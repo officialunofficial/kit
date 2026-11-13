@@ -538,7 +538,6 @@ impl Builder<'_> {
             Ok(Object::Remix(remix)) => remix.tree_hash,
             Ok(_) | Err(_) => return,
         };
-        let manifest_ids: HashSet<Hash> = self.manifests.iter().map(|m| m.id).collect();
         let mut dropped: HashSet<Hash> = HashSet::new();
         let mut visited: HashSet<Hash> = HashSet::new();
         let mut stack = vec![root];
@@ -549,16 +548,14 @@ impl Builder<'_> {
             if !visited.insert(id) {
                 continue;
             }
-            if self.objects.remove(&id) && manifest_ids.contains(&id) {
+            if self.objects.remove(&id) {
                 dropped.insert(id);
             }
             let Ok(Object::Tree(tree)) = self.store.read_object(&id) else {
                 continue;
             };
             for held in tree.entries {
-                if self.objects.remove(&held.object_hash)
-                    && manifest_ids.contains(&held.object_hash)
-                {
+                if self.objects.remove(&held.object_hash) {
                     dropped.insert(held.object_hash);
                 }
                 if held.mode == EntryMode::Tree {
@@ -566,10 +563,8 @@ impl Builder<'_> {
                 }
             }
         }
-        if !dropped.is_empty() {
-            self.manifests
-                .retain(|manifest| !dropped.contains(&manifest.id));
-        }
+        self.manifests
+            .retain(|manifest| !dropped.contains(&manifest.id));
     }
 }
 

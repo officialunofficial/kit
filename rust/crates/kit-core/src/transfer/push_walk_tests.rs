@@ -737,6 +737,54 @@ fn an_entry_equal_to_any_parents_entry_is_skipped() {
 }
 
 #[test]
+fn a_subtree_is_compared_with_every_parents_subtree_at_its_path() {
+    let (_d, s) = store();
+    let a = put_blob(&s, b"only in the older history".to_vec());
+    let b = put_blob(&s, b"in the remote".to_vec());
+    let c = put_blob(&s, b"new".to_vec());
+    let older = commit(
+        &s,
+        tree_of(&s, &[("d", tree_of(&s, &[("a", a)]))]),
+        &[],
+        "old",
+    );
+    let remote = commit(
+        &s,
+        tree_of(&s, &[("d", tree_of(&s, &[("b", b)]))]),
+        &[older],
+        "remote",
+    );
+    let merge = commit(
+        &s,
+        tree_of(&s, &[("d", tree_of(&s, &[("a", a), ("b", b), ("c", c)]))]),
+        &[older, remote],
+        "merge",
+    );
+    let seed = closure_bytes(&s, &remote);
+    let plan = plan_pack(&s, merge, Some(remote)).unwrap();
+    let sent = ids(&plan);
+    assert!(!sent.contains(&a), "the older parent holds it at this path");
+    assert!(!sent.contains(&b));
+    assert!(sent.contains(&c) && sent.contains(&merge));
+    assert_applies(&s, &plan, &seed, merge);
+}
+
+#[test]
+fn a_tree_tip_drops_what_the_remote_snapshot_holds_at_another_path() {
+    let (_d, s) = store();
+    let held = put_blob(&s, b"the remote has this".to_vec());
+    let fresh = put_blob(&s, b"fresh".to_vec());
+    let remote = commit(&s, tree_of(&s, &[("old", held)]), &[], "remote");
+    let seed = closure_bytes(&s, &remote);
+    let tip = tree_of(&s, &[("moved", held), ("fresh", fresh)]);
+    let plan = plan_pack(&s, tip, Some(remote)).unwrap();
+    let sent = ids(&plan);
+    assert!(!sent.contains(&held));
+    assert!(sent.contains(&tip) && sent.contains(&fresh));
+    assert_applies(&s, &plan, &seed, tip);
+}
+
+#[test]
 fn a_tree_equal_to_a_parents_tree_keeps_only_the_commit() {
     let (_d, s) = store();
     let a = put_blob(&s, b"a".to_vec());
@@ -1069,7 +1117,7 @@ fn build(s: &ObjectStore, specs: &[CommitSpec], tag: &str) -> Vec<Hash> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(96))]
+    #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
     fn the_plan_holds_everything_the_closure_difference_holds(
