@@ -584,6 +584,21 @@ fn the_buffer_stays_within_the_floor_before_its_first_compaction() {
 }
 
 #[test]
+fn a_buffer_that_exactly_fills_the_floor_does_not_compact() {
+    let mut ids = ChunkIds::new(4, usize::MAX);
+    // Four ids reach the floor, not past it.
+    ids.extend(&[id(1), id(2), id(3), id(4)]).unwrap();
+    assert_eq!(ids.settled, 0, "no compaction at the floor");
+    // A full buffer that takes nothing more does not grow or compact.
+    ids.extend(&[]).unwrap();
+    assert_eq!((ids.settled, ids.ids.len()), (0, 4));
+    // One more id grows it past the floor, which compacts first.
+    ids.extend(&[id(5)]).unwrap();
+    assert_eq!(ids.settled, 4);
+    assert_eq!(ids.ids.len(), 5);
+}
+
+#[test]
 fn distinct_ids_double_the_threshold_instead_of_compacting_every_append() {
     let mut ids = ChunkIds::new(4, usize::MAX);
     let mut compactions = 0;
