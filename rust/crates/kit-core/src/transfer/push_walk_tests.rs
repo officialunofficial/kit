@@ -441,6 +441,44 @@ fn a_remix_tip_is_walked_like_a_commit_and_never_through_its_sources() {
 }
 
 #[test]
+fn a_new_remix_is_compared_with_its_parents_like_a_commit() {
+    let (_d, s) = store();
+    let older_only = put_blob(&s, b"only in the older history".to_vec());
+    let in_remote = put_blob(&s, b"in the remote".to_vec());
+    let fresh = put_blob(&s, b"new".to_vec());
+    let older = commit(&s, tree_of(&s, &[("a", older_only)]), &[], "old");
+    let remote = commit(&s, tree_of(&s, &[("b", in_remote)]), &[older], "remote");
+    let seed = closure_bytes(&s, &remote);
+    let tree = tree_of(&s, &[("a", older_only), ("b", in_remote), ("c", fresh)]);
+    let remix = put(
+        &s,
+        &Object::Remix(Remix {
+            tree_hash: tree,
+            parents: vec![older, remote],
+            sources: vec![RemixSource {
+                upstream_id: [1; 32],
+                commit_hash: [2; 32],
+            }],
+            author: Identity::ed25519([7; 32]),
+            signer: [0; 32],
+            message: b"remix".to_vec(),
+            timestamp: 5,
+            signature: [0; 64],
+        }),
+    );
+    // A commit on top of the remix names it as a new parent.
+    let child = commit(
+        &s,
+        tree_of(&s, &[("a", older_only), ("b", in_remote), ("c", fresh)]),
+        &[remix],
+        "child",
+    );
+    let plan = plan_pack(&s, child, Some(remote)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([remix, tree, fresh, child]));
+    assert_applies(&s, &plan, &seed, child);
+}
+
+#[test]
 fn a_tag_tip_plans_the_closure_of_its_target() {
     let (_d, s) = store();
     let m1 = file(&s, &[1, 2]);
