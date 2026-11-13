@@ -1074,6 +1074,21 @@ mod tests {
         ));
     }
 
+    /// Chunks that sum to exactly `total_size` reassemble.
+    #[test]
+    fn blame_reads_chunks_up_to_the_declared_size() {
+        let (_d, store) = fresh_store();
+        let chunk = put_blob(&store, &[b'a'; 1000]);
+        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
+            total_size: 2000,
+            chunk_size: 0,
+            chunks: vec![chunk; 2],
+        });
+        let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        assert_eq!(load_blob_lines(&store, h).unwrap(), vec![vec![b'a'; 2000]]);
+    }
+
     fn put_blob(store: &ObjectStore, data: &[u8]) -> Hash {
         let bytes = serialize::serialize(&Object::Blob(crate::object::Blob {
             data: data.to_vec(),
