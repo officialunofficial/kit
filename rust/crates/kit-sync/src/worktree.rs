@@ -129,7 +129,6 @@ pub fn ensure_restore_safe(
     ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
 }
 
-/// Refuse a destructive restore when affected index/worktree paths contain user work.
 /// The refusal for a tracked path that differs from the index.
 fn local_changes_message(path: &str) -> String {
     format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
@@ -150,10 +149,13 @@ pub(crate) fn grown_tracked_file(
         return None;
     }
     let relative = path.strip_prefix(root).ok()?.to_str()?;
-    index.find_entry(relative)?;
-    Some(relative.to_owned())
+    let position = index.find_entry(relative)?;
+    // A removed entry has no tracked content to differ from.
+    (index.entries[position].status != kit_core::index::EntryStatus::Removed)
+        .then(|| relative.to_owned())
 }
 
+/// Refuse a destructive restore when affected index/worktree paths contain user work.
 pub fn ensure_restore_safe_with_options(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -190,8 +192,8 @@ pub fn ensure_restore_safe_with_options(
         &mut Vec::new(),
     )
     .map_err(|e| match grown_tracked_file(root, &idx, &e) {
-        Some(path) => local_changes_message(&path),
-        None => format!("check working tree changes: {e}"),
+        Some(path) if restore_affects_path(options, &path) => local_changes_message(&path),
+        _ => format!("check working tree changes: {e}"),
     })?;
     let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
@@ -427,6 +429,10 @@ mod tests {
             limit: core_worktree::CHUNK_THRESHOLD,
         };
         assert_eq!(grown_tracked_file(root, &index, &outside), None);
+        // A removed entry.
+        let mut removed = tracked("dir/a.bin");
+        removed.entries[0].status = kit_core::index::EntryStatus::Removed;
+        assert_eq!(grown_tracked_file(root, &removed, &grew), None);
         // Another kind of error.
         let io = core_worktree::WorktreeError::Io(std::io::Error::other("x"));
         assert_eq!(grown_tracked_file(root, &index, &io), None);

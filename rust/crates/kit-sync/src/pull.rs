@@ -456,3 +456,14 @@ fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
     crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod recovery_message_tests {
+    #[test]
+    fn the_recovery_refusal_text_is_unchanged() {
+        assert_eq!(
+            super::pull_recovery_changes_message("a b"),
+            "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+        );
+    }
+}
