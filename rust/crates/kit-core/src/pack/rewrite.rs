@@ -41,9 +41,12 @@ pub struct Rewritten {
 /// [`PackError::DeltaBaseMissing`] when a required excluded base cannot be
 /// supplied. A changed output exceeding the writer's caps produces the
 /// writer's existing error. An output that a writer would not seal (longer
-/// than [`crate::protocol::PACK_BODY_LIMIT`], decoding to more than
-/// [`super::decoded_bytes_cap`] or holding more than
-/// [`super::MAX_WRITE_ENTRIES`] entries) produces [`PackError::PackfileTooLarge`].
+/// than [`crate::protocol::PACK_BODY_LIMIT`], decoding to more than the budget
+/// of [`DecodeLimits::default`] with the delta bases a reader holds at once, or
+/// holding more than [`super::MAX_WRITE_ENTRIES`] entries) produces
+/// [`PackError::OverReadLimit`], which names the limit. This holds whatever `limits` the caller
+/// decodes with: the rewritten pack is one that a reader with the default
+/// limits takes.
 /// The entry bound is the writer's own margin, not the reader's: a small pack
 /// takes about twice as many entries to read, so a changed rewrite of an input
 /// sealed past the bound is refused unless it leaves at most that many
@@ -167,15 +170,15 @@ impl<'a> Rewrite<'a> {
                 return Err(error);
             }
             let decoded = self.writer.total_decoded();
+            let resident_bases = self.writer.peak_resident_bases();
             let entries = self.writer.entry_count();
             let bytes = self.writer.finish()?;
             // Rawifying a delta can grow the pack past what any fetch takes,
             // and compressing an entry the input stored plain adds decoded
-            // bytes. Dropping entries shortens the pack, which lowers the
-            // caps that follow its length.
-            if !within_read_limits(bytes.len(), decoded, entries) {
-                return Err(PackError::PackfileTooLarge);
-            }
+            // bytes. A rewrite of a pack an older writer sealed above the
+            // budget is refused, as the output is a pack a writer would not
+            // seal.
+            within_read_limits(bytes.len(), decoded, resident_bases, entries)?;
             bytes
         };
         Ok(Rewritten {

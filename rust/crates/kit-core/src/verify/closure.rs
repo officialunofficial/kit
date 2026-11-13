@@ -945,8 +945,7 @@ pub(crate) fn export_closure_with_limits(
         let bytes = store.read(h)?;
         // A raw-only pack stores every object as is, so a reader decodes none.
         if pack::PackFill::of(&writer).seals_before(
-            bytes.len() as u64,
-            0,
+            pack::Incoming::raw(bytes.len() as u64, 0),
             max_pack_payload,
             None,
             max_entries as usize,

@@ -157,13 +157,14 @@ impl Plan {
                 Entry::Raw { bytes, .. } => bytes.len() as u64,
                 Entry::Delta { stream, .. } => (32 + stream.len()) as u64,
             };
-            let decoded = match &entry {
-                Entry::Raw { .. } => size,
-                Entry::Delta { stream, .. } => pack::delta_decoded_len(stream, true),
+            let incoming = match &entry {
+                Entry::Raw { .. } => pack::Incoming::raw(size, size),
+                Entry::Delta { base, stream } => {
+                    pack::Incoming::delta(size, stream, true, writer.newly_held(base))
+                }
             };
             if PackFill::of(&writer).seals_before(
-                size,
-                decoded,
+                incoming,
                 cap,
                 Some(limits.max_pack_bytes),
                 pack::MAX_WRITE_ENTRIES,
@@ -177,7 +178,12 @@ impl Plan {
                     limits,
                 )?;
             }
+            // A delta the smallest reader cannot take alone: its result, its
+            // stream and its base pass the decoded-byte budget.
+            let unreadable =
+                matches!(&entry, Entry::Delta { stream, .. } if !pack::delta_fits_reader(stream));
             if size > cap
+                || unreadable
                 || serialized_bound(size, 1) > serialized_limit(Some(limits.max_pack_bytes))
             {
                 return Err(Error::Limit("one entry exceeds pack limit"));
@@ -337,6 +343,33 @@ mod tests {
             max_tickets,
             ..Limits::default()
         }
+    }
+
+    #[test]
+    fn a_delta_the_smallest_reader_cannot_take_alone_is_refused() {
+        // A header that claims a base and a result: a reader with a budget of
+        // 1 GiB charges the result, the stream (a compressed entry) and the
+        // base together.
+        let stream = |base: u32, result: u32| {
+            let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
+            stream[1..5].copy_from_slice(&base.to_le_bytes());
+            stream[5..9].copy_from_slice(&result.to_le_bytes());
+            stream
+        };
+        let delta = |base, result| Entry::Delta {
+            base: [1; 32],
+            stream: stream(base, result),
+        };
+        let limits = Limits::default();
+        let half = 1_u32 << 29;
+        // A base and a result of 16 bytes under 512 MiB each, and the nine
+        // bytes of the stream, fit.
+        assert!(Plan::prepare([delta(half - 16, half - 16)], limits).is_ok());
+        // A base and a result of 512 MiB each do not.
+        assert!(matches!(
+            Plan::prepare([delta(half, half)], limits),
+            Err(Error::Limit(_))
+        ));
     }
 
     #[test]

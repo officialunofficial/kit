@@ -2332,6 +2332,7 @@ dependencies = [
  "insta",
  "k256",
  "kit-attest",
+ "kit-client",
  "kit-core",
  "kit-keystore",
  "kit-rpc",

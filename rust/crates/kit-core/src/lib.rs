@@ -152,7 +152,7 @@ pub use pack::{
     DecodeLimits, DecodeReport, DecodedEntry, DeltaBaseSource, HEADER_LEN as PACK_HEADER_LEN,
     MAGIC as PACK_MAGIC, MAX_ENTRIES as PACK_MAX_ENTRIES,
     MAX_TOTAL_PAYLOAD as PACK_MAX_TOTAL_PAYLOAD, NoExternalBases, PackEntries, PackEntry,
-    PackError, PackReader, PackWriter, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport,
+    PackError, PackReader, PackWriter, ReadLimit, TRAILER_LEN as PACK_TRAILER_LEN, UnpackReport,
     VERSION as PACK_VERSION, decode_entries_with, pack_key,
 };
 

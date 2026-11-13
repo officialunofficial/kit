@@ -192,7 +192,10 @@ sending it uncompressed &mdash; the same "strictly smaller or don't bother"
 posture as the delta-preference heuristic in §3, mirrored here for
 consistency). A writer MUST NOT emit a `0x03` or `0x04` entry whose
 `uncompressed_len` would exceed `MAX_RAW_OBJECT_SIZE`; it writes such a
-payload uncompressed (`0x00` or `0x02`).
+payload uncompressed (`0x00` or `0x02`). Kit's writer also writes a payload
+uncompressed when `uncompressed_len` plus the entry's wire `payload_len`
+would exceed 1 GiB, the decoded-byte budget of `DecodeLimits::default()`: a
+reader that carries a compressed entry across windows charges both.
 kit's own writer uses zstd compression level 3 (the
 library default); this spec does not mandate a specific level, since
 the byte layout is level-independent &mdash; any level a compliant zstd
@@ -333,21 +336,38 @@ the remote to advertise a limit:
 
 - The whole pack, header and trailer included, is at most 4 GiB, the body
   limit of every transport (SPEC-TRANSPORT §6.4).
-- The bytes a reader decodes are at most `clamp(pack_len × 32768, 2 GiB,
-  16 GiB)`. Decoded bytes are the uncompressed length of each `0x03` and
-  `0x04` entry plus the result length of each delta. A writer counts them
-  against the pack length so far, which only grows.
+- The bytes a reader decodes are at most 1 GiB, the decoded-byte budget of
+  `DecodeLimits::default()`, the smallest budget any kit reader applies
+  (`PackReader::read` allows more, `clamp(pack_len × 32768, 2 GiB, 16 GiB)`).
+  Decoded bytes are the uncompressed length of each `0x03` and `0x04` entry
+  plus the result length of each delta. A reader with that budget also
+  charges each delta base that is not in the pack while the base is needed,
+  from its first delta to its last, so the writer counts the longest such
+  base once more.
+- A writer therefore writes the deltas that share a base next to each
+  other, so a reader holds one such base at a time: the plan lists deltas
+  ordered by base and then target. A writer that is handed a delta whose base
+  other deltas have followed in the pack counts that base as held across them,
+  beside the longest base, so the count holds for any order. A rewrite of a
+  pack counts the bases from where the deltas lie, taking every base to be one
+  the reader fetches.
 - The entries are at most 1 GiB divided by the reader's per-entry memory
   charge of 896 bytes, which is 1,198,372. The reader charges that memory
   to the same cap as the bytes it decodes, and the cap is 2 GiB for a small
   pack, so half of it stays free for the objects of the pack. A longer pack
   raises the cap, but a writer does not rely on that.
+- A compressed entry's frame is kept only when the bytes it decodes to plus
+  its whole payload are at most 1 GiB (§3.3). A reader that carries the
+  entry across windows charges both.
 
-A writer puts a single entry that is over one of its caps alone in a pack of its own.
+A writer puts a single entry that is over one of its caps alone in a pack of its own, except a delta whose result, stream and base together pass the decoded-byte budget: the planner sends the object raw instead, since no reader of that budget could take the delta, and `Plan::prepare` refuses a delta its caller supplies.
 
-These are the limits of [`PackReader::read`], the reader of every transport. A
-caller of `decode_entries_with` chooses its own decoded-byte budget, 1 GiB by
-default, and a pack can need more than that.
+A pack that fits these limits is read by `PackReader::read`, by
+`decode_entries_with` and `rewrite_excluding` with `DecodeLimits::default()`
+and by the window reader with it. A caller of those that sets a larger
+decoded-byte budget accepts more, never less. `rewrite_excluding` refuses
+to write a changed pack that is beyond these limits, whatever limits its
+caller decodes with.
 
 **These caps are measured on the wire (compressed) size.** For a
 `0x03`/`0x04` entry, `payload_len` is the on-wire length &mdash; the

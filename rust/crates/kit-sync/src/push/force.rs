@@ -2,8 +2,8 @@
 //! on an atomic or a serialized advance.
 use super::{
     PackSink, PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs,
-    effective_payload_cap, encode_delta_candidates_batch, estimate_exceeds_ticket_budget,
-    estimate_pack_sizes, packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error,
+    effective_payload_cap, encode_delta_candidates_batch, estimate_pack_sizes,
+    packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error,
 };
 use crate::SyncError;
 use crate::packmap::{flatten_oldest_first, packmap_ref, walk_pack_chain};
@@ -247,11 +247,10 @@ impl ForcePush<'_, '_> {
         };
         if let Some(reason) = recovery.or(replanned.then_some(RetryReason::PackmapChanged))
             && let Some(budget) = self.limits.data_packs_per_advance
-            && estimate_exceeds_ticket_budget(
-                &estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?,
-                self.limits,
-                budget,
-            )
+            // The packs the estimate counts, not only its ticketed ones: a
+            // real seal can merge two estimated packs into one that is ticketed.
+            && estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?.len()
+                > budget
             && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
                 PackSink::Count,
                 self.store,
