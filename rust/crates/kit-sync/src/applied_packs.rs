@@ -70,7 +70,7 @@ use std::collections::HashSet;
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use kit_core::hash::{HEX_LEN, Hash, to_hex};
@@ -194,11 +194,22 @@ impl AppliedPacks {
         }
         let mut line = to_hex(&key.into_hash());
         line.push('\n');
-        fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
+            .read(true)
             .append(true)
             .create(true)
-            .open(&self.path)?
-            .write_all(line.as_bytes())
+            .open(&self.path)?;
+        // A killed process can leave a torn last line. Start a new line, so
+        // this digest is not glued onto the torn one and lost.
+        if file.metadata()?.len() > 0 {
+            let mut last = [0u8; 1];
+            file.seek(SeekFrom::End(-1))?;
+            file.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                line.insert(0, '\n');
+            }
+        }
+        file.write_all(line.as_bytes())
     }
 
     /// Atomically rewrite the on-disk record with the full current set
@@ -218,8 +229,8 @@ impl AppliedPacks {
     /// Discard every recorded digest, in memory only, and mark the record
     /// dirty. Used by the fetch-side self-heal path when the local record is
     /// suspected stale relative to the object store (e.g. the store was
-    /// wiped but `applied-packs/` survived) — the caller persists once at
-    /// the end of the fetch, so this does not touch disk itself.
+    /// wiped but `applied-packs/` survived) — this does not touch disk
+    /// itself, so the caller persists, as the self-heal path does at once.
     pub fn clear(&mut self) {
         self.set.clear();
         self.dirty = true;
@@ -452,6 +463,12 @@ mod tests {
         let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
         assert!(reloaded.contains(&k1));
         assert!(!reloaded.contains(&pk("torn")));
+        // The next append starts a new line instead of joining the torn one.
+        let mut applied = reloaded;
+        let k2 = pk("pack-2");
+        applied.record_applied(&k2).unwrap();
+        let reloaded = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        assert!(reloaded.contains(&k1) && reloaded.contains(&k2));
     }
 
     #[test]

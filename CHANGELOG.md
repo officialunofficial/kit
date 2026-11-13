@@ -13,8 +13,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one is alive, `kit gc` deletes no object of the store at any grace period.
   It holds a shared lock on the `format` file, which a process that dies
   releases. It relies on a local filesystem.
-- `SyncEvent::WaitingForRepoLock`, sent once when a fetch waits for the
-  repository lock to publish its refs. `kit` prints a line for it.
+- `SyncEvent::WaitingForRepoLock`, sent once for each time a fetch waits for
+  the repository lock to publish a branch's ref. `kit` prints a line for it.
 - `AppliedPacks::record_applied` records a pack and appends its digest to the
   on-disk record at once.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
@@ -183,10 +183,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the applied-packs record, now appended as each pack lands; the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
   after a skipped pack now clears the record and retries once, as a missing
-  closure object already did. `SyncOptions::staging_dir`,
-  `SyncOptions::max_staged_bytes`, `SyncOptions::with_staging_dir` and
-  `SyncOptions::with_max_staged_bytes` are removed. Remove the calls; a fetch
-  needs no replacement.
+  closure object already did. `SyncOptions::staging_dir` and
+  `SyncOptions::with_staging_dir` are removed. Remove the calls; a fetch needs
+  no replacement. The publish step no longer fails with `SyncError::RepoLock`
+  when another process holds `worktree.lock`: it waits. A caller with an
+  observer that never cancels waits as long as the holder does, and a fetch
+  that waits holds its prune guard, so gc prunes nothing meanwhile.
 - A fetch keeps gc from deleting its objects with a prune guard, so
   `kit gc --grace-secs 0` run during a fetch prunes nothing the fetch wrote or
   reused. gc reports those objects as kept.

@@ -83,7 +83,7 @@ fn guards_coexist_and_never_block_writers() {
     let (_dir, _layout, store) = repo();
     let first = store.prune_guard().unwrap();
     let second = store.prune_guard().unwrap();
-    // A write takes the shared lock too, so the guards do not delay it.
+    // A bulk write takes the shared lock too, so the guards do not delay it.
     let written = orphans(&store, 2);
     assert!(written.iter().all(|id| store.contains(id)));
     drop(first);

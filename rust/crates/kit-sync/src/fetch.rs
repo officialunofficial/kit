@@ -186,7 +186,7 @@ pub(crate) fn apply_and_verify_chain(
     // is whole.
     .and_then(|()| verify_closure_present(store, &tip));
     let skipped = done.skipped + prefix_packs;
-    let mut stats = Applied {
+    let stats = Applied {
         packs_downloaded: done.packs,
         packs_skipped: skipped,
         objects_unpacked: done.objects,
@@ -229,11 +229,13 @@ pub(crate) fn apply_and_verify_chain(
         require_signed,
         &mut retry,
     )?;
-    stats.packs_downloaded = retry.packs;
-    stats.packs_skipped = 0;
-    stats.objects_unpacked += retry.objects;
     verify_closure_present(store, &tip)?;
-    Ok(stats)
+    // The report covers the attempt that published.
+    Ok(Applied {
+        packs_downloaded: retry.packs,
+        packs_skipped: retry.skipped,
+        objects_unpacked: retry.objects,
+    })
 }
 
 /// Rewrite the applied-packs record atomically. The record is a cache, so a

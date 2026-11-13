@@ -597,7 +597,7 @@ fn gc_does_not_delete_an_old_orphan_a_fetch_reuses() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_fetch_killed_in_any_downloadresumes_with_only_the_remaining_packs() {
+fn a_fetch_killed_in_any_download_resumes_with_only_the_remaining_packs() {
     const PACKS: usize = 5;
     let remote = Remote::with_commits(PACKS);
     for k in 1..=PACKS {
@@ -727,7 +727,7 @@ fn footprint(target: &Path, layout: &RepoLayout) -> Footprint {
 }
 
 #[test]
-fn aresumed_clone_equals_an_uninterrupted_one() {
+fn a_resumed_clone_equals_an_uninterrupted_one() {
     const PACKS: usize = 4;
     let remote = Remote::with_commits(PACKS);
 

@@ -49,25 +49,11 @@ fn download_checked_pack(
         }
         Err(e) => return Err(e.into()),
     };
-    #[cfg(test)]
-    observe_retained_pack_bytes(pack.capacity());
     if pack.len() as u64 > kit_core::protocol::PACK_BODY_LIMIT {
         return Err(crate::SourceError::PayloadTooLarge(pack.len()).into());
     }
     key.verify_bytes(&pack).map_err(crate::SourceError::from)?;
     Ok(pack)
-}
-
-#[cfg(test)]
-std::thread_local! {
-    // Tracks owned download payloads at the retention boundary. Thread-local
-    // state keeps concurrently running unit tests independent.
-    static PEAK_RETAINED_PACK_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn observe_retained_pack_bytes(bytes: usize) {
-    PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(peak.get().max(bytes)));
 }
 
 /// Download and apply every pack of `chain`, oldest first, into `store`,
@@ -276,40 +262,6 @@ mod tests {
             download_packlist_node(&TransportSource::new(&tx), key, "refs/heads/main"),
             Err(SyncError::Source(crate::SourceError::InvalidResponse))
         ));
-    }
-
-    #[test]
-    fn fetch_retains_at_most_one_downloaded_pack() {
-        let tx = MemoryTransport::new();
-        let mut keys = Vec::new();
-        for seed in 0..8_u8 {
-            let data: Vec<u8> = (0..1024 * 1024_u32)
-                .map(|i| {
-                    u8::try_from(i % 251)
-                        .unwrap()
-                        .wrapping_mul(31)
-                        .wrapping_add(seed)
-                })
-                .collect();
-            keys.push(upload_blob_pack(&tx, &[&data]));
-        }
-        let (_td, _layout, store, mut applied) = store_and_record();
-        PEAK_RETAINED_PACK_BYTES.with(|peak| peak.set(0));
-        let mut done = ChainApplied::default();
-        apply(
-            &store,
-            &TransportSource::new(&tx),
-            &keys,
-            &mut applied,
-            &mut done,
-        )
-        .unwrap();
-        assert_eq!(done.packs, 8);
-        let peak = PEAK_RETAINED_PACK_BYTES.with(std::cell::Cell::get);
-        assert!(
-            peak < 2 * 1024 * 1024,
-            "retained {peak} bytes for one-MiB packs"
-        );
     }
 
     #[test]

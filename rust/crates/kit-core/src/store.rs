@@ -785,6 +785,11 @@ impl ObjectStore {
     /// publish, because an object a fetch reuses keeps its old modification
     /// time, so the grace period does not protect it.
     ///
+    /// The guard protects only against a gc that holds the worktree locks
+    /// across its mark and sweep, as `kit gc` does: a gc that marks before the
+    /// fetch publishes and sweeps after the guard drops would not see the new
+    /// ref. It stops the delete step, not the mark.
+    ///
     /// The guard relies on a local filesystem that honours kernel file locks,
     /// as SPEC-CONCURRENCY already requires. On Linux NFS a shared lock can
     /// vanish when another handle to the file closes.
