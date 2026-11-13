@@ -23,39 +23,40 @@ fn warn_if_served(layout: &RepoLayout, observer: &dyn Observer<SyncEvent>) {
     }
 }
 
-/// The one deadline of a clone, fetch or pull for the waits on the worktree
-/// lock. It starts at the first failed attempt to take the lock and is not
-/// restarted by a later wait or by a change of holder.
+/// The limit of a clone, fetch or pull on the time it spends blocked waiting
+/// for the worktree lock, summed over every wait of the call. Work between two
+/// waits (a download, an apply) is not charged, and a lock that changes hands
+/// does not restart the count.
 pub(crate) struct LockWait {
     limit: Option<Duration>,
-    deadline: Cell<Option<Instant>>,
+    waited: Cell<Duration>,
 }
 
 impl LockWait {
-    /// A wait that gives up `limit` after its first failed attempt, or never
-    /// when `limit` is `None`.
+    /// A wait that gives up once the waits of the call add up to `limit`, or
+    /// never when `limit` is `None`.
     pub(crate) fn new(limit: Option<Duration>) -> Self {
         Self {
             limit,
-            deadline: Cell::new(None),
+            waited: Cell::new(Duration::ZERO),
         }
     }
 
-    /// Note a failed attempt, which starts the clock the first time, and
-    /// return how long is left, or `None` when there is no limit.
-    fn remaining(&self) -> Option<Duration> {
+    /// How much of the limit is left, or `None` when there is no limit.
+    /// `in_progress` is the time of the wait that is still running.
+    fn remaining(&self, in_progress: Duration) -> Option<Duration> {
         let limit = self.limit?;
-        let deadline = self.deadline.get().unwrap_or_else(|| {
-            let deadline = Instant::now() + limit;
-            self.deadline.set(Some(deadline));
-            deadline
-        });
-        Some(deadline.saturating_duration_since(Instant::now()))
+        Some(limit.saturating_sub(self.waited.get().saturating_add(in_progress)))
+    }
+
+    /// Add the time of a wait that has ended.
+    fn charge(&self, wait: Duration) {
+        self.waited.set(self.waited.get().saturating_add(wait));
     }
 }
 
 /// Take the worktree lock, then run the served-repository probe. Without a
-/// deadline it waits the default timeout. With one it waits as
+/// limit it waits the default timeout. With one it waits as
 /// [`wait_for_worktree_lock`] does. Every site that takes [`WORKTREE_LOCK`]
 /// directly must go through here so the probe cannot be forgotten.
 pub(crate) fn acquire_worktree_lock(
@@ -81,7 +82,8 @@ const PUBLISH_LOCK_POLL: Duration = Duration::from_millis(100);
 /// returns [`SyncError::Interrupted`] when the observer cancels. It polls with
 /// non-blocking attempts, so an abandoned wait leaves no thread behind.
 ///
-/// When `wait` has a deadline and it passes, the wait returns
+/// When `wait` has a limit and the time spent waiting, over this wait and the
+/// earlier ones of the call, reaches it, the wait returns
 /// [`SyncError::RepoLock`] with [`LockError::Busy`].
 pub(crate) fn wait_for_worktree_lock(
     layout: &RepoLayout,
@@ -89,28 +91,36 @@ pub(crate) fn wait_for_worktree_lock(
     wait: &LockWait,
 ) -> Result<RepoLock, SyncError> {
     let mut announced = false;
-    loop {
+    // The wait starts at the first failed attempt, so an attempt that succeeds
+    // at once charges nothing.
+    let mut blocked_since: Option<Instant> = None;
+    let result = loop {
         match repo_lock::acquire(layout.worktree_state_dir(), WORKTREE_LOCK, Duration::ZERO) {
             Ok(lock) => {
                 warn_if_served(layout, observer);
-                return Ok(lock);
+                break Ok(lock);
             }
             Err(LockError::Busy(_)) => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => break Err(e.into()),
         }
-        let remaining = wait.remaining();
+        let in_progress = blocked_since.get_or_insert_with(Instant::now).elapsed();
+        let remaining = wait.remaining(in_progress);
         if observer.cancelled() {
-            return Err(SyncError::Interrupted);
+            break Err(SyncError::Interrupted);
         }
         if remaining.is_some_and(|left| left.is_zero()) {
-            return Err(LockError::Busy(WORKTREE_LOCK.to_owned()).into());
+            break Err(LockError::Busy(WORKTREE_LOCK.to_owned()).into());
         }
         if !announced {
             announced = true;
             observer.event(&SyncEvent::WaitingForRepoLock);
         }
         std::thread::sleep(remaining.map_or(PUBLISH_LOCK_POLL, |left| left.min(PUBLISH_LOCK_POLL)));
+    };
+    if let Some(since) = blocked_since {
+        wait.charge(since.elapsed());
     }
+    result
 }
 
 #[cfg(test)]
@@ -165,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_that_changes_hands_between_attempts_still_ends_at_the_one_deadline() {
+    fn a_lock_that_changes_hands_between_attempts_still_ends_at_the_limit() {
         let (_dir, layout) = layout();
         let observer = observer(&layout, None);
         let wait = LockWait::new(Some(Duration::from_millis(300)));
@@ -178,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn a_later_wait_of_the_same_call_gets_no_fresh_budget() {
+    fn a_later_wait_of_the_same_call_gets_no_fresh_limit() {
         let (_dir, layout) = layout();
         let observer = observer(&layout, None);
         let wait = LockWait::new(Some(Duration::from_millis(200)));
@@ -190,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_freed_before_the_deadline_is_taken() {
+    fn a_lock_freed_before_the_limit_is_taken() {
         let (_dir, layout) = layout();
         let observer = observer(&layout, Some(2));
         let wait = LockWait::new(Some(Duration::from_secs(30)));
@@ -206,5 +216,107 @@ mod tests {
         let lock = wait_for_worktree_lock(&layout, &observer, &wait).unwrap();
         assert!(*observer.rounds.borrow() >= 4);
         drop(lock);
+    }
+
+    /// A call waits twice for the lock, for example once for each branch it
+    /// publishes. The first wait is short. The work between the two waits (a
+    /// download) takes longer than the limit. The second wait then finds the
+    /// lock held for a moment. Neither wait is near the limit, so the call
+    /// goes on.
+    #[test]
+    fn work_between_two_waits_is_not_charged_to_the_lock_wait() {
+        let (_dir, layout) = layout();
+        let wait = LockWait::new(Some(Duration::from_millis(300)));
+        {
+            let first = observer(&layout, Some(1));
+            let started = Instant::now();
+            let lock = wait_for_worktree_lock(&layout, &first, &wait).unwrap();
+            assert!(started.elapsed() < Duration::from_millis(250));
+            drop(lock);
+        }
+        // The download of the next branch.
+        std::thread::sleep(Duration::from_millis(400));
+        let second = observer(&layout, Some(1));
+        let started = Instant::now();
+        let result = wait_for_worktree_lock(&layout, &second, &wait);
+        assert!(
+            result.is_ok(),
+            "the lock was free after {:?} of waiting, with a limit of 300 ms: {:?}",
+            started.elapsed(),
+            result.err()
+        );
+    }
+
+    /// The longest wait a caller can ask for is a wait, not a panic.
+    #[test]
+    fn the_longest_lock_wait_does_not_panic() {
+        let (_dir, layout) = layout();
+        let observer = observer(&layout, Some(2));
+        let wait = LockWait::new(Some(Duration::MAX));
+        let lock = wait_for_worktree_lock(&layout, &observer, &wait).unwrap();
+        drop(lock);
+    }
+
+    #[test]
+    fn a_lock_that_stays_held_fails_a_short_limit_quickly() {
+        let (_dir, layout) = layout();
+        let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+        let wait = LockWait::new(Some(Duration::from_millis(200)));
+        let started = Instant::now();
+        let error = wait_for_worktree_lock(&layout, &NoCancel, &wait).unwrap_err();
+        assert!(matches!(error, SyncError::RepoLock(LockError::Busy(_))));
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(held);
+    }
+
+    /// The first wait takes the lock after about half the limit, and the lock
+    /// is then taken again by another holder. The second wait gets only what
+    /// is left of the limit.
+    #[test]
+    fn waits_that_lose_and_retake_the_lock_sum_to_the_limit() {
+        let (_dir, layout) = layout();
+        let wait = LockWait::new(Some(Duration::from_millis(1000)));
+        let first = observer(&layout, Some(5));
+        let lock = wait_for_worktree_lock(&layout, &first, &wait).unwrap();
+        drop(lock);
+        let second = observer(&layout, None);
+        let started = Instant::now();
+        let error = wait_for_worktree_lock(&layout, &second, &wait).unwrap_err();
+        assert!(matches!(error, SyncError::RepoLock(LockError::Busy(_))));
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the second wait got a fresh limit: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A pull's final update takes the lock through `acquire_worktree_lock`.
+    /// With a limit, it draws from the waiting time the earlier waits left,
+    /// and has no wait of its own: it fails once the summed waiting passes
+    /// the limit, long before the default 5 seconds.
+    #[test]
+    fn the_final_update_of_a_pull_draws_from_the_same_limit() {
+        let (_dir, layout) = layout();
+        let wait = LockWait::new(Some(Duration::from_millis(1000)));
+        let earlier = observer(&layout, Some(5));
+        let lock = wait_for_worktree_lock(&layout, &earlier, &wait).unwrap();
+        drop(lock);
+        let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+        let started = Instant::now();
+        let error = acquire_worktree_lock(&layout, &NoCancel, &wait).unwrap_err();
+        assert!(matches!(error, SyncError::RepoLock(LockError::Busy(_))));
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "the final update waited {:?}",
+            started.elapsed()
+        );
+        drop(held);
+    }
+
+    struct NoCancel;
+
+    impl Observer<SyncEvent> for NoCancel {
+        fn event(&self, _event: &SyncEvent) {}
     }
 }
