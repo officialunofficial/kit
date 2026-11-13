@@ -232,7 +232,7 @@ therefore verifies every tree, entry, and chunk reachable from it.
 
 `ObjectStore::open` enforces addressing consistency through the
 `.kit/format` repository marker. `ObjectStore::init` writes the
-marker with the value `bmt-v1`; `open` requires that same value and
+marker with the value `bmt-v2`; `open` requires that same value and
 rejects the repository with `IncompatibleRepoFormat` when the marker
 is missing or different, rather than misreading objects under the
 wrong addressing rule. The marker governs object identity only: the

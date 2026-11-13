@@ -519,12 +519,14 @@ History / commits:
   signer produced the commit; it does not bind that signer to a person
   or organization.
 - `kit prove <revision> [<path>] [--chunk N | --range OFFSET:LEN]
-  [--with-offsets] [-o FILE] [--format=json]` &mdash; build a disclosure
+  [-o FILE] [--format=json]` &mdash; build a disclosure
   bundle proving that `<path>` (repository-relative, split on `/`;
   omitted: the root tree), chunk `N` of a ChunkedBlob, or byte range
   `OFFSET:LEN` belongs to `<revision>` (a commit or remix). `--chunk`
-  and `--range` are mutually exclusive; `--with-offsets` is only valid
-  with `--range`. `LEN` must be greater than 0. Writes the bundle to
+  and `--range` are mutually exclusive. `LEN` must be greater than 0.
+  A range into a chunked file reads only the chunk that holds `OFFSET`; its
+  bundle carries the chunk's span, so the verifier reports the absolute
+  file offset at any position. Writes the bundle to
   `-o FILE`, or to stdout when stdout is not a TTY (refuses to write
   binary to a TTY). Default status line: `proof: <bytes> B for <path>
   @ <short id> (<kind>)` (stderr when the bundle goes to stdout).

@@ -146,9 +146,77 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Breaking, format:** a chunked file's id commits the byte span of every
+  chunk, so one log-size proof proves the chunk that holds any offset. Every
+  chunked file id changes. A repository written before this change is
+  refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`), and
+  there is no migration. Trees, blobs, commits and tags keep their ids.
+  - The manifest is schema `0x02` of type `0x05`, `22 + 40 * n` bytes: the
+    22-byte header, then per chunk a 32-byte id and the `u64` offset one
+    past its last byte (`end`). `serialize::CHUNKED_ENTRY_LEN` (40) and
+    `CHUNKED_HEADER_LEN` (22) export the sizes. Code that sized a manifest
+    as `22 + 32 * n` updates the formula.
+  - The metadata leaf is `domain_digest("kit-cblob-meta-v2", le64(total) ||
+    le32(chunk_size))`. Each chunk leaf is `domain_digest("kit-cblob-chunk-v1",
+    le64(start) || le64(end) || chunk_id)`, where `start` is the previous
+    chunk's end (0 for the first).
+  - A manifest is refused unless the ends increase, the last end is
+    `total_size`, every span fits one Blob (`MAX_CHUNK_LEN`), and a fixed-size
+    layout has the ends the layout gives. The new `KitError` variants are
+    `ChunkedBlobLength`, `ChunkEndNotIncreasing`, `ChunkEndAboveTotalSize`,
+    `ChunkLengthAboveLimit`, `FixedChunkEnd`, `ChunkedBlobLastEnd`,
+    `ChunkLengthMismatch` and `ChunkNotBlob`.
+  - Every place that reads a chunk checks it against its span: reassembly,
+    restore, diff, blame, the closure walk and the fetch check. A chunk that
+    is not a Blob, or whose length differs from its span, is a typed error.
+    The fetch check reads the first 10 bytes of each chunk
+    (`ObjectStore::object_head`) and remembers each chunk's length, so a chunk
+    named under two lengths is caught.
+  - `ChunkedBlob::new(total_size, chunk_size, chunks)` takes `(Hash, end)`
+    pairs. It has the new readers `ends()`, `span(index)`, `chunk_at(offset)`
+    and `entries()`. `ChunkedBlob::fixed_chunk_len` is gone, and
+    `check_chunk_length` replaces it.
+  - `merkle::ChunkedFold::new` takes the chunk count and returns a `Result`,
+    `push` takes the chunk and its end, `push_ids` is `push_entries`, and
+    `inner_root` and `id` are replaced by `finish`. `merkle::SpannedChunk`
+    pairs a chunk id with its span. `verify_chunk`, `verify_chunks_range`,
+    `verify_chunks_multi`, `verify_chunk_with_meta_leaf` and
+    `verify::verify_chunk_with_meta` take the span with the chunk id.
+- **Breaking, format:** the disclosure bundle is version 3. A chunk payload
+  and a chunk range header carry `start` and `end`, and a bundle of version 2
+  is refused with `UnsupportedBundleVersion`. The length proofs are gone:
+  `chunk_len_proofs`, `verify_blob_len_proof`, `LenProof`, `kit prove
+  --with-offsets` and the `with_offsets` argument of the MCP `prove` tool are
+  removed. `VerifyError::IncompleteLengthProofSet` and
+  `UnexpectedLengthProofs` are gone, and the span rules take their place:
+  `SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
+  `LastChunkEnd`, `ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan` and
+  `RangePastSpan`. `FixedChunkLength` now means a span that the fixed-size
+  layout does not give. The absolute offset of a
+  range is always known, and the proof of a byte has the same size at any
+  chunk index. `build_range_proof_from` takes no boundary hints and reads
+  only the chunks the range touches.
+- **Breaking, format:** the span container is KDSP version 2 and the proof
+  bundle KDPB version 3. A span has no anchor: each chunk carries its span
+  and the container checks that the spans chain. The new refusal reason is
+  `span_chunk_chain`; the `span_anchor_*` reasons are gone. The import
+  attestation `specVersion` is 2 (`IMPORT_SPEC_VERSION`), so an attestation
+  of version 1 no longer verifies.
+- **Breaking:** the `known` callback of `verify::verify_push` and the other
+  closure walks returns `verify::Known` (`No`, `Yes` or
+  `Blob(content_len)`) instead of a `bool`. The walk checks a known chunk's
+  length against its span only when the caller answers `Blob(len)`. A
+  manifest with a chunk answered `Yes` is reported corrupt, so a caller with
+  no length for a known chunk fails closed.
+- **Breaking, kit-wasm:** `verify_chunk` takes `start` and `end` after the
+  chunk id. `chunked_blob_decode` returns `ends` with the existing keys. A
+  chunk disclosure and a range disclosure carry `start` and `end`, and
+  `absolute_offset` is always a number. `verify_disclosure` keeps
+  `commit_id`, `leaf_id`, `signer`, `signature_valid` and `path` as they were.
 - **Breaking:** the fields of `kit_core::object::ChunkedBlob` are private, so
   every value is one that `deserialize` accepts. Build one with
-  `ChunkedBlob::new(total_size, chunk_size, chunks)`, which returns
+  `ChunkedBlob::new(total_size, chunk_size, chunks)` (the chunks are `(Hash, end)`
+  pairs, see below), which returns
   `Result<ChunkedBlob, KitError>` and refuses what the decoder refuses:
   `KitError::TooManyChunks` above `MAX_CHUNKS`, and
   `KitError::ChunkedBlobTotalSizeInvalid` for a `total_size` above
@@ -485,19 +553,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer sends a pack without the objects past the cut and then moves the
   branch. A cut in the walk of the remote's tip is no error: the push treats
   the remote as holding only what the walk reached and sends the rest.
-- The disclosure verifier checks fixed-size chunk lengths. In a fixed-size
-  `ChunkedBlob` every chunk but the last must hold exactly `chunk_size` bytes,
-  and the last the rest of `total_size` (SPEC-OBJECTS §7), but the manifest
-  binds no chunk lengths. A disclosed whole chunk and every length proof of a
-  fixed-size layout must now have the length the layout requires, or
-  verification fails with `VerifyError::FixedChunkLength`. A disclosed chunk
-  or range of a `ChunkedBlob` must also have a `total_size` that its layout
-  can produce, by the same rules as decoding a manifest.
-- **Breaking:** the absolute offset of a range disclosure comes only from
-  length proofs, for every layout. A range disclosure of a fixed-size chunked
-  file that carries no length proofs now verifies with `absolute_offset =
-  None`. It returned `Some(index * chunk_size + offset)` before, so a bundle
-  built without length proofs loses its offset.
 - **Breaking:** `verify::VerifyError` has a new variant, `ContentTooLarge
   { size }`. The disclosure builder returns it for a byte range of a
   `ChunkedBlob` above `worktree::MAX_FILE_BYTES`. The enum is not

@@ -285,19 +285,18 @@ client sampling one byte range, wants.
 
 ```
 magic   = "KDPB"              (4 raw bytes)
-version: u8 = 2
+version: u8 = 3
 commit_id: [u8; 32]
 commit_bytes: Vec<u8>          <= 4 MiB; verifier: BLAKE3(commit_bytes) == commit_id
 steps: Vec<Step>               <= MAX_TREE_DEPTH (128), root first
   Step { name, mode, child_id, inner_root, position, proof: Proof (max_items = 1) }
 payload_kind: u8
   0  Object { bytes }                       full canonical object bytes
-  1  Chunk  { total_size, chunk_size, index, inner_root,
+  1  Chunk  { total_size, chunk_size, index, start, end, inner_root,
               proof: Proof (max_items = 2), bytes }
-  2  Range  { chunk: Option<ChunkHdr>, offset_in_blob, len, slice,
-              chunk_len_proofs: Vec<LenProof> }
-     ChunkHdr { total_size, chunk_size, index, inner_root, chunk_id,
-                proof: Proof (max_items = 2) }
+  2  Range  { chunk: Option<ChunkHdr>, offset_in_blob, len, slice }
+     ChunkHdr { total_size, chunk_size, index, start, end, inner_root,
+                chunk_id, proof: Proof (max_items = 2) }
 ```
 
 Every integer is big-endian, every length an LEB128 varint, arrays are raw
@@ -332,32 +331,24 @@ map, not the territory.
 
 ### Absolute offsets inside a chunked file
 
-A `Range` payload's `offset_in_blob` is only relative to its *containing*
-chunk. For chunk index 0 that's already the file's absolute offset
-(nothing precedes it). For any later chunk, the verifier needs the sum of
-every preceding chunk's *content length* to turn a chunk-relative offset
-into a file-absolute one &mdash; and per-chunk lengths are deliberately **not**
-bound into a `ChunkedBlob`'s leaves, so they have
-to be proven separately when wanted. A **length proof**
-(`chunk_len_proofs`, `--with-offsets` on the CLI) is a tiny Bao slice over
-just the canonical prologue (bytes `0..10`, at Bao offset `0`, not `+10`)
-of one preceding chunk, authenticating its `le32` content-length field
-without disclosing any of its actual content. Every layout needs them,
-fixed-size included: the manifest binds no chunk lengths, so `index *
-chunk_size` proves nothing. In a fixed-size layout the verifier also
-rejects a proven length other than `chunk_size`, and a disclosed whole
-chunk whose length breaks the layout (`FixedChunkLength`).
+A chunk's leaf commits the span `[start, end)` it covers in the file, with
+its id (SPEC-MERKLE-OBJECTS §3.1). A `Chunk` or `Range` payload carries
+`start` and `end`, and the multi-proof over positions `{0, index + 1}`
+proves them. The verifier first checks that the span is possible: it lies
+inside the file, it is no longer than one Blob can be, chunk 0 starts at 0,
+the last chunk ends at `total_size`, and a fixed-size layout gives the span
+(`SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
+`LastChunkEnd`, `FixedChunkLength`). Then it folds the claim into the leaf,
+checks that the chunk bytes are one Blob as long as the span
+(`ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan`), and for a `Range` that
+the range lies inside the span (`RangePastSpan`).
 
-The set is all-or-nothing by design: `chunk_len_proofs` is either empty
-(no absolute offset requested/available, `absolute_offset: None`) or
-covers **exactly** `0..index` with no gaps and no duplicates
-(`absolute_offset: Some(sum + offset_in_blob)`) &mdash; a partial or malformed
-set is a typed rejection (`IncompleteLengthProofSet`), never silently
-treated as "absent." And **chunk index 0 never carries any length
-proofs at all**: there is nothing before it to describe, so a non-empty
-set there is rejected the same way as on a plain `Blob` leaf
-(`UnexpectedLengthProofs`). The golden vector
-`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` pins this rule.
+The absolute offset of a range is `start + offset_in_blob`. It needs no
+other proof, and a proof of a byte has the same size at any chunk index. A
+bundle proves only the chunk it names: it does not prove that the spans of
+other chunks are consistent (a manifest with overlapping spans has no valid
+id, but one chunk of it still verifies). A caller that wants the whole
+layout reads the manifest and checks it.
 
 ### Worked example
 
@@ -558,12 +549,12 @@ BMT property) and are normative in
 [SPEC-MERKLE-OBJECTS](specs/SPEC-MERKLE-OBJECTS.md) §3:
 
 - **Tree entry leaf**: `domain_digest("kit-tree-entry-v1", le32(len(name)) || name || u8(mode) || object_hash)`.
-- **ChunkedBlob metadata leaf** (position 0): `domain_digest("kit-cblob-meta-v1", le64(total_size) || le32(chunk_size))`.
-- **ChunkedBlob chunk leaf** (position `i + 1`): the chunk's own 32-byte
-  `Blob` id, raw &mdash; no further wrapping.
+- **ChunkedBlob metadata leaf** (position 0): `domain_digest("kit-cblob-meta-v2", le64(total_size) || le32(chunk_size))`.
+- **ChunkedBlob chunk leaf** (position `i + 1`): `domain_digest("kit-cblob-chunk-v1", le64(start) || le64(end) || chunk_id)`,
+  where `start` is the previous chunk's `end` (0 for the first).
 
 `domain_digest` itself, `"kit.tree\x00"` / `"kit.chunked\x00"` (the
-outer wrap, §2), and `"kit-tree-entry-v1"` / `"kit-cblob-meta-v1"` (the
+outer wrap, §2), and `"kit-tree-entry-v1"`, `"kit-cblob-meta-v2"` and `"kit-cblob-chunk-v1"` (the
 leaf domains, §3) are all normative spec byte strings &mdash; any independent
 implementation may hardcode them. What's private is only
 `kit_core::merkle`'s own Rust `const`s for these same strings (so they
@@ -583,7 +574,7 @@ outside Rust:
 3. **LEB128 unsigned varint decode** &mdash; for every length-prefixed field
    in a bundle, manifest, or proof.
 4. **Bao slice decode** (BLAKE3 verified streaming) &mdash; for any `Range`
-   payload or length proof. The [`bao` reference implementation's
+   payload. The [`bao` reference implementation's
    format](https://github.com/oconnor663/bao) is public and has ports in
    several languages; the encoding is exactly "outboard tree hashes plus
    1 KiB content leaves," nothing kit-specific.
@@ -631,8 +622,6 @@ itself checked against a fixed cap:
 | `steps` (tree depth) | `MAX_TREE_DEPTH` = 128 |
 | a proof's sibling count | `max_items * MAX_LEVELS` (32), checked *before* reading any sibling digest |
 | `Object`/`Chunk` payload bytes | `MAX_RAW_OBJECT_SIZE` = 1 GiB |
-| `chunk_len_proofs` count | `MAX_CHUNKS` = 8,388,608 |
-| one length-proof's Bao slice | 8 KiB |
 | closure manifest's pack list | `MAX_CLOSURE_PACKS` = 65,536 |
 | closure object count | `pack::MAX_ENTRIES` = 10,000,000 |
 | closure pack payload sum | `pack::MAX_TOTAL_PAYLOAD` = 4 GiB |
@@ -713,7 +702,7 @@ own test harness should take.
 | Surface | Purpose | Spec |
 |---|---|---|
 | **CLI** | | |
-| `kit prove <rev> [<path>] [--chunk N \| --range OFF:LEN] [--with-offsets] [-o FILE] [--format=json]` | build a disclosure bundle | SPEC-DISCLOSURE §3 |
+| `kit prove <rev> [<path>] [--chunk N \| --range OFF:LEN] [-o FILE] [--format=json]` | build a disclosure bundle | SPEC-DISCLOSURE §3 |
 | `kit verify-proof <commit-id> <bundle\|-> [--expect-path P] [--trusted] [--trust-roots PATH] [--payload-out FILE] [--format=json]` | verify a disclosure bundle | SPEC-DISCLOSURE §4 |
 | `kit closure export <rev> [--history] [-o DIR] [--force] [--format=json]` | write a closure (manifest + raw-only packs) | SPEC-DISCLOSURE §7.2/§7.3 |
 | `kit closure verify <commit-id> [--from DIR] [--history] [--show-unreferenced] [--format=json]` | verify a closure, remote (`--from`) or local | SPEC-DISCLOSURE §7.4 |
@@ -722,7 +711,6 @@ own test harness should take.
 | `verify_path(commit_id, commit_bytes, steps) -> PathVerified` | walk and verify a tree-entry step chain | SPEC-DISCLOSURE §4 steps 6&ndash;9 |
 | `verify_chunk_with_meta(chunked_id, total_size, chunk_size, chunk_hash, index, proof)` | verify one chunk + its manifest metadata | SPEC-MERKLE-OBJECTS §3.1 |
 | `verify_blob_slice(blob_id, content_offset, len, slice) -> bytes` | verify a Bao range slice | SPEC-DISCLOSURE §4 (Range) |
-| `verify_blob_len_proof(blob_id, slice) -> u32` | verify a chunk's declared content length | SPEC-DISCLOSURE §4.1 |
 | `verify_disclosure(commit_id, bundle) -> Disclosed` | decode + fully verify a bundle | SPEC-DISCLOSURE §3&ndash;§4 |
 | `build_disclosure(store, commit_id, path, selector) -> Vec<u8>` (native) | producer side of a bundle | SPEC-DISCLOSURE §3 |
 | `verify_closure(root, mode, objects) -> ClosureReport` | store-less closure check over an id&rarr;bytes map | SPEC-DISCLOSURE §7.4 |

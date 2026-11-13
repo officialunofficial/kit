@@ -545,7 +545,6 @@ _kit() {
                     _arguments \
                         '--chunk[chunk index]:N:' \
                         '--range[byte range OFFSET:LEN]:range:' \
-                        '--with-offsets[authenticate absolute offsets with --range]' \
                         '-o[write bundle to file]:file:_files' \
                         '--output[write bundle to file]:file:_files' \
                         '--format[output format]:fmt:(default json)' \

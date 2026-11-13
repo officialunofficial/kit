@@ -152,7 +152,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "export import fetch pull verify status format-patch --remote-name --ref --no-attest --algorithm --signer --key --json --passthrough --fork-audit --stdout -o --output-directory --help" -- "$cur") )
             ;;
         prove)
-            COMPREPLY=( $(compgen -W "--chunk --range --with-offsets -o --output --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--chunk --range -o --output --format --help" -- "$cur") )
             ;;
         verify-proof)
             COMPREPLY=( $(compgen -W "--expect-path --trusted --trust-roots --format --payload-out --help" -- "$cur") )
