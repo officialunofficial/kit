@@ -26,7 +26,7 @@ use crate::checkpoint::{self, Checkpoint};
 use crate::SyncOptions;
 use crate::apply::{ChainApplied, apply_pack_chain};
 use crate::error::SyncError;
-use crate::lock::wait_for_worktree_lock;
+use crate::lock::{LockWait, wait_for_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{
     MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
@@ -328,6 +328,7 @@ pub(crate) fn fetch_objects(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
+    lock_wait: &LockWait,
 ) -> Result<FetchReport, SyncError> {
     let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
@@ -339,6 +340,7 @@ pub(crate) fn fetch_objects(
         observer,
         remote,
         options,
+        lock_wait,
         &mut applied,
         &mut report,
     );
@@ -354,6 +356,7 @@ fn fetch_objects_inner(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     options: &SyncOptions,
+    lock_wait: &LockWait,
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
 ) -> Result<(), SyncError> {
@@ -509,7 +512,7 @@ fn fetch_objects_inner(
             // ends it. The fetch holds only the shared lock of the prune
             // guard, and no process blocks on the exclusive one, so this
             // wait cannot deadlock.
-            let _lock = wait_for_worktree_lock(layout, observer)?;
+            let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
             // Make the tracking rename durable before its checkpoint; a
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
@@ -532,7 +535,7 @@ fn fetch_objects_inner(
     tracking.commit()?;
     result?;
     if options.prune {
-        prune_tracking(layout, source, observer, remote, &listed, report)?;
+        prune_tracking(layout, source, observer, remote, &listed, lock_wait, report)?;
     }
     if let Some(cursor) = cursor {
         // A disposable cache: failing to write it costs the next fetch a
@@ -575,6 +578,7 @@ fn prune_tracking(
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     listed: &std::collections::HashSet<String>,
+    lock_wait: &LockWait,
     report: &mut FetchReport,
 ) -> Result<(), SyncError> {
     let mut gone = Vec::new();
@@ -590,7 +594,7 @@ fn prune_tracking(
     if gone.is_empty() {
         return Ok(());
     }
-    let _lock = wait_for_worktree_lock(layout, observer)?;
+    let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
     for name in gone {
         match refs::delete_remote_ref(layout, remote, &name) {
             Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),

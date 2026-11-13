@@ -97,6 +97,17 @@ pub struct SyncOptions {
     /// After a complete fetch, delete the remote-tracking refs whose branch
     /// is gone from the remote. Only [`fetch`] acts on it.
     pub prune: bool,
+    /// How long one clone, fetch or pull waits for the worktree lock that it
+    /// takes to publish. `None` waits for as long as it takes at each publish
+    /// of a fetch, and a pull's final update of the branch, HEAD and worktree
+    /// keeps its usual 5 second wait. With `Some`, a single deadline covers
+    /// every wait of the same call, that final update included. It starts at
+    /// the first failed attempt to take the lock and runs on wall-clock time,
+    /// so it also bounds a later wait of a long call, and a lock that changes
+    /// hands does not restart it. When it passes, the call fails with
+    /// [`SyncError::RepoLock`] and publishes nothing more. What it applied
+    /// stays in the store, and the next call resumes from it.
+    pub lock_wait: Option<std::time::Duration>,
 }
 
 impl SyncOptions {
@@ -121,6 +132,13 @@ impl SyncOptions {
         self
     }
 
+    /// Set [`lock_wait`](Self::lock_wait).
+    #[must_use]
+    pub fn with_lock_wait(mut self, wait: Option<std::time::Duration>) -> Self {
+        self.lock_wait = wait;
+        self
+    }
+
     /// Set [`sync_policy`](Self::sync_policy).
     #[must_use]
     pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
@@ -136,6 +154,7 @@ impl Default for SyncOptions {
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
             prune: false,
+            lock_wait: None,
         }
     }
 }

@@ -15,7 +15,7 @@ use kit_core::store::ObjectStore;
 use crate::SyncOptions;
 use crate::error::SyncError;
 use crate::fetch::{FetchReport, fetch_objects};
-use crate::lock::acquire_worktree_lock;
+use crate::lock::{LockWait, acquire_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::worktree::{
@@ -92,12 +92,15 @@ pub fn pull(
         return Err(SyncError::DetachedHead);
     }
     let store = open_store(&layout, options)?;
-    let fetch = fetch_objects(&store, &layout, source, observer, remote, options)?;
+    let lock_wait = LockWait::new(options.lock_wait);
+    let fetch = fetch_objects(
+        &store, &layout, source, observer, remote, options, &lock_wait,
+    )?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
-    let _lock = acquire_worktree_lock(&layout, observer)?;
+    let _lock = acquire_worktree_lock(&layout, observer, &lock_wait)?;
     let pending = PullState::read(&layout)?;
     let original_head = refs::read_head(&layout).ok();
     if matches!(original_head, Some(Head::Detached(_))) {
@@ -206,7 +209,10 @@ pub fn fetch(
     // No outer lock: `fetch_objects` takes the repo lock itself, per branch,
     // around only the ref publish.
     let store = open_store(&layout, options)?;
-    fetch_objects(&store, &layout, source, observer, remote, options)
+    let lock_wait = LockWait::new(options.lock_wait);
+    fetch_objects(
+        &store, &layout, source, observer, remote, options, &lock_wait,
+    )
 }
 
 fn rollback_pull_ref_and_head(

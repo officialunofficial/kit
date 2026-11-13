@@ -22,6 +22,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   grace window. It deletes each one under the same exclusive lock as an
   object, so a running fetch keeps its files. `GcReport::temp_files_pruned`
   counts them, and `bytes_reclaimed` includes their bytes.
+- `SyncOptions::lock_wait` (`with_lock_wait`) bounds how long one clone, fetch
+  or pull waits for `worktree.lock` when it publishes. The default, `None`,
+  waits as long as it takes at each publish of a fetch, and a pull's final
+  update keeps its 5 second wait. With `Some`, one deadline starts at the
+  first failed attempt and covers every later wait of the call, on wall-clock
+  time. When it passes, the
+  call fails with `SyncError::RepoLock` and publishes nothing more, and the
+  next call resumes from the packs already applied. `kit` keeps the default.
 - `kit_core::repo_lock::is_served` tells whether a server process is alive
   against a repository. `kit-sync` and `libkit` both use it.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps

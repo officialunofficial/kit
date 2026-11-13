@@ -521,6 +521,64 @@ fn the_publish_wait_honours_an_interrupt_and_keeps_the_work() {
     assert_eq!(tracking_tip(&layout), Some(remote.tip()));
 }
 
+fn run_fetch_with(
+    target: &Path,
+    source: &dyn RemoteSource,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<FetchReport, SyncError> {
+    fetch(target, source, "origin", options, observer)
+}
+
+#[test]
+fn a_deadline_ends_the_publish_wait_with_a_typed_error_and_the_next_fetch_resumes() {
+    let remote = Remote::with_commits(3);
+    let (_dir, target, layout) = fresh_target();
+    let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+    let options = SyncOptions::default().with_lock_wait(Some(Duration::from_millis(200)));
+
+    let started = std::time::Instant::now();
+    let error = run_fetch_with(&target, &remote.source(), &options, &NoopObserver).unwrap_err();
+    assert!(
+        matches!(error, SyncError::RepoLock(repo_lock::LockError::Busy(_))),
+        "{error:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() < Duration::from_secs(2));
+    drop(held);
+
+    // Nothing was published, and the applied packs are recorded.
+    assert_eq!(tracking_tip(&layout), None);
+    let applied = AppliedPacks::load(&layout, "origin").unwrap();
+    for key in &remote.packs {
+        assert!(applied.contains(&PackKey::from_hash(*key)));
+    }
+    let source = HookSource::counting(&remote);
+    let report = run_fetch_with(&target, &source, &options, &NoopObserver).unwrap();
+    assert_eq!(source.downloads(), 0);
+    assert_eq!(report.packs_already_applied, 3);
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+}
+
+#[test]
+fn a_lock_released_before_the_deadline_lets_the_publish_proceed() {
+    let remote = Remote::with_commits(2);
+    let (_dir, target, layout) = fresh_target();
+    let probe = Probe::default();
+    let held = repo_lock::acquire_default(layout.worktree_state_dir(), WORKTREE_LOCK).unwrap();
+    let options = SyncOptions::default().with_lock_wait(Some(Duration::from_secs(60)));
+
+    std::thread::scope(|scope| {
+        let fetching = scope.spawn(|| run_fetch_with(&target, &remote.source(), &options, &probe));
+        wait_until("the publish wait", || {
+            probe.waiting.load(Ordering::SeqCst) > 0
+        });
+        drop(held);
+        fetching.join().unwrap().unwrap();
+    });
+    assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+}
+
 // ---------------------------------------------------------------------------
 // 3. gc during a fetch
 // ---------------------------------------------------------------------------
