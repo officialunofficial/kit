@@ -695,7 +695,7 @@ impl CommitContext {
     }
 }
 
-/// Reuse a commit that the KDSP anchor has authenticated, but still bind
+/// Reuse a commit that the container has authenticated once, but still bind
 /// each inner bundle's own commit bytes to the trusted id.
 pub(crate) fn verify_path_reusing_context(
     commit_id: &Hash,
@@ -1397,7 +1397,7 @@ pub fn verify_disclosure(commit_id: &Hash, bundle: &[u8]) -> Result<Disclosed, V
     })
 }
 
-/// KDSP-only verification path. The anchor authenticated `context`; the
+/// KDSP-only verification path. The container authenticated `context`; the
 /// inner bundle still has to carry commit bytes hashing to `commit_id`.
 pub(crate) fn verify_disclosure_reusing_context(
     commit_id: &Hash,

@@ -289,6 +289,50 @@ mod tests {
         );
     }
 
+    /// A commit over a chunked file of two chunks (5 and 7 bytes), and the
+    /// ids of the manifest and both chunks.
+    fn chunked_commit(src: &mut Source) -> (Hash, Hash, [Hash; 2]) {
+        let one = src.blob(b"12345");
+        let two = src.blob(b"1234567");
+        let big = src.put(&Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(12, 0, [(one, 5), (two, 12)]).unwrap(),
+        ));
+        let tree = src.tree(&[(b"big", big)]);
+        let commit = src.commit(tree, vec![], b"chunked");
+        (commit, big, [one, two])
+    }
+
+    #[test]
+    fn a_known_chunk_is_checked_against_its_span() {
+        // `Known::Blob(len)` lets the walk check the chunk, `Known::Yes`
+        // cannot say how long it is, so the manifest is refused.
+        let answers = [
+            (Known::Blob(5), Known::Blob(7), true),
+            (Known::Blob(6), Known::Blob(7), false),
+            (Known::Yes, Known::No, false),
+            (Known::Blob(5), Known::Yes, false),
+        ];
+        for (n, (first, second, accepted)) in answers.into_iter().enumerate() {
+            let mut src = Source::default();
+            let (commit, big, chunks) = chunked_commit(&mut src);
+            let report = verify_push(&[commit], ClosureMode::History, &mut src, |id| {
+                if *id == chunks[0] {
+                    first
+                } else if *id == chunks[1] {
+                    second
+                } else {
+                    Known::No
+                }
+            })
+            .unwrap();
+            assert_eq!(report.is_accepted(), accepted, "answer {n}: {report:?}");
+            if !accepted {
+                let ids: Vec<Hash> = report.corrupt.iter().map(|(id, _)| *id).collect();
+                assert_eq!(ids, vec![big], "answer {n}: {report:?}");
+            }
+        }
+    }
+
     #[test]
     fn known_tip_is_noop() {
         let mut src = Source::default();

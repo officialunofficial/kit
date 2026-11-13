@@ -1219,7 +1219,7 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     window: usize,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
-    let mut chunks = Vec::new();
+    let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
     while let Some(chunk) = chunker.next_chunk_ref()? {
         let origin = ChunkOrigin {
@@ -1228,7 +1228,8 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
-        chunks.push((store_chunk_blob_at(sink, chunk, origin)?, total_size));
+        chunks.ids.push(store_chunk_blob_at(sink, chunk, origin)?);
+        chunks.ends.push(total_size);
         if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
         }
@@ -1236,17 +1237,27 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     store_chunk_manifest(sink, total_size, chunks)
 }
 
-/// Append one hashed batch to `chunks`, each hash with the end offset of its
-/// chunk. `end` is the end offset of the last chunk already in `chunks`.
-fn extend_with_ends(
-    chunks: &mut Vec<(Hash, u64)>,
-    end: &mut u64,
-    hashes: Vec<Hash>,
-    batch: &[Vec<u8>],
-) {
-    for (hash, chunk) in hashes.into_iter().zip(batch) {
-        *end += chunk.len() as u64;
-        chunks.push((hash, *end));
+/// The chunk ids and end offsets of a file being chunked, in two lists, so
+/// the manifest takes them over without a copy.
+#[derive(Default)]
+struct ChunkList {
+    ids: Vec<Hash>,
+    ends: Vec<u64>,
+}
+
+impl ChunkList {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Append one hashed batch, each hash with the end offset of its chunk.
+    fn extend(&mut self, hashes: Vec<Hash>, batch: &[Vec<u8>]) {
+        let mut end = self.ends.last().copied().unwrap_or(0);
+        for (hash, chunk) in hashes.into_iter().zip(batch) {
+            end += chunk.len() as u64;
+            self.ids.push(hash);
+            self.ends.push(end);
+        }
     }
 }
 
@@ -1254,10 +1265,15 @@ fn extend_with_ends(
 fn store_chunk_manifest<S: ObjectSink + ?Sized>(
     sink: &S,
     total_size: u64,
-    chunks: Vec<(Hash, u64)>,
+    chunks: ChunkList,
 ) -> WorktreeResult<Hash> {
     // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
-    let manifest = Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, chunks)?);
+    let manifest = Object::ChunkedBlob(ChunkedBlob::from_parts(
+        total_size,
+        0,
+        chunks.ids,
+        chunks.ends,
+    )?);
     let manifest_bytes = serialize::serialize(&manifest)?;
     // Free the id list before the sink stores the bytes, so the typed list and
     // the serialized bytes are not held together with the sink's own copies.
@@ -1293,7 +1309,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// instead of requiring the whole file resident in memory first.
 /// Bounds ingest memory to one fixed `ChunkReader` window
 /// (1 MiB to 16 MiB, by cutter thread count), an owned batch of at most 64 chunks (16 MiB), and the
-/// growing chunk-hash list (32 bytes/chunk). The reader and batch stay
+/// growing lists of chunk ids and ends (40 bytes/chunk). The reader and batch stay
 /// bounded independently of total file size.
 ///
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
@@ -1369,17 +1385,16 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     window: usize,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
-    let mut chunks = Vec::new();
+    let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
-    let mut ends = 0;
     while let Some(chunk) = chunker.next_chunk()? {
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
             let before = chunks.len();
             let hashes = checked_hash_chunks(hash_chunks, sink, &batch)?;
-            extend_with_ends(&mut chunks, &mut ends, hashes, &batch);
+            chunks.extend(hashes, &batch);
             if checkpoint_due(before, chunks.len(), window) {
                 sink.checkpoint()?;
             }
@@ -1388,7 +1403,7 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     }
     if !batch.is_empty() {
         let hashes = checked_hash_chunks(hash_chunks, sink, &batch)?;
-        extend_with_ends(&mut chunks, &mut ends, hashes, &batch);
+        chunks.extend(hashes, &batch);
     }
 
     store_chunk_manifest(sink, total_size, chunks)
@@ -1439,86 +1454,82 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
 
     let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
 
-    let (chunks, total_size) =
-        std::thread::scope(|scope| -> WorktreeResult<(Vec<(Hash, u64)>, u64)> {
-            scope.spawn(move || {
-                let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
-                let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
-                let mut running_total: u64 = 0;
-                loop {
-                    let chunk = match chunker.next_chunk() {
-                        Ok(Some(chunk)) => chunk,
-                        Ok(None) => {
-                            if !batch.is_empty() {
-                                let _ = tx.send(Ok(batch));
-                            }
-                            return;
+    let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(ChunkList, u64)> {
+        scope.spawn(move || {
+            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
+            let mut running_total: u64 = 0;
+            loop {
+                let chunk = match chunker.next_chunk() {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => {
+                        if !batch.is_empty() {
+                            let _ = tx.send(Ok(batch));
                         }
-                        Err(e) => {
-                            let _ = tx.send(Err(WorktreeError::from(e)));
-                            return;
-                        }
-                    };
-                    running_total = match add_within_chunked_bound(running_total, chunk.len(), path)
-                    {
-                        Ok(total) => total,
-                        Err(e) => {
-                            let _ = tx.send(Err(e));
-                            return;
-                        }
-                    };
-                    batch.push(chunk);
-                    if batch.len() == STREAM_HASH_BATCH {
-                        let full =
-                            std::mem::replace(&mut batch, Vec::with_capacity(STREAM_HASH_BATCH));
-                        if tx.send(Ok(full)).is_err() {
-                            return;
-                        }
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(WorktreeError::from(e)));
+                        return;
+                    }
+                };
+                running_total = match add_within_chunked_bound(running_total, chunk.len(), path) {
+                    Ok(total) => total,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                };
+                batch.push(chunk);
+                if batch.len() == STREAM_HASH_BATCH {
+                    let full = std::mem::replace(&mut batch, Vec::with_capacity(STREAM_HASH_BATCH));
+                    if tx.send(Ok(full)).is_err() {
+                        return;
                     }
                 }
-            });
+            }
+        });
 
-            // On any error, keep draining (discarding) the channel instead of
-            // returning immediately: with a rendezvous channel the cutter's
-            // *next* `send` — for a batch already cut, or one it hasn't
-            // finished cutting yet — has no buffer to land in and blocks
-            // until a matching `recv`, so an early return here that stops
-            // calling `recv` would deadlock `thread::scope`'s join waiting
-            // for a cutter that is itself waiting for a `recv` that will
-            // never come. Draining lets every future send succeed (or the
-            // cutter hits its own error/EOF and exits on its own), so the
-            // channel always disconnects and this loop always terminates.
-            let mut chunks = Vec::new();
-            let mut ends: u64 = 0;
-            let mut total_size: u64 = 0;
-            let mut first_err: Option<WorktreeError> = None;
-            while let Ok(received) = rx.recv() {
-                if first_err.is_some() {
-                    continue;
-                }
-                match received.and_then(|batch| {
-                    for chunk in &batch {
-                        total_size += chunk.len() as u64;
-                    }
-                    checked_hash_chunks(hash_chunks, sink, &batch).map(|hashes| (hashes, batch))
-                }) {
-                    Ok((hashes, batch)) => {
-                        let before = chunks.len();
-                        extend_with_ends(&mut chunks, &mut ends, hashes, &batch);
-                        if checkpoint_due(before, chunks.len(), window)
-                            && let Err(e) = sink.checkpoint()
-                        {
-                            first_err = Some(e.into());
-                        }
-                    }
-                    Err(e) => first_err = Some(e),
-                }
+        // On any error, keep draining (discarding) the channel instead of
+        // returning immediately: with a rendezvous channel the cutter's
+        // *next* `send` — for a batch already cut, or one it hasn't
+        // finished cutting yet — has no buffer to land in and blocks
+        // until a matching `recv`, so an early return here that stops
+        // calling `recv` would deadlock `thread::scope`'s join waiting
+        // for a cutter that is itself waiting for a `recv` that will
+        // never come. Draining lets every future send succeed (or the
+        // cutter hits its own error/EOF and exits on its own), so the
+        // channel always disconnects and this loop always terminates.
+        let mut chunks = ChunkList::default();
+        let mut total_size: u64 = 0;
+        let mut first_err: Option<WorktreeError> = None;
+        while let Ok(received) = rx.recv() {
+            if first_err.is_some() {
+                continue;
             }
-            match first_err {
-                Some(e) => Err(e),
-                None => Ok((chunks, total_size)),
+            match received.and_then(|batch| {
+                for chunk in &batch {
+                    total_size += chunk.len() as u64;
+                }
+                checked_hash_chunks(hash_chunks, sink, &batch).map(|hashes| (hashes, batch))
+            }) {
+                Ok((hashes, batch)) => {
+                    let before = chunks.len();
+                    chunks.extend(hashes, &batch);
+                    if checkpoint_due(before, chunks.len(), window)
+                        && let Err(e) = sink.checkpoint()
+                    {
+                        first_err = Some(e.into());
+                    }
+                }
+                Err(e) => first_err = Some(e),
             }
-        })?;
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok((chunks, total_size)),
+        }
+    })?;
 
     store_chunk_manifest(sink, total_size, chunks)
 }

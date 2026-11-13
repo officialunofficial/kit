@@ -320,13 +320,13 @@ pub fn check_chunk_entry(
 /// chunks `total_size` is `0`. `last_end` is `0` when there are no chunks.
 ///
 /// # Errors
-/// [`KitError::ChunkedBlobTotalSizeInvalid`] for a non-zero `total_size`
+/// [`KitError::ChunkedBlobNoChunks`] for a non-zero `total_size`
 /// with no chunks, and [`KitError::ChunkedBlobLastEnd`] for a last end
 /// below `total_size`.
 pub fn check_last_end(total_size: u64, chunk_count: usize, last_end: u64) -> Result<(), KitError> {
     if chunk_count == 0 {
         if total_size != 0 {
-            return Err(KitError::ChunkedBlobTotalSizeInvalid);
+            return Err(KitError::ChunkedBlobNoChunks);
         }
     } else if last_end != total_size {
         return Err(KitError::ChunkedBlobLastEnd);
@@ -1356,7 +1356,7 @@ mod tests {
         );
         assert_eq!(
             deserialize(&chunked_bytes(1, 0, &[])),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            Err(KitError::ChunkedBlobNoChunks)
         );
         // Good manifests of both layouts.
         assert!(deserialize(&chunked_bytes(10, 0, &[3, 4, 10])).is_ok());
@@ -1384,8 +1384,7 @@ mod tests {
     /// value the writer sees is undecodable.
     #[test]
     fn new_refuses_a_manifest_the_reader_refuses() {
-        // Zeroed: the allocator maps the pages lazily, and `new` refuses at
-        // the count before it reads one.
+        // `new` builds the entries before the cap, then refuses the next one.
         assert_eq!(
             ChunkedBlob::new(
                 MAX_CHUNKED_TOTAL_SIZE,
@@ -1422,7 +1421,7 @@ mod tests {
         // Zero chunks mean zero bytes.
         assert_eq!(
             ChunkedBlob::new(1, 0, Vec::new()),
-            Err(KitError::ChunkedBlobTotalSizeInvalid)
+            Err(KitError::ChunkedBlobNoChunks)
         );
     }
 

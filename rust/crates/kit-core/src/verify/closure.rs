@@ -462,16 +462,15 @@ fn reach(
 
 /// Report each chunked blob that has a chunk whose content length is not the
 /// length of its span, `end - start` (SPEC-OBJECTS §7). Every chunk is checked
-/// on its own, in both layouts, and the lowest wrong index is reported. A
-/// manifest with a chunk that was not read as a blob is skipped: that chunk is
-/// already missing, corrupt or a frontier stop. A chunk the frontier stopped
-/// at without a length ([`Known::Yes`]) cannot be checked, so its manifest is
-/// reported corrupt.
+/// on its own, in both layouts, and the lowest wrong index is reported, even
+/// when another chunk of the manifest is missing. A chunk that was not read as
+/// a blob is not measured: it is already missing or corrupt. A chunk the
+/// frontier stopped at without a length ([`Known::Yes`]) cannot be checked, so
+/// its manifest is reported corrupt.
 fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, crate::object::ChunkedBlob)>) {
     for (id, manifest) in manifests {
         let mut wrong = None;
         let mut unconfirmed = None;
-        let mut known_lens = true;
         for (index, (chunk, end)) in (0u32..).zip(manifest.entries()) {
             let reach = out.visited.get(&chunk);
             match reach.and_then(|r| r.blob_len) {
@@ -484,14 +483,8 @@ fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, crate::object::Chun
                 None if reach.is_some_and(|r| r.frontier) => {
                     unconfirmed.get_or_insert(index);
                 }
-                None => {
-                    known_lens = false;
-                    break;
-                }
+                None => {}
             }
-        }
-        if !known_lens {
-            continue;
         }
         if let Some((index, len, span_len)) = wrong {
             out.corrupt.push((
@@ -1365,15 +1358,26 @@ mod tests {
     }
 
     #[test]
-    fn chunk_lengths_are_not_checked_against_an_absent_chunk() {
+    fn chunk_lengths_are_checked_beside_an_absent_chunk() {
         let one = blob(b"12345");
         let two = blob(b"1234567");
-        let big = chunked(99, &[one.0, two.0]);
-        let root_tree = tree(&[(b"big", EntryMode::Blob, big.0)]);
-        let root = commit_over(root_tree.0, vec![]);
-        let report = closure_of(root.0, &[&root, &root_tree, &big, &one]);
-        assert_eq!(report.missing, vec![two.0]);
-        assert!(report.corrupt.is_empty(), "{report:?}");
+        // Chunk 1 is absent. A chunk 0 that fits its span adds nothing; one that
+        // does not makes the manifest corrupt all the same (SPEC-DISCLOSURE
+        // §7.4 item 10).
+        for (first_end, corrupt) in [(5, false), (6, true)] {
+            let big = object(&Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(12, 0, [(one.0, first_end), (two.0, 12)]).unwrap(),
+            ));
+            let root_tree = tree(&[(b"big", EntryMode::Blob, big.0)]);
+            let root = commit_over(root_tree.0, vec![]);
+            let report = closure_of(root.0, &[&root, &root_tree, &big, &one]);
+            assert_eq!(report.missing, vec![two.0]);
+            assert_eq!(
+                corrupt_ids(&report),
+                if corrupt { vec![big.0] } else { vec![] },
+                "{report:?}"
+            );
+        }
     }
 
     #[test]

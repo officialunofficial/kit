@@ -165,7 +165,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     layout has the ends the layout gives. The new `KitError` variants are
     `ChunkedBlobLength`, `ChunkEndNotIncreasing`, `ChunkEndAboveTotalSize`,
     `ChunkLengthAboveLimit`, `FixedChunkEnd`, `ChunkedBlobLastEnd`,
-    `ChunkLengthMismatch` and `ChunkNotBlob`.
+    `ChunkLengthMismatch`, `ChunkNotBlob` and `ChunkedBlobNoChunks` (a total
+    size with no chunks).
   - Every place that reads a chunk checks it against its span: reassembly,
     restore, diff, blame, the closure walk and the fetch check. A chunk that
     is not a Blob, or whose length differs from its span, is a typed error.
@@ -176,9 +177,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     pairs. It has the new readers `ends()`, `span(index)`, `chunk_at(offset)`
     and `entries()`. `ChunkedBlob::fixed_chunk_len` is gone, and
     `check_chunk_length` replaces it.
-  - `merkle::ChunkedFold::new` takes the chunk count and returns a `Result`,
+  - `merkle::ChunkedIdFold::new` takes the chunk count and returns a `Result`,
     `push` takes the chunk and its end, `push_ids` is `push_entries`, and
-    `inner_root` and `id` are replaced by `finish`. `merkle::SpannedChunk`
+    `inner_root` and `id` are replaced by `finish`. `serialize::check_chunked_header`
+    takes the total size and the chunk count, and checks no layout.
+    `MerkleError::PartialChunkId` is gone: a partial entry is
+    `KitError::ChunkedBlobLength`. `merkle::SpannedChunk`
     pairs a chunk id with its span. `verify_chunk`, `verify_chunks_range`,
     `verify_chunks_multi`, `verify_chunk_with_meta_leaf` and
     `verify::verify_chunk_with_meta` take the span with the chunk id.
@@ -213,6 +217,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunk disclosure and a range disclosure carry `start` and `end`, and
   `absolute_offset` is always a number. `verify_disclosure` keeps
   `commit_id`, `leaf_id`, `signer`, `signature_valid` and `path` as they were.
+  A range disclosure of a plain blob carries `start` and `end` as `null`.
+  `chunked_blob_encode` returns the new id of the manifest.
+- **Breaking, CLI:** `kit prove --format=json` has no `selector.with_offsets`
+  key. `kit verify-proof --format=json` prints `start` and `end` for a chunk
+  or a chunk range (`null` for a plain blob), and `absolute_offset` is never
+  `null`.
 - **Breaking:** the fields of `kit_core::object::ChunkedBlob` are private, so
   every value is one that `deserialize` accepts. Build one with
   `ChunkedBlob::new(total_size, chunk_size, chunks)` (the chunks are `(Hash, end)`
@@ -335,9 +345,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error before they read a chunk.
 - `kit add`, `status` and `stash` take a worktree file up to 128 GiB, the
   bound of a `ChunkedBlob`, and so does `diff --stat` for binary content.
-  Memory is one window of chunks plus a few copies of the list of chunk ids,
-  32 bytes each, while the manifest is stored. The line diff of text content
-  above 1 GiB still fails with `ContentTooLarge`. The hasher refused a file
+  Memory is one window of chunks plus a few copies of the list of chunk ids
+  and end offsets, 40 bytes for each chunk, while the manifest is stored. The
+  line diff of text content above 1 GiB still fails with
+  `WorktreeError::ContentTooLarge`. The hasher refused a file
   above 1 GiB before it read a byte. A file of 1 MiB or less that grows past 1
   MiB while it is read is stored chunked. It was stored as one oversized blob.
   A file above 128 GiB still fails with
@@ -369,12 +380,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `kit_sync::worktree::restore_worktree_and_index_from` takes the base tree.
 - `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
-  Ids do not change. `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from
-  its header fields and its chunk ids, one at a time or as the raw id bytes
-  of a manifest, so a caller need not decode the manifest.
-  `serialize::check_chunked_header` checks the header first, with the
-  decoder's rules. Breaking: `MerkleError` gains `TooManyLeaves` and
-  `PartialChunkId`.
+  `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from its header fields
+  and its entries, one at a time or as the raw entry bytes of a manifest, so a
+  caller need not decode the manifest. `serialize::check_chunked_header` checks
+  the header first, with the decoder's rules. Breaking: `MerkleError` gains
+  `TooManyLeaves`.
 - A rollover node of the packmap chain lists up to 4,096 packs, up from 1,024
   (`ROLLOVER_MAX_PACKS`). A chain of up to 4,096 packs rolls into one node,
   which is 131,080 bytes. A reader accepts the node as before. A server that
@@ -553,10 +563,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   longer sends a pack without the objects past the cut and then moves the
   branch. A cut in the walk of the remote's tip is no error: the push treats
   the remote as holding only what the walk reached and sends the rest.
-- **Breaking:** `verify::VerifyError` has a new variant, `ContentTooLarge
-  { size }`. The disclosure builder returns it for a byte range of a
-  `ChunkedBlob` above `worktree::MAX_FILE_BYTES`. The enum is not
-  `#[non_exhaustive]`, so an exhaustive `match` adds an arm.
 - **Breaking:** the text of `KitError::TooManyChunks` reads
   `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
   matches the message text updates the number. The variant is the same.

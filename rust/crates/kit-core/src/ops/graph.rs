@@ -897,6 +897,74 @@ mod tests {
         assert_eq!(whole.len(), 7);
     }
 
+    /// A commit whose tree holds one chunked blob with these (chunk id, span
+    /// length) entries, whatever the chunks really hold.
+    fn history_over(s: &ObjectStore, parent: Option<Hash>, entries: Vec<(Hash, u64)>) -> Hash {
+        let manifest = serialize::serialize(&Object::ChunkedBlob(
+            crate::object::testing::sized(0, entries).unwrap(),
+        ))
+        .unwrap();
+        let manifest = s.write(&manifest).unwrap();
+        let tree = put_tree(
+            s,
+            vec![TreeEntry {
+                name: b"big".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            }],
+        );
+        let parents: Vec<Hash> = parent.into_iter().collect();
+        make_commit(s, tree, &parents, "c")
+    }
+
+    #[test]
+    fn presence_check_refuses_a_chunk_that_is_not_a_blob() {
+        let (_d, s) = store();
+        let first = put_blob(&s, b"12345");
+        let tree = put_tree(&s, vec![]);
+        let c1 = history_over(&s, None, vec![(first, 5), (tree, 7)]);
+        assert!(matches!(
+            check_closure_present(&s, [&c1]),
+            Err(StoreError::Decode(KitError::ChunkNotBlob { index: 1 }))
+        ));
+    }
+
+    #[test]
+    fn presence_check_refuses_a_chunk_that_differs_from_its_span() {
+        let (_d, s) = store();
+        let first = put_blob(&s, b"12345");
+        let c1 = history_over(&s, None, vec![(first, 7)]);
+        assert!(matches!(
+            check_closure_present(&s, [&c1]),
+            Err(StoreError::Decode(KitError::ChunkLengthMismatch {
+                index: 0,
+                expected: 7,
+                actual: 5
+            }))
+        ));
+    }
+
+    #[test]
+    fn presence_check_catches_one_chunk_named_under_two_lengths() {
+        let (_d, s) = store();
+        let shared = put_blob(&s, b"12345");
+        // The first manifest fits the chunk, so the walk remembers its length.
+        // The second names the same id with another span, and the check of it
+        // is answered from the memory.
+        let c1 = history_over(&s, None, vec![(shared, 5)]);
+        let c2 = history_over(&s, Some(c1), vec![(shared, 7)]);
+        CHUNK_TYPE_READS.with(|reads| reads.set(0));
+        assert!(matches!(
+            check_closure_present(&s, [&c1, &c2]),
+            Err(StoreError::Decode(KitError::ChunkLengthMismatch {
+                index: 0,
+                expected: 7,
+                actual: 5
+            }))
+        ));
+        assert_eq!(CHUNK_TYPE_READS.with(std::cell::Cell::get), 1);
+    }
+
     #[test]
     fn presence_check_reports_a_missing_chunk() {
         let (_d, s) = store();

@@ -672,7 +672,7 @@ pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
     let _ = kit_core::verify::span::verify_disclosure_span(&commit, input);
-    if input.len() >= 37 && input.starts_with(b"KDSP\x01") {
+    if input.len() >= 37 && input.starts_with(b"KDSP\x02") {
         let mut patched = input.to_vec();
         patched[5..37].copy_from_slice(&commit);
         let _ = kit_core::verify::span::verify_disclosure_span(&commit, &patched);
@@ -3535,18 +3535,16 @@ mod tests {
     #[test]
     fn disclosure_decode_target_runs_within_caps() {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"KDPB\x01", &[0xFF; 64][..]] {
+        for case in [&b""[..], b"KDPB\x03", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
         }
-        // A range payload that declares 1,000,000 length proofs and holds
-        // 100 bytes after the count.
-        let mut huge_count = b"KDPB\x02".to_vec();
+        // A range payload whose slice declares 1,000,000 bytes and holds 100.
+        let mut huge_count = b"KDPB\x03".to_vec();
         huge_count.extend_from_slice(&[0; 32]); // commit id
         huge_count.extend_from_slice(&[0, 0]); // no commit bytes, no steps
         huge_count.push(2); // range payload
         huge_count.push(0); // no chunk header
         huge_count.extend_from_slice(&[0; 16]); // offset and length
-        huge_count.push(0); // empty slice
         huge_count.extend_from_slice(&[0xC0, 0x84, 0x3D]); // 1,000,000
         huge_count.extend_from_slice(&[0; 100]);
         run_one(&huge_count, disclosure_decode_one_iteration).expect("guardrails held");
@@ -3555,7 +3553,7 @@ mod tests {
     #[test]
     fn span_decode_target_runs_within_caps() {
         run_iterated_unit(span_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"KDSP\x01", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDSP\x02", &[0xff; 64][..]] {
             run_one(case, span_decode_one_iteration).expect("guardrails held");
         }
         let mut nonminimal = GOOD_SPAN[..53].to_vec();
@@ -3584,7 +3582,7 @@ mod tests {
     fn verify_span_target_runs_within_caps() {
         let fixture = build_span_fixture();
         run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
-        for case in [&b""[..], b"KDPB\x02", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDPB\x03", &[0xff; 64][..]] {
             let started = Instant::now();
             verify_span_one_iteration_with(case, &fixture);
             assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");

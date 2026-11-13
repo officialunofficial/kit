@@ -1423,6 +1423,38 @@ mod tests {
             .unwrap()
     }
 
+    /// The leaf digests of `chunk_offsets_expected.json`, which a reference
+    /// wrote from the spec: the values at the top of the `u64` range, the
+    /// empty file, and a start and end swapped.
+    #[test]
+    fn leaf_digests_match_the_reference_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/golden/chunk_offsets_expected.json");
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let decimal = |v: &serde_json::Value| v.as_str().unwrap().parse::<u64>().unwrap();
+        let leaves = file["leaf_digests"].as_array().unwrap();
+        assert_eq!(leaves.len(), 5);
+        for leaf in leaves {
+            let name = leaf["name"].as_str().unwrap();
+            let got = if leaf["domain"] == "kit-cblob-meta-v2" {
+                let chunk_size = u32::try_from(leaf["chunk_size"].as_u64().unwrap()).unwrap();
+                chunked_meta_leaf_raw(decimal(&leaf["total_size"]), chunk_size)
+            } else {
+                let id: Hash = hex::decode(leaf["chunk_id_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                chunked_chunk_leaf_raw(decimal(&leaf["start"]), decimal(&leaf["end"]), &id)
+            };
+            assert_eq!(
+                hex::encode(got),
+                leaf["digest_hex"].as_str().unwrap(),
+                "{name}"
+            );
+        }
+    }
+
     /// Chunk `index` of `c` as its leaf commits it.
     fn sc(c: &ChunkedBlob, index: u32) -> SpannedChunk {
         let (start, end) = c.span(index).unwrap();
@@ -2118,6 +2150,21 @@ mod tests {
             crate::hash::to_hex(&compute_chunked_id(&manifest)),
             ID_AT_1_000_001_CHUNKS
         );
+        assert_eq!(
+            crate::hash::to_hex(&fold_id(&generated_manifest(1_000_001))),
+            ID_AT_1_000_001_CHUNKS
+        );
+    }
+
+    /// The id `ChunkedIdFold` gives a manifest fed entry by entry.
+    fn fold_id(manifest: &ChunkedBlob) -> Hash {
+        let count = u32::try_from(manifest.chunks().len()).unwrap();
+        let mut fold =
+            ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), count).unwrap();
+        for (chunk, end) in manifest.entries() {
+            fold.push(&chunk, end).unwrap();
+        }
+        fold.finish().unwrap()
     }
 
     /// The level build gives the pinned ids, and the fold gives the same id
@@ -2141,6 +2188,7 @@ mod tests {
                 "level build at {count}"
             );
             assert_eq!(compute_chunked_id(&manifest), levels, "fold at {count}");
+            assert_eq!(fold_id(&manifest), levels, "entry fold at {count}");
         }
     }
 
@@ -2494,9 +2542,10 @@ mod kani_proofs {
     fn toy_h2(a: &[u8], b: &[u8]) -> Hash {
         toy(a, b)
     }
-    /// The body's first and last 16 bytes are mixed, so a change in a
-    /// chunk leaf's span (the first 16 bytes) or in its chunk id (the last
-    /// 32) reaches the digest. Loop-free, like `toy`.
+    /// The body's first 16 bytes, the 16 after them and its last 16 are
+    /// mixed, so a change in a chunk leaf's span (the first 16 bytes) or in
+    /// any byte of its chunk id (the last 32) reaches the digest. Loop-free,
+    /// like `toy`.
     fn toy_domain_digest(domain: &[u8], body: &[u8]) -> Hash {
         fn word(x: &[u8]) -> u128 {
             let mut w = [0u8; 16];
@@ -2504,14 +2553,12 @@ mod kani_proofs {
             w[..n].copy_from_slice(&x[..n]);
             u128::from_le_bytes(w)
         }
+        let middle = body.get(16..).unwrap_or(&[]);
         let tail = &body[body.len().saturating_sub(16)..];
-        let mixed = (word(body) ^ word(tail).rotate_left(24)).to_le_bytes();
+        let mixed =
+            (word(body) ^ word(middle).rotate_left(8) ^ word(tail).rotate_left(24)).to_le_bytes();
         toy(&mixed, domain)
     }
-    fn toy_hash(data: &[u8]) -> Hash {
-        toy(data, &[])
-    }
-
     /// SPEC-MERKLE-OBJECTS §5.3/§5.4: number of wire siblings a
     /// single-leaf proof of `position` in a `leaf_count`-leaf tree
     /// consumes (odd trailing nodes fold with themselves, no sibling).
@@ -2703,13 +2750,26 @@ mod kani_proofs {
     /// §3.1 leaf list `[meta, chunks…]`, and its id computed through the
     /// §2 domain wrap of the spec-built root.
     fn chunked_fixture<const N: usize>() -> (ChunkedBlob, Vec<Hash>) {
-        let cb = ChunkedBlob::new_unchecked(
-            kani::any(),
-            kani::any(),
-            kani::any::<[Hash; N]>().to_vec(),
-            kani::any::<[u64; N]>().to_vec(),
-        );
-        let leaves = cb.leaves().collect();
+        let total: u64 = kani::any();
+        let chunk_size: u32 = kani::any();
+        let ids: [Hash; N] = kani::any();
+        let ends: [u64; N] = kani::any();
+        let cb = ChunkedBlob::new_unchecked(total, chunk_size, ids.to_vec(), ends.to_vec());
+        // The leaves by hand, from SPEC-MERKLE-OBJECTS §3.1, not through the
+        // code under test.
+        let mut meta = [0u8; 12];
+        meta[..8].copy_from_slice(&total.to_le_bytes());
+        meta[8..].copy_from_slice(&chunk_size.to_le_bytes());
+        let mut leaves = vec![crate::hash::domain_digest(b"kit-cblob-meta-v2", &meta)];
+        let mut start = 0u64;
+        for (id, end) in ids.iter().zip(ends) {
+            let mut body = [0u8; 48];
+            body[..8].copy_from_slice(&start.to_le_bytes());
+            body[8..16].copy_from_slice(&end.to_le_bytes());
+            body[16..].copy_from_slice(id);
+            leaves.push(crate::hash::domain_digest(b"kit-cblob-chunk-v1", &body));
+            start = end;
+        }
         (cb, leaves)
     }
 

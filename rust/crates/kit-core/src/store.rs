@@ -1287,6 +1287,14 @@ mod tests {
             ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
         ));
+
+        // A repo of the format before chunk spans is refused, with no
+        // migration: every chunked id differs.
+        fs::write(&marker_path, b"bmt-v1\n").unwrap();
+        assert!(matches!(
+            ObjectStore::open(&layout),
+            Err(StoreError::IncompatibleRepoFormat { found: Some(ref found) }) if found == "bmt-v1"
+        ));
     }
 
     #[test]

@@ -404,6 +404,19 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
     }
 }
 
+/// Whether chunk `ia` of `ma` and chunk `ib` of `mb` have spans of one
+/// length. A chunk with one id but two lengths is not skipped: reading it
+/// reports the manifest whose span is wrong.
+fn same_length(ma: &ChunkedBlob, ia: usize, mb: &ChunkedBlob, ib: usize) -> bool {
+    let len = |m: &ChunkedBlob, i: usize| {
+        u32::try_from(i)
+            .ok()
+            .and_then(|i| m.span(i))
+            .map(|(start, end)| end - start)
+    };
+    len(ma, ia) == len(mb, ib)
+}
+
 /// Compare two [`ChunkedBlob`] manifests for content equality, skipping
 /// any chunk both sides reference by the same content-addressed hash:
 /// identical hash means identical bytes by construction — the same trust
@@ -474,6 +487,7 @@ fn chunked_content_eq<S: crate::store::ObjectSource + ?Sized>(
             && ia < ma.chunks().len()
             && ib < mb.chunks().len()
             && ma.chunks()[ia] == mb.chunks()[ib]
+            && same_length(ma, ia, mb, ib)
         {
             ia += 1;
             ib += 1;
@@ -1357,6 +1371,30 @@ mod equality_tests {
                         actual: 4
                     }
                 )
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// A chunk both sides name by id is skipped only when both spans have
+    /// its length. Here the second manifest gives the shared chunk a span of
+    /// 3 bytes, so the chunk is read and the wrong manifest is reported.
+    #[test]
+    fn chunked_content_eq_reads_a_shared_chunk_whose_spans_differ() {
+        let (_dir, store) = fresh_store();
+        let first = chunk(&store, b"12345");
+        let second = chunk(&store, b"1234567890");
+        let right = ChunkedBlob::new(15, 0, vec![(first, 5), (second, 15)]).unwrap();
+        let wrong = ChunkedBlob::new(15, 0, vec![(first, 3), (second, 15)]).unwrap();
+        assert!(super::chunked_content_eq(&store, &right, &right).unwrap());
+        let err = super::chunked_content_eq(&store, &right, &wrong).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::store::StoreError::Decode(crate::object::KitError::ChunkLengthMismatch {
+                    index: 0,
+                    ..
+                })
             ),
             "got {err:?}"
         );

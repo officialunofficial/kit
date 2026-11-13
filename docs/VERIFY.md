@@ -334,14 +334,14 @@ map, not the territory.
 A chunk's leaf commits the span `[start, end)` it covers in the file, with
 its id (SPEC-MERKLE-OBJECTS §3.1). A `Chunk` or `Range` payload carries
 `start` and `end`, and the multi-proof over positions `{0, index + 1}`
-proves them. The verifier first checks that the span is possible: it lies
-inside the file, it is no longer than one Blob can be, chunk 0 starts at 0,
-the last chunk ends at `total_size`, and a fixed-size layout gives the span
-(`SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
-`LastChunkEnd`, `FixedChunkLength`). Then it folds the claim into the leaf,
-checks that the chunk bytes are one Blob as long as the span
-(`ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan`), and for a `Range` that
-the range lies inside the span (`RangePastSpan`).
+proves them. The verifier folds the claim into the leaf first, then checks
+that the span is possible: it lies inside the file, it is no longer than one
+Blob can be, chunk 0 starts at 0, the last chunk ends at `total_size`, and a
+fixed-size layout gives the span (`SpanOutsideFile`, `SpanAboveObjectLimit`,
+`FirstChunkStart`, `LastChunkEnd`, `FixedChunkLength`). Then it checks that the
+chunk bytes are one Blob as long as the span (`ChunkBytesNotBlob`,
+`ChunkLengthDiffersFromSpan`), and for a `Range` that the range lies inside
+the span (`RangePastSpan`).
 
 The absolute offset of a range is `start + offset_in_blob`. It needs no
 other proof, and a proof of a byte has the same size at any chunk index. A
@@ -379,7 +379,7 @@ mismatch &mdash; it is not merely an informational filter.
 ```console
 $ kit verify-proof 64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93 \
     p.bin --expect-path src/lib.rs --format=json
-{"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
+{"commit_id":"64ccb22bf4134972fdcbce8c330407d0e15a5c80d8af3bb43ab7c09eb9592e93","tree_hash":"15fa3e247b96d89c9504a8125be55b3de930ccc9e3a2f750fff0a25098cd7cf8","path":[{"name":"src","name_hex":"737263","mode":"tree"},{"name":"lib.rs","name_hex":"6c69622e7273","mode":"blob"}],"leaf_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","signer":"0a486e59affe8fb54af5fa3e31b3b49663970da1cba4140d538a72ffb12e2077","signature_valid":true,"payload":{"kind":"range","bytes_len":40,"bytes_blake3":"0b9523ef4483e7a5a1651f25553c85294f0bf872b689c840df3c9f4a494c5cf1","blob_id":"0ef9636d9ce0ef6750be391a909d70ac673d6390ba512f37dcb1b972d525a6a0","chunk":null,"offset_in_blob":100,"start":null,"end":null,"absolute_offset":100},"step_inner_roots":["36b9b63b57ac62c1b0afee72d739e0d8aece1b17d0229b7a3d580b9e2c4cf955","7e837a5798b77529da077b0475cd370a2114c7c5dc99a654eecdc3559ac89ff4"],"chunk_inner_root":null,"signer_trusted":null}
 ```
 
 `signer_trusted` is the CLI's own trust-roots addition on top of the
@@ -709,7 +709,7 @@ own test harness should take.
 | **kit-core (`kit_core::verify`, `kit_core::merkle`)** | | |
 | `verify_object_id(bytes, expected) -> Object` | check one object's content-address | SPEC-OBJECTS §10 |
 | `verify_path(commit_id, commit_bytes, steps) -> PathVerified` | walk and verify a tree-entry step chain | SPEC-DISCLOSURE §4 steps 6&ndash;9 |
-| `verify_chunk_with_meta(chunked_id, total_size, chunk_size, chunk_hash, index, proof)` | verify one chunk + its manifest metadata | SPEC-MERKLE-OBJECTS §3.1 |
+| `verify_chunk_with_meta(chunked_id, total_size, chunk_size, chunk, index, proof)` (`chunk` is a `SpannedChunk`: id, start, end) | verify one chunk + its manifest metadata | SPEC-MERKLE-OBJECTS §3.1 |
 | `verify_blob_slice(blob_id, content_offset, len, slice) -> bytes` | verify a Bao range slice | SPEC-DISCLOSURE §4 (Range) |
 | `verify_disclosure(commit_id, bundle) -> Disclosed` | decode + fully verify a bundle | SPEC-DISCLOSURE §3&ndash;§4 |
 | `build_disclosure(store, commit_id, path, selector) -> Vec<u8>` (native) | producer side of a bundle | SPEC-DISCLOSURE §3 |

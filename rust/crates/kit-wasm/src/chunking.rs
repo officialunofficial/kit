@@ -55,7 +55,7 @@ pub fn chunk_boundaries(bytes: &[u8]) -> Result<ChunkerResult, JsValue> {
 /// return `{ root_hash_hex, chunks: [{ offset, len, hash_hex }], bytes_len }`.
 ///
 /// `root_hash_hex` is the object's content id — the BMT root of the manifest,
-/// whose leaves are the per-chunk **Blob object ids** (built via the shared
+/// whose leaves commit each chunk's span and **Blob object id** (built via the shared
 /// `worktree::chunked_blob_from_bytes`), so it equals the id the native store
 /// keys the `ChunkedBlob` under. Each chunk's `hash_hex` is the **raw**
 /// BLAKE3 of the chunk payload — for UI colouring/dedup, distinct from the

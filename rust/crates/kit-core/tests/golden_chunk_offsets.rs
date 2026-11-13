@@ -46,6 +46,7 @@ fn manifest_label(error: &KitError) -> &'static str {
         KitError::ChunkedBlobLength => "manifest length",
         KitError::TooManyChunks => "too many chunks",
         KitError::ChunkedBlobTotalSizeInvalid => "total_size above the file limit",
+        KitError::ChunkedBlobNoChunks => "total_size without chunks",
         KitError::UnsupportedObjectVersion => "unsupported object version",
         _ => "other",
     }
@@ -250,16 +251,8 @@ fn every_refused_manifest_is_refused_for_the_named_reason() {
             .expect_err(&format!("{name}: must be refused"));
         let label = manifest_label(&error);
         let want = case["refused_by"].as_str().unwrap();
-        // Zero chunks with a size, and a total above the cap, are the same
-        // check as the file names them: the manifest's size is not allowed.
-        let same = label == want
-            || (want == "total_size without chunks"
-                && matches!(
-                    error,
-                    KitError::ChunkedBlobTotalSizeInvalid | KitError::ChunkedBlobLastEnd
-                ));
-        assert!(
-            same,
+        assert_eq!(
+            label, want,
             "{name}: refused as `{label}` ({error:?}), the file says `{want}`"
         );
     }

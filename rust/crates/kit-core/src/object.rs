@@ -559,6 +559,38 @@ impl ChunkedBlob {
         builder.finish()
     }
 
+    /// Build a manifest from the chunk ids and the end offsets a writer
+    /// collected, taking both lists over without a copy. The checks are
+    /// those of [`Self::new`].
+    ///
+    /// # Errors
+    /// The errors of [`Self::new`], and [`KitError::ChunkedBlobLength`] when
+    /// the lists differ in length.
+    pub(crate) fn from_parts(
+        total_size: u64,
+        chunk_size: u32,
+        chunks: Vec<Hash>,
+        ends: Vec<u64>,
+    ) -> Result<Self, KitError> {
+        if chunks.len() != ends.len() {
+            return Err(KitError::ChunkedBlobLength);
+        }
+        let count = u32::try_from(chunks.len()).map_err(|_| KitError::TooManyChunks)?;
+        crate::serialize::check_chunked_header(total_size, count)?;
+        let mut prev_end = 0;
+        for (index, &end) in (0u32..).zip(&ends) {
+            crate::serialize::check_chunk_entry(index, chunk_size, total_size, prev_end, end)?;
+            prev_end = end;
+        }
+        crate::serialize::check_last_end(total_size, chunks.len(), prev_end)?;
+        Ok(Self {
+            total_size,
+            chunk_size,
+            chunks,
+            ends,
+        })
+    }
+
     /// A value that skips the decode checks, so a test can reach the
     /// writer's own check, and a proof harness can range over any sizes.
     /// Not compiled outside tests and proofs.
@@ -956,6 +988,10 @@ pub enum KitError {
     /// and chunk size, or above 128 GiB (SPEC-OBJECTS §7).
     #[error("chunked blob total_size is inconsistent with its chunk layout or too large")]
     ChunkedBlobTotalSizeInvalid,
+    /// A `ChunkedBlob` has a non-zero `total_size` and no chunks (SPEC-OBJECTS
+    /// §7, decode check 5).
+    #[error("chunked blob has a total_size but no chunks")]
+    ChunkedBlobNoChunks,
     /// A chunked blob manifest is not `22 + 40 * chunk_count` bytes long
     /// (SPEC-OBJECTS §7, decode check 2).
     #[error("chunked blob is not 22 + 40 * chunk_count bytes long")]
