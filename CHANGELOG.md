@@ -161,7 +161,25 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   larger manifest. Writers now refuse any manifest a reader refuses. Readers
   that hold a whole file in memory (`read_blob`, blame, byte-range
   disclosure and the git export) refuse content above 1 GiB with a typed
-  error before they read a chunk. Worktree files stay at 1 GiB.
+  error before they read a chunk.
+- `kit add`, `status`, `diff --stat` and `stash` take a worktree file up to
+  128 GiB, the bound of a `ChunkedBlob`, with the memory of a 1 GiB file. The
+  hasher refused a file above 1 GiB before it read a byte. A file above
+  128 GiB still fails with `WorktreeError::FileTooLarge`, which now carries the
+  limit that applied (`FileTooLarge { path, limit }`), and nothing is written.
+  `worktree::MAX_FILE_BYTES` keeps its value and its meaning, the limit of a
+  reader that holds a whole file. Breaking: `WorktreeError::FileTooLarge`
+  changes from a tuple to a struct variant.
+- A fast-forward pull rewrites only the files the new tip changed. It wrote
+  every tracked file again, and read each chunk of a large file again. An
+  unchanged file keeps its inode, its mtime and its stat cache. The safety
+  check that refuses to overwrite local work is unchanged, and so are its
+  messages. A resumed pull still writes every file.
+  `restore_tree_to_worktree_with` and `restore_tree_to_worktree_observed` skip
+  entries equal to `base_tree` when `clean` is set too. They skipped only when
+  it was not. A caller that passes both must have proved that the worktree
+  holds no untracked path outside the ignore rules.
+  `kit_sync::worktree::restore_worktree_and_index_from` takes the base tree.
 - `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
   Ids do not change. `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from

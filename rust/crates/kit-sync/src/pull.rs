@@ -19,8 +19,8 @@ use crate::lock::acquire_worktree_lock;
 use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::worktree::{
-    ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
-    write_ref_recording_history,
+    current_head_tree, ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
+    restore_worktree_and_index_from, write_ref_recording_history,
 };
 
 /// What a pull did to the local branch.
@@ -154,6 +154,9 @@ pub fn pull(
 
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
+    // The check above proved that the worktree and the index equal the tree
+    // of HEAD, so the restore only writes what the new tip changed.
+    let base_tree = current_head_tree(&layout, &store).map_err(SyncError::RestoreSafety)?;
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
@@ -167,7 +170,7 @@ pub fn pull(
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
-    if let Err(e) = restore_worktree_and_index(&layout, &store, tree) {
+    if let Err(e) = restore_worktree_and_index_from(&layout, &store, tree, base_tree) {
         if let Err(rollback) =
             rollback_pull_ref_and_head(&layout, &branch, local_tip, remote_tip, original_head)
         {

@@ -35,14 +35,14 @@ fn init_repo() -> (tempfile::TempDir, tempfile::TempDir) {
     (td, xdg)
 }
 
-/// A sparse file whose reported length exceeds kit's per-file cap
-/// (`kit_core::worktree::MAX_FILE_BYTES`) without writing real bytes
+/// A sparse file whose reported length exceeds kit's per-file bound
+/// (`kit_core::serialize::MAX_CHUNKED_TOTAL_SIZE`) without writing real bytes
 /// to disk — `add`'s size check reads only `Metadata::len()`, so this
 /// trips the same `FileTooLarge` error a genuinely huge file would,
-/// in milliseconds instead of writing a gigabyte.
+/// in milliseconds instead of writing 128 GiB.
 fn write_oversized_sparse_file(path: &Path) {
     let f = fs::File::create(path).expect("create sparse file");
-    f.set_len(kit_core::worktree::MAX_FILE_BYTES + 1)
+    f.set_len(kit_core::serialize::MAX_CHUNKED_TOTAL_SIZE + 1)
         .expect("set sparse length");
 }
 

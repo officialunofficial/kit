@@ -367,9 +367,13 @@ pub fn restore_tree_to_worktree(
 /// that with its destructive-restore safety gate, and so passes `None`
 /// under `--force`, where local edits are meant to be discarded. Skipped
 /// entries are not counted in the returned [`RestoreReport`]. The skip is
-/// disabled when `opts.clean` is set (a sweep must visit every entry) or
-/// `opts.sparse_patterns` is `Some` (a sparse worktree doesn't
+/// disabled when `opts.sparse_patterns` is `Some` (a sparse worktree doesn't
 /// necessarily mirror `base_tree`).
+///
+/// With `opts.clean`, the sweep visits only the directories the restore
+/// enters, so a skipped subtree is not swept. The caller must also have
+/// proved that the worktree holds no untracked path outside the ignore rules,
+/// as the safety gate of a destructive restore does.
 ///
 /// # Errors
 /// Same variants as [`restore_tree_to_worktree`], plus
@@ -418,7 +422,7 @@ pub fn restore_tree_to_worktree_observed<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    let base = if opts.clean || opts.sparse_patterns.is_some() {
+    let base = if opts.sparse_patterns.is_some() {
         None
     } else {
         base_tree
@@ -2068,6 +2072,54 @@ mod tests {
         // No base => full restore.
         restore_tree_to_worktree_with(&store, &next, None, target.path(), &opts, &rd).unwrap();
         assert_eq!(fs::read(target.path().join("same")).unwrap(), b"same");
+    }
+
+    /// With `clean`, an incremental restore still rewrites what changed and
+    /// sweeps what the tip dropped, and leaves an unchanged subtree alone.
+    #[test]
+    fn incremental_restore_with_clean_skips_unchanged_and_sweeps_dropped() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entry = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let dir = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: h,
+        };
+        let same = put_blob(&store, b"same");
+        let (a1, a2) = (put_blob(&store, b"a-old"), put_blob(&store, b"a-new"));
+        let gone = put_blob(&store, b"gone");
+        let kept = put_tree_with(&store, vec![entry("x", same)]);
+        let doomed = put_tree_with(&store, vec![entry("y", gone)]);
+        let base = put_tree_with(
+            &store,
+            vec![
+                entry("a", a1),
+                dir("doomed", doomed),
+                entry("gone", gone),
+                dir("kept", kept),
+            ],
+        );
+        let next = put_tree_with(&store, vec![entry("a", a2), dir("kept", kept)]);
+        let opts = RestoreOptions::default();
+        assert!(opts.clean);
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        fs::write(target.path().join("kept/x"), b"sentinel").unwrap();
+
+        let report =
+            restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+                .unwrap();
+
+        assert_eq!(report.files_written, 1);
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        assert_eq!(fs::read(target.path().join("kept/x")).unwrap(), b"sentinel");
+        assert!(!target.path().join("gone").exists());
+        assert!(!target.path().join("doomed").exists());
     }
 
     /// Without `observe`, a restored file reports no stat fields, chunked

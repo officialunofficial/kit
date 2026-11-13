@@ -90,11 +90,27 @@ pub fn restore_worktree_and_index(
     store: &ObjectStore,
     tree_hash: Hash,
 ) -> Result<(), String> {
+    restore_worktree_and_index_from(layout, store, tree_hash, None)
+}
+
+/// [`restore_worktree_and_index`] that leaves alone every entry whose mode and
+/// object id are the same in `base_tree`, so a file the tip did not change is
+/// not read, written or re-stat'ed.
+///
+/// The caller must have proved that the worktree and the index equal
+/// `base_tree` for every tracked path, as [`ensure_restore_safe`] does for the
+/// tree of HEAD. Pass `None` when it has not.
+pub fn restore_worktree_and_index_from(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Option<Hash>,
+) -> Result<(), String> {
     let mut observed = Vec::new();
     restore_tree_to_worktree_observed(
         store,
         &tree_hash,
-        None,
+        base_tree,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,

@@ -506,6 +506,50 @@ merkelized id in `rust/tests/golden/`, and
 `verify::tests::range_disclosure_stops_a_repeated_chunk_at_the_declared_size` and
 `round_trip::manifest_above_the_blob_cap_is_refused_before_any_read`.
 
+## A worktree file up to the chunked bound ingests in bounded memory
+
+**Always:** `add`, `status`, `diff --stat` and `stash` hash a worktree file up
+to `serialize::MAX_CHUNKED_TOTAL_SIZE` (128 GiB) by streaming it. A file above
+that bound fails with `WorktreeError::FileTooLarge` before any byte is read or
+stored, and the error names the bound. Only a reader that holds a whole file in
+memory (`read_regular_file_bounded`) keeps the 1 GiB limit
+(`worktree::MAX_FILE_BYTES`). The manifest is serialized once, and its list of
+chunk ids is freed before the bytes are stored.
+
+**Because:** the streaming paths hold one window of chunks and 32 bytes per
+chunk id, however large the file. The old 1 GiB check refused files that
+those paths handle.
+
+**If violated:** a file between 1 GiB and 128 GiB cannot be added, or an ingest
+holds a whole file in memory.
+
+**Enforced by:** `large_file_ingest::a_two_gib_file_ingests_in_bounded_memory_and_status_stays_clean`,
+`large_file_ingest::a_file_above_the_chunked_bound_is_refused_before_anything_is_written`,
+`large_file_ingest::the_whole_file_reader_keeps_its_smaller_limit` and
+`large_file_worktree::a_two_gib_file_adds_reports_changes_and_stashes`.
+
+## A fast-forward pull writes only what the new tip changed
+
+**Always:** `pull` passes the tree of HEAD to the restore only after
+`ensure_restore_safe` has proved that the index equals that tree, that no
+tracked file differs from the index, and that no untracked path outside the
+ignore rules exists. The restore then skips every entry whose mode and object
+id equal the entry in that tree, and sweeps the directories it enters. A
+resumed pull passes no base tree. The refusal messages of the safety check do
+not change.
+
+**Because:** a skipped entry is correct only while the worktree holds the
+base tree's content. Without the skip, a pull of one small file rewrites a
+64 GiB file.
+
+**If violated:** a changed file stays stale in the worktree after a pull, or an
+untracked file survives a sweep that should have refused.
+
+**Enforced by:** `sync::a_pull_leaves_the_worktree_and_index_equal_to_a_fresh_checkout_of_the_tip`,
+`sync::a_pull_does_not_rewrite_the_files_the_tip_left_unchanged`,
+`sync::the_restore_safety_messages_are_unchanged` and
+`restore::tests::incremental_restore_with_clean_skips_unchanged_and_sweeps_dropped`.
+
 ## Multi-leaf proof positions are strictly ascending
 
 **Always:** `merkle::BmtTree::multi_proof`, `proof_encoded_size` and every

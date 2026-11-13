@@ -43,9 +43,15 @@ pub enum WorktreeError {
     /// `read_link` returned a target that fails [`validate_symlink_target`].
     #[error("symlink target '{0}' is invalid (absolute or contains '..')")]
     InvalidSymlinkTarget(String),
-    /// File exceeded [`MAX_FILE_BYTES`].
-    #[error("file '{0}' exceeds the {MAX_FILE_BYTES} byte limit")]
-    FileTooLarge(PathBuf),
+    /// A file is larger than `limit`: [`MAX_FILE_BYTES`] for a reader that holds
+    /// the whole file, [`serialize::MAX_CHUNKED_TOTAL_SIZE`] for ingest.
+    #[error("file '{}' exceeds the {limit} byte limit", path.display())]
+    FileTooLarge {
+        /// The file that exceeded the limit.
+        path: PathBuf,
+        /// The limit that applied, in bytes.
+        limit: u64,
+    },
     /// A stored file's content is larger than [`MAX_FILE_BYTES`], so a
     /// reader that holds the whole file in memory refuses it.
     #[error("stored content of {size} bytes exceeds the {MAX_FILE_BYTES} byte in-memory limit")]
@@ -974,6 +980,14 @@ pub fn hash_file<S: ObjectSink + ?Sized>(sink: &S, path: &Path) -> WorktreeResul
     hash_file_with_metadata(sink, path).map(|(hash, _)| hash)
 }
 
+/// [`WorktreeError::FileTooLarge`] for `path` against `limit`.
+fn file_too_large(path: &Path, limit: u64) -> WorktreeError {
+    WorktreeError::FileTooLarge {
+        path: path.to_path_buf(),
+        limit,
+    }
+}
+
 /// Read a regular file without following the final path component on
 /// Unix, enforcing [`MAX_FILE_BYTES`] against both the opened handle's
 /// metadata and the actual bytes read.
@@ -987,16 +1001,16 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
         )));
     }
     if meta.len() > MAX_FILE_BYTES {
-        return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+        return Err(file_too_large(path, MAX_FILE_BYTES));
     }
     let initial_capacity = usize::try_from(meta.len().min(CHUNK_THRESHOLD))
-        .map_err(|_| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+        .map_err(|_| file_too_large(path, MAX_FILE_BYTES))?;
     let mut data = Vec::with_capacity(initial_capacity);
     file.by_ref()
         .take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut data)?;
     if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
-        return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+        return Err(file_too_large(path, MAX_FILE_BYTES));
     }
     Ok((meta, data))
 }
@@ -1079,25 +1093,28 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
             "path is not a regular file",
         )));
     }
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+    if meta.len() > serialize::MAX_CHUNKED_TOTAL_SIZE {
+        return Err(file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE));
     }
 
     if meta.len() <= CHUNK_THRESHOLD {
         let initial_capacity = usize::try_from(meta.len())
-            .map_err(|_| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+            .map_err(|_| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
         let mut data = Vec::with_capacity(initial_capacity);
         file.by_ref()
-            .take(MAX_FILE_BYTES + 1)
+            .take(CHUNK_THRESHOLD + 1)
             .read_to_end(&mut data)?;
-        if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
-            return Err(WorktreeError::FileTooLarge(path.to_path_buf()));
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) > CHUNK_THRESHOLD {
+            // The file grew past the single-blob size after its length was read.
+            return Err(WorktreeError::Io(io::Error::other(
+                "file grew while it was being read",
+            )));
         }
         let hash = store_file_object(sink, &data)?;
         return Ok((hash, meta));
     }
 
-    let hash = stream(sink, file.take(MAX_FILE_BYTES + 1), path)?;
+    let hash = stream(sink, file.take(serialize::MAX_CHUNKED_TOTAL_SIZE + 1), path)?;
     Ok((hash, meta))
 }
 
@@ -1173,8 +1190,8 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = total_size
             .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= MAX_FILE_BYTES)
-            .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
+            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
         let before = chunks.len();
         chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
         if checkpoint_due(before, chunks.len(), window) {
@@ -1196,6 +1213,9 @@ fn store_chunk_manifest<S: ObjectSink + ?Sized>(
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
+    // Free the id list before the sink stages the bytes, so a manifest of
+    // millions of chunks is never held twice beside the staged copy.
+    drop(manifest);
     Ok(sink.put(&manifest_bytes)?)
 }
 
@@ -1231,7 +1251,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// bounded independently of total file size.
 ///
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
-/// error if `reader` yields more than [`MAX_FILE_BYTES`].
+/// error if `reader` yields more than [`serialize::MAX_CHUNKED_TOTAL_SIZE`].
 ///
 /// Takes an explicit `hash_chunks` batch callback in place of a built-in
 /// sequential loop over [`store_chunk_blob`] — `kit-core` has no
@@ -1309,8 +1329,8 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     while let Some(chunk) = chunker.next_chunk()? {
         total_size = total_size
             .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= MAX_FILE_BYTES)
-            .ok_or_else(|| WorktreeError::FileTooLarge(path.to_path_buf()))?;
+            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
+            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
             let before = chunks.len();
@@ -1394,11 +1414,11 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 };
                 running_total = if let Some(t) = running_total
                     .checked_add(chunk.len() as u64)
-                    .filter(|&t| t <= MAX_FILE_BYTES)
+                    .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
                 {
                     t
                 } else {
-                    let _ = tx.send(Err(WorktreeError::FileTooLarge(path.to_path_buf())));
+                    let _ = tx.send(Err(file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE)));
                     return;
                 };
                 batch.push(chunk);
@@ -1513,6 +1533,9 @@ pub fn store_file_object_with<S: ObjectSink + ?Sized>(
         chunks,
     });
     let manifest_bytes = serialize::serialize(&manifest)?;
+    // Free the id list before the sink stages the bytes, so a manifest of
+    // millions of chunks is never held twice beside the staged copy.
+    drop(manifest);
     Ok(sink.put(&manifest_bytes)?)
 }
 
