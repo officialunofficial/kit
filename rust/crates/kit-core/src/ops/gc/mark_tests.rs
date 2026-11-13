@@ -59,10 +59,19 @@ impl Fx {
         }))
     }
 
+    /// `n` distinct blobs, written in one durability batch.
     fn blobs(&self, prefix: &str, n: usize) -> Vec<Hash> {
-        (0..n)
-            .map(|i| self.blob(&format!("{prefix}-{i}")))
-            .collect()
+        let mut writer = self.store.bulk_writer();
+        let ids = (0..n)
+            .map(|i| {
+                let blob = Object::Blob(Blob {
+                    data: format!("{prefix}-{i}").into_bytes(),
+                });
+                writer.write(&serialize::serialize(&blob).unwrap()).unwrap()
+            })
+            .collect();
+        writer.commit().unwrap();
+        ids
     }
 
     fn delta(&self, base: Hash) -> Hash {
