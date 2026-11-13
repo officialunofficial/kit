@@ -155,6 +155,20 @@ pub(crate) fn grown_tracked_file(
         .then(|| relative.to_owned())
 }
 
+/// The error for a failed worktree snapshot: a growing tracked file in the
+/// restored paths is a local change, anything else fails the check.
+fn snapshot_error(
+    root: &Path,
+    index: &Index,
+    options: &RestoreOptions,
+    error: &core_worktree::WorktreeError,
+) -> String {
+    match grown_tracked_file(root, index, error) {
+        Some(path) if restore_affects_path(options, &path) => local_changes_message(&path),
+        _ => format!("check working tree changes: {error}"),
+    }
+}
+
 /// Refuse a destructive restore when affected index/worktree paths contain user work.
 pub fn ensure_restore_safe_with_options(
     layout: &RepoLayout,
@@ -191,10 +205,7 @@ pub fn ensure_restore_safe_with_options(
         Some(&idx),
         &mut Vec::new(),
     )
-    .map_err(|e| match grown_tracked_file(root, &idx, &e) {
-        Some(path) if restore_affects_path(options, &path) => local_changes_message(&path),
-        _ => format!("check working tree changes: {e}"),
-    })?;
+    .map_err(|e| snapshot_error(root, &idx, options, &e))?;
     let unstaged = diff_trees(&snapshot, Some(index_tree), Some(worktree_tree))
         .map_err(|e| format!("check working tree changes: {e}"))?;
     if let Some(entry) = unstaged
@@ -436,6 +447,31 @@ mod tests {
         // Another kind of error.
         let io = core_worktree::WorktreeError::Io(std::io::Error::other("x"));
         assert_eq!(grown_tracked_file(root, &index, &io), None);
+    }
+
+    #[test]
+    fn a_growing_tracked_file_is_a_local_change_only_where_the_restore_reaches() {
+        let root = Path::new("/work");
+        let index = tracked("dir/a.bin");
+        let grew = too_large("dir/a.bin", core_worktree::CHUNK_THRESHOLD);
+        let all = RestoreOptions::default();
+        assert_eq!(
+            snapshot_error(root, &index, &all, &grew),
+            "restore would overwrite local changes; commit, stash, or reset 'dir/a.bin' first"
+        );
+        let elsewhere = RestoreOptions {
+            sparse_patterns: Some(kit_core::ops::restore::parse_sparse_patterns("other/\n")),
+            ..RestoreOptions::default()
+        };
+        assert!(
+            snapshot_error(root, &index, &elsewhere, &grew)
+                .starts_with("check working tree changes: ")
+        );
+        let untracked = too_large("dir/b.bin", core_worktree::CHUNK_THRESHOLD);
+        assert!(
+            snapshot_error(root, &index, &all, &untracked)
+                .starts_with("check working tree changes: ")
+        );
     }
 
     #[test]
