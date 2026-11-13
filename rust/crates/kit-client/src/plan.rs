@@ -32,10 +32,11 @@ pub fn advance_ticket_limit(info: &GetServerInfoResponse) -> u32 {
 }
 
 /// The data packs one advance may carry when it may name `max_tickets`
-/// tickets: one ticket is the packmap node's. Never less than one.
+/// tickets: one ticket is the packmap node's. A value below two gives zero, so
+/// the first ticketed data pack of a plan is refused.
 #[must_use]
 pub fn data_pack_budget(max_tickets: u32) -> usize {
-    (max_tickets as usize).saturating_sub(1).max(1)
+    (max_tickets as usize).saturating_sub(1)
 }
 
 /// Explicit limits for one advance. Larger histories are scheduled as
@@ -50,7 +51,8 @@ pub struct Limits {
     pub max_staged_bytes: u64,
     /// The most upload tickets one advance may name, the packlist node's
     /// included. A plan with more ticketed data packs than one fewer than this
-    /// is refused before anything is uploaded.
+    /// is refused before anything is uploaded; below two, no ticketed data
+    /// pack is allowed.
     pub max_tickets: u32,
 }
 
@@ -139,10 +141,6 @@ impl Plan {
     ) -> Result<Self, Error> {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
-        }
-        // One ticket is the packmap node's, so fewer than two leave no data pack.
-        if limits.max_tickets < 2 {
-            return Err(Error::Limit("advance ticket limit leaves no data pack"));
         }
         // Reserve a prior pointer and the largest u32 length prefix. The
         // empty canonical node has a one-byte prefix, which can grow by four.
@@ -412,8 +410,33 @@ mod tests {
         assert_eq!(counts, [u32::try_from(pack::MAX_WRITE_ENTRIES).unwrap(), 3]);
     }
 
+    /// A plan whose packs are all below the ticket threshold names no ticket,
+    /// and an empty plan uploads nothing. Neither needs a ticket allowance.
     #[test]
-    fn fewer_than_two_tickets_leave_no_data_pack() {
+    fn a_plan_that_names_no_ticket_needs_no_ticket_allowance() {
+        for tickets in [0, 1] {
+            let limits = Limits {
+                max_tickets: tickets,
+                ticket_threshold_bytes: u64::MAX,
+                ..Limits::default()
+            };
+            let one = Plan::prepare([tiny_pack_entry(1)], limits);
+            assert!(
+                one.is_ok(),
+                "{tickets} tickets, one small pack: {:?}",
+                one.err()
+            );
+            let none = Plan::prepare([], limits);
+            assert!(
+                none.is_ok(),
+                "{tickets} tickets, no entry: {:?}",
+                none.err()
+            );
+        }
+    }
+
+    #[test]
+    fn fewer_than_two_tickets_leave_no_ticketed_data_pack() {
         for tickets in [0, 1] {
             let limits = Limits {
                 max_tickets: tickets,
@@ -422,7 +445,9 @@ mod tests {
             assert!(
                 matches!(
                     Plan::prepare([tiny_pack_entry(1)], limits),
-                    Err(Error::Limit(_))
+                    Err(Error::Limit(
+                        "advance requires more ticketed data packs than the server allows"
+                    ))
                 ),
                 "{tickets}"
             );
@@ -458,9 +483,9 @@ mod tests {
         assert_eq!(data_pack_budget(3), 2);
         assert_eq!(data_pack_budget(DEFAULT_TICKETS_PER_ADVANCE), 6);
         assert_eq!(data_pack_budget(1024), 1023);
-        // A limits value built by hand never gives a budget of zero.
-        assert_eq!(data_pack_budget(1), 1);
-        assert_eq!(data_pack_budget(0), 1);
+        // Fewer than two tickets leave no room for a data pack.
+        assert_eq!(data_pack_budget(1), 0);
+        assert_eq!(data_pack_budget(0), 0);
     }
 
     #[test]

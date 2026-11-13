@@ -176,8 +176,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   server it reaches. The public function `kit_client::advance_ticket_limit`
   holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
   `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too.
-  `Plan::prepare` refuses a `Limits` whose `max_tickets` is below two, which
-  leaves no ticket for a data pack. Code that builds
+  `kit_client::data_pack_budget` returns `max_tickets - 1` with no floor, so a
+  `max_tickets` below two gives a budget of zero. `Plan::prepare` then fails
+  with the limit error at the first ticketed data pack, and prepares any plan
+  that holds none. Code that builds
   a `Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. No trait or signature of the crate changes.
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
