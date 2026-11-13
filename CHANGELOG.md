@@ -126,7 +126,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
   range, as `merge` and `log` do. A longer walk fails with an error that
   names the 1,000,000-commit limit. The limit was 10,000. A rebase still
-  replays at most 10,000 commits.
+  replays at most 10,000 commits, and a bisect keeps at most 10,000 skipped
+  commits; one more fails with an error.
 - A fetch no longer fails when its packs pass the staging budget. It stages
   packs without the lock while they fit, then takes the lock and downloads,
   checks, applies and records each later pack before the next. A clone of a

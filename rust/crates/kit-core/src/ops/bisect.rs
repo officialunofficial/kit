@@ -40,6 +40,11 @@ pub const BISECT_FILE: &str = "bisect";
 
 const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 
+/// The most commits a bisect keeps skipped. Each takes a 70-byte line of the
+/// state file, which is read back under [`MAX_BISECT_FILE_BYTES`], so this
+/// keeps the file inside it however many candidates the range has.
+pub const MAX_SKIPPED_COMMITS: usize = 10_000;
+
 /// The limit bisect reports when the ancestors of a good commit exceed
 /// [`crate::ops::merge::MAX_STRICT_WALK_COMMITS`].
 const GOOD_ANCESTOR_LIMIT: &str = "1,000,000-commit ancestor walk of a good commit";
@@ -56,6 +61,9 @@ pub enum BisectError {
     NoBisectInProgress,
     #[error("bisect state on disk is malformed")]
     InvalidBisectState,
+    /// More commits were skipped than the state file holds.
+    #[error("more than {MAX_SKIPPED_COMMITS} commits skipped in one bisect")]
+    TooManySkipped,
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -198,8 +206,13 @@ pub fn read_state(layout: &RepoLayout) -> BisectResult<BisectState> {
 /// Persist `state` to `<kit_dir>/bisect`.
 ///
 /// # Errors
+/// - [`BisectError::TooManySkipped`] when `state` skips more than
+///   [`MAX_SKIPPED_COMMITS`] commits. Nothing is written.
 /// - [`BisectError::Io`] for filesystem failures.
 pub fn write_state(layout: &RepoLayout, state: &BisectState) -> BisectResult<()> {
+    if state.skipped.len() > MAX_SKIPPED_COMMITS {
+        return Err(BisectError::TooManySkipped);
+    }
     let mut buf = String::new();
     buf.push_str(&hash::to_hex(&state.orig_head));
     buf.push('\n');
@@ -537,6 +550,32 @@ mod tests {
         assert_eq!(read.skipped.len(), 2);
         assert!(read.skipped.contains(&s1));
         assert!(read.skipped.contains(&s2));
+    }
+
+    #[test]
+    fn the_skipped_set_always_fits_the_state_file() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        let mut state = BisectState {
+            orig_head: hash::hash(b"head"),
+            orig_branch: Some("main".to_string()),
+            bad_hash: Some(hash::hash(b"bad")),
+            good_hashes: vec![hash::hash(b"good")],
+            skipped: (0..MAX_SKIPPED_COMMITS as u64)
+                .map(|i| hash::hash(&i.to_le_bytes()))
+                .collect(),
+        };
+        // The largest state is written and read back under the file cap.
+        write_state(&kit, &state).unwrap();
+        assert_eq!(read_state(&kit).unwrap(), state);
+        // One more skip is refused and the file is untouched.
+        state.skipped.insert(hash::hash(b"one more"));
+        assert!(matches!(
+            write_state(&kit, &state),
+            Err(BisectError::TooManySkipped)
+        ));
+        assert_eq!(read_state(&kit).unwrap().skipped.len(), MAX_SKIPPED_COMMITS);
     }
 
     #[test]

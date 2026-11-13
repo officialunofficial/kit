@@ -1000,7 +1000,8 @@ Branches / refs:
   commit. One that is missing, corrupt or not a commit fails the step with
   an error that names it, and bisect offers no candidate. A range with more
   than 1,000,000 candidates, or a good commit with more than 1,000,000
-  ancestors, fails the step with an error that names the limit.
+  ancestors, fails the step with an error that names the limit. A bisect
+  keeps at most 10,000 skipped commits; one more fails the skip.
 - `kit gc [-n|--dry-run] [--grace-secs <secs>]` &mdash; reclaim unreachable
   objects (mark-and-sweep). Under the repo lock it expires stale recovery
   entries, computes the live set reachable from the retention roots (refs,
