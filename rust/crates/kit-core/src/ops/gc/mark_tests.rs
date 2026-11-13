@@ -84,11 +84,9 @@ impl Fx {
 
     /// A manifest of the given chunks, in the given order.
     fn manifest(&self, chunks: &[Hash]) -> Hash {
-        self.put(&Object::ChunkedBlob(ChunkedBlob {
-            total_size: chunks.len() as u64,
-            chunk_size: 0,
-            chunks: chunks.to_vec(),
-        }))
+        self.put(&Object::ChunkedBlob(
+            ChunkedBlob::new(chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
+        ))
     }
 
     /// A tree of files and subtrees, named by position so the names sort.

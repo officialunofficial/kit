@@ -268,7 +268,7 @@ pub(crate) fn check_invariants(root: &Path, label: &str) -> Result<(), String> {
             Object::Tree(t) => {
                 work.extend(t.entries.into_iter().map(|e| e.object_hash));
             }
-            Object::ChunkedBlob(cb) => work.extend(cb.chunks),
+            Object::ChunkedBlob(cb) => work.extend(cb.chunks()),
             Object::Blob(_) | Object::Delta(_) => {}
         }
     }

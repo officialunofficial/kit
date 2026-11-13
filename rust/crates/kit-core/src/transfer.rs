@@ -314,8 +314,8 @@ fn pair_entry(
         }
         (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => pair_chunks(
             store,
-            &new_cb.chunks,
-            &old_cb.chunks,
+            new_cb.chunks(),
+            old_cb.chunks(),
             MAX_PAIRED_CHUNKS,
             out,
         ),
@@ -883,11 +883,7 @@ mod tests {
             .collect();
         put(
             s,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: data.len() as u64,
-                chunk_size: 0,
-                chunks,
-            }),
+            &Object::ChunkedBlob(ChunkedBlob::new(data.len() as u64, 0, chunks).unwrap()),
         )
     }
 
@@ -1275,11 +1271,7 @@ mod tests {
         let chunk_ids: Vec<Hash> = chunks.iter().map(|c| put_blob(s, c.clone())).collect();
         put(
             s,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: total as u64,
-                chunk_size: 0,
-                chunks: chunk_ids,
-            }),
+            &Object::ChunkedBlob(ChunkedBlob::new(total as u64, 0, chunk_ids).unwrap()),
         )
     }
 

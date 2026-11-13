@@ -356,11 +356,12 @@ mod tests {
     #[test]
     fn merkle_sizes_match_odd_even_and_power_of_two_shapes() {
         for chunks in 1u32..=70 {
-            let manifest = ChunkedBlob {
-                total_size: u64::from(chunks),
-                chunk_size: 0,
-                chunks: (0..chunks).map(|n| [n as u8; 32]).collect(),
-            };
+            let manifest = ChunkedBlob::new(
+                u64::from(chunks),
+                0,
+                (0..chunks).map(|n| [n as u8; 32]).collect(),
+            )
+            .unwrap();
             for index in 0..chunks {
                 let position = index + 1;
                 assert_eq!(
@@ -541,11 +542,8 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            let manifest = Object::ChunkedBlob(ChunkedBlob {
-                total_size: lengths.iter().sum(),
-                chunk_size: 0,
-                chunks,
-            });
+            let manifest =
+                Object::ChunkedBlob(ChunkedBlob::new(lengths.iter().sum(), 0, chunks).unwrap());
             let leaf = store.write(&serialize(&manifest).unwrap()).unwrap();
             let name = vec![b'f'; name_len];
             let tree = Object::Tree(Tree {

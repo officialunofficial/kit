@@ -582,11 +582,10 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
             h
         })
         .collect();
-    let cb = ChunkedBlob {
-        total_size: input.len() as u64,
-        chunk_size: 0,
-        chunks: chunks.clone(),
-    };
+    // At most 64 chunks and one input byte per chunk at least, so the header
+    // rules always hold.
+    let cb = ChunkedBlob::new(input.len() as u64, 0, chunks.clone())
+        .expect("a header within the manifest bounds");
     let cid = merkle::compute_chunked_id(&cb);
     assert_eq!(cid.len(), 32);
     if !chunks.is_empty() {
@@ -758,11 +757,8 @@ pub fn build_span_fixture() -> SpanFixture {
             store.write(&bytes).expect("write chunk")
         })
         .collect();
-    let manifest = ChunkedBlob {
-        total_size: plaintext.len() as u64,
-        chunk_size: CHUNK as u32,
-        chunks: chunk_ids,
-    };
+    let manifest = ChunkedBlob::new(plaintext.len() as u64, CHUNK as u32, chunk_ids)
+        .expect("a fixed-size manifest of the plaintext chunks");
     let leaf = store
         .write(&kit_core::serialize::serialize(&Object::ChunkedBlob(manifest)).expect("manifest"))
         .expect("write manifest");
@@ -1760,17 +1756,17 @@ pub fn chunked_blob_build_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let manifest =
         kit_core::worktree::chunked_blob_from_bytes(input).expect("a bounded input always chunks");
-    assert_eq!(manifest.total_size, input.len() as u64);
-    assert_eq!(manifest.chunk_size, 0);
-    assert_eq!(manifest.chunks.is_empty(), input.is_empty());
+    assert_eq!(manifest.total_size(), input.len() as u64);
+    assert_eq!(manifest.chunk_size(), 0);
+    assert_eq!(manifest.chunks().is_empty(), input.is_empty());
 
     // The FastCDC v2 manifest names its chunker, decodes back to itself,
     // and its cuts cover the input.
     let v2 = kit_core::chunker::Chunker::FastCdcV2;
     let manifest = kit_core::worktree::chunked_blob_from_bytes_with(input, v2)
         .expect("a bounded input always chunks");
-    assert_eq!(manifest.total_size, input.len() as u64);
-    assert_eq!(manifest.chunk_size, v2.chunk_size());
+    assert_eq!(manifest.total_size(), input.len() as u64);
+    assert_eq!(manifest.chunk_size(), v2.chunk_size());
     let object = kit_core::object::Object::ChunkedBlob(manifest);
     let bytes = kit_core::serialize::serialize(&object).expect("a bounded manifest serializes");
     assert_eq!(

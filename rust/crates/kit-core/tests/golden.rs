@@ -206,11 +206,14 @@ fn remix_two_sources_matches_golden() {
 
 #[test]
 fn chunked_blob_matches_golden() {
-    let obj = Object::ChunkedBlob(ChunkedBlob {
-        total_size: 4 * 65536,
-        chunk_size: 65536,
-        chunks: vec![[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]],
-    });
+    let obj = Object::ChunkedBlob(
+        ChunkedBlob::new(
+            4 * 65536,
+            65536,
+            vec![[0x01; 32], [0x02; 32], [0x03; 32], [0x04; 32]],
+        )
+        .unwrap(),
+    );
     assert_object_matches("chunked_blob", &obj);
 }
 
@@ -339,11 +342,9 @@ fn tree_single_file_matches_golden() {
 #[test]
 fn chunked_blob_cs0_3chunks_matches_golden() {
     // SPEC §13.7: chunk_size=0 (CDC marker) + 3 chunks => exactly 118 bytes.
-    let obj = Object::ChunkedBlob(ChunkedBlob {
-        total_size: 1_000_000,
-        chunk_size: 0,
-        chunks: vec![[0xA1; 32], [0xA2; 32], [0xA3; 32]],
-    });
+    let obj = Object::ChunkedBlob(
+        ChunkedBlob::new(1_000_000, 0, vec![[0xA1; 32], [0xA2; 32], [0xA3; 32]]).unwrap(),
+    );
     assert_object_matches("chunked_blob_cs0_3chunks", &obj);
     let bytes = serialize(&obj).unwrap();
     // 6 (prologue) + 8 (total_size u64) + 4 (chunk_size u32) + 4 (count u32) + 32*3 = 118

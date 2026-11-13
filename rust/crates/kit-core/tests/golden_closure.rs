@@ -236,11 +236,7 @@ fn build_fixture() -> ClosureFixture {
     assert!(chunks.len() > 1, "fixture file must split into chunks");
     let chunked_id = write_object(
         &store,
-        Object::ChunkedBlob(ChunkedBlob {
-            total_size: CHUNKED_FILE_LEN as u64,
-            chunk_size: 0,
-            chunks,
-        }),
+        Object::ChunkedBlob(ChunkedBlob::new(CHUNKED_FILE_LEN as u64, 0, chunks).unwrap()),
     );
 
     let entry = |name: &[u8], mode, object_hash| TreeEntry {
@@ -457,7 +453,7 @@ fn build_vectors() -> Vec<Vector> {
         let Object::ChunkedBlob(cb) = f.store.read_object(&chunked_id).unwrap() else {
             panic!("chunked");
         };
-        let drop_id = cb.chunks[0];
+        let drop_id = cb.chunks()[0];
         objects.retain(|b| {
             kit_core::serialize::deserialize(b)
                 .ok()
@@ -548,19 +544,15 @@ fn build_vectors() -> Vec<Vector> {
             data: b"1234567".to_vec(),
         }));
         let chunked = |chunks: &[Hash]| {
-            object_bytes(Object::ChunkedBlob(ChunkedBlob {
-                total_size: 13,
-                chunk_size: 0,
-                chunks: chunks.to_vec(),
-            }))
+            object_bytes(Object::ChunkedBlob(
+                ChunkedBlob::new(13, 0, chunks.to_vec()).unwrap(),
+            ))
         };
         let (names_tree_id, names_tree_bytes) = chunked(&[inner_id]);
         let (sum_id, sum_bytes) = chunked(&[five_id, seven_id]);
-        let (fixed_id, fixed_bytes) = object_bytes(Object::ChunkedBlob(ChunkedBlob {
-            total_size: 12,
-            chunk_size: 6,
-            chunks: vec![five_id, seven_id],
-        }));
+        let (fixed_id, fixed_bytes) = object_bytes(Object::ChunkedBlob(
+            ChunkedBlob::new(12, 6, vec![five_id, seven_id]).unwrap(),
+        ));
         for (name, description, mode, target, objects) in [
             (
                 "neg_tree_mode_names_blob",

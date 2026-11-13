@@ -707,13 +707,13 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
     let data: Vec<u8> = match obj {
         Object::Blob(b) => b.data,
         Object::ChunkedBlob(cb) => {
-            if cb.total_size > crate::worktree::MAX_FILE_BYTES {
+            if cb.total_size() > crate::worktree::MAX_FILE_BYTES {
                 return Err(BlameError::ContentTooLarge {
-                    size: cb.total_size,
+                    size: cb.total_size(),
                 });
             }
             let mut buf: Vec<u8> = Vec::new();
-            for ch in &cb.chunks {
+            for ch in cb.chunks() {
                 let chunk_obj = store.read_object(ch)?;
                 let Object::Blob(b) = chunk_obj else {
                     return Err(BlameError::NotABlob);
@@ -721,9 +721,9 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
                 // Stop at the first chunk that passes `total_size`, so a
                 // manifest that repeats one chunk cannot grow `buf`.
                 let next = buf.len() as u64 + b.data.len() as u64;
-                if next > cb.total_size {
+                if next > cb.total_size() {
                     return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
-                        expected: cb.total_size,
+                        expected: cb.total_size(),
                         actual: next,
                     }
                     .into());
@@ -1024,11 +1024,14 @@ mod tests {
     #[test]
     fn blame_refuses_a_file_above_the_memory_limit() {
         let (_d, store) = fresh_store();
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: crate::worktree::MAX_FILE_BYTES + 1,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                crate::worktree::MAX_FILE_BYTES + 1,
+                0,
+                vec![[1u8; 32], [2u8; 32]],
+            )
+            .unwrap(),
+        );
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
             .unwrap();
         assert!(matches!(
@@ -1037,11 +1040,14 @@ mod tests {
         ));
 
         // At the limit blame goes on to the chunks, which are missing.
-        let at_limit = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: crate::worktree::MAX_FILE_BYTES,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let at_limit = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(
+                crate::worktree::MAX_FILE_BYTES,
+                0,
+                vec![[1u8; 32], [2u8; 32]],
+            )
+            .unwrap(),
+        );
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&at_limit).unwrap())
             .unwrap();
         assert!(matches!(
@@ -1056,11 +1062,9 @@ mod tests {
     fn blame_stops_a_repeated_chunk_at_the_declared_size() {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, &[b'a'; 1000]);
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 1500,
-            chunk_size: 0,
-            chunks: vec![chunk; 1000],
-        });
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(1500, 0, vec![chunk; 1000]).unwrap(),
+        );
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
             .unwrap();
         assert!(matches!(
@@ -1079,11 +1083,8 @@ mod tests {
     fn blame_reads_chunks_up_to_the_declared_size() {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, &[b'a'; 1000]);
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 2000,
-            chunk_size: 0,
-            chunks: vec![chunk; 2],
-        });
+        let manifest =
+            Object::ChunkedBlob(crate::object::ChunkedBlob::new(2000, 0, vec![chunk; 2]).unwrap());
         let h = crate::store::ObjectSink::put(&store, &serialize::serialize(&manifest).unwrap())
             .unwrap();
         assert_eq!(load_blob_lines(&store, h).unwrap(), vec![vec![b'a'; 2000]]);
@@ -1184,11 +1185,8 @@ mod tests {
     fn blame_rejects_chunked_total_size_mismatch() {
         let (_d, store) = fresh_store();
         let chunk = put_blob(&store, b"one line\n");
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 4096,
-            chunk_size: 0,
-            chunks: vec![chunk],
-        });
+        let cb =
+            Object::ChunkedBlob(crate::object::ChunkedBlob::new(4096, 0, vec![chunk]).unwrap());
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_single_file_tree(&store, "big.bin", cb_h);
         let commit = Object::Commit(Commit::new_unannotated(

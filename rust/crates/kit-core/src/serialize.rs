@@ -264,14 +264,15 @@ pub fn check_chunked_header(
 }
 
 /// Refuse a manifest that [`deserialize`] would refuse, so a writer never
-/// stores an undecodable manifest.
+/// stores an undecodable manifest. [`ChunkedBlob::new`] already runs these
+/// checks; this is the second line of defence.
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), KitError> {
-    let chunk_count = u32::try_from(cb.chunks.len()).map_err(|_| KitError::TooManyChunks)?;
-    check_chunked_header(cb.total_size, cb.chunk_size, chunk_count)?;
-    write_u64_le(buf, cb.total_size);
-    write_u32_le(buf, cb.chunk_size);
+    let chunk_count = u32::try_from(cb.chunks().len()).map_err(|_| KitError::TooManyChunks)?;
+    check_chunked_header(cb.total_size(), cb.chunk_size(), chunk_count)?;
+    write_u64_le(buf, cb.total_size());
+    write_u32_le(buf, cb.chunk_size());
     write_u32_le(buf, chunk_count);
-    for c in &cb.chunks {
+    for c in cb.chunks() {
         buf.extend_from_slice(c);
     }
     Ok(())
@@ -321,7 +322,7 @@ fn estimated_body_len(obj: &Object) -> usize {
                 + 32
                 + 64
         }
-        Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks.len() * 32,
+        Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks().len() * 32,
         Object::Delta(d) => 32 + 4 + 4 + d.instructions.len(),
         Object::Tag(t) => {
             32 + 1
@@ -641,11 +642,7 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
     for _ in 0..chunk_count {
         chunks.push(r.read_hash()?);
     }
-    Ok(ChunkedBlob {
-        total_size,
-        chunk_size,
-        chunks,
-    })
+    ChunkedBlob::new(total_size, chunk_size, chunks)
 }
 
 /// Reject a `total_size` that the chunk layout cannot produce. Readers
@@ -852,11 +849,14 @@ mod tests {
 
     #[test]
     fn chunked_blob_roundtrip() {
-        let obj = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 3 * 65536,
-            chunk_size: 65536,
-            chunks: vec![hash(b"c1"), hash(b"c2"), hash(b"c3")],
-        });
+        let obj = Object::ChunkedBlob(
+            ChunkedBlob::new(
+                3 * 65536,
+                65536,
+                vec![hash(b"c1"), hash(b"c2"), hash(b"c3")],
+            )
+            .unwrap(),
+        );
         let bytes = serialize(&obj).unwrap();
         assert_eq!(bytes[0], 0x05);
         assert_eq!(deserialize(&bytes).unwrap(), obj);
@@ -864,11 +864,9 @@ mod tests {
 
     #[test]
     fn chunked_blob_cdc_marker_roundtrips() {
-        let obj = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 100_000,
-            chunk_size: 0,
-            chunks: vec![hash(b"x"), hash(b"y")],
-        });
+        let obj = Object::ChunkedBlob(
+            ChunkedBlob::new(100_000, 0, vec![hash(b"x"), hash(b"y")]).unwrap(),
+        );
         assert_eq!(deserialize(&serialize(&obj).unwrap()).unwrap(), obj);
     }
 
@@ -1223,42 +1221,94 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(KitError::UnexpectedEof));
     }
 
-    /// The writer refuses a manifest the reader would refuse, so no
-    /// undecodable manifest is ever stored.
+    /// `ChunkedBlob::new` refuses every manifest the reader refuses, so no
+    /// value the writer sees is undecodable.
+    #[test]
+    fn new_refuses_a_manifest_the_reader_refuses() {
+        // Zeroed: the allocator maps the pages lazily, and `new` refuses on
+        // the length before it reads one.
+        assert_eq!(
+            ChunkedBlob::new(
+                MAX_CHUNKED_TOTAL_SIZE,
+                0,
+                vec![[0u8; 32]; MAX_CHUNKS as usize + 1]
+            ),
+            Err(KitError::TooManyChunks)
+        );
+        assert_eq!(
+            ChunkedBlob::new(MAX_CHUNKED_TOTAL_SIZE + 1, 0, vec![[1u8; 32], [2u8; 32]]),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        assert_eq!(
+            ChunkedBlob::new(1, 0, vec![[1u8; 32], [2u8; 32]]),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        // A fixed size the chunks cannot fill, and one they overfill.
+        assert_eq!(
+            ChunkedBlob::new(131_072, 65_536, vec![[1u8; 32]; 3]),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        assert_eq!(
+            ChunkedBlob::new(196_609, 65_536, vec![[1u8; 32]; 3]),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        // Zero chunks mean zero bytes.
+        assert_eq!(
+            ChunkedBlob::new(1, 0, Vec::new()),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+    }
+
+    /// The bounds themselves still build, serialize and decode.
+    #[test]
+    fn a_manifest_at_the_bound_round_trips() {
+        let at_bound = Object::ChunkedBlob(
+            ChunkedBlob::new(MAX_CHUNKED_TOTAL_SIZE, 0, vec![[1u8; 32], [2u8; 32]]).unwrap(),
+        );
+        assert_eq!(deserialize(&serialize(&at_bound).unwrap()), Ok(at_bound));
+        let empty = Object::ChunkedBlob(ChunkedBlob::new(0, 0, Vec::new()).unwrap());
+        assert_eq!(deserialize(&serialize(&empty).unwrap()), Ok(empty));
+    }
+
+    /// The writer checks the header too, as a second line of defence: a
+    /// value built past `new` is still refused before any byte is written.
     #[test]
     fn serialize_refuses_a_manifest_the_reader_refuses() {
-        let over_count = Object::ChunkedBlob(ChunkedBlob {
-            total_size: MAX_CHUNKED_TOTAL_SIZE,
-            chunk_size: 0,
-            // Zeroed: the allocator maps the pages lazily, and the writer
-            // refuses on the length before it reads one.
-            chunks: vec![[0u8; 32]; MAX_CHUNKS as usize + 1],
-        });
+        let over_count = Object::ChunkedBlob(ChunkedBlob::new_unchecked(
+            MAX_CHUNKED_TOTAL_SIZE,
+            0,
+            vec![[0u8; 32]; MAX_CHUNKS as usize + 1],
+        ));
         assert_eq!(serialize(&over_count), Err(KitError::TooManyChunks));
-        let over_size = Object::ChunkedBlob(ChunkedBlob {
-            total_size: MAX_CHUNKED_TOTAL_SIZE + 1,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let over_size = Object::ChunkedBlob(ChunkedBlob::new_unchecked(
+            MAX_CHUNKED_TOTAL_SIZE + 1,
+            0,
+            vec![[1u8; 32], [2u8; 32]],
+        ));
         assert_eq!(
             serialize(&over_size),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
-        let inconsistent = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 1,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
+        let inconsistent =
+            Object::ChunkedBlob(ChunkedBlob::new_unchecked(1, 0, vec![[1u8; 32], [2u8; 32]]));
         assert_eq!(
             serialize(&inconsistent),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
-        let at_bound = Object::ChunkedBlob(ChunkedBlob {
-            total_size: MAX_CHUNKED_TOTAL_SIZE,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32], [2u8; 32]],
-        });
-        assert_eq!(deserialize(&serialize(&at_bound).unwrap()), Ok(at_bound));
+    }
+
+    /// The capacity hint of a manifest is its exact encoded length, so
+    /// `serialize` allocates once.
+    #[test]
+    fn the_capacity_estimate_of_a_manifest_is_its_encoded_length() {
+        for count in [0usize, 1, 3] {
+            let cb = ChunkedBlob::new(count as u64, 0, vec![[1u8; 32]; count]).unwrap();
+            let obj = Object::ChunkedBlob(cb);
+            assert_eq!(
+                PROLOGUE_LEN + estimated_body_len(&obj),
+                serialize(&obj).unwrap().len()
+            );
+        }
     }
 
     #[test]

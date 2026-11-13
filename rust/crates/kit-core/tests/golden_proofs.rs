@@ -310,9 +310,9 @@ fn build_vectors() -> Vec<Vector> {
                 "kind": "chunk",
                 "proof_kind": "single",
                 "position": pos,
-                "total_size": cb.total_size,
-                "chunk_size": cb.chunk_size,
-                "chunk_hashes_hex": [to_hex(&cb.chunks[(pos - 1) as usize])],
+                "total_size": cb.total_size(),
+                "chunk_size": cb.chunk_size(),
+                "chunk_hashes_hex": [to_hex(&cb.chunks()[(pos - 1) as usize])],
             }),
         ));
     }
@@ -331,9 +331,9 @@ fn build_vectors() -> Vec<Vector> {
             "kind": "chunk",
             "proof_kind": "range",
             "start": 1,
-            "total_size": cb.total_size,
-            "chunk_size": cb.chunk_size,
-            "chunk_hashes_hex": cb.chunks.iter().map(to_hex).collect::<Vec<_>>(),
+            "total_size": cb.total_size(),
+            "chunk_size": cb.chunk_size(),
+            "chunk_hashes_hex": cb.chunks().iter().map(to_hex).collect::<Vec<_>>(),
         }),
     ));
 
@@ -352,8 +352,8 @@ fn build_vectors() -> Vec<Vector> {
             "kind": "chunk",
             "proof_kind": "single",
             "position": 0,
-            "total_size": cb.total_size,
-            "chunk_size": cb.chunk_size,
+            "total_size": cb.total_size(),
+            "chunk_size": cb.chunk_size(),
             // No chunk hash is recorded: the metadata leaf's pre-image isn't
             // reachable from outside merkle.rs, and isn't needed — a verifier
             // rejects on position alone, before ever hashing a leaf.

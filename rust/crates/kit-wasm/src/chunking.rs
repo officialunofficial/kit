@@ -505,11 +505,7 @@ mod tests {
         let raw_chunks: Vec<[u8; 32]> = ChunkIterator::new(FastCdc::v1(), &data)
             .map(|b| hash(&data[b.offset..b.offset + b.length]))
             .collect();
-        let raw_cb = kit_core::object::ChunkedBlob {
-            total_size: data.len() as u64,
-            chunk_size: 0,
-            chunks: raw_chunks,
-        };
+        let raw_cb = kit_core::object::ChunkedBlob::new(data.len() as u64, 0, raw_chunks).unwrap();
         let raw_root = to_hex(&kit_core::merkle::compute_chunked_id(&raw_cb));
         assert_ne!(
             wasm_id, raw_root,

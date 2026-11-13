@@ -830,11 +830,9 @@ mod tests {
         );
         source.put(
             old_manifest,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: 3_000_000,
-                chunk_size: 0,
-                chunks: vec![old_chunk0, old_chunk1],
-            }),
+            &Object::ChunkedBlob(
+                ChunkedBlob::new(3_000_000, 0, vec![old_chunk0, old_chunk1]).unwrap(),
+            ),
         );
         let new_chunk0 = fake_hash(4);
         let new_chunk1 = fake_hash(5);
@@ -847,11 +845,9 @@ mod tests {
         );
         source.put(
             new_manifest,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size: 4_000_000,
-                chunk_size: 0,
-                chunks: vec![new_chunk0, new_chunk1],
-            }),
+            &Object::ChunkedBlob(
+                ChunkedBlob::new(4_000_000, 0, vec![new_chunk0, new_chunk1]).unwrap(),
+            ),
         );
 
         let entry = modified("big.bin", old_manifest, new_manifest);
@@ -1011,11 +1007,7 @@ mod tests {
         source.put(chunk0, &Object::Blob(Blob { data: first }));
         source.put(
             manifest,
-            &Object::ChunkedBlob(ChunkedBlob {
-                total_size,
-                chunk_size: 0,
-                chunks: vec![chunk0, chunk1],
-            }),
+            &Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, vec![chunk0, chunk1]).unwrap()),
         );
         (manifest, chunk1)
     }

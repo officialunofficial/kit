@@ -537,7 +537,7 @@ fn manifest_listing(
             continue;
         }
         if let Object::ChunkedBlob(manifest) = store.read_object(h)?
-            && manifest.chunks.contains(chunk)
+            && manifest.chunks().contains(chunk)
         {
             return Ok(*h);
         }

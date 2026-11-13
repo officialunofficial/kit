@@ -1849,11 +1849,8 @@ mod tests {
         let inline = put_blob(&s, b"abcdef");
         let a = put_blob(&s, b"ab");
         let b = put_blob(&s, b"cdef");
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: 6,
-            chunk_size: 0,
-            chunks: vec![a, b],
-        });
+        let manifest =
+            Object::ChunkedBlob(crate::object::ChunkedBlob::new(6, 0, vec![a, b]).unwrap());
         let chunked = s.write(&serialize::serialize(&manifest).unwrap()).unwrap();
         assert_ne!(inline, chunked);
         let old = put_tree(&s, vec![entry(b"a", EntryMode::Blob, chunked)]);
@@ -1931,11 +1928,9 @@ mod tests {
         // The same bytes stored in a fixed layout of 1 MiB chunks: a different
         // id from the content-defined manifest the worktree file hashes to.
         let chunks: Vec<Hash> = data.chunks(1 << 20).map(|c| put_blob(&s, c)).collect();
-        let manifest = Object::ChunkedBlob(crate::object::ChunkedBlob {
-            total_size: data.len() as u64,
-            chunk_size: 1 << 20,
-            chunks,
-        });
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(data.len() as u64, 1 << 20, chunks).unwrap(),
+        );
         let fixed = s.write(&serialize::serialize(&manifest).unwrap()).unwrap();
         let old = put_tree(&s, vec![entry(b"big.bin", EntryMode::Blob, fixed)]);
         let idx = crate::index::from_tree(&s, old).unwrap();

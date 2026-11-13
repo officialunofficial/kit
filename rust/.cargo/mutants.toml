@@ -1,0 +1,3 @@
+# Cargo builds the Kani proof modules only under `cfg(kani)`, so no test can
+# catch a mutant in them. The Kani prover runs those modules by hand.
+exclude_re = ["kani_proofs::"]

@@ -322,11 +322,11 @@ impl PushWalk {
                 continue;
             };
             let replaced: HashSet<Hash> = match manifest.old.map(|old| store.read_object(&old)) {
-                Some(Ok(Object::ChunkedBlob(old))) => old.chunks.into_iter().collect(),
+                Some(Ok(Object::ChunkedBlob(old))) => old.into_chunks().into_iter().collect(),
                 Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => HashSet::new(),
                 Some(Err(error)) => return Err(error),
             };
-            for chunk in blob.chunks {
+            for chunk in blob.into_chunks() {
                 if replaced.contains(&chunk)
                     || self.objects.contains(&chunk)
                     || !memory.first_sight(&chunk)

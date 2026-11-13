@@ -57,11 +57,7 @@ mod tests {
             data: b"chunk".to_vec(),
         });
         let chunk = put(&mut source, &blob);
-        let manifest = Object::ChunkedBlob(ChunkedBlob {
-            total_size: 5,
-            chunk_size: 0,
-            chunks: vec![chunk],
-        });
+        let manifest = Object::ChunkedBlob(ChunkedBlob::new(5, 0, vec![chunk]).unwrap());
         let file = put(&mut source, &manifest);
         let tree = Object::Tree(Tree {
             entries: vec![TreeEntry {
@@ -128,11 +124,9 @@ mod tests {
         let chunk = add(Object::Blob(Blob {
             data: b"chunk".to_vec(),
         }));
-        let manifest = add(Object::ChunkedBlob(ChunkedBlob {
-            total_size: 5,
-            chunk_size: 0,
-            chunks: vec![chunk],
-        }));
+        let manifest = add(Object::ChunkedBlob(
+            ChunkedBlob::new(5, 0, vec![chunk]).unwrap(),
+        ));
         let tree = add(Object::Tree(Tree {
             entries: vec![TreeEntry {
                 name: b"file".to_vec(),

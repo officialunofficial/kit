@@ -121,7 +121,7 @@ fn fresh_store(dir: &Path) -> ObjectStore {
 
 fn manifest_total(store: &ObjectStore, id: kit_core::hash::Hash) -> u64 {
     match store.read_object(&id).unwrap() {
-        Object::ChunkedBlob(manifest) => manifest.total_size,
+        Object::ChunkedBlob(manifest) => manifest.total_size(),
         other => panic!("expected a chunked blob, got {other:?}"),
     }
 }

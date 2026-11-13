@@ -424,11 +424,9 @@ mod tests {
         let mut src = Source::default();
         let chunk_a = src.blob(b"chunk-a");
         let chunk_b = crate::hash::hash(b"chunk-b never supplied");
-        let manifest = src.put(&Object::ChunkedBlob(ChunkedBlob {
-            total_size: 14,
-            chunk_size: 7,
-            chunks: vec![chunk_a, chunk_b],
-        }));
+        let manifest = src.put(&Object::ChunkedBlob(
+            ChunkedBlob::new(14, 7, vec![chunk_a, chunk_b]).unwrap(),
+        ));
         let tree = src.tree(&[(b"big", manifest)]);
         let c = src.commit(tree, vec![], b"chunked");
         let report = verify_push(&[c], ClosureMode::History, &mut src, |_| false).unwrap();

@@ -566,11 +566,9 @@ fn chunked_file(store: &ObjectStore, chunks: &[&str]) -> Hash {
         .collect();
     put(
         store,
-        &Object::ChunkedBlob(kit_core::object::ChunkedBlob {
-            total_size: ids.len() as u64 * 200,
-            chunk_size: 0,
-            chunks: ids,
-        }),
+        &Object::ChunkedBlob(
+            kit_core::object::ChunkedBlob::new(ids.len() as u64 * 200, 0, ids).unwrap(),
+        ),
     )
 }
 

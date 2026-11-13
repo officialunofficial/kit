@@ -429,15 +429,96 @@ impl Tag {
 }
 
 /// Chunked-blob manifest. See `SPEC-OBJECTS.md` §7.
+///
+/// The fields are private and [`ChunkedBlob::new`] runs the decode checks,
+/// so every value is one that [`crate::serialize::deserialize`] accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkedBlob {
-    pub total_size: u64,
+    total_size: u64,
     /// `0` = content-defined chunking (`FastCDC`), otherwise fixed-size.
-    pub chunk_size: u32,
-    pub chunks: Vec<Hash>,
+    chunk_size: u32,
+    chunks: Vec<Hash>,
 }
 
 impl ChunkedBlob {
+    /// Build a manifest from its parts, after the header rules of
+    /// SPEC-OBJECTS §7 ([`crate::serialize::check_chunked_header`]): the
+    /// chunk cap, the size bound and the layout. This is the only way to
+    /// build a value outside this module.
+    ///
+    /// # Errors
+    /// [`KitError::TooManyChunks`] above [`crate::serialize::MAX_CHUNKS`],
+    /// and [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size`
+    /// above [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`] or impossible for
+    /// the layout.
+    pub fn new(total_size: u64, chunk_size: u32, chunks: Vec<Hash>) -> Result<Self, KitError> {
+        let chunk_count = u32::try_from(chunks.len()).map_err(|_| KitError::TooManyChunks)?;
+        crate::serialize::check_chunked_header(total_size, chunk_size, chunk_count)?;
+        Ok(Self {
+            total_size,
+            chunk_size,
+            chunks,
+        })
+    }
+
+    /// A value that skips the header rules, so a test can reach the writer's
+    /// own check, and a proof harness can range over any sizes. Not compiled
+    /// outside tests and proofs.
+    #[cfg(any(test, kani))]
+    pub(crate) fn new_unchecked(total_size: u64, chunk_size: u32, chunks: Vec<Hash>) -> Self {
+        Self {
+            total_size,
+            chunk_size,
+            chunks,
+        }
+    }
+
+    /// The content length of the whole blob in bytes.
+    #[must_use]
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    /// The fixed chunk size, or `0` for content-defined chunking
+    /// (`FastCDC`).
+    #[must_use]
+    pub fn chunk_size(&self) -> u32 {
+        self.chunk_size
+    }
+
+    /// The chunk ids in order.
+    #[must_use]
+    pub fn chunks(&self) -> &[Hash] {
+        &self.chunks
+    }
+
+    /// Take the chunk ids by value.
+    #[must_use]
+    pub fn into_chunks(self) -> Vec<Hash> {
+        self.chunks
+    }
+
+    /// The leaves of a manifest's Binary Merkle Tree, in position order:
+    /// the metadata leaf at position 0, then one leaf per chunk. This is
+    /// the one statement of the leaf layout; the leaf count, the id fold,
+    /// the proofs and the chunk positions all derive from it.
+    pub(crate) fn leaf_sequence(
+        total_size: u64,
+        chunk_size: u32,
+        chunks: impl IntoIterator<Item = Hash>,
+    ) -> impl Iterator<Item = Hash> {
+        core::iter::once(crate::merkle::chunked_meta_leaf_raw(total_size, chunk_size)).chain(chunks)
+    }
+
+    /// The leaves of this manifest's tree, per [`Self::leaf_sequence`].
+    pub(crate) fn leaves(&self) -> impl Iterator<Item = Hash> + '_ {
+        Self::leaf_sequence(
+            self.total_size,
+            self.chunk_size,
+            self.chunks.iter().copied(),
+        )
+    }
+
     /// Enforce the SPEC-OBJECTS §7 reassembly invariant: the concatenated
     /// chunk contents MUST total exactly `total_size` bytes. Every
     /// reassembly site calls this after concatenation so a manifest whose
@@ -773,11 +854,7 @@ mod tests {
     #[test]
     fn the_reassembled_size_check_takes_a_length_above_four_gib() {
         let total_size = (5u64 << 30) + 7;
-        let manifest = ChunkedBlob {
-            total_size,
-            chunk_size: 0,
-            chunks: Vec::new(),
-        };
+        let manifest = ChunkedBlob::new(total_size, 0, vec![[1u8; 32]]).unwrap();
         assert!(manifest.check_reassembled_size(total_size).is_ok());
         assert!(matches!(
             manifest.check_reassembled_size(total_size - 1),
@@ -821,11 +898,7 @@ mod tests {
                     object_hash: [9u8; 32],
                 }],
             }),
-            Object::ChunkedBlob(ChunkedBlob {
-                total_size: 4,
-                chunk_size: 0,
-                chunks: vec![[7u8; 32], [8u8; 32]],
-            }),
+            Object::ChunkedBlob(ChunkedBlob::new(4, 0, vec![[7u8; 32], [8u8; 32]]).unwrap()),
             Object::Commit(Commit::new_unannotated(
                 [1u8; 32],
                 vec![[2u8; 32]],
@@ -1154,6 +1227,50 @@ mod tests {
         assert_eq!(
             object_id_from_parts(&[head, tail]),
             object_id_from_bytes(&blob)
+        );
+    }
+
+    #[test]
+    fn chunked_blob_new_runs_the_header_rules_and_exposes_its_parts() {
+        let chunks = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let cb = ChunkedBlob::new(150_000, 65_536, chunks.clone()).unwrap();
+        assert_eq!(cb.total_size(), 150_000);
+        assert_eq!(cb.chunk_size(), 65_536);
+        assert_eq!(cb.chunks(), chunks.as_slice());
+        assert_eq!(cb.into_chunks(), chunks);
+
+        let over_count = crate::serialize::MAX_CHUNKS as usize + 1;
+        assert_eq!(
+            ChunkedBlob::new(0, 0, vec![[0u8; 32]; over_count]),
+            Err(KitError::TooManyChunks)
+        );
+        assert_eq!(
+            ChunkedBlob::new(
+                crate::serialize::MAX_CHUNKED_TOTAL_SIZE + 1,
+                0,
+                chunks.clone()
+            ),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        // Three fixed chunks of 65,536 hold more than 131,072 bytes.
+        assert_eq!(
+            ChunkedBlob::new(131_072, 65_536, chunks),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+    }
+
+    #[test]
+    fn chunked_blob_leaves_are_the_meta_leaf_then_the_chunks() {
+        let chunks = vec![[7u8; 32], [8u8; 32]];
+        let cb = ChunkedBlob::new(10, 0, chunks.clone()).unwrap();
+        let leaves: Vec<Hash> = cb.leaves().collect();
+        assert_eq!(leaves.len(), 1 + chunks.len());
+        assert_eq!(leaves[0], crate::merkle::chunked_meta_leaf_raw(10, 0));
+        assert_eq!(&leaves[1..], chunks.as_slice());
+        // The header alone yields the leaves before the chunks.
+        assert_eq!(
+            ChunkedBlob::leaf_sequence(10, 0, core::iter::empty()).collect::<Vec<_>>(),
+            leaves[..1]
         );
     }
 }

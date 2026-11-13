@@ -13,7 +13,7 @@ use wasm_bindgen::prelude::*;
 use kit_core::ClosureMode;
 use kit_core::hash::{hash, to_hex};
 use kit_core::merkle::{self, MerkleError, ObjectKind, Proof};
-use kit_core::object::{Blob, ChunkedBlob, EntryMode, Object, TreeEntry};
+use kit_core::object::{Blob, EntryMode, Object, TreeEntry};
 use kit_core::serialize::serialize;
 use kit_core::verify::{
     self, ClosureReport, Disclosed, DisclosedPayload, MAX_BUNDLE_BYTES, MAX_CLOSURE_PACKS,
@@ -537,18 +537,15 @@ pub fn verify_chunk(
 #[wasm_bindgen]
 pub fn chunked_blob_decode(bytes: &[u8]) -> Result<String, String> {
     cap_object(bytes)?;
-    let Object::ChunkedBlob(ChunkedBlob {
-        total_size,
-        chunk_size,
-        chunks,
-    }) = kit_core::deserialize(bytes).map_err(|e| format!("deserialize: {e}"))?
+    let Object::ChunkedBlob(manifest) =
+        kit_core::deserialize(bytes).map_err(|e| format!("deserialize: {e}"))?
     else {
         return Err("object is not a chunked blob".into());
     };
     serde_json::to_string(&serde_json::json!({
-        "total_size": total_size,
-        "chunk_size": chunk_size,
-        "chunks": chunks.iter().map(to_hex).collect::<Vec<_>>(),
+        "total_size": manifest.total_size(),
+        "chunk_size": manifest.chunk_size(),
+        "chunks": manifest.chunks().iter().map(to_hex).collect::<Vec<_>>(),
     }))
     .map_err(|e| format!("chunked blob JSON: {e}"))
 }
@@ -644,15 +641,11 @@ pub fn wrap_object_id(kind: &str, inner_root_hex: &str) -> Result<String, String
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use kit_core::object::{Tree, TreeEntry};
+    use kit_core::object::{ChunkedBlob, Tree, TreeEntry};
 
     #[test]
     fn chunked_blob_decode_round_trip() {
-        let cb = ChunkedBlob {
-            total_size: 3,
-            chunk_size: 0,
-            chunks: vec![[1u8; 32]],
-        };
+        let cb = ChunkedBlob::new(3, 0, vec![[1u8; 32]]).unwrap();
         let bytes = serialize(&Object::ChunkedBlob(cb)).unwrap();
         let json: serde_json::Value =
             serde_json::from_str(&chunked_blob_decode(&bytes).unwrap()).unwrap();
