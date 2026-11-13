@@ -201,7 +201,8 @@ fn walk_chain_capped(
 /// What a pass over the chain measured.
 struct Weights {
     /// `cumulative[j]` is what the first `j` chain commits contribute beyond
-    /// what the remote holds, in serialized bytes.
+    /// what the chain's first-parent base holds, in serialized bytes. It is an
+    /// upper bound on what the plan of any step sends for them.
     cumulative: Vec<u64>,
     /// The serialized size of the largest single object in the chain.
     largest_object: u64,
@@ -262,10 +263,27 @@ fn weigh_one(
     Ok(weight)
 }
 
-/// Serialized bytes each chain prefix adds. Each new commit is sized on its
-/// own, against its parents, and each chain commit then takes the new commits
-/// that no earlier chain commit reaches. The sum is never less than what a
-/// step plan sends, whatever commit the step starts after.
+/// The commit the chain starts after, when this store holds it and the remote
+/// holds it too: the first parent of the oldest chain commit.
+fn chain_base(
+    store: &ObjectStore,
+    chain: &Chain,
+    ctl: &PushControl<'_>,
+) -> Result<Option<Hash>, PushError> {
+    let oldest = chain.commits[0];
+    if ctl.shallow.contains(&oldest) {
+        return Ok(None);
+    }
+    Ok(first_parent(&store.read_object(&oldest)?).filter(|base| chain.held.contains(base)))
+}
+
+/// Serialized bytes each chain prefix adds beyond the commits the chain's base
+/// holds. Each new commit is sized on its own, against its parents, and each
+/// chain commit then takes the new commits that no earlier chain commit
+/// reaches. Every step is planned against a chain commit, which holds the
+/// base's history, so the sum is never less than what a step plan sends,
+/// whatever commit the step starts after, and whether or not the remote head
+/// is an ancestor of the tip.
 fn cumulative_weights(
     store: &ObjectStore,
     chain: &Chain,
@@ -287,6 +305,19 @@ fn cumulative_weights_capped(
             largest_object: 0,
         });
     }
+    let base_held;
+    let held = match chain_base(store, chain, ctl)? {
+        Some(base) if chain.held.tip() == Some(base) => &chain.held,
+        Some(base) => {
+            base_held =
+                HeldCommits::collect(store, Some(base), limits.objects).map_err(walk_error)?;
+            &base_held
+        }
+        None => {
+            base_held = HeldCommits::default();
+            &base_held
+        }
+    };
     let mut largest_object = 0_u64;
     let mut cumulative = Vec::with_capacity(chain.commits.len() + 1);
     let mut total = 0_u64;
@@ -299,10 +330,10 @@ fn cumulative_weights_capped(
         }
         let mut stack = vec![*commit];
         while let Some(hash) = stack.pop() {
-            if chain.held.contains(&hash) || !taken.insert(hash) {
+            if held.contains(&hash) || !taken.insert(hash) {
                 continue;
             }
-            let weight = weigh_one(store, &chain.held, &ctl.shallow, hash, limits, &mut seen)?;
+            let weight = weigh_one(store, held, &ctl.shallow, hash, limits, &mut seen)?;
             largest_object = largest_object.max(weight.largest);
             total = total.saturating_add(weight.total);
             // A shallow-boundary commit's parents are not in this repository.
@@ -371,17 +402,15 @@ impl Cutter<'_> {
 
     /// Whether the step from `from` to `to`, which no cut can divide, needs
     /// more than the budget's packs at this cutter's cap. Within the natural
-    /// floor a step always fits, and past the budget's weight it never does;
-    /// between them the packs depend on the sizes of the objects, so a real
-    /// plan decides.
+    /// floor a step always fits, because the weights never undercount. Past
+    /// it the packs depend on what the plan sends, which can be far less than
+    /// the weights say (a moved directory weighs all it holds), so a real plan
+    /// decides.
     fn overflows(&self, from: usize, to: usize) -> Result<bool, PushError> {
         let weight = self.weights[to] - self.weights[from];
         let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
         if weight <= wcap.saturating_mul((self.budget / 2) as u64) {
             return Ok(false);
-        }
-        if weight > wcap.saturating_mul(self.budget as u64) {
-            return Ok(true);
         }
         Ok(self.probe(from, to)?.1 > self.budget)
     }
@@ -1037,6 +1066,153 @@ mod tests {
             "{sent} > {}",
             weights[4] - weights[2]
         );
+    }
+
+    /// The data packs an exact dry seal of the plan that advances `base` to
+    /// `tip` makes at `cap`.
+    fn step_packs(
+        store: &ObjectStore,
+        tip: Hash,
+        base: Option<Hash>,
+        limits: UploadLimits,
+        cap: u64,
+    ) -> usize {
+        let plan = transfer::plan_pack_with(store, tip, base, |_, candidates| {
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        let cap = effective_payload_cap(cap, limits.max_pack_bytes).unwrap();
+        build_and_upload_packs(
+            PackSink::Count,
+            store,
+            plan,
+            cap,
+            limits,
+            &crate::NoopObserver,
+        )
+        .map_or(usize::MAX, |keys| keys.len())
+    }
+
+    #[test]
+    fn a_forced_overwrite_that_merges_a_remote_commit_still_fits_every_step() {
+        let (_dir, store) = store();
+        let tree = |entries: &[(String, Hash, EntryMode)]| {
+            let mut entries: Vec<TreeEntry> = entries
+                .iter()
+                .map(|(name, hash, mode)| TreeEntry {
+                    name: name.clone().into_bytes(),
+                    mode: *mode,
+                    object_hash: *hash,
+                })
+                .collect();
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            put(&store, &Object::Tree(Tree { entries }))
+        };
+        let shared = ("s".to_string(), blob(&store, 1, 100), EntryMode::Blob);
+        let big_files: Vec<(String, Hash, EntryMode)> = (0..20)
+            .map(|i| {
+                (
+                    format!("b{i:02}"),
+                    blob(&store, 100 + i, 3000),
+                    EntryMode::Blob,
+                )
+            })
+            .collect();
+        let big = ("big".to_string(), tree(&big_files), EntryMode::Tree);
+        let r0 = commit_tree(&store, tree(std::slice::from_ref(&shared)), Vec::new(), 1);
+        // The remote holds a commit the local history reaches only by a merge.
+        let with_big = tree(&[shared.clone(), big.clone()]);
+        let x = commit_tree(&store, with_big, vec![r0], 2);
+        let remote = commit_tree(&store, with_big, vec![x], 3);
+        let mut tip = r0;
+        let mut local = vec![shared.clone()];
+        for i in 0..12_u8 {
+            let file = blob(&store, 1000 + u64::from(i), 3000);
+            local.push((format!("l{i:02}"), file, EntryMode::Blob));
+            tip = commit_tree(&store, tree(&local), vec![tip], 10 + i);
+        }
+        local.push(big);
+        let merged = commit_tree(&store, tree(&local), vec![tip, x], 40);
+        let limits = ticketed(None);
+        let plan = plan_split(
+            &store,
+            merged,
+            Some(remote),
+            limits,
+            4096,
+            &PushControl::default(),
+            RefWriteCondition::Any,
+            "main",
+        )
+        .unwrap();
+        let mut base = Some(remote);
+        for step in &plan.steps {
+            assert!(
+                step_packs(&store, *step, base, limits, plan.payload_cap)
+                    <= data_pack_budget(limits),
+                "a step needs more packs than an advance may carry"
+            );
+            base = Some(*step);
+        }
+    }
+
+    #[test]
+    fn a_moved_directory_does_not_raise_the_pack_size_or_refuse_the_push() {
+        let (_dir, store) = store();
+        let blobs: Vec<Hash> = (0..20).map(|i| blob(&store, i + 1, 3000)).collect();
+        let dir = |files: &[Hash]| {
+            put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: files
+                        .iter()
+                        .enumerate()
+                        .map(|(i, hash)| TreeEntry {
+                            name: format!("f{i:04}").into_bytes(),
+                            mode: EntryMode::Blob,
+                            object_hash: *hash,
+                        })
+                        .collect(),
+                }),
+            )
+        };
+        let moved_dir = dir(&blobs);
+        let top = |name: &[u8], sub: Hash, extra: &[(String, Hash)]| {
+            let mut entries = vec![TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: sub,
+            }];
+            entries.extend(extra.iter().map(|(n, h)| TreeEntry {
+                name: n.clone().into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: *h,
+            }));
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            put(&store, &Object::Tree(Tree { entries }))
+        };
+        let remote = commit_tree(&store, top(b"a", moved_dir, &[]), Vec::new(), 1);
+        let mut tip = commit_tree(&store, top(b"b", moved_dir, &[]), vec![remote], 2);
+        let mut extra = Vec::new();
+        for i in 0..12_u8 {
+            extra.push((format!("z{i:02}"), blob(&store, 500 + u64::from(i), 3000)));
+            tip = commit_tree(&store, top(b"b", moved_dir, &extra), vec![tip], 10 + i);
+        }
+        for max in [None, Some(8192)] {
+            let limits = ticketed(max);
+            let plan = plan_split(
+                &store,
+                tip,
+                Some(remote),
+                limits,
+                4096,
+                &PushControl::default(),
+                RefWriteCondition::Any,
+                "main",
+            )
+            .unwrap();
+            assert_eq!(plan.payload_cap, 4096, "{max:?}");
+        }
     }
 
     /// The refusal of a lone commit that only fits by containing the remote
