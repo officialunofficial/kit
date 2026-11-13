@@ -23,10 +23,11 @@
 //!   moved directory).
 //! * [`Cutter::cut`] cuts the chain: it finds the furthest commit whose real
 //!   plan fits the budget, by binary search over real plans from the commit
-//!   the weights say would fill the budget at best, and on past it while plans
-//!   fit. The least step, a single commit or the first advance forced to hold
-//!   the remote head, is checked with the real plan and, if its estimate is
-//!   over budget, an exact local dry seal.
+//!   the weights say would fill half the budget, and on past the commit they
+//!   say would fill all of it while plans fit and leave a pack to spare. The
+//!   least step, a single commit or the first advance forced to hold the
+//!   remote head, is checked with the real plan and, if its estimate is over
+//!   budget, an exact local dry seal.
 //!
 //! The caller's pack payload cap is a preferred size. When one commit (or the
 //! first advance, forced to hold the remote head) weighs more than the budget
@@ -472,46 +473,44 @@ impl Cutter<'_> {
             }
         }
         (fits, packs) = self.widest(from, fits, packs, over)?;
+        // The least step, when nothing larger fits, has not been probed.
+        let mut used = if let Some(used) = packs {
+            used
+        } else {
+            let (plan, used) = self.probe(from, fits)?;
+            if used > self.budget {
+                let forced = from == 0 && least > natural;
+                return Ok(match self.verify_forced(plan, fits, forced)? {
+                    None => Cut::To(fits),
+                    Some(overflow) => Cut::TooBig(overflow),
+                });
+            }
+            used
+        };
         let (mut reached, mut stride) = (ceiling, 1);
-        while over == ceiling
-            && fits == reached
-            && reached < end
-            && packs.is_none_or(|used| used < self.budget)
-        {
+        while over == ceiling && fits == reached && reached < end && used < self.budget {
             let next = (reached + stride).min(end);
             let next_packs = self.probe(from, next)?.1;
             if next_packs <= self.budget {
-                (fits, packs, reached, stride) = (next, Some(next_packs), next, stride * 2);
+                (fits, used, reached, stride) = (next, next_packs, next, stride * 2);
             } else {
-                (fits, _) = self.widest(from, fits, packs, next - 1)?;
+                (fits, _) = self.widest(from, fits, Some(used), next - 1)?;
                 break;
             }
         }
-        if fits > least {
-            return Ok(Cut::To(fits));
-        }
-        Ok(
-            match self.verify_forced(from, fits, from == 0 && least > natural)? {
-                None => Cut::To(fits),
-                Some(overflow) => Cut::TooBig(overflow),
-            },
-        )
+        Ok(Cut::To(fits))
     }
 
-    /// A step that cannot be split further must fit in the budget once
-    /// compressed: run the exact seal without uploading.
+    /// A step that cannot be split further, whose estimate is over the budget,
+    /// must still fit once compressed: run the exact seal without uploading.
     /// `holds_remote_head`: the step was forced to reach the remote head, which
     /// the refusal then says.
     fn verify_forced(
         &self,
-        from: usize,
+        plan: PackPlan,
         to: usize,
         holds_remote_head: bool,
     ) -> Result<Option<Overflow>, PushError> {
-        let (plan, packs) = self.probe(from, to)?;
-        if packs <= self.budget {
-            return Ok(None);
-        }
         let weight = plan_weight(self.store, &plan)?;
         match build_and_upload_packs(
             PackSink::Count,
@@ -623,8 +622,10 @@ fn raised_payload_cap(
 /// `tip`. One entry means the push is not split.
 ///
 /// Refuses, before anything is uploaded, a push that would need more than
-/// `ctl.max_steps` advances, one whose grants do not cover every advance, and
-/// one containing a single commit that cannot fit in an advance.
+/// `ctl.max_steps` advances (counted at the pack size the push starts with,
+/// unless a step that needs larger packs has been found by then), one whose
+/// grants do not cover every advance, and one containing a single commit that
+/// cannot fit in an advance.
 ///
 /// # Errors
 /// [`PushError::PushSplitLimit`], [`PushError::PushNotAuthorized`],
@@ -707,8 +708,10 @@ pub(super) fn plan_split(
         let mut needed: Option<u64> = None;
         let mut refusal: Option<PushError> = None;
         while from < chain.commits.len() {
-            // A pass that will be cut again at a larger size may have more
-            // steps than the last one needs.
+            // A pass that has found a step needing larger packs will be cut
+            // again, and may have more steps than that cut needs. A step that
+            // needs them and comes after the limit is reached is found too
+            // late: the push is refused at the size it was started with.
             if needed.is_none() && steps.len() >= ctl.max_steps {
                 return Err(too_many_steps(ctl.max_steps));
             }
