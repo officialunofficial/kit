@@ -321,11 +321,11 @@ fn cumulative_weights_capped(
 
 /// The largest total weight (payload plus frames) after which a pack must
 /// seal: either the payload cap, or the serialized limit net of header and
-/// trailer. Two consecutive packs always weigh more than this together.
+/// trailer. A search heuristic only: the decoded-byte and entry seals can close
+/// a lighter pack, so the real plan is always checked, never this weight.
 fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
-    let serialized = max_pack_bytes.map_or(u64::MAX, |limit| {
-        limit.saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
-    });
+    let serialized = pack::serialized_limit(max_pack_bytes)
+        .saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64);
     payload_cap.min(serialized).max(1)
 }
 
@@ -1402,7 +1402,10 @@ mod tests {
     #[test]
     fn the_raised_cap_never_passes_the_format_or_the_advertised_maximum() {
         // The weight fits only by filling every pack: clamped, not refused.
-        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        // With no advertised limit the body limit every fetch applies sets
+        // the ceiling, net of the header and trailer.
+        let ceiling = pack_weight_cap(pack::MAX_TOTAL_PAYLOAD, None);
+        assert_eq!(ceiling, kit_core::protocol::PACK_BODY_LIMIT - 44);
         let limits = ticketed(None);
         assert_eq!(
             raised_payload_cap(limits, 6, 6 * ceiling, 0, 1 << 20).unwrap(),
@@ -1429,7 +1432,7 @@ mod tests {
 
     #[test]
     fn a_forced_first_advance_past_the_ceiling_is_left_to_the_cut() {
-        let ceiling = pack::MAX_TOTAL_PAYLOAD;
+        let ceiling = pack_weight_cap(pack::MAX_TOTAL_PAYLOAD, None);
         // Clamped to the ceiling, not refused: the cut names the remedy.
         let cap = raised_payload_cap(ticketed(None), 6, 1, 7 * ceiling, 0)
             .unwrap()

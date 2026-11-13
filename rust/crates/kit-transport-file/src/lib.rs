@@ -1622,6 +1622,11 @@ impl Transport for FileTransport {
     // ------------------------------------------------------------------
 
     fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+        // Refuse a pack that `download_pack` would refuse, rather than store
+        // something that can never be read back.
+        if bytes.len() as u64 > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        }
         let dest = self.pack_path(key);
         write_atomic(&dest, bytes, true)
             .map_err(|e| TransportError::RemoteError(format!("upload_pack I/O error: {e}")))
@@ -2019,6 +2024,53 @@ mod tests {
             t.download_pack(&key),
             Err(TransportError::PayloadTooLarge(_))
         ));
+    }
+
+    // The fetch limit is `usize::MAX` where a pack cannot be larger than that.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn upload_pack_refuses_a_pack_download_pack_would_refuse() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x56u8; 32]);
+        // Zeroed memory is mapped lazily, so the test commits none of it.
+        let over = vec![0_u8; PACK_BODY_LIMIT_USIZE + 1];
+        assert!(matches!(
+            t.upload_pack(&over, &key),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+        assert!(!t.pack_exists(&key).unwrap());
+    }
+
+    #[test]
+    #[ignore = "reads back a pack of 1.2 million entries; minutes in a debug build"]
+    fn a_pack_of_the_most_entries_a_writer_seals_is_stored_and_read_back() {
+        use kit_core::pack::{MAX_WRITE_ENTRIES, PackReader, PackWriter, pack_key};
+        use kit_core::store::ObjectStore;
+
+        let mut w = PackWriter::new();
+        for i in 0..u32::try_from(MAX_WRITE_ENTRIES).unwrap() {
+            let bytes = kit_core::serialize::serialize(&kit_core::object::Object::Blob(
+                kit_core::object::Blob {
+                    data: i.to_le_bytes().to_vec(),
+                },
+            ))
+            .unwrap();
+            w.push_raw(kit_core::hash::hash(&bytes), &bytes).unwrap();
+        }
+        let pack = w.finish().unwrap();
+        let key = PackKey::from_hash(pack_key(&pack));
+
+        let remote = tmp();
+        let t = FileTransport::new(remote.path());
+        t.upload_pack(&pack, &key).unwrap();
+        let fetched = t.download_pack(&key).unwrap();
+        assert_eq!(fetched, pack);
+
+        let local = tmp();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(local.path())).unwrap();
+        let report = PackReader::read(&fetched, &store).unwrap();
+        assert_eq!(report.stored.len(), MAX_WRITE_ENTRIES);
     }
 
     #[test]

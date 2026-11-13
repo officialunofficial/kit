@@ -7,7 +7,7 @@
 
 use super::{
     DecodeLimits, DecodedEntry, DeltaBaseSource, ENTRY_FRAME_LEN, HEADER_LEN, PackError,
-    PackWriter, decode_entries_with, decompress_zstd_entry,
+    PackWriter, decode_entries_with, decompress_zstd_entry, within_read_limits,
 };
 use crate::hash::Hash;
 use std::collections::HashSet;
@@ -40,7 +40,14 @@ pub struct Rewritten {
 /// Invalid input produces the decoder's error, including
 /// [`PackError::DeltaBaseMissing`] when a required excluded base cannot be
 /// supplied. A changed output exceeding the writer's caps produces the
-/// writer's existing error. No partial output is returned.
+/// writer's existing error. An output that a writer would not seal (longer
+/// than [`crate::protocol::PACK_BODY_LIMIT`], decoding to more than
+/// [`super::decoded_bytes_cap`] or holding more than
+/// [`super::MAX_WRITE_ENTRIES`] entries) produces [`PackError::PackfileTooLarge`].
+/// The entry bound is the writer's own margin, not the reader's: a small pack
+/// takes about twice as many entries to read, so a changed rewrite of an input
+/// sealed past the bound is refused unless it leaves at most that many
+/// entries. An unchanged pack is returned as is. No partial output is returned.
 #[allow(clippy::implicit_hasher)] // The orchestrator fixes this additive API signature.
 pub fn rewrite_excluding<B: DeltaBaseSource>(
     pack: &[u8],
@@ -159,7 +166,17 @@ impl<'a> Rewrite<'a> {
             if let Some(error) = self.writer_error {
                 return Err(error);
             }
-            self.writer.finish()?
+            let decoded = self.writer.total_decoded();
+            let entries = self.writer.entry_count();
+            let bytes = self.writer.finish()?;
+            // Rawifying a delta can grow the pack past what any fetch takes,
+            // and compressing an entry the input stored plain adds decoded
+            // bytes. Dropping entries shortens the pack, which lowers the
+            // caps that follow its length.
+            if !within_read_limits(bytes.len(), decoded, entries) {
+                return Err(PackError::PackfileTooLarge);
+            }
+            bytes
         };
         Ok(Rewritten {
             bytes,

@@ -181,7 +181,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small
   pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
-  about 3.05 million and 6.10 million.
+  about 3.05 million and 6.10 million. A push seals a pack before it holds
+  more than `pack::MAX_WRITE_ENTRIES` entries (1,198,372), half the
+  small-pack figure, where it sealed at the format's 10,000,000. The other
+  half of the reader's memory floor stays free for the objects of the pack.
 - `rebase` walks up to 1,000,000 ancestors of its base, and `bisect` walks
   up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
   range, as `merge` and `log` do. A longer walk fails with an error that
@@ -298,7 +301,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still goes into a pack of its own. A push uses larger packs only when a
   single commit cannot fit one advance's data packs otherwise: it raises the
   size for that push, once, to what that commit needs, never past the format
-  limit or the largest pack the remote accepts. Against a server that does not
+  limit, the body limit every fetch applies (4 GiB, header and trailer
+  included) or the largest pack the remote accepts. Against a server that does not
   advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
   of objects, where it carries about 1.5 GiB at the preferred size. A commit
   that does not fit even then is refused before any upload, with
@@ -307,6 +311,29 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the size holds up to two packs of that size in memory (one pack and one
   prepared batch). The `kit` command has no flag to raise the cap.
 
+- A push seals only packs that every reader accepts. A pack stays within the
+  fetch body limit of 4 GiB even when the remote advertises no pack limit (a
+  `kit+file://`, `kit+ssh://` or `kit+s3://` remote). It stays within the
+  bytes a pack read decodes (`pack::decoded_bytes_cap`, from 2 GiB for a
+  small pack up to 16 GiB), so objects that compress well no longer make a
+  pack a read refuses. It holds at most `pack::MAX_WRITE_ENTRIES` entries.
+  A push that sealed such a pack succeeded, and a clone then failed. One rule
+  decides every seal, `pack::PackFill::seals_before`, with
+  `pack::serialized_limit` and `pack::serialized_bound`. The push, the
+  planning of its split, `kit_client::Plan::prepare` and the closure export
+  all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
+  a writer would not seal (above the fetch body limit, the decoded cap or
+  `MAX_WRITE_ENTRIES` entries) with `PackfileTooLarge`. When the remote issues
+  upload tickets, a single commit that adds more than the data-pack budget
+  (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
+  about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
+  its packs need tickets, because a writer seals no more entries than that per pack. `Plan::prepare`
+  also cuts the server's `max_pack_bytes` to the fetch body limit.
+  `PackWriter` reports `total_decoded` and `serialized_len`, and
+  `PreparedRaw` and `PreparedDelta` report `decoded_len`. `pack::delta_decoded_len`
+  and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
+  refuses to store a pack above the fetch body limit, as the S3 transport
+  does.
 ### Fixed
 
 - Two fetches of one clone no longer leave a record that makes every later

@@ -618,6 +618,10 @@ note on large packs.
   `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
   becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
   streaming/constant-memory `Transport` redesign, which is out of scope here.
+  A writer applies the limit whether or not the remote advertises
+  `max_pack_bytes`: it seals no pack above `min(advertised, PACK_BODY_LIMIT)`,
+  so a pack that was uploaded can be fetched. The `kit+file://` transport
+  refuses an upload above it, as the S3 transport does.
 - `REF_BODY_LIMIT = 256` bytes for a ref `GET`. It bounds the read; a
   body other than the 65-byte ref wire is rejected after it.
 - `REF_LIST_BODY_LIMIT = 16 MiB` for the `ListObjectsV2` XML

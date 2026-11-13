@@ -71,6 +71,7 @@ pub mod rewrite;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
+use crate::protocol::PACK_BODY_LIMIT;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 pub use rewrite::{Rewritten, rewrite_excluding};
 use std::borrow::Cow;
@@ -90,6 +91,12 @@ pub const VERSION: u32 = 1;
 /// contain `0x03`/`0x04` entries.
 pub const VERSION_V2: u32 = 2;
 
+/// The floor of the reader's memory caps: twice the largest object, which is
+/// a maximum-size base plus its target. The resident cap of a pack read and
+/// the decoded cap of a small pack are both this much at least, see
+/// [`MIN_TOTAL_DECODED`] and `resident_bytes_cap`.
+const MEMORY_FLOOR: usize = 2 * MAX_RAW_OBJECT_SIZE;
+
 /// Hard cap on entries (SPEC-PACKFILE §5).
 pub const MAX_ENTRIES: u32 = 10_000_000;
 /// Hard cap on the sum of payload bytes across all entries.
@@ -106,7 +113,7 @@ pub const MAX_TOTAL_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_TOTAL_DECODED: u64 = 16 * 1024 * 1024 * 1024;
 /// Decoded bytes that [`PackReader::read`] allows any pack, however small:
 /// a compressed delta stream of up to 1 GiB plus its 1 GiB result.
-const MIN_TOTAL_DECODED: u64 = 2 * MAX_RAW_OBJECT_SIZE as u64;
+pub const MIN_TOTAL_DECODED: u64 = MEMORY_FLOOR as u64;
 /// Decoded bytes allowed per wire byte of a pack, above [`MIN_TOTAL_DECODED`].
 ///
 /// Real packs expand about 2 to 4 times. The most that an honest pack can
@@ -118,9 +125,14 @@ const DECODED_PER_WIRE_BYTE: u64 = 32_768;
 
 /// The cap on decoded bytes for a pack of `pack_len` bytes: a multiple of the
 /// pack size, no lower than [`MIN_TOTAL_DECODED`] and no higher than
-/// [`MAX_TOTAL_DECODED`]. A few kilobytes of hostile input cannot force the
+/// 16 GiB. A few kilobytes of hostile input cannot force the
 /// full ceiling of decompression work.
-fn decoded_bytes_cap(pack_len: usize) -> u64 {
+///
+/// A writer seals a pack before the bytes it decodes to pass this cap for the
+/// pack's length so far. The pack only grows, so the cap for the final length
+/// is never lower.
+#[must_use]
+pub fn decoded_bytes_cap(pack_len: usize) -> u64 {
     (pack_len as u64)
         .saturating_mul(DECODED_PER_WIRE_BYTE)
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
@@ -145,6 +157,14 @@ fn read_budget(pack_len: usize, owned_bytes: Option<&AtomicU64>) -> ResidentBudg
 /// cost depends on the store path and on scheduling: 691 to 705 bytes per
 /// entry under `/tmp`, and 728 to 754 under a path of 37 characters.
 pub const PACK_ENTRY_RESIDENT_COST: usize = 896;
+/// The most entries a writer seals into one pack: half the floor of the
+/// reader's resident-memory cap divided by [`PACK_ENTRY_RESIDENT_COST`]. A
+/// pack with more entries can be refused on read even though it is under
+/// [`MAX_ENTRIES`], the format cap. The writer never relies on a larger cap
+/// that a long pack would allow. The reader charges the per-entry bookkeeping
+/// to the same cap as the bytes it decodes, so the other half of the floor
+/// stays free for the largest object a pack can hold.
+pub const MAX_WRITE_ENTRIES: usize = MEMORY_FLOOR / 2 / PACK_ENTRY_RESIDENT_COST;
 /// Entries that [`PackReader::read`] stages before it commits them. Each
 /// window holds at most this many temp files and staged-map slots, so a
 /// pack with millions of entries does not fill the disk or the heap.
@@ -292,6 +312,18 @@ impl PreparedRaw {
     pub fn conservative_len(&self) -> usize {
         self.bytes.len()
     }
+
+    /// Bytes a reader decodes for this entry: the object length when the
+    /// entry is compressed, none when it is stored raw. This is the amount
+    /// [`PackWriter::total_decoded`] adds on push.
+    #[must_use]
+    pub fn decoded_len(&self) -> u64 {
+        if self.frame.is_some() {
+            self.bytes.len() as u64
+        } else {
+            0
+        }
+    }
 }
 
 /// The delta-entry counterpart of [`PreparedRaw`], produced by
@@ -318,6 +350,111 @@ impl PreparedDelta {
     pub fn conservative_len(&self) -> usize {
         hash::HASH_LEN + self.stream.len()
     }
+
+    /// Bytes a reader decodes for this entry: the delta result, plus the
+    /// stream when the entry is compressed. This is the amount
+    /// [`PackWriter::total_decoded`] adds on push. A stream too short to
+    /// carry its result length counts as the largest object, so a caller
+    /// that seals on this value seals early rather than late.
+    #[must_use]
+    pub fn decoded_len(&self) -> u64 {
+        delta_decoded_len(&self.stream, self.frame.is_some())
+    }
+}
+
+/// Bytes a reader decodes for a delta entry holding `stream`.
+#[must_use]
+pub fn delta_decoded_len(stream: &[u8], compressed: bool) -> u64 {
+    let result = validate_delta_result_size(stream).unwrap_or(MAX_RAW_OBJECT_SIZE) as u64;
+    let stream = if compressed { stream.len() as u64 } else { 0 };
+    result.saturating_add(stream)
+}
+
+/// The most bytes one sealed pack holds, header and trailer included: the
+/// limit the remote advertises, never above [`PACK_BODY_LIMIT`]. Every fetch
+/// refuses a pack over that, so a writer applies it even when the remote
+/// advertises no limit.
+#[must_use]
+pub fn serialized_limit(advertised: Option<u64>) -> u64 {
+    advertised.map_or(PACK_BODY_LIMIT, |limit| limit.min(PACK_BODY_LIMIT))
+}
+
+/// An upper bound on the length of a pack of `entries` entries whose wire
+/// payloads total `payload` bytes: the payloads, the frame of each entry, the
+/// header and the trailer.
+#[must_use]
+pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
+    payload
+        .saturating_add((entries as u64).saturating_mul(ENTRY_FRAME_LEN as u64))
+        .saturating_add((HEADER_LEN + TRAILER_LEN) as u64)
+}
+
+/// What a pack under construction holds, as far as the limits a reader
+/// applies are concerned. Every writer that seals packs asks
+/// [`Self::seals_before`] before it adds an entry, so a pack it seals is one
+/// every reader accepts.
+#[derive(Clone, Copy, Debug)]
+pub struct PackFill {
+    entries: usize,
+    payload: u64,
+    decoded: u64,
+    serialized_len: usize,
+}
+
+impl PackFill {
+    /// The fill of the pack `w` is building.
+    #[must_use]
+    pub fn of(w: &PackWriter) -> Self {
+        Self {
+            entries: w.entry_count(),
+            payload: w.total_payload(),
+            decoded: w.total_decoded(),
+            serialized_len: w.serialized_len(),
+        }
+    }
+
+    /// Would adding an entry of (conservative, uncompressed) size
+    /// `add_bound` that a reader decodes to `add_decoded` bytes exceed
+    /// `payload_cap`, pass the serialized limit or the decoded cap a reader
+    /// applies, or does the pack already hold `max_entries` entries? Never
+    /// true for an empty pack: a single entry over the cap (a blob between
+    /// the cap and [`MAX_RAW_OBJECT_SIZE`], or a test-injected tiny cap)
+    /// lands alone in its own pack rather than looping forever.
+    ///
+    /// The serialized limit is `max_pack_bytes`, never above
+    /// [`PACK_BODY_LIMIT`], see [`serialized_limit`]. The decoded cap is the
+    /// reader's for the pack's length so far: the pack only grows, so the cap
+    /// for its final length is never lower. `max_entries` is at most
+    /// [`MAX_WRITE_ENTRIES`].
+    #[must_use]
+    pub fn seals_before(
+        self,
+        add_bound: u64,
+        add_decoded: u64,
+        payload_cap: u64,
+        max_pack_bytes: Option<u64>,
+        max_entries: usize,
+    ) -> bool {
+        let next_payload = self.payload.saturating_add(add_bound);
+        self.entries > 0
+            && (self.entries >= max_entries.min(MAX_WRITE_ENTRIES)
+                || next_payload > payload_cap
+                || serialized_bound(next_payload, self.entries + 1)
+                    > serialized_limit(max_pack_bytes)
+                || self.decoded.saturating_add(add_decoded)
+                    > decoded_bytes_cap(self.serialized_len))
+    }
+}
+
+/// Would a writer seal a finished pack of `len` bytes that holds
+/// `entries` entries and decodes to `decoded` bytes? The same limits as
+/// [`PackFill::seals_before`], for a writer that cannot seal early because it
+/// rewrites a pack it was given.
+#[must_use]
+pub(crate) fn within_read_limits(len: usize, decoded: u64, entries: usize) -> bool {
+    len as u64 <= PACK_BODY_LIMIT
+        && decoded <= decoded_bytes_cap(len)
+        && entries <= MAX_WRITE_ENTRIES
 }
 
 /// Builds a packfile, enforcing entry/payload caps and streaming each
@@ -337,6 +474,10 @@ pub struct PackWriter {
     buf: Vec<u8>,
     entry_count: u32,
     total_payload: u64,
+    // Bytes a reader decodes from the entries pushed so far, as it charges
+    // them: each compressed entry's uncompressed length plus each delta's
+    // result length. A raw entry costs nothing here.
+    total_decoded: u64,
     // Set the first time `push_raw`/`push_delta` emits a `0x03`/`0x04`
     // entry. `finish` reads this to decide the header's `version`
     // field (SPEC-PACKFILE §1's writer version-selection rule) — v2
@@ -367,6 +508,7 @@ impl PackWriter {
             buf,
             entry_count: 0,
             total_payload: 0,
+            total_decoded: 0,
             has_compressed_entry: false,
             raw_only: false,
         }
@@ -463,6 +605,7 @@ impl PackWriter {
             let payload_len = ZSTD_LEN_PREFIX + frame.len();
             self.check_caps_for(payload_len)?;
             self.total_payload += payload_len as u64;
+            self.total_decoded = self.total_decoded.saturating_add(bytes.len() as u64);
             self.append_entry(0x03, &[&uncompressed_len.to_le_bytes(), &frame])?;
             self.has_compressed_entry = true;
         } else {
@@ -535,6 +678,9 @@ impl PackWriter {
             let payload_len = hash::HASH_LEN + ZSTD_LEN_PREFIX + frame.len();
             self.check_caps_for(payload_len)?;
             self.total_payload += payload_len as u64;
+            self.total_decoded = self
+                .total_decoded
+                .saturating_add(delta_decoded_len(delta_stream, true));
             self.append_entry(
                 0x04,
                 &[
@@ -548,6 +694,9 @@ impl PackWriter {
             let payload_len = hash::HASH_LEN + delta_stream.len();
             self.check_caps_for(payload_len)?;
             self.total_payload += payload_len as u64;
+            self.total_decoded = self
+                .total_decoded
+                .saturating_add(delta_decoded_len(delta_stream, false));
             self.append_entry(0x02, &[base_hash.as_slice(), delta_stream])?;
         }
         self.entry_count += 1;
@@ -603,6 +752,22 @@ impl PackWriter {
     #[must_use]
     pub fn total_payload(&self) -> u64 {
         self.total_payload
+    }
+
+    /// Bytes a reader decodes from the entries pushed so far: each
+    /// compressed entry's uncompressed length plus each delta's result
+    /// length. [`PackReader::read`] refuses a pack whose total passes
+    /// [`decoded_bytes_cap`] for its length.
+    #[must_use]
+    pub fn total_decoded(&self) -> u64 {
+        self.total_decoded
+    }
+
+    /// Length in bytes of the pack [`Self::finish`] would return now: the
+    /// header, every entry and the trailer.
+    #[must_use]
+    pub fn serialized_len(&self) -> usize {
+        self.buf.len() + TRAILER_LEN
     }
 
     /// Serialise the pack: header + entries + trailer. Entries are
@@ -2143,9 +2308,7 @@ fn replay_window<'p, 'b>(
 /// from a small pack is refused while that stream is resident.
 /// Saturation avoids arithmetic traps on 32-bit hosts.
 fn resident_bytes_cap(pack_len: usize) -> usize {
-    MAX_RAW_OBJECT_SIZE
-        .saturating_mul(2)
-        .max(pack_len.saturating_mul(16))
+    MEMORY_FLOOR.max(pack_len.saturating_mul(16))
 }
 
 /// Peak owned payload bytes, released with each reservation. Unlike
@@ -4086,6 +4249,176 @@ mod tests {
         assert_eq!(report.raw_count, 6);
         assert_eq!(report.delta_count, 1);
         assert_eq!(store.read(&hash::hash(&target)).unwrap(), target);
+    }
+
+    #[test]
+    fn the_most_entries_a_writer_seals_leave_room_for_the_largest_object() {
+        let floor = resident_bytes_cap(0);
+        let budget = || ResidentBudget::new(floor, None).with_entry_cost(PACK_ENTRY_RESIDENT_COST);
+        assert_eq!(MAX_WRITE_ENTRIES, 1_198_372);
+        // The bookkeeping of a full pack uses half the floor, and an object of
+        // the largest size still fits beside it.
+        let full = budget();
+        full.reserve_entries(MAX_WRITE_ENTRIES).unwrap();
+        full.charge(MAX_RAW_OBJECT_SIZE).unwrap();
+        // One entry more than the floor holds is refused outright.
+        let max_entries_at_floor = floor / PACK_ENTRY_RESIDENT_COST;
+        budget().reserve_entries(max_entries_at_floor).unwrap();
+        assert!(matches!(
+            budget().reserve_entries(max_entries_at_floor + 1),
+            Err(PackError::PackfileTooLarge)
+        ));
+        assert!(MAX_WRITE_ENTRIES <= MAX_ENTRIES as usize);
+    }
+
+    #[test]
+    fn the_decoded_cap_follows_the_pack_length_so_far() {
+        let fill = |decoded, serialized_len| PackFill {
+            entries: 1,
+            payload: 0,
+            decoded,
+            serialized_len,
+        };
+        let seals = |fill: PackFill, add| fill.seals_before(0, add, u64::MAX, None, usize::MAX);
+        let floor = MIN_TOTAL_DECODED;
+        // A short pack holds up to the floor and no more.
+        assert!(!seals(fill(floor - 1, 100), 1));
+        assert!(seals(fill(floor, 100), 1));
+        // A longer pack holds a multiple of its length, up to 16 GiB.
+        let long = (floor / 16384) as usize;
+        assert!(!seals(fill(floor, long), 1));
+        assert!(!seals(fill(2 * floor - 1, long), 1));
+        assert!(seals(fill(2 * floor, long), 1));
+        let huge = 1 << 30;
+        assert!(!seals(fill(16 << 30, huge), 0));
+        assert!(seals(fill(16 << 30, huge), 1));
+    }
+
+    #[test]
+    fn a_fill_seals_on_each_reader_limit_and_never_when_empty() {
+        let fill = |entries, payload| PackFill {
+            entries,
+            payload,
+            decoded: 0,
+            serialized_len: 0,
+        };
+        // An empty pack takes any entry.
+        assert!(!fill(0, 0).seals_before(u64::MAX, u64::MAX, 1, Some(1), 1));
+        // Entry bound: the caller's, and never above the writer's.
+        assert!(fill(3, 0).seals_before(0, 0, u64::MAX, None, 3));
+        assert!(!fill(2, 0).seals_before(0, 0, u64::MAX, None, 3));
+        assert!(!fill(MAX_WRITE_ENTRIES - 1, 0).seals_before(0, 0, u64::MAX, None, usize::MAX));
+        assert!(fill(MAX_WRITE_ENTRIES, 0).seals_before(0, 0, u64::MAX, None, usize::MAX));
+        // Payload cap.
+        assert!(!fill(1, 10).seals_before(5, 0, 15, None, usize::MAX));
+        assert!(fill(1, 10).seals_before(6, 0, 15, None, usize::MAX));
+        // Serialized limit: the advertised one, or the body limit without one.
+        let room = serialized_bound(0, 2);
+        assert!(!fill(1, 10).seals_before(5, 0, u64::MAX, Some(room + 15), usize::MAX));
+        assert!(fill(1, 10).seals_before(6, 0, u64::MAX, Some(room + 15), usize::MAX));
+        assert!(!fill(1, 0).seals_before(PACK_BODY_LIMIT - room, 0, u64::MAX, None, usize::MAX));
+        assert!(fill(1, 0).seals_before(PACK_BODY_LIMIT - room + 1, 0, u64::MAX, None, usize::MAX));
+    }
+
+    #[test]
+    fn a_delta_decodes_to_its_result_and_a_compressed_one_also_to_its_stream() {
+        let base = write_blob_via_serialize(&vec![b'a'; 4096]);
+        let mut content = vec![b'a'; 4096];
+        content[0] = b'b';
+        let target = write_blob_via_serialize(&content);
+        let stream = delta::encode(&base, &target).unwrap();
+        let result = target.len() as u64;
+        assert_eq!(delta_decoded_len(&stream, false), result);
+        assert_eq!(
+            delta_decoded_len(&stream, true),
+            result + stream.len() as u64
+        );
+        // A stream that cannot carry its result length counts as the largest object.
+        assert_eq!(delta_decoded_len(&[], false), MAX_RAW_OBJECT_SIZE as u64);
+        assert_eq!(delta_decoded_len(&[], true), MAX_RAW_OBJECT_SIZE as u64);
+    }
+
+    #[test]
+    #[cfg(feature = "pack-zstd")]
+    fn the_writer_counts_the_bytes_a_reader_decodes() {
+        let stored = write_blob_via_serialize(&incompressible_bytes(7, 4096));
+        let squeezed = write_blob_via_serialize(&compressible_bytes(4096));
+        let mut w = PackWriter::new();
+        // A stored raw entry decodes to nothing, a compressed one to its length.
+        w.push_raw(hash::hash(&stored), &stored).unwrap();
+        assert_eq!(w.total_decoded(), 0);
+        w.push_raw(hash::hash(&squeezed), &squeezed).unwrap();
+        assert_eq!(w.total_decoded(), squeezed.len() as u64);
+        let before = w.total_decoded();
+        let prepared = PackWriter::prepare_raw(hash::hash(&squeezed), squeezed.clone());
+        assert_eq!(prepared.decoded_len(), squeezed.len() as u64);
+        w.push_prepared_raw(prepared).unwrap();
+        assert_eq!(w.total_decoded(), before + squeezed.len() as u64);
+        let prepared = PackWriter::prepare_raw(hash::hash(&stored), stored.clone());
+        assert_eq!(prepared.decoded_len(), 0);
+
+        // A delta adds its result, and its stream too when it is compressed.
+        let mut content = compressible_bytes(4096);
+        content[0] = 0x43;
+        let target = write_blob_via_serialize(&content);
+        let stream = delta::encode(&squeezed, &target).unwrap();
+        let compressed = maybe_compress(&stream).is_some();
+        let expected = delta_decoded_len(&stream, compressed);
+        let before = w.total_decoded();
+        let prepared = PackWriter::prepare_delta(hash::hash(&squeezed), stream.clone());
+        assert_eq!(prepared.decoded_len(), expected);
+        w.push_prepared_delta(prepared).unwrap();
+        assert_eq!(w.total_decoded(), before + expected);
+        let before = w.total_decoded();
+        w.push_delta(&hash::hash(&squeezed), &stream).unwrap();
+        assert_eq!(w.total_decoded(), before + expected);
+    }
+
+    #[test]
+    fn the_serialized_bound_is_the_length_of_a_pack_of_stored_entries() {
+        assert_eq!(serialized_bound(0, 0), 44);
+        assert_eq!(serialized_bound(100, 3), 100 + 3 * 5 + 44);
+        let (pack, _) = tiny_blob_pack(7);
+        let mut w = PackWriter::new_raw_only();
+        for i in 0..7_u32 {
+            let blob = write_blob_via_serialize(&i.to_le_bytes());
+            w.push_raw(hash::hash(&blob), &blob).unwrap();
+        }
+        assert_eq!(w.serialized_len(), pack.len());
+        assert_eq!(
+            serialized_bound(w.total_payload(), w.entry_count()),
+            pack.len() as u64
+        );
+        assert_eq!(PackFill::of(&w).serialized_len, pack.len());
+    }
+
+    #[test]
+    fn a_finished_pack_is_within_the_read_limits_up_to_each_limit() {
+        let floor = MIN_TOTAL_DECODED;
+        assert!(within_read_limits(100, floor, MAX_WRITE_ENTRIES));
+        assert!(!within_read_limits(100, floor + 1, 1));
+        assert!(!within_read_limits(100, 0, MAX_WRITE_ENTRIES + 1));
+        // A longer pack decodes more.
+        let long = (floor / DECODED_PER_WIRE_BYTE) as usize * 2;
+        assert!(within_read_limits(long, 2 * floor, 1));
+        assert!(!within_read_limits(
+            long,
+            2 * floor + DECODED_PER_WIRE_BYTE * 4,
+            1
+        ));
+        #[cfg(target_pointer_width = "64")]
+        {
+            use crate::protocol::PACK_BODY_LIMIT_USIZE;
+            assert!(within_read_limits(PACK_BODY_LIMIT_USIZE, 0, 1));
+            assert!(!within_read_limits(PACK_BODY_LIMIT_USIZE + 1, 0, 1));
+        }
+    }
+
+    #[test]
+    fn the_serialized_limit_is_the_advertised_one_never_above_the_body_limit() {
+        assert_eq!(serialized_limit(None), PACK_BODY_LIMIT);
+        assert_eq!(serialized_limit(Some(7)), 7);
+        assert_eq!(serialized_limit(Some(u64::MAX)), PACK_BODY_LIMIT);
     }
 
     #[test]

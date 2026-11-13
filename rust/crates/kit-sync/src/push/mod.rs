@@ -1,7 +1,9 @@
 //! Native repository push: bounded packs and conditioned ref publication.
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
-use kit_core::pack::{self, PackWriter, PreparedDelta, PreparedRaw};
+use kit_core::pack::{
+    self, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_bound, serialized_limit,
+};
 use kit_core::protocol::{PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
@@ -733,12 +735,6 @@ fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64,
     Ok(cap)
 }
 
-fn serialized_bound(payload: u64, entries: usize) -> u64 {
-    payload
-        .saturating_add((entries as u64).saturating_mul(pack::ENTRY_FRAME_LEN as u64))
-        .saturating_add((pack::HEADER_LEN + pack::TRAILER_LEN) as u64)
-}
-
 fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
     limits.tickets_per_advance.is_some()
         && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
@@ -761,7 +757,7 @@ fn estimate_pack_sizes(
 }
 
 /// [`estimate_pack_sizes`] with the entry bound a pack holds, so a test can
-/// reach it without ten million entries.
+/// reach it without a million entries.
 fn estimate_pack_sizes_with(
     store: &ObjectStore,
     plan: &transfer::PackPlan,
@@ -771,29 +767,44 @@ fn estimate_pack_sizes_with(
 ) -> Result<Vec<u64>, PushError> {
     let mut packs = Vec::new();
     let mut payload = 0_u64;
+    let mut decoded = 0_u64;
     let mut entries = 0_usize;
-    let sizes = plan
+    let raw = plan
         .raw
         .iter()
-        .map(|hash| store.object_metadata(hash).map(|meta| meta.len()))
+        .map(|hash| {
+            store
+                .object_metadata(hash)
+                .map(|meta| (meta.len(), meta.len()))
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    for size in sizes.into_iter().chain(
-        plan.deltas
-            .iter()
-            .map(|delta| (HASH_LEN + delta.stream.len()) as u64),
-    ) {
+    // An entry may compress on the wire, and then a reader counts its whole
+    // length as decoded. The decoded bound here is the floor of the reader's
+    // cap, which no pack's cap is below, so the estimate never counts fewer
+    // packs than a real seal needs. It counts every raw object as decoded, so
+    // with a payload cap above 2 GiB it cuts about every 2 GiB even for
+    // content stored plain. That only over-counts packs.
+    let deltas = plan.deltas.iter().map(|delta| {
+        (
+            (HASH_LEN + delta.stream.len()) as u64,
+            pack::delta_decoded_len(&delta.stream, true),
+        )
+    });
+    for (size, size_decoded) in raw.into_iter().chain(deltas) {
         let next_payload = payload.saturating_add(size);
         if entries > 0
-            && (entries >= max_entries
+            && (entries >= max_entries.min(pack::MAX_WRITE_ENTRIES)
                 || next_payload > payload_cap
-                || max_pack_bytes
-                    .is_some_and(|limit| serialized_bound(next_payload, entries + 1) > limit))
+                || serialized_bound(next_payload, entries + 1) > serialized_limit(max_pack_bytes)
+                || decoded.saturating_add(size_decoded) > pack::MIN_TOTAL_DECODED)
         {
             packs.push(serialized_bound(payload, entries));
             payload = 0;
+            decoded = 0;
             entries = 0;
         }
         payload = payload.saturating_add(size);
+        decoded = decoded.saturating_add(size_decoded);
         entries += 1;
     }
     if entries > 0 {
@@ -880,6 +891,7 @@ fn build_and_upload_packs(
             if should_seal(
                 &w,
                 entry.conservative_len() as u64,
+                entry.decoded_len(),
                 payload_cap,
                 limits.max_pack_bytes,
                 MAX_PACK_ENTRIES,
@@ -915,6 +927,7 @@ fn build_and_upload_packs(
             if should_seal(
                 &w,
                 entry.conservative_len() as u64,
+                entry.decoded_len(),
                 payload_cap,
                 limits.max_pack_bytes,
                 MAX_PACK_ENTRIES,
@@ -1159,28 +1172,24 @@ fn cache_delta_bases(
 
 /// Most entries one pack holds. A plan can pass it, because a chunk of a large
 /// file counts toward no cap and a repeated chunk may be listed twice.
-const MAX_PACK_ENTRIES: usize = pack::MAX_ENTRIES as usize;
+const MAX_PACK_ENTRIES: usize = pack::MAX_WRITE_ENTRIES;
 
-/// Would pushing an entry of (conservative, uncompressed) size
-/// `add_bound` into `w` exceed `payload_cap`, or does `w` already hold
-/// `max_entries` entries? Never true for an empty writer — a single entry
-/// over the cap (a blob between the cap and
-/// [`kit_core::store::MAX_RAW_OBJECT_SIZE`], or a test-injected tiny cap;
-/// entries stay under [`pack::MAX_TOTAL_PAYLOAD`] because of that size
-/// limit) lands alone in its own pack rather than looping forever.
+/// [`PackFill::seals_before`] for the pack `w` is building.
 fn should_seal(
     w: &PackWriter,
     add_bound: u64,
+    add_decoded: u64,
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
     max_entries: usize,
 ) -> bool {
-    let next_payload = w.total_payload().saturating_add(add_bound);
-    w.entry_count() > 0
-        && (w.entry_count() >= max_entries
-            || next_payload > payload_cap
-            || max_pack_bytes
-                .is_some_and(|limit| serialized_bound(next_payload, w.entry_count() + 1) > limit))
+    PackFill::of(w).seals_before(
+        add_bound,
+        add_decoded,
+        payload_cap,
+        max_pack_bytes,
+        max_entries,
+    )
 }
 
 /// Finish `w`, upload it, record its key, and replace `w` with a fresh
@@ -1209,10 +1218,7 @@ fn seal_pack(
             holds_remote_head: false,
         });
     }
-    if limits
-        .max_pack_bytes
-        .is_some_and(|limit| pack.len() as u64 > limit)
-    {
+    if pack.len() as u64 > serialized_limit(limits.max_pack_bytes) {
         return Err(PushError::from(SourceError::PayloadTooLarge(pack.len())));
     }
     let pack_key = pack::pack_key(&pack);
@@ -1240,6 +1246,7 @@ mod rebaseline_tests;
 mod tests {
     use super::*;
     use kit_core::layout::RepoLayout;
+    use kit_core::protocol::PACK_BODY_LIMIT;
 
     #[test]
     fn a_pack_holds_at_most_256_mib_unless_the_caller_says_otherwise() {
@@ -1271,22 +1278,132 @@ mod tests {
             .collect()
     }
 
+    fn blob(data: &[u8]) -> (Hash, Vec<u8>) {
+        let bytes = kit_core::serialize::serialize(&kit_core::object::Object::Blob(
+            kit_core::object::Blob {
+                data: data.to_vec(),
+            },
+        ))
+        .unwrap();
+        (kit_core::hash::hash(&bytes), bytes)
+    }
+
+    /// Push `entries` through the sealing rule, reading back each pack it
+    /// seals. Returns the number of packs.
+    fn push_and_read_back(
+        entries: impl Iterator<Item = (Hash, Vec<u8>)>,
+        payload_cap: u64,
+        max_pack_bytes: Option<u64>,
+    ) -> usize {
+        let (_dir, store) = store();
+        let mut packs = 0;
+        let mut w = PackWriter::new();
+        let mut seal = |w: &mut PackWriter| {
+            let pack = std::mem::replace(w, PackWriter::new()).finish().unwrap();
+            let read = kit_core::pack::PackReader::read(&pack, &store).map(|_| ());
+            assert!(
+                read.is_ok(),
+                "a sealed pack of {} bytes: {read:?}",
+                pack.len()
+            );
+            assert!(pack.len() as u64 <= serialized_limit(max_pack_bytes));
+            packs += 1;
+        };
+        for (id, bytes) in entries {
+            let entry = PackWriter::prepare_raw(id, bytes);
+            if should_seal(
+                &w,
+                entry.conservative_len() as u64,
+                entry.decoded_len(),
+                payload_cap,
+                max_pack_bytes,
+                MAX_PACK_ENTRIES,
+            ) {
+                seal(&mut w);
+            }
+            w.push_prepared_raw(entry).unwrap();
+        }
+        seal(&mut w);
+        packs
+    }
+
+    #[test]
+    #[ignore = "reads back packs of 1.2 million entries; several minutes in a debug build"]
+    fn a_pack_of_tiny_blobs_the_push_seals_is_read_back() {
+        let count = u32::try_from(pack::MAX_WRITE_ENTRIES).unwrap() + 100_000;
+        let packs = push_and_read_back(
+            (0..count).map(|i| blob(&i.to_le_bytes())),
+            DEFAULT_PACK_PAYLOAD_CAP,
+            None,
+        );
+        assert_eq!(packs, 2);
+    }
+
+    #[test]
+    #[ignore = "compresses 3 GiB; minutes in a debug build"]
+    fn a_pack_of_compressible_objects_the_push_seals_is_read_back() {
+        // Each object decodes to 128 MiB and takes a few kilobytes on the
+        // wire. The decoded floor of 2 GiB does not seal here, since the
+        // reader's cap grows with the pack faster than the content does; the
+        // push and the read agree on that.
+        let mut data = vec![0_u8; 128 << 20];
+        let packs = push_and_read_back(
+            (0..24_u64).map(|i| {
+                data[..8].copy_from_slice(&i.to_le_bytes());
+                blob(&data)
+            }),
+            DEFAULT_PACK_PAYLOAD_CAP,
+            None,
+        );
+        assert!(packs >= 2, "{packs}");
+    }
+
+    #[test]
+    #[ignore = "builds a pack of about 4 GiB and needs about 9 GiB of memory"]
+    fn a_pack_sealed_at_the_format_payload_cap_fits_the_fetch_body_limit() {
+        let cap = effective_payload_cap(pack::MAX_TOTAL_PAYLOAD, None).unwrap();
+        let size = 64_usize << 20;
+        let overhead = blob(&vec![0; size - 64]).1.len() - (size - 64);
+        // Content that does not compress.
+        let mut data = vec![0_u8; size - overhead];
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        for word in data.chunks_mut(8) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let n = word.len();
+            word.copy_from_slice(&state.to_le_bytes()[..n]);
+        }
+        let mut w = PackWriter::new();
+        for i in 0..80_u64 {
+            data[..8].copy_from_slice(&i.to_le_bytes());
+            let (id, bytes) = blob(&data);
+            assert_eq!(bytes.len(), size);
+            if should_seal(&w, bytes.len() as u64, 0, cap, None, MAX_PACK_ENTRIES) {
+                break;
+            }
+            w.push_raw(id, &bytes).unwrap();
+        }
+        let pack = w.finish().unwrap();
+        assert!(pack.len() as u64 <= PACK_BODY_LIMIT, "{} bytes", pack.len());
+    }
+
     #[test]
     fn a_pack_seals_when_it_holds_the_most_entries_it_may() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
         let mut w = PackWriter::new();
         // An empty writer never seals, whatever the bound.
-        assert!(!should_seal(&w, 1, u64::MAX, None, 0));
+        assert!(!should_seal(&w, 1, 0, u64::MAX, None, 0));
         for hash in &hashes {
             w.push_raw(*hash, &store.read(hash).unwrap()).unwrap();
         }
-        assert!(!should_seal(&w, 1, u64::MAX, None, 4));
-        assert!(should_seal(&w, 1, u64::MAX, None, 3));
-        assert!(should_seal(&w, 1, u64::MAX, None, 2));
+        assert!(!should_seal(&w, 1, 0, u64::MAX, None, 4));
+        assert!(should_seal(&w, 1, 0, u64::MAX, None, 3));
+        assert!(should_seal(&w, 1, 0, u64::MAX, None, 2));
         // The format's own bound is the production one.
-        assert_eq!(MAX_PACK_ENTRIES, pack::MAX_ENTRIES as usize);
-        assert!(!should_seal(&w, 1, u64::MAX, None, MAX_PACK_ENTRIES));
+        assert_eq!(MAX_PACK_ENTRIES, pack::MAX_WRITE_ENTRIES);
+        assert!(!should_seal(&w, 1, 0, u64::MAX, None, MAX_PACK_ENTRIES));
     }
 
     #[test]
@@ -1324,6 +1441,136 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn the_pack_estimate_splits_at_the_payload_and_serialized_limits() {
+        let (_dir, store) = store();
+        let hashes = blob_hashes(&store, 3);
+        let size = store.object_metadata(&hashes[0]).unwrap().len();
+        assert!(
+            hashes
+                .iter()
+                .all(|h| store.object_metadata(h).unwrap().len() == size)
+        );
+        let plan = transfer::PackPlan {
+            raw: hashes,
+            deltas: Vec::new(),
+            self_contained: true,
+        };
+        let packs = |payload_cap, max_pack_bytes| {
+            estimate_pack_sizes_with(&store, &plan, payload_cap, max_pack_bytes, usize::MAX)
+                .unwrap()
+                .len()
+        };
+        // The payload cap: three entries fill it exactly.
+        assert_eq!(packs(3 * size, None), 1);
+        assert_eq!(packs(3 * size - 1, None), 2);
+        assert_eq!(packs(2 * size, None), 2);
+        assert_eq!(packs(2 * size - 1, None), 3);
+        // The serialized limit counts each entry's frame, the header and the
+        // trailer.
+        let bound = |entries: usize| serialized_bound(entries as u64 * size, entries);
+        assert_eq!(packs(u64::MAX, Some(bound(3))), 1);
+        assert_eq!(packs(u64::MAX, Some(bound(3) - 1)), 2);
+        assert_eq!(packs(u64::MAX, Some(bound(2))), 2);
+        assert_eq!(packs(u64::MAX, Some(bound(2) - 1)), 3);
+        // The body limit applies when the remote advertises none.
+        assert_eq!(packs(u64::MAX, Some(u64::MAX)), 1);
+    }
+
+    #[test]
+    fn a_sealed_pack_longer_than_the_advertised_limit_is_refused() {
+        let (id, bytes) = blob(&vec![7; 300]);
+        let seal = |max_pack_bytes| {
+            let mut w = PackWriter::new_raw_only();
+            w.push_raw(id, &bytes).unwrap();
+            let mut keys = Vec::new();
+            let limits = UploadLimits {
+                max_pack_bytes: Some(max_pack_bytes),
+                ..UploadLimits::default()
+            };
+            seal_pack(
+                PackSink::Count,
+                &mut w,
+                &mut keys,
+                &mut 0,
+                limits,
+                &crate::observer::NoopObserver,
+            )
+        };
+        let exact = serialized_bound(bytes.len() as u64, 1);
+        assert!(seal(exact).is_ok());
+        assert!(matches!(
+            seal(exact - 1),
+            Err(PushError::Sync(SyncError::Source(
+                SourceError::PayloadTooLarge(_)
+            )))
+        ));
+    }
+
+    #[test]
+    fn a_first_entry_over_every_limit_is_one_pack_and_never_an_empty_one() {
+        let (_dir, store) = store();
+        let hashes = blob_hashes(&store, 2);
+        let plan = transfer::PackPlan {
+            raw: hashes,
+            deltas: Vec::new(),
+            self_contained: true,
+        };
+        // Each entry alone is over the payload cap, so each is a pack of its own.
+        let sizes = estimate_pack_sizes_with(&store, &plan, 1, None, usize::MAX).unwrap();
+        assert_eq!(sizes.len(), 2);
+        assert!(sizes.iter().all(|&size| size > serialized_bound(0, 0)));
+    }
+
+    #[test]
+    fn the_pack_estimate_splits_before_the_decoded_floor() {
+        let (_dir, store) = store();
+        // A delta stream that claims a result of 512 MiB. The estimate counts
+        // the result and the stream as decoded bytes, against 2 GiB.
+        let delta = |salt: u8| {
+            let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
+            stream[5..9].copy_from_slice(&(1_u32 << 29).to_le_bytes());
+            transfer::PlannedDelta {
+                target: [salt; 32],
+                base: [0; 32],
+                stream,
+            }
+        };
+        let plan = |count: u8| transfer::PackPlan {
+            raw: Vec::new(),
+            deltas: (0..count).map(delta).collect(),
+            self_contained: false,
+        };
+        let packs = |count| {
+            estimate_pack_sizes_with(&store, &plan(count), u64::MAX, None, usize::MAX)
+                .unwrap()
+                .len()
+        };
+        // Three of them (1.5 GiB) fit, a fourth reaches 2 GiB and a little more.
+        assert_eq!(packs(3), 1);
+        assert_eq!(packs(4), 2);
+        assert_eq!(packs(6), 2);
+        assert_eq!(packs(7), 3);
+    }
+
+    #[test]
+    fn only_packs_from_the_threshold_up_count_toward_the_ticket_budget() {
+        let limits = |budget, threshold| UploadLimits {
+            max_pack_bytes: None,
+            tickets_per_advance: budget,
+            ticket_threshold_bytes: threshold,
+        };
+        // No tickets, no ticketed packs.
+        assert!(!ticketed_pack(limits(None, Some(0)), 1_000));
+        assert!(ticketed_pack(limits(Some(6), None), 0));
+        assert!(!ticketed_pack(limits(Some(6), Some(100)), 99));
+        assert!(ticketed_pack(limits(Some(6), Some(100)), 100));
+        assert_eq!(
+            estimated_ticketed_count(&[99, 100, 101], limits(Some(6), Some(100))),
+            2
         );
     }
 

@@ -245,6 +245,38 @@ fn duplicate_entries_and_all_excluded() {
     assert_eq!(result.bytes, PackWriter::new().finish().unwrap());
 }
 
+#[test]
+fn an_output_with_more_entries_than_a_writer_seals_is_refused() {
+    use crate::pack::MAX_WRITE_ENTRIES;
+    let entries: Vec<(Hash, Vec<u8>)> = (0..MAX_WRITE_ENTRIES + 2)
+        .map(|i| {
+            let bytes = blob(&(i as u64).to_le_bytes());
+            (hash::hash(&bytes), bytes)
+        })
+        .collect();
+    let mut w = PackWriter::new();
+    for (id, bytes) in &entries {
+        w.push_raw(*id, bytes).unwrap();
+    }
+    let pack = w.finish().unwrap();
+    let rewrite_without = |count: usize| {
+        let excluded = entries[..count].iter().map(|e| e.0).collect();
+        rewrite_excluding(
+            &pack,
+            &excluded,
+            &mut NoExternalBases,
+            DecodeLimits::default(),
+        )
+    };
+    // Dropping two leaves exactly the entries a writer seals; dropping one
+    // leaves one more.
+    assert!(rewrite_without(2).is_ok());
+    assert!(matches!(
+        rewrite_without(1),
+        Err(PackError::PackfileTooLarge)
+    ));
+}
+
 fn seal(mut body: Vec<u8>) -> Vec<u8> {
     body.extend_from_slice(&hash::hash(&body));
     body

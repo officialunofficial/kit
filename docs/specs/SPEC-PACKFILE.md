@@ -326,6 +326,29 @@ These are policy caps, not wire limits. Implementations MUST fail with
 `TooManyObjects`/`PackfileTooLarge` on violation rather than
 silently truncating.
 
+**A writer seals a pack every reader accepts.** The caps above are the
+format's. A reader also refuses a pack for its own limits, so a writer stops
+adding entries to a pack before it passes any of them, and never relies on
+the remote to advertise a limit:
+
+- The whole pack, header and trailer included, is at most 4 GiB, the body
+  limit of every transport (SPEC-TRANSPORT §6.4).
+- The bytes a reader decodes are at most `clamp(pack_len × 32768, 2 GiB,
+  16 GiB)`. Decoded bytes are the uncompressed length of each `0x03` and
+  `0x04` entry plus the result length of each delta. A writer counts them
+  against the pack length so far, which only grows.
+- The entries are at most 1 GiB divided by the reader's per-entry memory
+  charge of 896 bytes, which is 1,198,372. The reader charges that memory
+  to the same cap as the bytes it decodes, and the cap is 2 GiB for a small
+  pack, so half of it stays free for the objects of the pack. A longer pack
+  raises the cap, but a writer does not rely on that.
+
+A writer puts a single entry that is over one of its caps alone in a pack of its own.
+
+These are the limits of [`PackReader::read`], the reader of every transport. A
+caller of `decode_entries_with` chooses its own decoded-byte budget, 1 GiB by
+default, and a pack can need more than that.
+
 **These caps are measured on the wire (compressed) size.** For a
 `0x03`/`0x04` entry, `payload_len` is the on-wire length &mdash; the
 `uncompressed_len` prefix plus the zstd frame &mdash; exactly as framed in
@@ -687,6 +710,7 @@ publication path before the terminal acceptance step.
 | No malformed or pack-only object reaches the object store | canonical SPEC-OBJECTS deserialization gate; `Object::Delta` payloads rejected (§3) |
 | Every delta is resolvable when encountered | ordering rule: base precedes its delta in-pack or pre-exists in the store; else `DeltaBaseMissing`; no buffering of undefined chains; `0x04`'s uncompressed `base_hash` needs no decompression to check (§4) |
 | Resource use is bounded on the wire | `entry_count ≤ 10M` → `TooManyObjects`; payload sum ≤ 4 GiB → `PackfileTooLarge`, never silent truncation (§5) |
+| A writer seals only packs a reader accepts | serialized size ≤ 4 GiB, decoded bytes ≤ the reader's cap for the pack length, entries ≤ 1,198,372 (§5) |
 | Resource use is bounded on decompression | claimed `uncompressed_len` checked against `MAX_RAW_OBJECT_SIZE` (1 GiB) before any decompression allocation; decompression capacity-bounded to the claim; actual decompressed length re-checked against the claim exactly → `DecompressedSizeOverCap`/`DecompressedSizeMismatch` (§3.3) |
 | No hidden trailing data | bytes between the entry list and the trailer are rejected even if the trailer hashes them (§6) |
 | Pack identity is deterministic and byte-exact | key = lowercase hex `BLAKE3(pack_bytes)` over the whole pack including the trailer; byte-exact comparison (§7) |
