@@ -988,6 +988,16 @@ fn file_too_large(path: &Path, limit: u64) -> WorktreeError {
     }
 }
 
+/// `total` plus one more chunk of `len` bytes, refused when the file would
+/// pass [`serialize::MAX_CHUNKED_TOTAL_SIZE`].
+fn add_within_chunked_bound(total: u64, len: usize, path: &Path) -> WorktreeResult<u64> {
+    u64::try_from(len)
+        .ok()
+        .and_then(|len| total.checked_add(len))
+        .filter(|&sum| sum <= serialize::MAX_CHUNKED_TOTAL_SIZE)
+        .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))
+}
+
 /// Refuse a file of `len` bytes above `limit`.
 fn ensure_within(len: u64, limit: u64, path: &Path) -> WorktreeResult<()> {
     if len > limit {
@@ -1219,10 +1229,7 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
             path,
             offset: total_size,
         };
-        total_size = total_size
-            .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
+        total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
         chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
         if checkpoint_due(before, chunks.len(), window) {
@@ -1358,10 +1365,7 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     let mut total_size: u64 = 0;
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
     while let Some(chunk) = chunker.next_chunk()? {
-        total_size = total_size
-            .checked_add(chunk.len() as u64)
-            .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-            .ok_or_else(|| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
+        total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
             let before = chunks.len();
@@ -1443,14 +1447,12 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                         return;
                     }
                 };
-                running_total = if let Some(t) = running_total
-                    .checked_add(chunk.len() as u64)
-                    .filter(|&t| t <= serialize::MAX_CHUNKED_TOTAL_SIZE)
-                {
-                    t
-                } else {
-                    let _ = tx.send(Err(file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE)));
-                    return;
+                running_total = match add_within_chunked_bound(running_total, chunk.len(), path) {
+                    Ok(total) => total,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
                 };
                 batch.push(chunk);
                 if batch.len() == STREAM_HASH_BATCH {
@@ -3645,10 +3647,24 @@ mod tests {
         }
     }
 
-    fn limit_of(result: &WorktreeResult<Vec<u8>>) -> Option<u64> {
+    fn limit_of<T>(result: &WorktreeResult<T>) -> Option<u64> {
         match result {
             Err(WorktreeError::FileTooLarge { limit, .. }) => Some(*limit),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn the_chunked_total_may_reach_the_bound_and_not_pass_it() {
+        let path = Path::new("f");
+        let bound = serialize::MAX_CHUNKED_TOTAL_SIZE;
+        assert_eq!(add_within_chunked_bound(0, 0, path).unwrap(), 0);
+        assert_eq!(add_within_chunked_bound(bound - 5, 5, path).unwrap(), bound);
+        for (total, len) in [(bound - 5, 6), (bound, 1), (u64::MAX, 1)] {
+            assert_eq!(
+                limit_of(&add_within_chunked_bound(total, len, path)),
+                Some(bound)
+            );
         }
     }
 
