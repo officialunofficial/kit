@@ -244,6 +244,49 @@ impl PushWalk {
         })
     }
 
+    /// What `id` brings on its own: its tree entries that no parent of it has
+    /// at the same name, or the closure of `id` when it is not a commit.
+    ///
+    /// Nothing another new commit brings is left out, and the remote head's
+    /// snapshot is not consulted, so the result is never less than what a plan
+    /// that starts at any ancestor of `id` sends for it. A split push sizes
+    /// its steps with it.
+    ///
+    /// # Errors
+    ///
+    /// As [`PushWalk::run`].
+    pub fn run_one(
+        store: &ObjectStore,
+        id: Hash,
+        held: &HeldCommits,
+        shallow: &HashSet<Hash>,
+        limits: WalkLimits,
+    ) -> Result<Self, StoreError> {
+        let mut walk = Builder {
+            store,
+            held,
+            limits,
+            objects: BTreeSet::new(),
+            manifests: Vec::new(),
+            non_commit: 0,
+            roots: vec![id],
+            log: None,
+        };
+        match read_commit(store, &id)? {
+            Some((tree, mut parents)) => {
+                if shallow.contains(&id) {
+                    parents.clear();
+                }
+                walk.add_commit(0, &NewCommit { id, tree, parents })?;
+            }
+            None => walk.add_closure(0, id)?,
+        }
+        Ok(Self {
+            objects: walk.objects,
+            manifests: walk.manifests,
+        })
+    }
+
     /// The kept objects: new commits, trees, small blobs, manifests and the
     /// rest. Never a chunk of a manifest.
     #[must_use]

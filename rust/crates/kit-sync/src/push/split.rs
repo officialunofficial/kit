@@ -15,7 +15,7 @@
 //!
 //! * [`walk_chain`] walks the tip's first parents back to the first commit the
 //!   remote already holds.
-//! * [`cumulative_weights`] makes one forward pass that sizes what each chain
+//! * [`cumulative_weights`] makes one forward pass that sizes, on its own, what each chain
 //!   commit adds, in serialized bytes (raw size plus one frame per object).
 //! * [`select_steps`] cuts the chain: a guaranteed floor of `budget / 2` caps
 //!   per step (under next-fit any two consecutive packs together exceed the
@@ -31,7 +31,7 @@
 //! largest pack the remote accepts. Every cut, probe and upload then uses the
 //! same value.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use kit_core::hash::{Hash, to_hex};
 use kit_core::object::Object;
@@ -215,10 +215,57 @@ fn weight_of(store: &ObjectStore, hash: &Hash) -> Result<u64, StoreError> {
         .saturating_add(pack::ENTRY_FRAME_LEN as u64))
 }
 
-/// Serialized bytes each chain prefix adds. One walk of what the remote lacks
-/// sizes what each new commit brings; a chunk is sized once and is never put
-/// into a set the walk counts. Each chain commit then takes the new commits
-/// that no earlier chain commit reaches.
+/// What one new commit brings on its own, in serialized bytes.
+struct OneWeight {
+    total: u64,
+    largest: u64,
+}
+
+/// Size what `id` brings against its parents alone. An object that two new
+/// commits each bring is counted for both, because a step that starts after
+/// the first sends it again. A chunk is sized once per commit and is never put
+/// into a set the walk counts.
+///
+/// `seen` holds every object any commit has brought so far, which is what the
+/// cap on the walk counts together with the held commits.
+fn weigh_one(
+    store: &ObjectStore,
+    held: &HeldCommits,
+    shallow: &HashSet<Hash>,
+    id: Hash,
+    limits: WalkLimits,
+    seen: &mut HashSet<Hash>,
+) -> Result<OneWeight, PushError> {
+    let walk = PushWalk::run_one(store, id, held, shallow, limits).map_err(walk_error)?;
+    let mut weight = OneWeight {
+        total: 0,
+        largest: 0,
+    };
+    let mut add = |object: &Hash| -> Result<(), StoreError> {
+        let size = weight_of(store, object)?;
+        weight.largest = weight.largest.max(size);
+        weight.total = weight.total.saturating_add(size);
+        Ok(())
+    };
+    for object in walk.objects() {
+        if seen.insert(*object) && held.len() + seen.len() > limits.objects {
+            return Err(too_large_to_split());
+        }
+        add(object).map_err(walk_error)?;
+    }
+    walk.for_each_chunk(
+        store,
+        &mut ChunkMemory::new(limits.chunk_memory),
+        |_, chunk| add(&chunk),
+    )
+    .map_err(walk_error)?;
+    Ok(weight)
+}
+
+/// Serialized bytes each chain prefix adds. Each new commit is sized on its
+/// own, against its parents, and each chain commit then takes the new commits
+/// that no earlier chain commit reaches. The sum is never less than what a
+/// step plan sends, whatever commit the step starts after.
 fn cumulative_weights(
     store: &ObjectStore,
     chain: &Chain,
@@ -234,45 +281,17 @@ fn cumulative_weights_capped(
     ctl: &PushControl<'_>,
     limits: WalkLimits,
 ) -> Result<Weights, PushError> {
-    let Some(&tip) = chain.commits.last() else {
+    if chain.commits.is_empty() {
         return Ok(Weights {
             cumulative: vec![0],
             largest_object: 0,
         });
-    };
-    let mut brought: HashMap<Hash, u64> = HashMap::new();
+    }
     let mut largest_object = 0_u64;
-    let walk = PushWalk::run(
-        store,
-        tip,
-        &chain.held,
-        &ctl.shallow,
-        limits,
-        Some(&mut |commit, object| {
-            let weight = weight_of(store, object)?;
-            largest_object = largest_object.max(weight);
-            let total = brought.entry(*commit).or_default();
-            *total = total.saturating_add(weight);
-            Ok(())
-        }),
-    )
-    .map_err(walk_error)?;
-    walk.for_each_chunk(
-        store,
-        &mut ChunkMemory::new(limits.chunk_memory),
-        |commit, chunk| {
-            let weight = weight_of(store, &chunk)?;
-            largest_object = largest_object.max(weight);
-            let total = brought.entry(*commit).or_default();
-            *total = total.saturating_add(weight);
-            Ok(())
-        },
-    )
-    .map_err(walk_error)?;
-
     let mut cumulative = Vec::with_capacity(chain.commits.len() + 1);
     let mut total = 0_u64;
     let mut taken: HashSet<Hash> = HashSet::new();
+    let mut seen: HashSet<Hash> = HashSet::new();
     cumulative.push(0);
     for commit in &chain.commits {
         if ctl.observer.cancelled() {
@@ -283,7 +302,9 @@ fn cumulative_weights_capped(
             if chain.held.contains(&hash) || !taken.insert(hash) {
                 continue;
             }
-            total = total.saturating_add(brought.get(&hash).copied().unwrap_or(0));
+            let weight = weigh_one(store, &chain.held, &ctl.shallow, hash, limits, &mut seen)?;
+            largest_object = largest_object.max(weight.largest);
+            total = total.saturating_add(weight.total);
             // A shallow-boundary commit's parents are not in this repository.
             if ctl.shallow.contains(&hash) {
                 continue;
@@ -879,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_weighs_once_and_a_renamed_chunked_file_weighs_none() {
+    fn a_chunk_weighs_once_and_a_renamed_chunked_file_weighs_as_if_sent() {
         let (_dir, store) = store();
         let chunk = blob(&store, 7, 1000);
         let other = blob(&store, 8, 1000);
@@ -901,7 +922,15 @@ mod tests {
         let ctl = PushControl::default();
         let chain = walk_chain(&store, renamed, Some(remote), &ctl).unwrap();
         let weights = cumulative_weights(&store, &chain, &ctl).unwrap();
-        assert!(weights.cumulative[1] < 1000, "{:?}", weights.cumulative);
+        // Sized against its parents alone, the renamed file weighs what a step
+        // that starts in front of the rename would have to send. The plan of
+        // the push itself, which sees the remote's snapshot, sends none of it.
+        assert!(weights.cumulative[1] >= 2000, "{:?}", weights.cumulative);
+        let plan = transfer::plan_pack_with(&store, renamed, Some(remote), |_, candidates| {
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        assert!(plan.raw.iter().all(|h| ![big, chunk, other].contains(h)));
 
         // A chunk that a file lists many times is weighed once.
         let repeated = chunked(&store, &[chunk; 50]);
@@ -950,7 +979,15 @@ mod tests {
     #[test]
     fn cumulative_weights_add_up_to_the_new_objects() {
         let (_dir, store) = store();
-        let c = line(&store, 6);
+        // Distinct files: two seeds can make the same bytes, and a blob that two
+        // commits bring is weighed for both.
+        let mut files = Vec::new();
+        let mut c: Vec<Hash> = Vec::new();
+        for i in 0..6_u8 {
+            files.push(blob(&store, 2 * u64::from(i) + 1, 100));
+            let parents = c.last().copied().into_iter().collect();
+            c.push(commit(&store, &files, parents, i));
+        }
         let chain = walk_chain(&store, c[5], Some(c[1]), &PushControl::default()).unwrap();
         let weights = cumulative_weights(&store, &chain, &PushControl::default())
             .unwrap()
@@ -964,6 +1001,42 @@ mod tests {
             .map(|h| store.object_metadata(h).unwrap().len() + pack::ENTRY_FRAME_LEN as u64)
             .sum();
         assert_eq!(*weights.last().unwrap(), expected);
+    }
+
+    #[test]
+    fn a_step_never_weighs_more_than_its_weights_say() {
+        let (_dir, store) = store();
+        let blobs = |first: u64, count: u64| -> Vec<Hash> {
+            (first..first + count)
+                .map(|i| blob(&store, i, 3000))
+                .collect()
+        };
+        let a = blobs(1, 5);
+        let b = blobs(100, 5);
+        let e = blobs(200, 2);
+        let d = blobs(300, 1);
+        let c1 = commit(&store, &a, Vec::new(), 1);
+        let c2 = commit(&store, &b, vec![c1], 2);
+        // The same paths return to the first files, and two files are added.
+        let with = |parts: &[&[Hash]]| -> Vec<Hash> { parts.concat() };
+        let c3 = commit(&store, &with(&[&a, &e]), vec![c2], 3);
+        let c4 = commit(&store, &with(&[&a, &e, &d]), vec![c3], 4);
+        let chain = walk_chain(&store, c4, None, &PushControl::default()).unwrap();
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
+        // A step that starts after c2 sends the first files again.
+        let plan = transfer::plan_pack_with(&store, c4, Some(c2), |_, candidates| {
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        let sent: u64 = plan.raw.iter().map(|h| weight_of(&store, h).unwrap()).sum();
+        assert!(plan.raw.contains(&a[0]));
+        assert!(
+            sent <= weights[4] - weights[2],
+            "{sent} > {}",
+            weights[4] - weights[2]
+        );
     }
 
     /// The refusal of a lone commit that only fits by containing the remote
