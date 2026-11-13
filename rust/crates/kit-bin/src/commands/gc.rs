@@ -152,12 +152,13 @@ pub fn run(args: &[String]) -> u8 {
     };
     let _ = writeln!(
         stderr,
-        "gc{}: {prune_verb} {} object(s), {} bytes; scanned {}, live {}, kept-recent {}; {expire_verb} {} recovery entr{}",
+        "gc{}: {prune_verb} {} object(s), {} bytes; scanned {}, live {} ({} chunks), kept-recent {}; {expire_verb} {} recovery entr{}",
         if report.dry_run { " (dry run)" } else { "" },
         report.pruned,
         report.bytes_reclaimed,
         report.scanned,
         report.live,
+        report.live_chunks,
         report.kept_recent,
         expired,
         if expired == 1 { "y" } else { "ies" },

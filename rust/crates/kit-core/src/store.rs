@@ -712,24 +712,32 @@ impl ObjectStore {
             if dir.len() != 2 || !dir.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
-            for entry in fs::read_dir(shard.path())? {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
-                    continue;
-                }
-                let file_name = entry.file_name();
-                let Some(file) = file_name.to_str() else {
-                    continue;
-                };
-                if file.len() != 62 {
-                    continue;
-                }
-                // Reassemble the 64-hex id and parse it; skips non-objects.
-                if let Ok(h) = hash::from_hex(&format!("{dir}{file}")) {
-                    out.push(h);
-                }
-            }
+            read_shard_dir(&shard.path(), dir, &mut out)?;
         }
+        Ok(out)
+    }
+
+    /// Enumerate the objects in one shard directory, `objects/<2-hex>/`,
+    /// where `shard` is the first byte of their ids. The names that
+    /// [`iter_object_hashes`](Self::iter_object_hashes) skips are skipped
+    /// here too, and an absent directory has no objects. Holds one
+    /// directory's ids, not the whole store's.
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if the directory cannot be read.
+    pub fn list_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
+        let dir = format!("{shard:02x}");
+        let path = self.objects_root.join(&dir);
+        // Like `iter_object_hashes`, which skips an entry that is not a
+        // directory in its own right, a symlink here is not a shard.
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+        let mut out = Vec::new();
+        read_shard_dir(&path, &dir, &mut out)?;
         Ok(out)
     }
 
@@ -808,6 +816,30 @@ impl ObjectStore {
             Err(e) => Err(StoreError::Io(e)),
         }
     }
+}
+
+/// Append the ids of the objects in shard directory `path`, named `dir`, to
+/// `out`. A name that is not a 62-hex file name is not an object and is
+/// skipped.
+fn read_shard_dir(path: &std::path::Path, dir: &str, out: &mut Vec<Hash>) -> StoreResult<()> {
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(file) = file_name.to_str() else {
+            continue;
+        };
+        if file.len() != 62 {
+            continue;
+        }
+        // Reassemble the 64-hex id and parse it; skips non-objects.
+        if let Ok(h) = hash::from_hex(&format!("{dir}{file}")) {
+            out.push(h);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn old_enough(meta: &fs::Metadata, now: u64, grace: u64) -> bool {
@@ -1367,6 +1399,73 @@ mod tests {
         assert_eq!(parent_name, &hex[..2]);
         assert_eq!(file_name, &hex[2..]);
         assert!(path.is_file(), "object file must exist at expected path");
+    }
+
+    #[test]
+    fn list_shard_lists_one_directory_and_all_shards_list_the_store() {
+        let (_dir, store) = fresh_store();
+        let ids: Vec<Hash> = (0..300)
+            .map(|i| {
+                store
+                    .write(
+                        &crate::serialize::serialize(&Object::Blob(Blob {
+                            data: format!("object {i}").into_bytes(),
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let mut union = Vec::new();
+        for shard in 0..=u8::MAX {
+            let mut listed = store.list_shard(shard).unwrap();
+            let mut expected: Vec<Hash> = ids.iter().copied().filter(|h| h[0] == shard).collect();
+            listed.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(listed, expected, "shard {shard:02x}");
+            union.extend(listed);
+        }
+        let mut all = store.iter_object_hashes().unwrap();
+        union.sort_unstable();
+        all.sort_unstable();
+        assert_eq!(union, all);
+        assert_eq!(all.len(), ids.len());
+    }
+
+    #[test]
+    fn list_shard_skips_what_is_not_an_object() {
+        let (_dir, store) = fresh_store();
+        let id = store.write(b"an object").unwrap();
+        let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+        let name = id[0];
+        // A stale temp file, a short name, a directory and a non-hex name of
+        // the right length are not objects.
+        fs::write(shard.join(".tmp.1.2"), b"partial").unwrap();
+        fs::write(shard.join("short"), b"x").unwrap();
+        fs::create_dir(shard.join("d".repeat(62))).unwrap();
+        fs::write(shard.join("z".repeat(62)), b"x").unwrap();
+        assert_eq!(store.list_shard(name).unwrap(), vec![id]);
+        assert_eq!(store.iter_object_hashes().unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn list_shard_of_an_absent_or_misplaced_directory_is_empty() {
+        let (_dir, store) = fresh_store();
+        assert!(store.list_shard(0x00).unwrap().is_empty());
+        // A file where the directory belongs is not a shard.
+        fs::write(store.objects_root.join("ab"), b"x").unwrap();
+        assert!(store.list_shard(0xab).unwrap().is_empty());
+        #[cfg(unix)]
+        {
+            // Nor is a link to a directory that holds an object.
+            let real = TempDir::new().unwrap();
+            let id = hash::hash(b"elsewhere");
+            let name = hash::to_hex(&id);
+            fs::write(real.path().join(&name[2..]), b"x").unwrap();
+            std::os::unix::fs::symlink(real.path(), store.objects_root.join(&name[..2])).unwrap();
+            assert!(store.list_shard(id[0]).unwrap().is_empty());
+            assert!(store.iter_object_hashes().unwrap().is_empty());
+        }
     }
 
     #[test]

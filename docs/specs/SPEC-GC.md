@@ -67,12 +67,29 @@ A present empty, corrupt, oversized or unsupported staging index MUST abort GC
 before sweeping. An absent index alone means no staging roots. Only the current
 index format is supported (SPEC-INDEX).
 
-The live keep-set is the reachable closure over those roots:
-`ops::gc::live_objects(store, kit_dir)` = `reachable_closure(store,
-collect_roots(...))`. Walk semantics match `reachable_objects`
-(commits/remixes → tree + parents, trees → entries, chunked-blobs →
-chunks, tags → target; blobs/deltas are leaves), capped at
-`MAX_REACHABLE`.
+The live keep-set is the reachable closure over those roots, held in two
+parts: `ops::gc::live_objects(store, layout)` returns a `LiveSet` of
+`objects` and `chunks`. Walk semantics match `reachable_objects`
+(commits/remixes → tree + parents, trees → entries, tags → target;
+blobs/deltas are leaves), with one difference: the walk queues no chunk of a
+chunked blob.
+
+- `objects` holds the commits, trees, tags, remixes, manifests and blobs that
+  the walk reaches other than as a chunk. It is capped at `MAX_REACHABLE`
+  (10,000,000), and no chunk counts toward the cap.
+- `chunks` holds the ids that reached manifests list, sorted, without
+  duplicates and disjoint from `objects`. It is capped at 134,217,728
+  distinct ids, which is 4 GiB of ids. Each chunk MUST be a blob or a delta,
+  since a chunk is a leaf and gc cannot tell what an object of another kind
+  reaches. An object of any other kind in a manifest is an error, not a chunk. A manifest that another manifest lists
+  as a chunk and that is also reached as a file is an object, and its own
+  chunks are live.
+- An object is live when it is in `objects` or in `chunks`.
+
+The walk keeps the chunk ids in a buffer that it sorts and deduplicates
+whenever the buffer would grow past the larger of twice its length after the
+last compaction and 1,048,576 ids, so the buffer stays near twice the number
+of distinct chunks whatever the number of manifests.
 
 ## Fail-closed requirement
 
@@ -86,13 +103,24 @@ set. In particular:
   atomic-write temp files are ignored.)
 - A root or referenced object missing from the store during the closure
   walk (`StoreError::ObjectNotFound`) propagates.
-- If the closure hits the [`MAX_REACHABLE`] cap, `live_objects` returns
+- If the walk reaches [`MAX_REACHABLE`] objects, `live_objects` returns
   `GcRootsError::Truncated` &mdash; beyond the cap the "unreachable" verdict is
   unsound, so gc must abort rather than prune. Push planning fails
   closed the same way: `reachable_closure`, `reachable_objects` and
   `reachable_snapshot` return `OperationLimitExceeded` at the cap, so a
   push whose new tip's closure reaches it fails before it publishes the cut
   step. A cut in the remote tip's walk only makes the push send more.
+- If the distinct chunk ids pass their cap, `live_objects` returns
+  `GcRootsError::TooManyChunks`. A manifest that lists an object that is not
+  a blob or a delta gives `GcRootsError::ChunkNotBlob`, which names the
+  manifest and the chunk. A chunk missing from the store is
+  `StoreError::ObjectNotFound`.
+- The whole mark, every chunk type read included, ends before gc lists or
+  deletes any object. Every error returns before a delete.
+- The sweep lists one `objects/<2 hex>/` directory at a time, tests each
+  object against the `LiveSet` and applies the age rules, so it never holds
+  the id of every loose object. The dry run and the real run visit the same
+  candidates.
 
 ## Recovery log
 
@@ -230,6 +258,9 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
+| gc counts no chunk toward the object cap | `LiveSet` holds chunks apart from `objects`; only `objects` is capped at `MAX_REACHABLE` ("Retention roots") |
+| A chunk that is not a blob or a delta aborts gc | the mark reads the type of each distinct chunk and returns `GcRootsError::ChunkNotBlob` before the sweep lists an object ("Fail-closed requirement") |
+| gc holds neither every loose object nor an uncompacted chunk buffer | the sweep lists one `objects/<2 hex>/` directory at a time, and the chunk ids are compacted before the buffer grows past its threshold ("Retention roots") |
 | A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.kit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |

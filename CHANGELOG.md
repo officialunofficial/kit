@@ -123,7 +123,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   them.
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
-  of many large files can be fetched. `gc` and push still count every chunk.
+  of many large files can be fetched. Push still counts every chunk.
+- `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
+  cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
+  it grows, so memory stays near twice the 32 bytes of each distinct chunk id. gc
+  refuses a repository of more than 134,217,728 distinct live chunks, as
+  `GcRootsError::TooManyChunks`. It reads the type of each chunk before it
+  deletes anything, and refuses a chunk that is not a blob or a delta, as
+  `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one
+  object directory at a time. The summary line shows the live chunk count.
+  `live_objects` returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
 - `kit add` makes the chunks of a large file durable in windows of 4,096
   chunks, and no longer stages every chunk of the file until the command
   ends. The staged set of one file stays bounded whatever the file's size. The

@@ -34,7 +34,7 @@ pub use diff::{
     merge_blob_3way, status_diff, status_diff_observed, text_patch, unified_hunks,
     unified_hunks_opts,
 };
-pub use gc::{GcReport, GcRootsError, collect_roots, live_objects, run_gc};
+pub use gc::{GcReport, GcRootsError, LiveSet, collect_roots, live_objects, run_gc};
 pub use graph::{
     ClosureMode, check_closure_present, children, collect_ancestor_set, reachable_closure,
     reachable_closure_checked, reachable_objects, reachable_snapshot,

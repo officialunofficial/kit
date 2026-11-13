@@ -195,10 +195,10 @@ impl From<LimitReached> for AncestorError {
 /// Hard cap on the object ids a closure walk retains per call. Matches the
 /// scale of [`MAX_ANCESTORS`] but applies to the object closure, so it is
 /// intentionally larger. The cap bounds the retained id set to about half a
-/// GiB. [`reachable_objects`], and so `gc` and push, count every chunk
-/// toward it, so a repository with more chunks than the cap can be fetched
-/// but not collected or pushed whole. [`check_closure_present`], the check a
-/// fetch runs, counts no chunk.
+/// GiB. [`reachable_objects`], and so push, count every chunk toward it, so
+/// a repository with more chunks than the cap can be fetched or collected
+/// but not pushed whole. [`check_closure_present`], the check a fetch runs,
+/// and `gc` (see [`super::gc::live_objects`]) count no chunk.
 pub const MAX_REACHABLE: usize = 10_000_000;
 
 /// How a closure walk treats commit/remix parents.
@@ -338,10 +338,10 @@ pub fn reachable_objects(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<Ha
 }
 
 /// Collect every object reachable from **any** of `roots` — the
-/// multi-root generalization of [`reachable_objects`]. This is the
-/// closure `kit gc` keeps live: seed it with the full retention
-/// root set from [`super::gc::collect_roots`] and every object NOT in the
-/// result is unreachable.
+/// multi-root generalization of [`reachable_objects`]. `kit gc` does not
+/// use it: [`super::gc::live_objects`] marks the closure of the roots from
+/// [`super::gc::collect_roots`] with the chunks held apart, so that a chunk
+/// counts toward no cap.
 ///
 /// Identical walk semantics to [`reachable_objects`] (commits/remixes →
 /// tree + parents, trees → entries, chunked-blobs → chunks, tags →
@@ -403,7 +403,7 @@ pub(crate) fn complete(
 
 /// Like [`reachable_closure`] but also reports whether the
 /// [`MAX_REACHABLE`] cap truncated the walk (`true` = incomplete). A
-/// caller that would *delete* unreachable objects (gc) MUST treat
+/// caller that would *delete* unreachable objects MUST treat
 /// `truncated == true` as fatal: beyond the cap the "unreachable" verdict
 /// is unsound, so pruning would drop live data.
 ///
@@ -442,8 +442,8 @@ pub fn reachable_snapshot(store: &ObjectStore, root: &Hash) -> Result<BTreeSet<H
 /// Same walk as [`reachable_closure_checked`], but with a caller-supplied
 /// cap instead of the hardcoded [`MAX_REACHABLE`] (10 million).
 ///
-/// Test-only injection point: `gc`'s fail-closed `Truncated` abort has
-/// no other way to exercise a truncation without actually constructing
+/// Injection point for tests and for the push walks: a truncation has
+/// no other way to be exercised without actually constructing
 /// ten million objects. `pub(crate)`, not part of the public API — real
 /// external callers MUST use [`reachable_closure_checked`] (or
 /// [`reachable_closure`]) instead.
@@ -468,8 +468,9 @@ where
 /// The walk remembers up to [`MAX_CHECKED_CHUNKS`] checked chunk ids, so a
 /// chunk that several versions of a file share is read once. Past that bound
 /// a chunk is checked again for each manifest that names it, and memory stays
-/// fixed. A repository past the cap in chunks still passes this check, while
-/// `gc` and push, which retain every chunk, refuse it.
+/// fixed. A repository past the cap in chunks still passes this check, and
+/// so it does `gc`, which counts no chunk toward the cap. Push, which
+/// retains every chunk, refuses it.
 ///
 /// # Errors
 ///
