@@ -130,7 +130,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whole closures. A chunk of a large file counts toward no cap, so a repository
   of many large files pushes. The walk's cap is 10,000,000 held commits, new
   commits and kept objects, and it fails with `OperationLimitExceeded`
-  (`10,000,000-object push walk`); split push reports it as its own limit. A
+  (`10,000,000-object push walk`). A
   file that returns at a path the remote head's snapshot does not hold, a file
   reverted to an older version, and a chunk shared with a file the remote lacks
   are sent again, up to a whole file. A history the remote holds and this store
