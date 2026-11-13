@@ -89,3 +89,82 @@ fn guards_coexist_and_never_block_writers() {
     drop(first);
     drop(second);
 }
+
+/// A temp file named the way an object write names it, with its modification
+/// time `age_secs` in the past.
+fn temp_file(store: &ObjectStore, name: &str, age_secs: u64) -> std::path::PathBuf {
+    let shard = store.objects_root().join("ab");
+    std::fs::create_dir_all(&shard).unwrap();
+    let path = shard.join(name);
+    std::fs::write(&path, b"partial object").unwrap();
+    let modified = std::time::SystemTime::now() - Duration::from_secs(age_secs);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    path
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[test]
+fn gc_removes_a_temp_file_older_than_the_grace_period_and_keeps_a_younger_one() {
+    let (_dir, layout, store) = repo();
+    let old = temp_file(&store, ".0123.tmp.77.1Xyz", 10_000);
+    let bulk = temp_file(&store, ".kit.tmp.77.2Abc", 10_000);
+    let young = temp_file(&store, ".4567.tmp.77.3Def", 10);
+
+    let report = run_gc(&store, &layout, now_secs(), 1_000, true).unwrap();
+    assert_eq!(report.temp_files_pruned, 2);
+    assert!(old.exists() && bulk.exists() && young.exists(), "dry run");
+
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    assert_eq!(report.temp_files_pruned, 2);
+    assert_eq!(report.bytes_reclaimed, 2 * 14);
+    assert!(!old.exists() && !bulk.exists());
+    assert!(young.exists());
+}
+
+#[test]
+fn gc_keeps_an_old_temp_file_while_a_prune_guard_is_held() {
+    let (_dir, layout, store) = repo();
+    let old = temp_file(&store, ".0123.tmp.77.1Xyz", 10_000);
+
+    let guard = store.prune_guard().unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 0, false).unwrap();
+    assert_eq!(report.temp_files_pruned, 0);
+    assert!(old.exists());
+
+    drop(guard);
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    assert_eq!(report.temp_files_pruned, 1);
+    assert!(!old.exists());
+}
+
+#[test]
+fn gc_leaves_files_that_are_not_temp_files_alone() {
+    let (_dir, layout, store) = repo();
+    let ids = orphans(&store, 1);
+    let shard = store.objects_root().join("ab");
+    std::fs::create_dir_all(&shard).unwrap();
+    let stray = shard.join("notes.txt");
+    std::fs::write(&stray, b"x").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&stray)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(10_000))
+        .unwrap();
+
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    assert_eq!(report.temp_files_pruned, 0);
+    assert!(stray.exists());
+    assert!(store.contains(&ids[0]), "a young object stays too");
+}

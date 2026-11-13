@@ -558,7 +558,10 @@ pub struct GcReport {
     pub kept_recent: usize,
     /// Unreachable objects pruned (or that *would* be pruned in a dry run).
     pub pruned: usize,
-    /// Bytes reclaimed by the pruned objects.
+    /// Temp files of dead writers removed (or that *would* be removed in a dry
+    /// run): files in the object directories that no object name matches.
+    pub temp_files_pruned: usize,
+    /// Bytes reclaimed by the pruned objects and temp files.
     pub bytes_reclaimed: u64,
     /// True if this was a dry run (nothing deleted).
     pub dry_run: bool,
@@ -662,8 +665,41 @@ fn run_gc_with_hook(
             report.pruned += 1;
             report.bytes_reclaimed += len;
         }
+        sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
     Ok(report)
+}
+
+/// Delete the temp files in shard `shard` that a dead writer left and that are
+/// older than the grace window. A file goes through the same final check as an
+/// object, under the exclusive lock of `format`, so a fetch that is writing is
+/// never touched. A file whose age cannot be read is kept.
+fn sweep_temp_files(
+    store: &ObjectStore,
+    shard: u8,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    report: &mut GcReport,
+) -> Result<(), GcRootsError> {
+    for path in store.list_shard_temp_files(shard)? {
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !crate::store::old_enough(&meta, now_secs, grace_secs) {
+            continue;
+        }
+        let mut len = meta.len();
+        if !dry_run {
+            let Some(freed) = store.prune_temp_file_if_old(&path, now_secs, grace_secs)? else {
+                continue;
+            };
+            len = freed;
+        }
+        report.temp_files_pruned += 1;
+        report.bytes_reclaimed += len;
+    }
+    Ok(())
 }
 
 /// Strict, fail-closed walk of a ref namespace directory (e.g.

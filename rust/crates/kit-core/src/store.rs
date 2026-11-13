@@ -764,6 +764,34 @@ impl ObjectStore {
         })
     }
 
+    /// The temp files in one shard directory, `objects/<2-hex>/`: the files a
+    /// writer names `.<name>.tmp.*` or `.kit.tmp.*` before it renames them into
+    /// place. A writer that dies leaves its temp file behind. An absent
+    /// directory has none.
+    ///
+    /// A live writer owns these files, so a caller deletes one only through
+    /// [`prune_temp_file_if_old`](Self::prune_temp_file_if_old).
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if the directory cannot be read.
+    pub(crate) fn list_shard_temp_files(&self, shard: u8) -> StoreResult<Vec<PathBuf>> {
+        let path = self.objects_root.join(format!("{shard:02x}"));
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StoreError::Io(e)),
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() && is_temp_file_name(&entry.file_name()) {
+                out.push(entry.path());
+            }
+        }
+        Ok(out)
+    }
+
     // `format` is immutable after init and never unlinked. Reuse it as a
     // kernel-lock anchor, so exclusion needs no new on-disk state. Each guard
     // owns a separately opened handle; dropping it (including process death)
@@ -833,19 +861,51 @@ impl ObjectStore {
         grace: u64,
         before_unlink: impl FnOnce(),
     ) -> StoreResult<Option<u64>> {
+        self.prune_file_if_old(&self.path_for(h), now, grace, before_unlink)
+    }
+
+    /// [`prune_if_old`](Self::prune_if_old) for a temp file of
+    /// [`list_shard_temp_files`](Self::list_shard_temp_files). Returns the
+    /// bytes freed.
+    ///
+    /// A writer that is alive does not lose its file. A fetch or a bulk write
+    /// holds the shared lock this needs to be free. Any other writer holds a
+    /// worktree lock, which gc holds across its sweep. A writer that has gone
+    /// quiet for the whole grace period is taken to be dead.
+    pub(crate) fn prune_temp_file_if_old(
+        &self,
+        path: &Path,
+        now: u64,
+        grace: u64,
+    ) -> StoreResult<Option<u64>> {
+        self.prune_file_if_old(path, now, grace, || {})
+    }
+
+    /// The final age check and unlink of `path` under the exclusive lock of
+    /// `format`. Contention, uncertain age or a file already gone keep it.
+    fn prune_file_if_old(
+        &self,
+        path: &Path,
+        now: u64,
+        grace: u64,
+        before_unlink: impl FnOnce(),
+    ) -> StoreResult<Option<u64>> {
         let guard = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
         if guard.try_lock().is_err() {
             return Ok(None);
         }
-        let Ok(meta) = self.object_metadata(h) else {
+        let Ok(meta) = fs::metadata(path) else {
             return Ok(None);
         };
         if !old_enough(&meta, now, grace) {
             return Ok(None);
         }
         before_unlink();
-        self.remove_object(h)?;
-        Ok(Some(meta.len()))
+        match fs::remove_file(path) {
+            Ok(()) => Ok(Some(meta.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Some(meta.len())),
+            Err(e) => Err(StoreError::Io(e)),
+        }
     }
 
     /// Delete object `h` from the store. Idempotent: a missing object is
@@ -884,6 +944,14 @@ fn read_shard_dir(path: &std::path::Path, dir: &str, out: &mut Vec<Hash>) -> Sto
         }
     }
     Ok(())
+}
+
+/// Whether `name` is a temp file of an object write: `.<name>.tmp.*` from a
+/// single or batched write, `.kit.tmp.*` from a bulk write. No object file
+/// starts with a dot.
+fn is_temp_file_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with('.') && name.contains(".tmp."))
 }
 
 pub(crate) fn old_enough(meta: &fs::Metadata, now: u64, grace: u64) -> bool {
@@ -1797,5 +1865,124 @@ mod sweep_crash_tests {
         assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
         assert!(!reopened.contains(&control));
         assert_eq!(report.pruned, 1);
+    }
+}
+
+#[cfg(test)]
+mod temp_file_tests {
+    #![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
+
+    use super::*;
+    use std::time::UNIX_EPOCH;
+
+    fn store() -> (tempfile::TempDir, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    fn old_file(path: &Path) {
+        fs::write(path, b"partial").unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH)
+            .unwrap();
+    }
+
+    #[test]
+    fn only_dot_tmp_files_are_temp_files() {
+        for name in [".ab.tmp.1.2xyz", ".kit.tmp.7.0abc"] {
+            assert!(is_temp_file_name(std::ffi::OsStr::new(name)), "{name}");
+        }
+        for name in ["notes.tmp.1", ".hidden", "tmp.1", &"a".repeat(62)] {
+            assert!(!is_temp_file_name(std::ffi::OsStr::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_temp_files_of_a_shard_are_listed_and_nothing_else() {
+        let (_dir, store) = store();
+        let shard = store.objects_root().join("ab");
+        fs::create_dir_all(&shard).unwrap();
+        fs::write(shard.join(".x.tmp.1.2"), b"t").unwrap();
+        fs::write(shard.join("keep.txt"), b"t").unwrap();
+        fs::create_dir(shard.join(".dir.tmp.1.3")).unwrap();
+        let listed = store.list_shard_temp_files(0xab).unwrap();
+        assert_eq!(listed, vec![shard.join(".x.tmp.1.2")]);
+        // A shard directory that was never created has none.
+        let _ = fs::remove_dir_all(store.objects_root().join("cd"));
+        assert!(store.list_shard_temp_files(0xcd).unwrap().is_empty());
+    }
+
+    /// A symlink named like a shard is not a shard, as for objects.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_shard_has_no_temp_files() {
+        let (dir, store) = store();
+        let outside = dir.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join(".x.tmp.1.2"), b"t").unwrap();
+        let shard = store.objects_root().join("ab");
+        let _ = fs::remove_dir_all(&shard);
+        std::os::unix::fs::symlink(&outside, shard).unwrap();
+        assert!(store.list_shard_temp_files(0xab).unwrap().is_empty());
+    }
+
+    /// An error other than a missing directory is an error, not an empty shard.
+    #[test]
+    fn an_unreadable_shard_path_is_an_error() {
+        let (dir, store) = store();
+        fs::remove_dir_all(store.objects_root()).unwrap();
+        fs::write(store.objects_root(), b"not a directory").unwrap();
+        let error = store.list_shard_temp_files(0xab).unwrap_err();
+        assert!(matches!(error, StoreError::Io(_)), "{error:?}");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_temp_file_that_is_gone_at_the_final_check_still_counts_as_removed() {
+        let (dir, store) = store();
+        let path = dir.path().join(".x.tmp.1.2");
+        old_file(&path);
+        let freed = store
+            .prune_file_if_old(&path, u64::MAX, 10, || fs::remove_file(&path).unwrap())
+            .unwrap();
+        assert_eq!(freed, Some(7));
+    }
+
+    #[test]
+    fn a_failed_unlink_is_an_error() {
+        let (dir, store) = store();
+        let path = dir.path().join(".x.tmp.1.2");
+        old_file(&path);
+        // The file turns into a directory between the check and the unlink.
+        let result = store.prune_file_if_old(&path, u64::MAX, 10, || {
+            fs::remove_file(&path).unwrap();
+            fs::create_dir(&path).unwrap();
+        });
+        assert!(matches!(result, Err(StoreError::Io(_))), "{result:?}");
+    }
+
+    #[test]
+    fn a_young_temp_file_is_kept() {
+        let (dir, store) = store();
+        let path = dir.path().join(".x.tmp.1.2");
+        fs::write(&path, b"partial").unwrap();
+        assert_eq!(
+            store
+                .prune_file_if_old(&path, now(), 1_000, || unreachable!())
+                .unwrap(),
+            None
+        );
+        assert!(path.exists());
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 }
