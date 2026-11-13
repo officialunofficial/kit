@@ -41,7 +41,7 @@ pub const BISECT_FILE: &str = "bisect";
 const MAX_BISECT_FILE_BYTES: u64 = 1024 * 1024;
 
 /// The most commits a bisect keeps skipped. Each takes a 70-byte line of the
-/// state file, which is read back under [`MAX_BISECT_FILE_BYTES`], so this
+/// state file, which is read back under `MAX_BISECT_FILE_BYTES` (1 MiB), so this
 /// keeps the file inside it however many candidates the range has.
 pub const MAX_SKIPPED_COMMITS: usize = 10_000;
 
@@ -62,7 +62,7 @@ pub enum BisectError {
     #[error("bisect state on disk is malformed")]
     InvalidBisectState,
     /// More commits were skipped than the state file holds.
-    #[error("more than {MAX_SKIPPED_COMMITS} commits skipped in one bisect")]
+    #[error("more than 10,000 commits skipped in one bisect")]
     TooManySkipped,
     #[error(transparent)]
     Io(#[from] io::Error),

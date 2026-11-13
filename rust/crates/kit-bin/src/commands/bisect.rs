@@ -169,7 +169,7 @@ fn skip(store: &ObjectStore, layout: &RepoLayout) -> u8 {
     // Add the current midpoint to the exclusion set, then advance.
     state.skipped.insert(current_mid);
     if let Err(e) = write_state(layout, &state) {
-        return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
+        return emit_err(&format!("persist state: {e}"), persist_exit(&e));
     }
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(
@@ -333,8 +333,19 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
         }
         if let Err(e) = write_state(layout, &state) {
             let _ = restore_head(cwd, &state);
-            return emit_err(&format!("persist state: {e}"), exit::CANTCREAT);
+            return emit_err(&format!("persist state: {e}"), persist_exit(&e));
         }
+    }
+}
+
+/// The exit code for a failed write of the bisect state: the limit on skipped
+/// commits is a general error, any other failure is a file that cannot be
+/// created.
+fn persist_exit(e: &kit_core::ops::bisect::BisectError) -> u8 {
+    if matches!(e, kit_core::ops::bisect::BisectError::TooManySkipped) {
+        exit::GENERAL_ERROR
+    } else {
+        exit::CANTCREAT
     }
 }
 
@@ -453,7 +464,19 @@ use super::error as emit_err;
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, classify};
+    use super::{Verdict, classify, persist_exit};
+    use crate::exit;
+    use kit_core::ops::bisect::BisectError;
+
+    #[test]
+    fn the_skip_limit_is_a_general_error_and_a_write_failure_is_not() {
+        assert_eq!(
+            persist_exit(&BisectError::TooManySkipped),
+            exit::GENERAL_ERROR
+        );
+        let io = BisectError::Io(std::io::Error::other("disk"));
+        assert_eq!(persist_exit(&io), exit::CANTCREAT);
+    }
 
     #[test]
     fn classify_matches_git_bisect_run_contract() {
