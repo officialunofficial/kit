@@ -161,32 +161,82 @@ fn a_push_of_compressible_content_decodes_under_the_default_budget() {
     );
 }
 
-/// The writer's own verdict on a pack made of one object of the largest size
-/// and every reader's, with default limits.
-fn largest_object_reads_back(bytes: Vec<u8>) {
+#[test]
+#[ignore = "pushes 1.5 GiB over 1,000 files; run in release mode"]
+fn deltas_over_many_bases_read_back_with_one_base_held_at_a_time() {
+    const GROUPS: u64 = 500;
+    const LEN: usize = 1 << 20;
+    let alice = Repo::new();
+    // Two files of each group start with the same content, so one blob is the
+    // delta base of both after their edits. The files of one member share a
+    // directory. The targets of the 1,000 deltas hash in no order of their
+    // bases, so a plan ordered by target lists the 500 bases scattered, and a
+    // reader holds most of them at once beside the 1,000 results.
+    for group in 0..GROUPS {
+        let body = incompressible(0xB0DE_0000 + group, LEN);
+        for member in 0..2 {
+            alice.write(&format!("m{member}/g{group:03}.bin"), &body);
+        }
+    }
+    alice.ok(&["add", "."]);
+    alice.ok(&["commit", "-m", "bases"]);
+    let remote = tempfile::tempdir().unwrap();
+    let tx = FileTransport::new(remote.path());
+    let first = head(alice.path());
+    push(&alice, &tx, RefWriteCondition::Missing);
+
+    for group in 0..GROUPS {
+        let body = incompressible(0xB0DE_0000 + group, LEN);
+        for member in 0..2_u64 {
+            let mut edited = body.clone();
+            let at = LEN / 2 + usize::try_from(member).unwrap();
+            edited[at..at + 16].copy_from_slice(&(group * 2 + member).to_le_bytes().repeat(2));
+            alice.write(&format!("m{member}/g{group:03}.bin"), &edited);
+        }
+    }
+    alice.ok(&["add", "."]);
+    alice.ok(&["commit", "-m", "edits"]);
+    push(&alice, &tx, RefWriteCondition::Match(first));
+
+    let pushes = remote_packs(&tx, "main");
+    assert_eq!(pushes.len(), 2);
+    let store = ObjectStore::open(&RepoLayout::single(alice.path())).unwrap();
+    // The deltas of a base sit next to each other, so a reader holds one base
+    // at a time and the whole push fits one pack.
+    assert_eq!(pushes[1].len(), 1);
+    let deltas = read_back(&tx, &store, &pushes[1]);
+    assert!(
+        deltas >= 2 * usize::try_from(GROUPS).unwrap() - 10,
+        "the second push should be almost all deltas, got {deltas}"
+    );
+}
+
+/// The writer's own verdict on a pack made of one blob of `bytes.len()` bytes
+/// and every reader's, with default limits. `compressed` says whether the
+/// writer keeps a zstd frame for it: it does not when the bytes it decodes to
+/// and the frame together pass the 1 GiB budget.
+fn object_reads_back(bytes: Vec<u8>, compressed: bool) {
     use kit_core::pack::window::read_all;
     use kit_core::pack::{PackFill, PackReader, PackWriter};
-    use kit_core::store::MAX_RAW_OBJECT_SIZE;
 
-    // A blob: the six-byte prologue, a four-byte length and the content,
-    // `MAX_RAW_OBJECT_SIZE` in all.
+    // A blob: the six-byte prologue, a four-byte length and the content.
     let mut bytes = bytes;
     bytes[..6].copy_from_slice(&[0x01, b'K', b'O', b'B', b'1', 0x01]);
     let content = u32::try_from(bytes.len() - 10).unwrap();
     bytes[6..10].copy_from_slice(&content.to_le_bytes());
-    assert_eq!(bytes.len(), MAX_RAW_OBJECT_SIZE);
     let id = kit_core::hash::hash(&bytes);
     let entry = PackWriter::prepare_raw(id, bytes);
-    // The writer takes it into an empty pack, and seals before any second
-    // entry: the decoded budget is spent.
+    assert_eq!(entry.decoded_len() > 0, compressed);
+    // The writer takes it into an empty pack. A compressed entry spends most
+    // of the decoded budget, so the writer seals before a second one.
     let fill = PackFill::of(&PackWriter::new());
     assert!(!fill.seals_before(entry.incoming(), u64::MAX, None, usize::MAX));
-    if entry.decoded_len() > 0 {
-        let second = PackWriter::prepare_raw(id, compressible(3, 64 << 10)).incoming();
+    if compressed {
+        let second = PackWriter::prepare_raw(id, compressible(3, 128 << 20)).incoming();
         assert!(
             fill.with(entry.incoming())
                 .seals_before(second, u64::MAX, None, usize::MAX),
-            "the largest compressed object leaves no room for a second one"
+            "a compressed object of 900 MiB leaves no room for one of 128 MiB"
         );
     }
     let mut writer = PackWriter::new();
@@ -242,22 +292,36 @@ fn largest_object_reads_back(bytes: Vec<u8>) {
 }
 
 #[test]
-#[ignore = "builds a 1 GiB object four times; run in release mode"]
-fn the_largest_compressible_object_reads_back_through_every_reader() {
-    // All zeros compress to a few dozen KiB: the compressed entry fits one
-    // window.
-    largest_object_reads_back(vec![0_u8; kit_core::store::MAX_RAW_OBJECT_SIZE]);
+#[ignore = "builds a 1 GiB object; run in release mode"]
+fn the_largest_object_of_zeros_reads_back_through_every_reader() {
+    // The object takes a few dozen KiB as a frame, but its 1 GiB and the frame
+    // pass the budget of the smallest reader, so the writer stores it plain.
+    object_reads_back(vec![0_u8; kit_core::store::MAX_RAW_OBJECT_SIZE], false);
 }
 
 #[test]
 #[ignore = "builds a 1 GiB object; run in release mode"]
 fn the_largest_object_of_sixteen_to_one_content_reads_back_through_every_reader() {
-    // About 64 MiB on the wire: the compressed entry straddles windows.
-    largest_object_reads_back(compressible(7, kit_core::store::MAX_RAW_OBJECT_SIZE));
+    // As a frame it would take about 64 MiB, which the window reader charges
+    // beside the 1 GiB when the entry straddles windows. Stored plain, every
+    // reader takes it.
+    object_reads_back(compressible(7, kit_core::store::MAX_RAW_OBJECT_SIZE), false);
+}
+
+#[test]
+#[ignore = "builds a 900 MiB object; run in release mode"]
+fn a_compressed_object_that_straddles_windows_reads_back_through_every_reader() {
+    // About 56 MiB on the wire: the entry is compressed, larger than a 1 MiB
+    // window, and the window reader's charge for it, the frame and the 900 MiB
+    // together, is under the budget.
+    object_reads_back(compressible(7, 900 << 20), true);
 }
 
 #[test]
 #[ignore = "builds a 1 GiB object; run in release mode"]
 fn the_largest_incompressible_object_reads_back_through_every_reader() {
-    largest_object_reads_back(incompressible(9, kit_core::store::MAX_RAW_OBJECT_SIZE));
+    object_reads_back(
+        incompressible(9, kit_core::store::MAX_RAW_OBJECT_SIZE),
+        false,
+    );
 }

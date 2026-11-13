@@ -35,6 +35,7 @@ use crate::delta;
 use crate::hash::{self, Hash};
 use crate::list_decode::read_list;
 use crate::object::{KitError, Object, ObjectType};
+use crate::pack::delta_fits_reader;
 use crate::store::{ObjectStore, StoreError};
 
 use self::walk::{ChunkMemory, HeldCommits, MAX_CHUNK_MEMORY, MAX_HELD_SCAN, PushWalk};
@@ -527,7 +528,8 @@ pub struct PlannedDelta {
 ///
 /// Entries are pre-ordered for [`crate::pack::PackWriter`]: all `raw`
 /// objects first (non-blobs before blobs, each group in BLAKE3 order),
-/// then `deltas`. Delta bases are external — they live in `old_tip`'s
+/// then `deltas`, grouped by base in BLAKE3 order of the base, then of the
+/// target. Delta bases are external — they live in `old_tip`'s
 /// closure, which the remote already holds and earlier packs already
 /// delivered, NEVER in an entry introduced earlier in this same plan —
 /// so no in-pack base ordering is required (SPEC-PACKFILE §4), and a
@@ -805,6 +807,12 @@ fn plan_pack_capped(
         }
     }
 
+    // A reader holds a base from the first delta that names it to the last.
+    // The deltas of one base sit next to each other, so a pack holds one base
+    // at a time, whatever the number of bases. Hash order inside a base and
+    // between bases keeps the plan, and so the pack bytes, deterministic.
+    deltas.sort_unstable_by(|a, b| a.base.cmp(&b.base).then_with(|| a.target.cmp(&b.target)));
+
     Ok(PackPlan {
         raw,
         deltas,
@@ -828,12 +836,23 @@ fn try_delta(
     target_bytes: &[u8],
     base_bytes: &[u8],
 ) -> Option<PlannedDelta> {
+    try_delta_with(target, base, target_bytes, base_bytes, delta_fits_reader)
+}
+
+/// [`try_delta`] with the test of whether a reader takes the delta given.
+fn try_delta_with(
+    target: Hash,
+    base: Hash,
+    target_bytes: &[u8],
+    base_bytes: &[u8],
+    fits: impl FnOnce(&[u8]) -> bool,
+) -> Option<PlannedDelta> {
     let Ok(stream) = delta::encode(base_bytes, target_bytes) else {
         // Over-u32 inputs can't happen here (object cap < 4 GiB), but treat
         // any encode failure as "send raw" rather than propagating.
         return None;
     };
-    if hash::HASH_LEN + stream.len() < target_bytes.len() {
+    if hash::HASH_LEN + stream.len() < target_bytes.len() && fits(&stream) {
         Some(PlannedDelta {
             target,
             base,
@@ -856,6 +875,46 @@ mod tests {
     use crate::pack::{PackReader, PackWriter};
     use crate::serialize;
     use tempfile::TempDir;
+
+    #[test]
+    fn only_a_delta_a_reader_takes_alone_is_planned() {
+        let base = vec![7_u8; 4096];
+        let mut target = base.clone();
+        target[100] = 8;
+        // Within the default budget, the delta is taken.
+        assert!(try_delta([2; 32], [1; 32], &target, &base).is_some());
+        // A delta whose wire payload is as long as the object is not worth
+        // sending: only a shorter one is. Look for an edit that fills it.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut noise = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state.to_le_bytes()[0]
+                })
+                .collect()
+        };
+        let small = noise(200);
+        let mut equal = 0;
+        for literal in 1..24_usize {
+            for copy in 16..120_usize {
+                let mut changed = noise(literal);
+                changed.extend_from_slice(&small[..copy]);
+                let stream = delta::encode(&small, &changed).unwrap();
+                let wire = hash::HASH_LEN + stream.len();
+                let planned = try_delta_with([2; 32], [1; 32], &changed, &small, |_| true);
+                assert_eq!(planned.is_some(), wire < changed.len());
+                equal += usize::from(wire == changed.len());
+            }
+        }
+        assert!(equal > 0, "no edit filled the object exactly");
+        // A delta that a reader cannot take alone is declined, so the object
+        // goes raw.
+        assert!(try_delta_with([2; 32], [1; 32], &target, &base, |_| false).is_none());
+        assert!(try_delta_with([2; 32], [1; 32], &target, &base, |_| true).is_some());
+    }
 
     pub(super) fn store() -> (TempDir, ObjectStore) {
         let d = TempDir::new().unwrap();
@@ -1527,6 +1586,54 @@ mod tests {
         );
 
         assert_pack_reconstructs(&s, &plan, c1, c2);
+    }
+
+    /// The deltas of a plan are ordered by base and then target, so a reader
+    /// holds one external base at a time and the plan is deterministic.
+    #[test]
+    fn the_deltas_of_a_plan_are_ordered_by_base_then_target() {
+        let (_d, s) = store();
+        let text = |file: usize, edit: bool| {
+            let mut out = Vec::new();
+            for i in 0..40 {
+                if edit && i == 20 {
+                    out.extend_from_slice(b"THIS LINE WAS EDITED\n");
+                } else {
+                    out.extend_from_slice(format!("file {file} line {i:02}\n").as_bytes());
+                }
+            }
+            out
+        };
+        let commit_of = |edit: bool, parents: Vec<Hash>| {
+            let entries = (0..8)
+                .map(|file| TreeEntry {
+                    name: format!("f{file}.txt").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&s, text(file, edit)),
+                })
+                .collect();
+            let tree = put(&s, &Object::Tree(Tree { entries }));
+            put(
+                &s,
+                &Object::Commit(Commit::new_unannotated(
+                    tree,
+                    parents,
+                    Identity::ed25519([7; 32]),
+                    [0; 32],
+                    b"m".to_vec(),
+                    1,
+                    [0; 64],
+                )),
+            )
+        };
+        let c1 = commit_of(false, vec![]);
+        let c2 = commit_of(true, vec![c1]);
+        let plan = plan_pack(&s, c2, Some(c1)).unwrap();
+        assert!(plan.deltas.len() >= 2, "{}", plan.deltas.len());
+        let keys: Vec<_> = plan.deltas.iter().map(|d| (d.base, d.target)).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted);
     }
 
     #[test]
