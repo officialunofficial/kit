@@ -401,8 +401,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fixed-size layout must now have the length the layout requires, or
   verification fails with `VerifyError::FixedChunkLength`. A disclosed chunk
   or range of a `ChunkedBlob` must also have a `total_size` that its layout
-  can produce, by the same rules as decoding a manifest. An absolute offset
-  still comes only from length proofs, for every layout.
+  can produce, by the same rules as decoding a manifest.
+- **Breaking:** the absolute offset of a range disclosure comes only from
+  length proofs, for every layout. A range disclosure of a fixed-size chunked
+  file that carries no length proofs now verifies with `absolute_offset =
+  None`. It returned `Some(index * chunk_size + offset)` before, so a bundle
+  built without length proofs loses its offset.
+- **Breaking:** `verify::VerifyError` has a new variant, `ContentTooLarge
+  { size }`. The disclosure builder returns it for a byte range of a
+  `ChunkedBlob` above `worktree::MAX_FILE_BYTES`. The enum is not
+  `#[non_exhaustive]`, so an exhaustive `match` adds an arm.
+- **Breaking:** the text of `KitError::TooManyChunks` reads
+  `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
+  matches the message text updates the number. The variant is the same.
 - `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
   signature does not verify, with or without trust roots. It used to print
   `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
