@@ -524,3 +524,190 @@ fn a_push_that_already_landed_writes_nothing() {
         assert!(remote.head_conditions.lock().unwrap().is_empty());
     }
 }
+
+/// A commit whose tree holds the given objects.
+fn commit_objects(store: &ObjectStore, files: &[(&str, Hash)], parents: &[Hash], seed: u8) -> Hash {
+    let mut entries: Vec<TreeEntry> = files
+        .iter()
+        .map(|(name, hash)| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: *hash,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let tree = put(store, &Object::Tree(Tree { entries }));
+    put(
+        store,
+        &Object::Commit(Commit::new_unannotated(
+            tree,
+            parents.to_vec(),
+            Identity::ed25519([7; 32]),
+            [0; 32],
+            vec![seed],
+            u64::from(seed),
+            [0; 64],
+        )),
+    )
+}
+
+/// A chunked file of the given chunk contents.
+fn chunked_file(store: &ObjectStore, chunks: &[&str]) -> Hash {
+    let ids: Vec<Hash> = chunks
+        .iter()
+        .map(|data| {
+            put(
+                store,
+                &Object::Blob(Blob {
+                    data: data.repeat(200).into_bytes(),
+                }),
+            )
+        })
+        .collect();
+    put(
+        store,
+        &Object::ChunkedBlob(kit_core::object::ChunkedBlob {
+            total_size: ids.len() as u64 * 200,
+            chunk_size: 0,
+            chunks: ids,
+        }),
+    )
+}
+
+/// The same check as [`rebuilds`], for any branch.
+fn branch_rebuilds(remote: &Remote<'_>, branch: &str, head: Hash) -> bool {
+    let (_dir, fresh) = store();
+    let mut nodes = Vec::new();
+    let mut cursor = remote.read_ref(&packmap_ref(branch)).unwrap();
+    while let Some(key) = cursor {
+        let node =
+            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
+                .unwrap();
+        cursor = node.prev;
+        nodes.push(node);
+    }
+    nodes.reverse();
+    for key in nodes.iter().flat_map(|node| &node.packs) {
+        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        if PackReader::read(&bytes, &fresh).is_err() {
+            return false;
+        }
+    }
+    reachable_objects(&fresh, &head).is_ok()
+}
+
+fn push_branch(
+    remote: &Remote<'_>,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: RefWriteCondition,
+) {
+    push_branch_steps(
+        &TransportSource::new(remote),
+        store,
+        branch,
+        tip,
+        condition,
+        DEPTH,
+        pack::MAX_TOTAL_PAYLOAD,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        remote.read_ref(&format!("refs/heads/{branch}")).unwrap(),
+        Some(tip)
+    );
+    assert!(
+        branch_rebuilds(remote, branch, tip),
+        "{branch} must clone after the push"
+    );
+}
+
+/// Every branch a push publishes can be cloned: its packmap chain rebuilds
+/// the closure of its head. The pushes edit, rename and merge a chunked
+/// file, branch from an earlier commit, and force a branch onto an unrelated
+/// history that holds one of the files, on every kind of advance.
+#[test]
+fn every_pushed_branch_can_be_cloned() {
+    for kind in ["serialized", "ordered", "atomic"] {
+        for tickets in [false, true] {
+            let case = format!("{kind}, tickets: {tickets}");
+            let (_dir, store) = store();
+            let remote = Remote {
+                atomic: kind == "atomic",
+                serialized: kind != "ordered",
+                tickets,
+                ..Remote::new()
+            };
+            let note = put(
+                &store,
+                &Object::Blob(Blob {
+                    data: b"note".to_vec(),
+                }),
+            );
+            let big = chunked_file(&store, &["a", "b", "c", "d"]);
+            let edited = chunked_file(&store, &["a", "b", "e", "d"]);
+            let base = commit_objects(&store, &[("big", big), ("note", note)], &[], 0);
+            push_branch(&remote, &store, "main", base, RefWriteCondition::Missing);
+
+            let edit = commit_objects(&store, &[("big", edited), ("note", note)], &[base], 1);
+            push_branch(
+                &remote,
+                &store,
+                "main",
+                edit,
+                RefWriteCondition::Match(base),
+            );
+
+            let renamed = commit_objects(&store, &[("moved", edited), ("note", note)], &[edit], 2);
+            push_branch(
+                &remote,
+                &store,
+                "main",
+                renamed,
+                RefWriteCondition::Match(edit),
+            );
+
+            // A branch from the first commit that adds a file of its own.
+            let extra = chunked_file(&store, &["x", "y"]);
+            let feature = commit_objects(
+                &store,
+                &[("big", big), ("extra", extra), ("note", note)],
+                &[base],
+                3,
+            );
+            push_branch(
+                &remote,
+                &store,
+                "feature",
+                feature,
+                RefWriteCondition::Missing,
+            );
+
+            // A merge of the two lines.
+            let merged = commit_objects(
+                &store,
+                &[("extra", extra), ("moved", edited), ("note", note)],
+                &[renamed, feature],
+                4,
+            );
+            push_branch(
+                &remote,
+                &store,
+                "main",
+                merged,
+                RefWriteCondition::Match(renamed),
+            );
+
+            // A forced branch onto unrelated history that holds a file the
+            // remote has at another path.
+            let unrelated = commit_objects(&store, &[("again", edited)], &[], 5);
+            push_branch(&remote, &store, "main", unrelated, RefWriteCondition::Any);
+
+            // Every earlier branch still clones.
+            assert!(branch_rebuilds(&remote, "feature", feature), "{case}");
+        }
+    }
+}

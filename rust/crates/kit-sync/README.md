@@ -9,9 +9,11 @@ verifies the signature of every commit, remix and tag it introduced, checks
 the tip's closure is complete, publishes the remote-tracking ref, and (for
 `pull`) fast-forwards the branch, HEAD and worktree with rollback on failure.
 
-The push path plans the repository closure and deltas, builds and uploads
-packs, advances the packmap and branch refs with CAS, and records each published
-remote-tracking ref. It preserves split-push bounds and resumable uploads.
+The push path plans from what changed: it walks the commits the remote lacks,
+compares each tree with the trees of its parents, and plans deltas. A chunk of
+a large file counts toward no cap. It builds and uploads packs, advances the
+packmap and branch refs with CAS, and records each published remote-tracking
+ref. It preserves split-push bounds and resumable uploads.
 
 Every call returns a typed report or a typed error. **Nothing is printed**
 (`#![deny(clippy::print_stdout, clippy::print_stderr)]`), and the library

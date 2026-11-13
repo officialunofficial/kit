@@ -31,17 +31,17 @@
 //! largest pack the remote accepts. Every cut, probe and upload then uses the
 //! same value.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use kit_core::hash::{Hash, to_hex};
-use kit_core::object::{Object, ObjectType};
-use kit_core::ops::graph::{ClosureMode, MAX_REACHABLE, children, reachable_closure_checked};
+use kit_core::object::Object;
 use kit_core::ops::merge::is_ancestor;
 use kit_core::pack;
 use kit_core::protocol::UploadLimits;
 use kit_core::refs::RefWriteCondition;
 use kit_core::store::{ObjectStore, StoreError};
-use kit_core::transfer::{self, PackPlan};
+use kit_core::transfer::walk::{ChunkMemory, HeldCommits, PushWalk};
+use kit_core::transfer::{self, MAX_PUSH_WALK, PUSH_WALK_LIMIT, PackPlan, WalkLimits};
 
 use super::{
     PackSink, PushError, build_and_upload_packs, effective_payload_cap,
@@ -122,10 +122,9 @@ pub(super) fn data_pack_budget(limits: UploadLimits) -> usize {
 struct Chain {
     /// Oldest first; the last is the tip.
     commits: Vec<Hash>,
-    /// Objects the remote already holds among the chain's ancestors: the
-    /// closure of the newest chain ancestor the remote has (none for a new
-    /// branch, or one with no shared history).
-    seed: HashSet<Hash>,
+    /// The commits the remote holds: the ancestors of its head, which this
+    /// store knows (none for a new branch, or a head it lacks).
+    held: HeldCommits,
 }
 
 fn first_parent(obj: &Object) -> Option<Hash> {
@@ -136,29 +135,22 @@ fn first_parent(obj: &Object) -> Option<Hash> {
     }
 }
 
-/// The closure of `root`, or nothing when the store lacks part of it (the
-/// same degradation as `plan_pack_with`). A closure too large to enumerate
-/// is refused: a truncated one would send the walk past commits the remote
-/// holds and rewind its branch.
-fn held_closure(store: &ObjectStore, root: Option<Hash>) -> Result<HashSet<Hash>, PushError> {
-    let Some(root) = root.filter(|root| store.contains(root)) else {
-        return Ok(HashSet::new());
-    };
-    match reachable_closure_checked(store, [&root]) {
-        Ok((set, false)) => Ok(set.into_iter().collect()),
-        Ok((_, true)) => Err(too_large_to_split()),
-        Err(StoreError::ObjectNotFound(_)) => Ok(HashSet::new()),
-        Err(e) => Err(e.into()),
-    }
-}
-
 fn too_large_to_split() -> PushError {
     PushError::PushSplitLimit(format!(
-        "the history is too large to split ({MAX_REACHABLE} objects or more); no advance of this branch was published"
+        "the history is too large to split ({MAX_PUSH_WALK} objects or more); no advance of this branch was published"
     ))
 }
 
-/// Walk `tip`'s first parents down to the first commit `remote_tip`'s closure
+/// A walk failure as a push error: the cap on the walk is the split's own
+/// limit, which is refused before anything is published.
+fn walk_error(error: StoreError) -> PushError {
+    match error {
+        StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT) => too_large_to_split(),
+        other => other.into(),
+    }
+}
+
+/// Walk `tip`'s first parents down to the first commit `remote_tip`'s history
 /// contains. Never enters a second-parent side: a merge is one chain commit.
 fn walk_chain(
     store: &ObjectStore,
@@ -166,13 +158,22 @@ fn walk_chain(
     remote_tip: Option<Hash>,
     ctl: &PushControl<'_>,
 ) -> Result<Chain, PushError> {
-    let held = held_closure(store, remote_tip)?;
+    walk_chain_capped(store, tip, remote_tip, ctl, MAX_PUSH_WALK)
+}
+
+/// [`walk_chain`] with the cap on the held set, so a test can reach it.
+fn walk_chain_capped(
+    store: &ObjectStore,
+    tip: Hash,
+    remote_tip: Option<Hash>,
+    ctl: &PushControl<'_>,
+    cap: usize,
+) -> Result<Chain, PushError> {
+    let held = HeldCommits::collect(store, remote_tip, cap).map_err(walk_error)?;
     let mut commits = Vec::new();
-    let mut base = None;
     let mut cursor = tip;
     loop {
         if held.contains(&cursor) {
-            base = Some(cursor);
             break;
         }
         if commits.len() >= ctl.max_chain {
@@ -194,34 +195,84 @@ fn walk_chain(
         }
     }
     commits.reverse();
-    let seed = match base {
-        Some(base) if Some(base) == remote_tip => held,
-        base => held_closure(store, base)?,
-    };
-    Ok(Chain { commits, seed })
+    Ok(Chain { commits, held })
 }
 
 /// What a pass over the chain measured.
 struct Weights {
     /// `cumulative[j]` is what the first `j` chain commits contribute beyond
-    /// `chain.seed`, in serialized bytes.
+    /// what the remote holds, in serialized bytes.
     cumulative: Vec<u64>,
     /// The serialized size of the largest single object in the chain.
     largest_object: u64,
 }
 
-/// Serialized bytes each chain prefix adds. One pass, each object visited
-/// once; a walk from a chain commit stops at anything already seen, since a
-/// closure is closed under its children.
+/// The serialized weight of one object: its raw size plus one pack frame.
+fn weight_of(store: &ObjectStore, hash: &Hash) -> Result<u64, StoreError> {
+    Ok(store
+        .object_metadata(hash)?
+        .len()
+        .saturating_add(pack::ENTRY_FRAME_LEN as u64))
+}
+
+/// Serialized bytes each chain prefix adds. One walk of what the remote lacks
+/// sizes what each new commit brings; a chunk is sized once and is never put
+/// into a set the walk counts. Each chain commit then takes the new commits
+/// that no earlier chain commit reaches.
 fn cumulative_weights(
     store: &ObjectStore,
     chain: &Chain,
     ctl: &PushControl<'_>,
 ) -> Result<Weights, PushError> {
-    let mut seen = chain.seed.clone();
+    cumulative_weights_capped(store, chain, ctl, WalkLimits::default())
+}
+
+/// [`cumulative_weights`] with the walk's bounds, so a test can reach them.
+fn cumulative_weights_capped(
+    store: &ObjectStore,
+    chain: &Chain,
+    ctl: &PushControl<'_>,
+    limits: WalkLimits,
+) -> Result<Weights, PushError> {
+    let Some(&tip) = chain.commits.last() else {
+        return Ok(Weights {
+            cumulative: vec![0],
+            largest_object: 0,
+        });
+    };
+    let mut brought: HashMap<Hash, u64> = HashMap::new();
+    let mut largest_object = 0_u64;
+    let walk = PushWalk::run(
+        store,
+        tip,
+        &chain.held,
+        &ctl.shallow,
+        limits,
+        Some(&mut |commit, object| {
+            let weight = weight_of(store, object)?;
+            largest_object = largest_object.max(weight);
+            let total = brought.entry(*commit).or_default();
+            *total = total.saturating_add(weight);
+            Ok(())
+        }),
+    )
+    .map_err(walk_error)?;
+    walk.for_each_chunk(
+        store,
+        &mut ChunkMemory::new(limits.chunk_memory),
+        |commit, chunk| {
+            let weight = weight_of(store, &chunk)?;
+            largest_object = largest_object.max(weight);
+            let total = brought.entry(*commit).or_default();
+            *total = total.saturating_add(weight);
+            Ok(())
+        },
+    )
+    .map_err(walk_error)?;
+
     let mut cumulative = Vec::with_capacity(chain.commits.len() + 1);
     let mut total = 0_u64;
-    let mut largest_object = 0_u64;
+    let mut taken: HashSet<Hash> = HashSet::new();
     cumulative.push(0);
     for commit in &chain.commits {
         if ctl.observer.cancelled() {
@@ -229,31 +280,19 @@ fn cumulative_weights(
         }
         let mut stack = vec![*commit];
         while let Some(hash) = stack.pop() {
-            if !seen.insert(hash) {
+            if chain.held.contains(&hash) || !taken.insert(hash) {
                 continue;
             }
-            if seen.len() > MAX_REACHABLE {
-                return Err(too_large_to_split());
-            }
-            let weight = store
-                .object_metadata(&hash)?
-                .len()
-                .saturating_add(pack::ENTRY_FRAME_LEN as u64);
-            largest_object = largest_object.max(weight);
-            total = total.saturating_add(weight);
-            if matches!(
-                store.object_type(&hash)?,
-                ObjectType::Blob | ObjectType::Delta
-            ) {
-                continue;
-            }
+            total = total.saturating_add(brought.get(&hash).copied().unwrap_or(0));
             // A shallow-boundary commit's parents are not in this repository.
-            let mode = if ctl.shallow.contains(&hash) {
-                ClosureMode::Snapshot
-            } else {
-                ClosureMode::History
-            };
-            stack.extend(children(&store.read_object(&hash)?, mode));
+            if ctl.shallow.contains(&hash) {
+                continue;
+            }
+            match store.read_object(&hash)? {
+                Object::Commit(commit) => stack.extend(commit.parents),
+                Object::Remix(remix) => stack.extend(remix.parents),
+                _ => {}
+            }
         }
         cumulative.push(total);
     }
@@ -302,7 +341,8 @@ impl Cutter<'_> {
             self.chain.commits[to - 1],
             base,
             encode_delta_candidates_batch,
-        )?;
+        )
+        .map_err(walk_error)?;
         let packs =
             estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?.len();
         Ok((plan, packs))
@@ -676,6 +716,21 @@ mod tests {
         )
     }
 
+    fn commit_tree(store: &ObjectStore, tree: Hash, parents: Vec<Hash>, seed: u8) -> Hash {
+        put(
+            store,
+            &Object::Commit(Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::ed25519([7; 32]),
+                [0; 32],
+                vec![seed],
+                u64::from(seed),
+                [0; 64],
+            )),
+        )
+    }
+
     fn blob(store: &ObjectStore, seed: u64, len: usize) -> Hash {
         put(
             store,
@@ -722,12 +777,13 @@ mod tests {
         let c = line(&store, 6);
         let chain = walk_chain(&store, c[5], Some(c[2]), &PushControl::default()).unwrap();
         assert_eq!(chain.commits, [c[3], c[4], c[5]]);
-        assert_eq!(chain.seed, held_closure(&store, Some(c[2])).unwrap());
+        assert_eq!(chain.held.len(), 3);
+        assert!(c[..3].iter().all(|held| chain.held.contains(held)));
 
         // A new branch walks to the root.
         let chain = walk_chain(&store, c[5], None, &PushControl::default()).unwrap();
         assert_eq!(chain.commits, c);
-        assert!(chain.seed.is_empty());
+        assert!(chain.held.is_empty());
     }
 
     #[test]
@@ -738,7 +794,10 @@ mod tests {
         let theirs = commit(&store, &[other], vec![c[1]], 90);
         let chain = walk_chain(&store, c[5], Some(theirs), &PushControl::default()).unwrap();
         assert_eq!(chain.commits, [c[2], c[3], c[4], c[5]]);
-        assert_eq!(chain.seed, held_closure(&store, Some(c[1])).unwrap());
+        // The remote's history is its tip and the shared ancestors.
+        assert_eq!(chain.held.len(), 3);
+        assert!(chain.held.contains(&theirs) && chain.held.contains(&c[1]));
+        assert!(!chain.held.contains(&c[2]));
     }
 
     #[test]
@@ -757,6 +816,103 @@ mod tests {
         let brought = weights[5] - weights[4];
         let lone = weights[4] - weights[3];
         assert!(brought > lone, "{weights:?}");
+    }
+
+    fn chunked(store: &ObjectStore, chunks: &[Hash]) -> Hash {
+        put(
+            store,
+            &Object::ChunkedBlob(kit_core::object::ChunkedBlob {
+                total_size: 100 * chunks.len() as u64,
+                chunk_size: 0,
+                chunks: chunks.to_vec(),
+            }),
+        )
+    }
+
+    #[test]
+    fn the_walk_cap_is_the_split_limit() {
+        let (_dir, store) = store();
+        // Distinct files: every new commit brings a commit, a tree and a blob.
+        let mut files = Vec::new();
+        let mut c: Vec<Hash> = Vec::new();
+        for i in 0..6_u8 {
+            files.push(blob(&store, 2 * u64::from(i) + 1, 100));
+            let parents = c.last().copied().into_iter().collect();
+            c.push(commit(&store, &files, parents, i));
+        }
+        let ctl = PushControl::default();
+        // Three held commits pass a cap of three and fail a cap of two.
+        walk_chain_capped(&store, c[5], Some(c[2]), &ctl, 3).unwrap();
+        assert!(matches!(
+            walk_chain_capped(&store, c[5], Some(c[2]), &ctl, 2),
+            Err(PushError::PushSplitLimit(_))
+        ));
+
+        // Held commits, new commits and kept objects share the cap.
+        let chain = walk_chain(&store, c[5], Some(c[2]), &ctl).unwrap();
+        let counted = |objects| {
+            cumulative_weights_capped(
+                &store,
+                &chain,
+                &ctl,
+                WalkLimits {
+                    objects,
+                    ..WalkLimits::default()
+                },
+            )
+        };
+        let exact = 3 + 3 * 3;
+        counted(exact).unwrap();
+        assert!(matches!(
+            counted(exact - 1),
+            Err(PushError::PushSplitLimit(_))
+        ));
+
+        assert!(matches!(
+            walk_error(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT)),
+            PushError::PushSplitLimit(_)
+        ));
+        assert!(!matches!(
+            walk_error(StoreError::OperationLimitExceeded("another limit")),
+            PushError::PushSplitLimit(_)
+        ));
+    }
+
+    #[test]
+    fn a_chunk_weighs_once_and_a_renamed_chunked_file_weighs_none() {
+        let (_dir, store) = store();
+        let chunk = blob(&store, 7, 1000);
+        let other = blob(&store, 8, 1000);
+        let big = chunked(&store, &[chunk, other]);
+        let tree = |name: &[u8], file: Hash| {
+            put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: vec![TreeEntry {
+                        name: name.to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: file,
+                    }],
+                }),
+            )
+        };
+        let remote = commit_tree(&store, tree(b"a", big), Vec::new(), 1);
+        let renamed = commit_tree(&store, tree(b"b", big), vec![remote], 2);
+        let ctl = PushControl::default();
+        let chain = walk_chain(&store, renamed, Some(remote), &ctl).unwrap();
+        let weights = cumulative_weights(&store, &chain, &ctl).unwrap();
+        assert!(weights.cumulative[1] < 1000, "{:?}", weights.cumulative);
+
+        // A chunk that a file lists many times is weighed once.
+        let repeated = chunked(&store, &[chunk; 50]);
+        let tree_c = tree(b"c", repeated);
+        let once = commit_tree(&store, tree_c, Vec::new(), 3);
+        let chain = walk_chain(&store, once, None, &ctl).unwrap();
+        let weights = cumulative_weights(&store, &chain, &ctl).unwrap();
+        let weight = |hash| weight_of(&store, &hash).unwrap();
+        let expected = weight(once) + weight(tree_c) + weight(repeated) + weight(chunk);
+        assert_eq!(weights.cumulative[1], expected);
+        assert_eq!(weights.largest_object, weight(repeated).max(weight(chunk)));
     }
 
     #[test]
@@ -1086,7 +1242,7 @@ mod tests {
                     put(&store, &Object::Blob(Blob { data: bytes(i as u64 + 1, *len, *compressible) }))
                 })
                 .collect();
-            let (tip, base, seed) = if with_deltas {
+            let (tip, base) = if with_deltas {
                 // The tip edits every file a little, so each is sent as a delta.
                 let base = commit(&store, &files, Vec::new(), 1);
                 let edited: Vec<Hash> = sizes
@@ -1100,9 +1256,9 @@ mod tests {
                     })
                     .collect();
                 let tip = commit(&store, &edited, vec![base], 2);
-                (tip, Some(base), held_closure(&store, Some(base)).unwrap())
+                (tip, Some(base))
             } else {
-                (commit(&store, &files, Vec::new(), 1), None, HashSet::new())
+                (commit(&store, &files, Vec::new(), 1), None)
             };
             let plan = if with_deltas {
                 transfer::plan_pack_with(&store, tip, base, encode_delta_candidates_batch).unwrap()
@@ -1123,7 +1279,8 @@ mod tests {
             let keys = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits, &crate::NoopObserver)
                 .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
             prop_assert!(keys.len() <= estimate, "{} > {estimate}", keys.len());
-            let chain = Chain { commits: vec![tip], seed };
+            let held = HeldCommits::collect(&store, base, MAX_PUSH_WALK).unwrap();
+            let chain = Chain { commits: vec![tip], held };
             let weight = *cumulative_weights(&store, &chain, &PushControl::default())
                 .unwrap()
                 .cumulative

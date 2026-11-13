@@ -27,14 +27,48 @@
 //! re-verified by `PackReader` before storing.
 
 pub mod packmap;
+pub mod walk;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::list_decode::read_list;
-use crate::object::{Object, ObjectType};
+use crate::object::{KitError, Object, ObjectType};
 use crate::store::{ObjectStore, StoreError};
+
+use self::walk::{ChunkMemory, HeldCommits, MAX_CHUNK_MEMORY, MAX_HELD_SCAN, PushWalk};
+
+/// Most objects a push walk holds: the commits the remote holds, the commits
+/// it lacks, and the objects the walk keeps. A chunk of a large file counts
+/// toward nothing.
+pub const MAX_PUSH_WALK: usize = 10_000_000;
+
+/// The limit [`plan_pack`] and [`plan_pack_with`] report when a walk reaches
+/// [`MAX_PUSH_WALK`].
+pub const PUSH_WALK_LIMIT: &str = "10,000,000-object push walk";
+
+/// The bounds of one push walk. The defaults are the production ones; a test
+/// lowers them to cut a walk without building ten million objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkLimits {
+    /// Most held commits, new commits and kept objects together.
+    pub objects: usize,
+    /// Most trees the held filter reads from the remote head's snapshot.
+    pub held_scan: usize,
+    /// Most chunk ids remembered as already listed.
+    pub chunk_memory: usize,
+}
+
+impl Default for WalkLimits {
+    fn default() -> Self {
+        Self {
+            objects: MAX_PUSH_WALK,
+            held_scan: MAX_HELD_SCAN,
+            chunk_memory: MAX_CHUNK_MEMORY,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // PackList wire format
@@ -484,7 +518,9 @@ pub struct PlannedDelta {
 /// safe.
 #[derive(Debug, Clone, Default)]
 pub struct PackPlan {
-    /// Objects to send verbatim, already ordered non-blobs-then-blobs.
+    /// Objects to send verbatim, already ordered non-blobs-then-blobs. A chunk
+    /// repeated past the plan's chunk memory may appear twice; a pack reader
+    /// accepts duplicate raw entries.
     pub raw: Vec<Hash>,
     /// Objects to send as a delta against an already-present base.
     pub deltas: Vec<PlannedDelta>,
@@ -516,11 +552,14 @@ impl PackPlan {
 /// Plan the pack for pushing `new_tip` to a remote whose current tip is
 /// `old_tip` (`None` for a first push or a remote we cannot diff against).
 ///
-/// Computes the send-set as `closure(new_tip) \ closure(old_tip)` — so
-/// objects the remote already holds are never re-sent (this is the
-/// identical-object dedup, preferred over delta) — then delta-encodes
-/// changed chunks against same-path prior chunks where that actually
-/// saves bytes, falling back to raw otherwise.
+/// Plans from what changed: it walks the commits the remote lacks and keeps
+/// the entries of each tree that differ from the trees of its parents (see
+/// [`walk::PushWalk`]). An object the remote holds is not re-sent when a
+/// parent has it at the same path or the remote head's snapshot holds it
+/// (the identical-object dedup, preferred over delta). It then delta-encodes
+/// changed chunks against same-path prior chunks where that actually saves
+/// bytes, falling back to raw otherwise. A plan may send an object the remote
+/// holds. It never omits one the remote lacks.
 ///
 /// Delta candidates are encoded one at a time, sequentially — see
 /// [`plan_pack_with`] for a version that lets a caller fan that step out
@@ -528,9 +567,8 @@ impl PackPlan {
 ///
 /// # Errors
 ///
-/// Propagates [`StoreError`] from reading the local closure. A missing
-/// `old_tip` closure is treated as "diff unavailable" (full-closure,
-/// all-raw push) rather than an error.
+/// See [`plan_pack_with`]. An `old_tip` that this store lacks is treated as
+/// "diff unavailable" (full-closure, all-raw push) rather than an error.
 pub fn plan_pack(
     store: &ObjectStore,
     new_tip: Hash,
@@ -615,15 +653,6 @@ pub fn encode_delta_candidate_with_base(
     ))
 }
 
-/// A blob's slot in [`plan_pack_with`]'s final (BLAKE3-ordered)
-/// `blob_raw`/`deltas` split: either an immediate raw hash, or a
-/// placeholder pointing at its index in the candidates slice handed to
-/// `encode_deltas` — filled in once that callback returns.
-enum BlobSlot {
-    Raw(Hash),
-    Pending(usize),
-}
-
 /// [`plan_pack`], but with an explicit `encode_deltas` batch callback in
 /// place of the built-in sequential loop over [`encode_delta_candidate`].
 ///
@@ -641,16 +670,16 @@ enum BlobSlot {
 /// MUST return exactly one `Option<PlannedDelta>` per input candidate, in the same
 /// order — a `None` for a given candidate falls back to sending that
 /// blob raw, matching [`encode_delta_candidate`]'s own "smaller or raw"
-/// rule.
+/// rule. A chunk whose candidate returns `None` is still sent raw.
 ///
 /// # Errors
 ///
-/// Propagates [`StoreError`] from the local closure walk or from
-/// `encode_deltas`, including [`StoreError::OperationLimitExceeded`] when
-/// the closure of the new tip reaches [`crate::ops::graph::MAX_REACHABLE`]:
-/// a plan never omits the objects past a cut. A cut in the walk of the
-/// remote tip is no error. The plan then treats the remote as holding only
-/// the objects the walk reached, so it sends more and loses nothing.
+/// Propagates [`StoreError`] from the local walk or from `encode_deltas`.
+/// [`StoreError::ObjectNotFound`] names a new commit, or an object of one,
+/// that this store lacks: a plan never omits what the remote lacks.
+/// [`StoreError::OperationLimitExceeded`] names [`PUSH_WALK_LIMIT`] when the
+/// held commits, the new commits and the kept objects together pass
+/// [`MAX_PUSH_WALK`]. A chunk of a large file counts toward nothing.
 ///
 /// Also returns [`StoreError::DeltaBatchLengthMismatch`] if `encode_deltas`
 /// returns a `Vec` of a different length than the candidate slice it was given
@@ -672,12 +701,11 @@ pub fn plan_pack_with(
         new_tip,
         old_tip,
         encode_deltas,
-        crate::ops::graph::MAX_REACHABLE,
+        WalkLimits::default(),
     )
 }
 
-/// [`plan_pack_with`] with a caller-supplied closure cap, so a test can cut
-/// either walk.
+/// [`plan_pack_with`] with caller-supplied bounds, so a test can cut the walk.
 fn plan_pack_capped(
     store: &ObjectStore,
     new_tip: Hash,
@@ -686,96 +714,91 @@ fn plan_pack_capped(
         &ObjectStore,
         &[DeltaCandidate],
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
-    cap: usize,
+    limits: WalkLimits,
 ) -> Result<PackPlan, StoreError> {
-    use crate::ops::graph::{complete, reachable_closure_checked_with_cap};
+    // What the remote holds is decided from its head alone. A head this store
+    // lacks leaves nothing held, and the plan is the whole closure.
+    let held = HeldCommits::collect(store, old_tip, limits.objects)?;
+    let walk = PushWalk::run(store, new_tip, &held, &HashSet::new(), limits, None)?;
+    let base_map = match held.tip() {
+        Some(old) if !walk.objects().is_empty() => select_chunk_delta_bases(store, new_tip, old)?,
+        Some(_) | None => HashMap::new(),
+    };
 
-    let new_set = complete(reachable_closure_checked_with_cap(
-        store,
-        std::iter::once(&new_tip),
-        cap,
-    ))?;
-
-    // What the remote already holds = the closure of its current tip, if we
-    // can compute it locally. A partial local history (some referenced
-    // object pruned) degrades to "send everything" rather than failing.
-    let mut remote_set = BTreeSet::new();
-    let mut base_map = HashMap::new();
-    let mut have_old = false;
-    if let Some(o) = old_tip
-        && store.contains(&o)
-    {
-        // A cut walk reaches part of what the remote holds. Sending against
-        // that part only adds objects the remote may already have.
-        match reachable_closure_checked_with_cap(store, std::iter::once(&o), cap) {
-            Ok((s, _cut)) => {
-                remote_set = s;
-                base_map = select_chunk_delta_bases(store, new_tip, o)?;
-                have_old = true;
-            }
-            Err(StoreError::ObjectNotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
-    }
-
-    let send: BTreeSet<Hash> = new_set.difference(&remote_set).copied().collect();
-
-    // Partition the send-set, iterating in BTreeSet (BLAKE3) order so the
-    // plan — and therefore the pack bytes — is deterministic.
+    // Objects the walk kept, in BLAKE3 order so the plan, and so the pack
+    // bytes, are deterministic. Classify via the cheap 6-byte prologue check
+    // (`object_type`) instead of a full read+verify of the object's bytes:
+    // the plan only needs the type tag, not the content (INV-14). Bytes are
+    // read lazily, only for the subset that are actually delta candidates,
+    // by `encode_deltas` below.
     let mut non_blob_raw = Vec::new();
-    let mut blob_slots = Vec::new();
-    let mut candidates: Vec<DeltaCandidate> = Vec::new();
-
-    for h in &send {
-        // Classify via the cheap 6-byte prologue check (`object_type`)
-        // instead of a full read+verify of the object's bytes — the send-set
-        // classification only needs the type tag, not the content (INV-14).
-        // Bytes are read lazily, only for the subset that are actually
-        // delta candidates, by `encode_deltas` below.
-        let is_blob = store.object_type(h)? == ObjectType::Blob;
-        if !is_blob {
+    let mut blobs = Vec::new();
+    for h in walk.objects() {
+        if store.object_type(h)? == ObjectType::Blob {
+            blobs.push(*h);
+        } else {
             non_blob_raw.push(*h);
-            continue;
         }
-
-        // Only blobs (FastCDC chunks) are delta candidates, and only against
-        // a base the remote actually holds.
-        match base_map.get(h) {
-            Some(&base) if remote_set.contains(&base) => {
-                blob_slots.push(BlobSlot::Pending(candidates.len()));
-                candidates.push(DeltaCandidate { target: *h, base });
+    }
+    // Then the chunks of every kept manifest, which the walk never counted.
+    // They follow the other blobs, in manifest order.
+    let mut memory = ChunkMemory::new(limits.chunk_memory);
+    walk.for_each_chunk(store, &mut memory, |_, chunk| {
+        match store.object_type(&chunk)? {
+            ObjectType::Blob | ObjectType::Delta => {
+                blobs.push(chunk);
+                Ok(())
             }
-            _ => blob_slots.push(BlobSlot::Raw(*h)),
+            other => Err(StoreError::Decode(KitError::InvalidObjectType(other as u8))),
+        }
+    })?;
+
+    // Only blobs (small files and `FastCDC` chunks) are delta candidates, and
+    // only against a base the remote holds: the base sits in the remote
+    // head's own tree, and this store must hold it too to encode.
+    let mut candidates: Vec<DeltaCandidate> = Vec::new();
+    let mut listed: HashSet<Hash> = HashSet::new();
+    for h in &blobs {
+        if let Some(&base) = base_map.get(h)
+            && store.contains(&base)
+            && listed.insert(*h)
+        {
+            candidates.push(DeltaCandidate { target: *h, base });
         }
     }
 
-    let mut delta_results = encode_deltas(store, &candidates)?;
+    let delta_results = encode_deltas(store, &candidates)?;
     if delta_results.len() != candidates.len() {
         return Err(StoreError::DeltaBatchLengthMismatch {
             expected: candidates.len(),
             actual: delta_results.len(),
         });
     }
+    let mut encoded: HashMap<Hash, PlannedDelta> = candidates
+        .iter()
+        .zip(delta_results)
+        .filter_map(|(candidate, planned)| Some((candidate.target, planned?)))
+        .collect();
 
-    let mut blob_raw = Vec::with_capacity(blob_slots.len());
-    let mut deltas = Vec::with_capacity(candidates.len());
-    for slot in blob_slots {
-        match slot {
-            BlobSlot::Raw(h) => blob_raw.push(h),
-            BlobSlot::Pending(idx) => match delta_results[idx].take() {
-                Some(planned) => deltas.push(planned),
-                None => blob_raw.push(candidates[idx].target),
-            },
+    // A blob goes out as its delta if one was encoded, else raw. A candidate
+    // whose encode returned nothing is never dropped. A blob listed twice
+    // (a repeat past the chunk memory) goes out as its delta once.
+    let mut raw = non_blob_raw;
+    let mut deltas = Vec::with_capacity(encoded.len());
+    let mut sent_as_delta: HashSet<Hash> = HashSet::new();
+    for h in blobs {
+        if let Some(planned) = encoded.remove(&h) {
+            sent_as_delta.insert(h);
+            deltas.push(planned);
+        } else if !sent_as_delta.contains(&h) {
+            raw.push(h);
         }
     }
-
-    let mut raw = non_blob_raw;
-    raw.extend(blob_raw);
 
     Ok(PackPlan {
         raw,
         deltas,
-        self_contained: !have_old,
+        self_contained: held.tip().is_none(),
     })
 }
 
@@ -824,19 +847,19 @@ mod tests {
     use crate::serialize;
     use tempfile::TempDir;
 
-    fn store() -> (TempDir, ObjectStore) {
+    pub(super) fn store() -> (TempDir, ObjectStore) {
         let d = TempDir::new().unwrap();
         let s = ObjectStore::init(&crate::layout::RepoLayout::single(d.path())).unwrap();
         (d, s)
     }
 
-    fn put(s: &ObjectStore, obj: &Object) -> Hash {
+    pub(super) fn put(s: &ObjectStore, obj: &Object) -> Hash {
         s.write(&serialize::serialize(obj).unwrap()).unwrap()
     }
 
     /// Store `data` as `FastCDC` chunks + a `ChunkedBlob` manifest, mirroring
     /// the worktree large-file path. Returns the manifest hash.
-    fn put_chunked(s: &ObjectStore, data: &[u8]) -> Hash {
+    pub(super) fn put_chunked(s: &ObjectStore, data: &[u8]) -> Hash {
         let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), data)
             .take(data.len() + 1)
             .map(|b| {
@@ -858,14 +881,19 @@ mod tests {
         )
     }
 
-    fn commit_with_file(s: &ObjectStore, file_hash: Hash, parents: Vec<Hash>, msg: &str) -> Hash {
+    pub(super) fn commit_with_file(
+        s: &ObjectStore,
+        file_hash: Hash,
+        parents: Vec<Hash>,
+        msg: &str,
+    ) -> Hash {
         commit_with_named_file(s, b"big.bin", file_hash, parents, msg)
     }
 
     /// Like [`commit_with_file`], but with a caller-chosen tree entry name —
     /// needed to build trees with more than one entry, or to control whether
     /// two commits share a path.
-    fn commit_with_named_file(
+    pub(super) fn commit_with_named_file(
         s: &ObjectStore,
         name: &[u8],
         file_hash: Hash,
@@ -899,7 +927,7 @@ mod tests {
     /// A >1 MiB pseudo-random buffer (deterministic) that `FastCDC` splits
     /// into several chunks. Splitmix64 keeps it dependency-free and
     /// reproducible.
-    fn big_buffer() -> Vec<u8> {
+    pub(super) fn big_buffer() -> Vec<u8> {
         let mut data = vec![0u8; 2 * 1024 * 1024];
         let mut state: u64 = 0x1234_5678_9abc_def0;
         for chunk in data.chunks_mut(8) {
@@ -1151,7 +1179,12 @@ mod tests {
     /// Build the planned pack, replay it into a fresh store pre-seeded with
     /// `old_tip`'s closure, and assert every `new_tip` object reconstructs
     /// with a matching hash.
-    fn assert_pack_reconstructs(src: &ObjectStore, plan: &PackPlan, old_tip: Hash, new_tip: Hash) {
+    pub(super) fn assert_pack_reconstructs(
+        src: &ObjectStore,
+        plan: &PackPlan,
+        old_tip: Hash,
+        new_tip: Hash,
+    ) {
         let mut w = PackWriter::new();
         for h in &plan.raw {
             let bytes = src.read(h).unwrap();
@@ -1185,61 +1218,6 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_remote_walk_sends_more_and_a_cut_new_walk_fails() {
-        let (_d, s) = store();
-        // The remote holds a long history; the new tip is a small root with
-        // no parents, as a force push of a fresh branch is.
-        let mut remote_tip = None;
-        let oldest = put_chunked(&s, &[0; 64]);
-        for i in 0..8u8 {
-            let file = put_chunked(&s, &[i; 64]);
-            remote_tip = Some(commit_with_file(
-                &s,
-                file,
-                remote_tip.into_iter().collect(),
-                &format!("old {i}"),
-            ));
-        }
-        let remote_tip = remote_tip.unwrap();
-        // The new tip names the remote's oldest file, which the cut walk
-        // does not reach.
-        let new_tip = commit_with_file(&s, oldest, vec![], "new");
-        let new_len = crate::ops::reachable_objects(&s, &new_tip).unwrap().len();
-        let remote_len = crate::ops::reachable_objects(&s, &remote_tip)
-            .unwrap()
-            .len();
-        assert!(new_len < remote_len);
-
-        // The cap holds the new tip's closure and cuts the remote's.
-        let plan = plan_pack_capped(
-            &s,
-            new_tip,
-            Some(remote_tip),
-            |s, c| c.iter().map(|&c| encode_delta_candidate(s, c)).collect(),
-            new_len,
-        )
-        .unwrap();
-        assert!(
-            plan.raw.contains(&oldest),
-            "a file the remote holds past the cut is sent again"
-        );
-        assert_pack_reconstructs(&s, &plan, remote_tip, new_tip);
-
-        assert!(matches!(
-            plan_pack_capped(
-                &s,
-                new_tip,
-                Some(remote_tip),
-                |_, _| Ok(Vec::new()),
-                new_len - 1
-            ),
-            Err(StoreError::OperationLimitExceeded(
-                crate::ops::graph::REACHABLE_LIMIT
-            ))
-        ));
-    }
-
-    #[test]
     fn select_bases_pairs_only_changed_chunks() {
         let (_d, s) = store();
         let v1 = big_buffer();
@@ -1264,7 +1242,7 @@ mod tests {
 
     /// Deterministic, feature-rich chunk content (xorshift so 16-byte window
     /// hashes are well-distributed rather than colliding on flat data).
-    fn chunk_content(seed: u8, len: usize) -> Vec<u8> {
+    pub(super) fn chunk_content(seed: u8, len: usize) -> Vec<u8> {
         let mut state = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         let mut v = vec![0u8; len];
         for byte in &mut v {
@@ -1276,13 +1254,13 @@ mod tests {
         v
     }
 
-    fn put_blob(s: &ObjectStore, content: Vec<u8>) -> Hash {
+    pub(super) fn put_blob(s: &ObjectStore, content: Vec<u8>) -> Hash {
         put(s, &Object::Blob(Blob { data: content }))
     }
 
     /// Build a `ChunkedBlob` from explicit chunk contents (bypassing
     /// `FastCDC`) so a test can control chunk boundaries and shifts precisely.
-    fn put_chunked_from(s: &ObjectStore, chunks: &[Vec<u8>]) -> Hash {
+    pub(super) fn put_chunked_from(s: &ObjectStore, chunks: &[Vec<u8>]) -> Hash {
         let total: usize = chunks.iter().map(Vec::len).sum();
         let chunk_ids: Vec<Hash> = chunks.iter().map(|c| put_blob(s, c.clone())).collect();
         put(
@@ -1601,3 +1579,6 @@ mod wire_conformance {
         assert_eq!(node.packs, vec![[0x22u8; 32], [0x33u8; 32]]);
     }
 }
+
+#[cfg(test)]
+mod push_walk_tests;

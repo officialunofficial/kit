@@ -108,10 +108,12 @@ set. In particular:
 - If the walk reaches [`MAX_REACHABLE`] objects, `live_objects` returns
   `GcRootsError::Truncated` &mdash; beyond the cap the "unreachable" verdict is
   unsound, so gc must abort rather than prune. Push planning fails
-  closed the same way: `reachable_closure`, `reachable_objects` and
-  `reachable_snapshot` return `OperationLimitExceeded` at the cap, so a
-  push whose new tip's closure reaches it fails before it publishes the cut
-  step. A cut in the remote tip's walk only makes the push send more.
+  closed the same way: the push walk counts the commits the remote holds, the
+  commits it lacks and the objects the walk keeps toward a cap of 10,000,000,
+  counts no chunk, and returns `OperationLimitExceeded` at the cap, so a push
+  whose walk reaches it fails before it publishes a pack. The walk never
+  returns a partial plan. A held commit that this store cannot read ends its
+  path and only makes the push send more.
 - If the distinct chunk ids pass their cap, `live_objects` returns
   `GcRootsError::TooManyChunks`. A manifest that lists an object that is not
   a blob or a delta gives `GcRootsError::ChunkNotBlob`, which names the

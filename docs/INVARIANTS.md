@@ -649,9 +649,11 @@ and builder byte-identity checks
 **Always:** every reachability walk &mdash; store-backed
 `reachable_objects` / `reachable_closure` / `reachable_snapshot`, the
 store-less `verify_closure` BFS, the pull-based `verify_closure_streaming`
-walk, push verification (`verify_push`), push/fetch pack planning, and the
+walk, push verification (`verify_push`), fetch pack planning, and the
 `kit gc` mark (`ops::gc::mark_live`) &mdash; takes
-its edges from `ops::graph::children(obj, mode)`. The verifiers
+its edges from `ops::graph::children(obj, mode)`. The push walk compares the
+trees of a commit and its parents entry by entry, and takes the edges of any
+other object from `children`. The verifiers
 (`verify_closure*` and `verify_push`) share one BFS, `verify::closure::walk`;
 none keeps a walker of its own. Snapshot mode omits
 commit/remix parents; history mode includes them; remix `sources` and
@@ -994,6 +996,36 @@ large to verify, or its memory grows with the chunk count.
 
 **Enforced by:** `kit_core::ops::graph::tests::presence_check_does_not_count_chunks_toward_the_cap`
 and `presence_check_reports_a_missing_chunk`.
+
+## A push plan omits nothing the remote lacks and counts no chunk
+
+**Always:** the push walk keeps every object that the new tip reaches and the
+remote head does not. It treats a commit as held only if it is an ancestor of
+the remote head. For each new commit it skips a tree entry only when a parent
+has the same id at the same path. The held filter removes only ids found in the
+remote head's own snapshot. A chunk is skipped only when the manifest at the
+same path in a parent lists it, or when the plan already lists it. A chunk
+whose delta encode returns nothing is sent raw. Held commits, new commits and
+kept objects count toward one cap of 10,000,000, no chunk counts, and no path
+returns a partial plan. A plan may send an object the remote holds.
+
+**Because:** the remote holds the history closure of its head
+(see "A head resolves only to what its packmap rebuilds"), and every object a
+new commit adds sits in its tree. A plan that omits an object the remote lacks
+loses pushed data, and a walk that counts a chunk makes a repository of a few
+large files impossible to push.
+
+**If violated:** a branch is published whose closure the remote cannot
+reconstruct, or a push of a repository of large files fails as too large.
+
+**Enforced by:** `kit_core::transfer::push_walk_tests`: a property test against
+the closure difference the plan replaced (random merge graphs with shared and
+repeated chunks; the plan holds every object of the old answer and none outside
+the closure, and the pack applied over the remote's closure passes
+`check_closure_present`), the cases for renames, type changes, merges, a
+missing held commit, a missing new commit, a Remix tip and a tag tip, the cap
+and held-scan boundaries, and the test that no chunk id enters a counted set;
+`kit-sync` `push::split::tests` for the split weights and the cap.
 
 ## Connect read authentication is scoped to one attempt
 
