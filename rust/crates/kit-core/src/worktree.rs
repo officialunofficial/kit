@@ -988,11 +988,38 @@ fn file_too_large(path: &Path, limit: u64) -> WorktreeError {
     }
 }
 
+/// Refuse a file of `len` bytes above `limit`.
+fn ensure_within(len: u64, limit: u64, path: &Path) -> WorktreeResult<()> {
+    if len > limit {
+        Err(file_too_large(path, limit))
+    } else {
+        Ok(())
+    }
+}
+
+/// Read the whole of `reader`, which `declared` bytes were reported to hold,
+/// refusing more than `limit`. `declared` is checked before the first read, and
+/// the bytes read are checked again, since a file can grow between the two.
+fn read_whole(
+    mut reader: impl Read,
+    declared: u64,
+    limit: u64,
+    path: &Path,
+) -> WorktreeResult<Vec<u8>> {
+    ensure_within(declared, limit, path)?;
+    let initial_capacity =
+        usize::try_from(declared.min(CHUNK_THRESHOLD)).map_err(|_| file_too_large(path, limit))?;
+    let mut data = Vec::with_capacity(initial_capacity);
+    reader.by_ref().take(limit + 1).read_to_end(&mut data)?;
+    ensure_within(u64::try_from(data.len()).unwrap_or(u64::MAX), limit, path)?;
+    Ok(data)
+}
+
 /// Read a regular file without following the final path component on
 /// Unix, enforcing [`MAX_FILE_BYTES`] against both the opened handle's
 /// metadata and the actual bytes read.
 pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, Vec<u8>)> {
-    let mut file = open_regular_file(path)?;
+    let file = open_regular_file(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() {
         return Err(WorktreeError::Io(io::Error::new(
@@ -1000,18 +1027,7 @@ pub fn read_regular_file_bounded(path: &Path) -> WorktreeResult<(fs::Metadata, V
             "path is not a regular file",
         )));
     }
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(file_too_large(path, MAX_FILE_BYTES));
-    }
-    let initial_capacity = usize::try_from(meta.len().min(CHUNK_THRESHOLD))
-        .map_err(|_| file_too_large(path, MAX_FILE_BYTES))?;
-    let mut data = Vec::with_capacity(initial_capacity);
-    file.by_ref()
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut data)?;
-    if u64::try_from(data.len()).unwrap_or(u64::MAX) > MAX_FILE_BYTES {
-        return Err(file_too_large(path, MAX_FILE_BYTES));
-    }
+    let data = read_whole(file, meta.len(), MAX_FILE_BYTES, path)?;
     Ok((meta, data))
 }
 
@@ -1085,7 +1101,7 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
     path: &Path,
     stream: impl FnOnce(&S, io::Take<fs::File>, &Path) -> WorktreeResult<Hash>,
 ) -> WorktreeResult<(Hash, fs::Metadata)> {
-    let mut file = open_regular_file(path)?;
+    let file = open_regular_file(path)?;
     let meta = file.metadata()?;
     if !meta.file_type().is_file() {
         return Err(WorktreeError::Io(io::Error::new(
@@ -1093,23 +1109,12 @@ fn hash_file_with_metadata_using<S: ObjectSink + ?Sized>(
             "path is not a regular file",
         )));
     }
-    if meta.len() > serialize::MAX_CHUNKED_TOTAL_SIZE {
-        return Err(file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE));
-    }
+    ensure_within(meta.len(), serialize::MAX_CHUNKED_TOTAL_SIZE, path)?;
 
     if meta.len() <= CHUNK_THRESHOLD {
-        let initial_capacity = usize::try_from(meta.len())
-            .map_err(|_| file_too_large(path, serialize::MAX_CHUNKED_TOTAL_SIZE))?;
-        let mut data = Vec::with_capacity(initial_capacity);
-        file.by_ref()
-            .take(CHUNK_THRESHOLD + 1)
-            .read_to_end(&mut data)?;
-        if u64::try_from(data.len()).unwrap_or(u64::MAX) > CHUNK_THRESHOLD {
-            // The file grew past the single-blob size after its length was read.
-            return Err(WorktreeError::Io(io::Error::other(
-                "file grew while it was being read",
-            )));
-        }
+        // A file that grew past the single-blob size since its length was
+        // read fails here, so a blob never exceeds the threshold.
+        let data = read_whole(file, meta.len(), CHUNK_THRESHOLD, path)?;
         let hash = store_file_object(sink, &data)?;
         return Ok((hash, meta));
     }
@@ -3601,5 +3606,86 @@ mod tests {
             t.entries[0].object_hash,
             store_file_object(&store, b"new content").unwrap()
         );
+    }
+
+    // ---- size limits of the whole-file reader and the ingest ------------------
+
+    /// A reader that fails the test when it is read.
+    struct NeverRead;
+
+    impl Read for NeverRead {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            panic!("the reader was read");
+        }
+    }
+
+    fn limit_of(result: &WorktreeResult<Vec<u8>>) -> Option<u64> {
+        match result {
+            Err(WorktreeError::FileTooLarge { limit, .. }) => Some(*limit),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn ensure_within_refuses_only_above_the_limit() {
+        let path = Path::new("f");
+        assert!(ensure_within(9, 10, path).is_ok());
+        assert!(ensure_within(10, 10, path).is_ok());
+        assert!(matches!(
+            ensure_within(11, 10, path),
+            Err(WorktreeError::FileTooLarge { limit: 10, .. })
+        ));
+    }
+
+    #[test]
+    fn read_whole_reads_a_file_of_exactly_the_limit() {
+        let path = Path::new("f");
+        let data = vec![7u8; 40];
+        assert_eq!(read_whole(&data[..], 40, 40, path).unwrap(), data);
+        assert_eq!(read_whole(&data[..], 40, 41, path).unwrap(), data);
+        assert!(read_whole(&data[..0], 0, 40, path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_whole_refuses_a_declared_size_above_the_limit_before_it_reads() {
+        let path = Path::new("f");
+        assert_eq!(limit_of(&read_whole(NeverRead, 41, 40, path)), Some(40));
+    }
+
+    #[test]
+    fn read_whole_refuses_a_file_that_grew_past_the_limit() {
+        let path = Path::new("f");
+        let grown = [7u8; 60];
+        assert_eq!(limit_of(&read_whole(&grown[..], 10, 40, path)), Some(40));
+        let one_over = [7u8; 41];
+        assert_eq!(limit_of(&read_whole(&one_over[..], 10, 40, path)), Some(40));
+    }
+
+    #[test]
+    fn a_small_file_that_grew_past_the_threshold_is_refused() {
+        let grown = vec![1u8; usize::try_from(CHUNK_THRESHOLD).unwrap() + 1];
+        let result = read_whole(&grown[..], 10, CHUNK_THRESHOLD, Path::new("f"));
+        assert_eq!(limit_of(&result), Some(CHUNK_THRESHOLD));
+        let exact = vec![1u8; usize::try_from(CHUNK_THRESHOLD).unwrap()];
+        assert!(read_whole(&exact[..], 10, CHUNK_THRESHOLD, Path::new("f")).is_ok());
+    }
+
+    #[test]
+    fn ingest_reads_at_most_the_chunked_bound_plus_one_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.bin");
+        fs::write(
+            &file,
+            vec![3u8; usize::try_from(CHUNK_THRESHOLD).unwrap() + 1],
+        )
+        .unwrap();
+        let store = ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).unwrap();
+        let stub: Hash = [9u8; 32];
+        let (hash, _) = hash_file_with_metadata_using(&store, &file, |_, reader, _| {
+            assert_eq!(reader.limit(), serialize::MAX_CHUNKED_TOTAL_SIZE + 1);
+            Ok(stub)
+        })
+        .unwrap();
+        assert_eq!(hash, stub);
     }
 }

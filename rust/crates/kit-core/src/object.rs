@@ -630,10 +630,10 @@ pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
     if merkle {
         // One part is already contiguous: a manifest of millions of chunk ids
         // is not copied to hash it.
-        return match parts {
-            [only] => object_id_from_bytes(only),
-            _ => object_id_from_bytes(&parts.concat()),
-        };
+        if let [only] = parts {
+            return object_id_from_bytes(only);
+        }
+        return object_id_from_bytes(&parts.concat());
     }
     let mut hasher = crate::hash::Hasher::new();
     for p in parts {
@@ -1107,5 +1107,30 @@ mod tests {
         assert!(r(vec![src(1, 1), src(1, 2), src(2, 1)]).sources_sorted());
         assert!(!r(vec![src(2, 1), src(1, 1)]).sources_sorted());
         assert!(!r(vec![src(1, 1), src(1, 1)]).sources_sorted());
+    }
+
+    #[test]
+    fn parts_of_an_object_hash_as_its_concatenation() {
+        let tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: [1; 32],
+            }],
+        });
+        let bytes = crate::serialize::serialize(&tree).unwrap();
+        let whole = object_id_from_bytes(&bytes);
+        assert_eq!(object_id_from_parts(&[&bytes]), whole);
+        let (head, tail) = bytes.split_at(7);
+        assert_eq!(object_id_from_parts(&[head, tail]), whole);
+        let blob = crate::serialize::serialize(&Object::Blob(Blob {
+            data: b"data".to_vec(),
+        }))
+        .unwrap();
+        let (head, tail) = blob.split_at(7);
+        assert_eq!(
+            object_id_from_parts(&[head, tail]),
+            object_id_from_bytes(&blob)
+        );
     }
 }
