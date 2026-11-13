@@ -1488,6 +1488,113 @@ mod tests {
         assert!(sealed_packs(&store, tip, limits, plan.payload_cap) <= 6);
     }
 
+    /// A ticketed remote that takes one data pack an advance.
+    fn one_pack() -> UploadLimits {
+        UploadLimits {
+            max_pack_bytes: None,
+            data_packs_per_advance: Some(1),
+            ticket_threshold_bytes: Some(0),
+        }
+    }
+
+    fn big_blob(store: &ObjectStore, seed: u64, len: usize, compressible: bool) -> Hash {
+        put(
+            store,
+            &Object::Blob(Blob {
+                data: bytes(seed, len, compressible),
+            }),
+        )
+    }
+
+    /// The estimate counts every entry as compressed, so against a threshold
+    /// above 1 GiB it can count packs a real seal does not make. A push then
+    /// reaches the exact dry seal, which finds the content fits.
+    #[test]
+    #[ignore = "writes 1.1 GiB; run in release mode"]
+    fn an_estimate_that_counts_too_many_packs_leaves_the_push_whole() {
+        let (_dir, store) = store();
+        // Plain content decodes to nothing, so one pack holds all 1.1 GiB.
+        let files: Vec<Hash> = (0..11)
+            // Odd seeds: the generator ORs in one, so two seeds must not meet.
+            .map(|i| big_blob(&store, 2 * i + 1, 100 << 20, false))
+            .collect();
+        let tip = commit(&store, &files, Vec::new(), 1);
+        let limits = one_pack();
+        let cap = pack::MAX_TOTAL_PAYLOAD;
+        let plan = transfer::plan_pack_with(&store, tip, None, |_, candidates| {
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        let estimate = estimate_pack_sizes(&store, &plan, cap, None).unwrap().len();
+        assert_eq!(estimate, 2, "the estimate counts every entry as compressed");
+        assert_eq!(step_packs(&store, tip, None, limits, cap), 1);
+        // One commit is one step, and nothing is raised or refused.
+        let split = split(&store, tip, limits, cap).unwrap();
+        assert_eq!(split.steps, [tip]);
+        assert_eq!(split.payload_cap, cap);
+    }
+
+    /// Compressible content is counted as it decodes. A history of it past the
+    /// budget of an advance is cut into steps, and every step seals within it.
+    #[test]
+    #[ignore = "writes 3.6 GiB; run in release mode"]
+    fn a_history_past_the_decoded_budget_is_cut_into_steps_that_each_seal_in_budget() {
+        let (_dir, store) = store();
+        let cap = pack::MAX_TOTAL_PAYLOAD;
+        let mut files: Vec<Hash> = Vec::new();
+        let mut commits: Vec<Hash> = Vec::new();
+        for i in 0..4_u8 {
+            // Three blobs of 300 MiB decode to 900 MiB: one pack, no more.
+            for j in 0..3_u64 {
+                files.push(big_blob(&store, u64::from(i) * 3 + j + 1, 300 << 20, true));
+            }
+            let parents = commits.last().copied().into_iter().collect();
+            commits.push(commit(&store, &files, parents, i));
+        }
+        let tip = *commits.last().unwrap();
+        let limits = one_pack();
+        assert_eq!(step_packs(&store, tip, None, limits, cap), usize::MAX);
+
+        let plan = split(&store, tip, limits, cap).unwrap();
+        assert_eq!(plan.steps.last(), Some(&tip));
+        assert!(plan.steps.len() >= 4, "{}", plan.steps.len());
+        let mut base = None;
+        for step in &plan.steps {
+            assert_eq!(step_packs(&store, *step, base, limits, plan.payload_cap), 1);
+            base = Some(*step);
+        }
+    }
+
+    /// One commit whose decoded bytes need more than one advance takes, and
+    /// that a larger pack cannot help, is refused with the typed error before
+    /// anything is uploaded.
+    #[test]
+    #[ignore = "writes 1.5 GiB; run in release mode"]
+    fn a_commit_that_decodes_to_more_than_an_advance_takes_is_refused_before_any_upload() {
+        let (_dir, store) = store();
+        let files: Vec<Hash> = (0..5)
+            .map(|i| big_blob(&store, i + 1, 300 << 20, true))
+            .collect();
+        let tip = commit(&store, &files, Vec::new(), 1);
+        let limits = one_pack();
+        let cap = pack::MAX_TOTAL_PAYLOAD;
+        assert_eq!(step_packs(&store, tip, None, limits, cap), usize::MAX);
+        // The cut cannot split one commit, and no larger pack helps: the push
+        // ends in the typed error, before any upload.
+        let error = split(&store, tip, limits, cap).err().unwrap();
+        assert!(
+            matches!(
+                error,
+                PushError::PushTooLarge {
+                    packs: 2,
+                    limit: 1,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_first_step_forced_to_reach_the_remote_head_counts_toward_the_cap() {
         let (_dir, store) = store();

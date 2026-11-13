@@ -1621,9 +1621,13 @@ fn a_pack_with_a_delta_entry_reports_no_new_objects() {
     let plan = Plan::prepare(
         [
             blob(1),
+            // A header that claims no base and no result: the writer counts
+            // what a stream claims, so a header it can read adds nothing, and
+            // a stream it cannot read would count as the largest object and
+            // be refused.
             Entry::Delta {
                 base: [1; 32],
-                stream: vec![0; 4],
+                stream: vec![0; kit_core::delta::HEADER_LEN],
             },
         ],
         limits,

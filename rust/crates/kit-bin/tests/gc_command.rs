@@ -144,3 +144,30 @@ fn gc_does_not_prune_recovery_logged_commit() {
         "gc must not prune a commit pinned by the recovery log"
     );
 }
+
+#[test]
+fn gc_skips_a_bisect_commit_that_is_gone_and_warns_with_the_state_file() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "a.txt", b"one\n", "one");
+    assert!(run_in(root, &["bisect", "start"]).status.success());
+    // An older gc pruned the commit the bisect started from: its id is
+    // the first line of the state file.
+    let state = root.join(".kit/bisect");
+    let text = fs::read_to_string(&state).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    assert_eq!(first.len(), 64, "the first line is a hex id");
+    fs::write(&state, format!("{}\n{rest}", "a".repeat(64))).unwrap();
+
+    let out = run_in(root, &["gc", "--grace-secs", "0"]);
+    assert!(out.status.success(), "gc: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("warning:") && line.contains(".kit/bisect"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "one warning names the file: {stderr}");
+    // The branch is untouched.
+    let log = run_in(root, &["log", "--oneline"]);
+    assert!(String::from_utf8_lossy(&log.stdout).contains("one"));
+}

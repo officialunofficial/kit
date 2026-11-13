@@ -91,12 +91,43 @@ fn rewrite_through_taken_down_base_still_decodes() {
     );
 }
 
+/// A frame is kept only when the bytes it decodes to plus the whole payload
+/// fit the budget of the smallest reader, a delta's payload counting its base
+/// hash too.
 #[cfg(feature = "pack-zstd")]
 #[test]
-fn compression_respects_uncompressed_claim_cap() {
+fn a_frame_is_kept_only_when_it_and_what_it_decodes_to_fit_the_budget() {
+    use super::super::{DELTA_BASE_LEN, ZSTD_LEN_PREFIX, maybe_compress_within};
     let bytes = vec![17; 4096];
-    assert!(super::super::maybe_compress_capped(&bytes, bytes.len() - 1).is_none());
-    assert!(super::super::maybe_compress_capped(&bytes, bytes.len()).is_some());
+    let frame = maybe_compress_within(&bytes, 0, u64::MAX).unwrap();
+    let wire = (ZSTD_LEN_PREFIX + frame.len()) as u64;
+    let fits = bytes.len() as u64 + wire;
+    // Exactly the budget keeps the frame, one byte less does not.
+    assert!(maybe_compress_within(&bytes, 0, fits).is_some());
+    assert!(maybe_compress_within(&bytes, 0, fits - 1).is_none());
+    // A delta's payload carries its base hash ahead of the frame.
+    let delta_fits = fits + DELTA_BASE_LEN as u64;
+    assert!(maybe_compress_within(&bytes, DELTA_BASE_LEN, delta_fits).is_some());
+    assert!(maybe_compress_within(&bytes, DELTA_BASE_LEN, delta_fits - 1).is_none());
+    // A budget the claim alone passes never compresses.
+    assert!(maybe_compress_within(&bytes, 0, bytes.len() as u64).is_none());
+    assert!(maybe_compress_within(&bytes, 0, 0).is_none());
+    // Data under the minimum length is never worth a frame, and data of it
+    // is.
+    let min = super::super::MIN_COMPRESS_LEN;
+    assert!(maybe_compress_within(&vec![0; min - 1], 0, u64::MAX).is_none());
+    assert!(maybe_compress_within(&vec![0; min], 0, u64::MAX).is_some());
+    // The frame is kept only when it is smaller than the data it holds.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let noise: Vec<u8> = (0..4096)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[0]
+        })
+        .collect();
+    assert!(maybe_compress_within(&noise, 0, u64::MAX).is_none());
 }
 
 #[test]
@@ -273,7 +304,7 @@ fn an_output_with_more_entries_than_a_writer_seals_is_refused() {
     assert!(rewrite_without(2).is_ok());
     assert!(matches!(
         rewrite_without(1),
-        Err(PackError::PackfileTooLarge)
+        Err(PackError::OverReadLimit(super::super::ReadLimit::Entries))
     ));
 }
 

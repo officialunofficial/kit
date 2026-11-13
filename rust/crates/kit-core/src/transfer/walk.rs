@@ -295,8 +295,8 @@ impl PushWalk {
     }
 
     /// The kept manifests, oldest commit first.
-    #[must_use]
-    pub fn manifests(&self) -> &[ChunkList] {
+    #[cfg(test)]
+    pub(crate) fn manifests(&self) -> &[ChunkList] {
         &self.manifests
     }
 

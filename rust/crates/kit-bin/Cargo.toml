@@ -196,6 +196,8 @@ kit-keystore = { version = "=0.8.0", path = "../kit-keystore", features = ["back
 [dev-dependencies]
 tempfile = "3.27.0"
 kit-test-util = { path = "../kit-test-util" }
+# `reader_budget_fit` reads the packs of a push back through the client reader.
+kit-client = { version = "=0.8.0", path = "../kit-client" }
 kit-transport-memory = { path = "../kit-transport-memory" }
 # The self-update test uses a local mockito server standing in for the
 # release host.

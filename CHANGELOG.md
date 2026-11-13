@@ -332,16 +332,16 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A push seals only packs that every reader accepts. A pack stays within the
   fetch body limit of 4 GiB even when the remote advertises no pack limit (a
   `kit+file://`, `kit+ssh://` or `kit+s3://` remote). It stays within the
-  bytes a pack read decodes (`pack::decoded_bytes_cap`, from 2 GiB for a
-  small pack up to 16 GiB), so objects that compress well no longer make a
-  pack a read refuses. It holds at most `pack::MAX_WRITE_ENTRIES` entries.
+  bytes a pack read decodes, so objects that compress well no longer make a
+  pack a read refuses (see the next entry for the bound). It holds at most
+  `pack::MAX_WRITE_ENTRIES` entries.
   A push that sealed such a pack succeeded, and a clone then failed. One rule
   decides every seal, `pack::PackFill::seals_before`, with
   `pack::serialized_limit` and `pack::serialized_bound`. The push, the
   planning of its split, `kit_client::Plan::prepare` and the closure export
   all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
-  a writer would not seal (above the fetch body limit, the decoded cap or
-  `MAX_WRITE_ENTRIES` entries) with `PackfileTooLarge`. When the remote issues
+  a writer would not seal (above the fetch body limit, the decoded-byte
+  budget or `MAX_WRITE_ENTRIES` entries) with `PackError::OverReadLimit`. When the remote issues
   upload tickets, a single commit that adds more than the data-pack budget
   (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
   about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
@@ -375,7 +375,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   period could prune them while the operation was waiting to resume. The
   result tree is a root only while its operation is in progress. `kit bisect
   reset` removes a state file it cannot read, so a damaged file no longer
-  blocks gc. `GcRootsError` has a `Bisect` variant for such a file.
+  blocks gc. `GcRootsError` has a `Bisect` variant for such a file. When an
+  older gc already pruned one of those objects, or part of the closure of one,
+  gc skips that root instead of failing, and `GcReport::skipped_state_files`
+  lists the state file that named it. `kit gc` prints one warning for each
+  such file. **Breaking:** `GcReport` is no longer `Copy`, and has the field
+  `skipped_state_files`. `conflict_state::result_tree_path` is public. A
+  missing object that a ref or any other root reaches still fails gc. The
+  objects of a skipped root's closure that the store still holds are not kept
+  for that root, so a gc prunes them like any other unreachable object.
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.
@@ -398,6 +406,54 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lock that `kit gc` holds across its mark and sweep. `bisect run` takes it
   around each state write, because its checkout of a candidate takes the lock
   too.
+
+- A pack a kit writer seals decodes under `DecodeLimits::default()`, the
+  1 GiB budget of the smallest reader (`kit_client::unpack`,
+  `rewrite_excluding` and the window reader), where it was bounded by the
+  cap of `PackReader::read` (2 to 16 GiB). `PackFill::seals_before` counts
+  the bytes a pack decodes and the longest delta base a reader holds at once
+  against that budget, and a push and `Plan::prepare` use it. The closure
+  export writes raw entries only, and `rewrite_excluding` checks its output
+  against the same budget. `DecodeLimits::default()`, the cap of
+  `PackReader::read`, `PACK_ENTRY_RESIDENT_COST` and `MAX_WRITE_ENTRIES`
+  (1,198,372) are unchanged. A push that sealed one pack of compressible
+  content of up to 16 GiB decoded now seals one pack for each 1 GiB.
+  - The deltas that share an external base are written next to each other,
+    so a reader holds one such base at a time. The plan lists deltas ordered
+    by base and then target, and a writer that is given a delta whose base
+    other deltas have followed counts that base as held across them, so the
+    count holds for any order. `rewrite_excluding` counts the bases from where
+    the deltas of its output lie. A history of many large bases refused on
+    read before.
+  - A compressed entry keeps its frame only when the bytes it decodes to plus
+    its whole wire payload fit that budget. The window reader charges both
+    for an entry that straddles windows, so a 1 GiB object that compresses to
+    64 MiB was refused by it. Such an entry is stored plain now.
+  - The largest commit a 7-ticket remote takes, six data packs, is still
+    6 × 1,198,372 = 7,190,232 objects. By bytes, content that compresses is
+    now limited to 6 GiB decoded (it was 6 × 16 GiB), and content that does
+    not compress is limited by the 4 GiB body limit of each pack, about
+    24 GiB, as before.
+  - A delta whose result, stream and base pass that budget on their own is
+    sent raw by the planner, and `Plan::prepare` refuses one a caller
+    supplies with `Error::Limit`. No reader of the budget takes such a delta.
+  - **Breaking:** `PackFill::seals_before` takes an `Incoming` (made with
+    `Incoming::raw` or `Incoming::delta`) where it took the sizes of the
+    entry, and `PreparedRaw::incoming` and `PreparedDelta::incoming` build
+    one. `pack::decoded_bytes_cap` is private. New: `pack::delta_base_len`,
+    `pack::delta_fits_reader`, `PackWriter::newly_held`,
+    `PackWriter::peak_resident_bases`, `PackFill::{with, entries,
+    serialized_bound}` and `Default` for `PackFill`. `PushWalk::manifests` is
+    removed from the public API: only tests used it.
+- **Breaking:** `PackError::PackfileTooLarge` reads `pack exceeds a size
+  limit: ...` and names both causes, the payload sum and the decoded-byte
+  budget. `PackError` has a new variant, `OverReadLimit(ReadLimit)`, which
+  names the body limit, the decoded-byte budget or the entry bound.
+  `rewrite_excluding` returns it, where it returned `PackfileTooLarge`, for a
+  rewritten pack a writer would not seal: a changed rewrite of a pack that an
+  older writer sealed above the 1 GiB budget (it could decode up to 16 GiB)
+  is refused, whatever limits the caller decodes with, and an unchanged pack
+  is still returned as it is. `ReadLimit` is `#[non_exhaustive]`.
 
 ### Fixed
 

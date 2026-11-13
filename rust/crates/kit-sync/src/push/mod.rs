@@ -2,7 +2,7 @@
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
 use kit_core::pack::{
-    self, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_bound, serialized_limit,
+    self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_limit,
 };
 use kit_core::protocol::{PackKey, UploadLimits};
 use kit_core::refs;
@@ -618,11 +618,9 @@ fn push_branch_once(
     // uploading any of it, so the failure leaves no half-uploaded advance.
     if let Some(reason) = retry
         && let Some(budget) = limits.data_packs_per_advance
-        && estimate_exceeds_ticket_budget(
-            &estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?,
-            limits,
-            budget,
-        )
+        // The packs the estimate counts, not only its ticketed ones: a real
+        // seal can merge two estimated packs into one that is ticketed.
+        && estimate_pack_sizes(store, &plan, effective_cap, limits.max_pack_bytes)?.len() > budget
         && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
             PackSink::Count,
             store,
@@ -725,7 +723,7 @@ fn plan_branch(
 /// by the limit the remote advertises. A cap of zero is an error.
 fn effective_payload_cap(requested: u64, advertised: Option<u64>) -> Result<u64, PushError> {
     // The serialized limit's overhead margin is exact and dynamic: header,
-    // trailer and one frame per entry. `should_seal` applies it on each add.
+    // trailer and one frame per entry. `PackFill::seals_before` applies it on each add.
     let cap = requested
         .min(pack::MAX_TOTAL_PAYLOAD)
         .min(advertised.unwrap_or(pack::MAX_TOTAL_PAYLOAD));
@@ -740,25 +738,13 @@ fn ticketed_pack(limits: UploadLimits, serialized_size: u64) -> bool {
         && serialized_size >= limits.ticket_threshold_bytes.unwrap_or(0)
 }
 
-/// Whether estimated pack `sizes` need more tickets than `budget` data packs.
-fn estimate_exceeds_ticket_budget(sizes: &[u64], limits: UploadLimits, budget: usize) -> bool {
-    estimated_ticketed_count(sizes, limits) > budget
-}
-
-fn estimated_ticketed_count(sizes: &[u64], limits: UploadLimits) -> usize {
-    sizes
-        .iter()
-        .filter(|&&size| ticketed_pack(limits, size))
-        .count()
-}
-
 fn estimate_pack_sizes(
     store: &ObjectStore,
     plan: &transfer::PackPlan,
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
 ) -> Result<Vec<u64>, PushError> {
-    estimate_pack_sizes_with(store, plan, payload_cap, max_pack_bytes, MAX_PACK_ENTRIES)
+    estimate_pack_sizes_with(store, plan, payload_cap, max_pack_bytes, usize::MAX)
 }
 
 /// [`estimate_pack_sizes`] with the entry bound a pack holds, so a test can
@@ -771,49 +757,38 @@ fn estimate_pack_sizes_with(
     max_entries: usize,
 ) -> Result<Vec<u64>, PushError> {
     let mut packs = Vec::new();
-    let mut payload = 0_u64;
-    let mut decoded = 0_u64;
-    let mut entries = 0_usize;
+    let mut fill = PackFill::default();
     let raw = plan
         .raw
         .iter()
         .map(|hash| {
             store
                 .object_metadata(hash)
-                .map(|meta| (meta.len(), meta.len()))
+                .map(|meta| Incoming::raw(meta.len(), meta.len()))
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
-    // length as decoded. The decoded bound here is the floor of the reader's
-    // cap, which no pack's cap is below, so the estimate never counts fewer
-    // packs than a real seal needs. It counts every raw object as decoded, so
-    // with a payload cap above 2 GiB it cuts about every 2 GiB even for
-    // content stored plain. That only over-counts packs.
+    // length as decoded. The estimate counts every raw object and every delta
+    // stream as compressed, so it never counts fewer packs than a real seal
+    // needs. It may count more. The plan lists the deltas of one base next to
+    // each other, so none of them brings a base back.
     let deltas = plan.deltas.iter().map(|delta| {
-        (
+        Incoming::delta(
             (HASH_LEN + delta.stream.len()) as u64,
-            pack::delta_decoded_len(&delta.stream, true),
+            &delta.stream,
+            true,
+            0,
         )
     });
-    for (size, size_decoded) in raw.into_iter().chain(deltas) {
-        let next_payload = payload.saturating_add(size);
-        if entries > 0
-            && (entries >= max_entries.min(pack::MAX_WRITE_ENTRIES)
-                || next_payload > payload_cap
-                || serialized_bound(next_payload, entries + 1) > serialized_limit(max_pack_bytes)
-                || decoded.saturating_add(size_decoded) > pack::MIN_TOTAL_DECODED)
-        {
-            packs.push(serialized_bound(payload, entries));
-            payload = 0;
-            decoded = 0;
-            entries = 0;
+    for add in raw.into_iter().chain(deltas) {
+        if fill.seals_before(add, payload_cap, max_pack_bytes, max_entries) {
+            packs.push(fill.serialized_bound());
+            fill = PackFill::default();
         }
-        payload = payload.saturating_add(size);
-        decoded = decoded.saturating_add(size_decoded);
-        entries += 1;
+        fill = fill.with(add);
     }
-    if entries > 0 {
-        packs.push(serialized_bound(payload, entries));
+    if fill.entries() > 0 {
+        packs.push(fill.serialized_bound());
     }
     Ok(packs)
 }
@@ -895,11 +870,10 @@ fn build_and_upload_packs(
         for entry in prepare_raw_batch(store, chunk)? {
             if should_seal(
                 &w,
-                entry.conservative_len() as u64,
-                entry.decoded_len(),
+                entry.incoming(),
                 payload_cap,
                 limits.max_pack_bytes,
-                MAX_PACK_ENTRIES,
+                usize::MAX,
             ) {
                 seal_pack(
                     sink,
@@ -931,11 +905,10 @@ fn build_and_upload_packs(
         for entry in prepare_delta_batch(chunk) {
             if should_seal(
                 &w,
-                entry.conservative_len() as u64,
-                entry.decoded_len(),
+                entry.incoming(&w),
                 payload_cap,
                 limits.max_pack_bytes,
-                MAX_PACK_ENTRIES,
+                usize::MAX,
             ) {
                 seal_pack(
                     sink,
@@ -1175,26 +1148,15 @@ fn cache_delta_bases(
     Ok(cache)
 }
 
-/// Most entries one pack holds. A plan can pass it, because a chunk of a large
-/// file counts toward no cap and a repeated chunk may be listed twice.
-const MAX_PACK_ENTRIES: usize = pack::MAX_WRITE_ENTRIES;
-
 /// [`PackFill::seals_before`] for the pack `w` is building.
 fn should_seal(
     w: &PackWriter,
-    add_bound: u64,
-    add_decoded: u64,
+    add: Incoming,
     payload_cap: u64,
     max_pack_bytes: Option<u64>,
     max_entries: usize,
 ) -> bool {
-    PackFill::of(w).seals_before(
-        add_bound,
-        add_decoded,
-        payload_cap,
-        max_pack_bytes,
-        max_entries,
-    )
+    PackFill::of(w).seals_before(add, payload_cap, max_pack_bytes, max_entries)
 }
 
 /// Finish `w`, upload it, record its key, and replace `w` with a fresh
@@ -1253,6 +1215,7 @@ mod rebaseline_tests;
 mod tests {
     use super::*;
     use kit_core::layout::RepoLayout;
+    use kit_core::pack::{DecodeLimits, serialized_bound};
     use kit_core::protocol::PACK_BODY_LIMIT;
 
     #[test]
@@ -1320,11 +1283,10 @@ mod tests {
             let entry = PackWriter::prepare_raw(id, bytes);
             if should_seal(
                 &w,
-                entry.conservative_len() as u64,
-                entry.decoded_len(),
+                entry.incoming(),
                 payload_cap,
                 max_pack_bytes,
-                MAX_PACK_ENTRIES,
+                usize::MAX,
             ) {
                 seal(&mut w);
             }
@@ -1350,9 +1312,8 @@ mod tests {
     #[ignore = "compresses 3 GiB; minutes in a debug build"]
     fn a_pack_of_compressible_objects_the_push_seals_is_read_back() {
         // Each object decodes to 128 MiB and takes a few kilobytes on the
-        // wire. The decoded floor of 2 GiB does not seal here, since the
-        // reader's cap grows with the pack faster than the content does; the
-        // push and the read agree on that.
+        // wire. Seven of them and the framing of each spend the decoded budget of
+        // the smallest reader (1 GiB), so the push seals before the eighth.
         let mut data = vec![0_u8; 128 << 20];
         let packs = push_and_read_back(
             (0..24_u64).map(|i| {
@@ -1362,7 +1323,7 @@ mod tests {
             DEFAULT_PACK_PAYLOAD_CAP,
             None,
         );
-        assert!(packs >= 2, "{packs}");
+        assert_eq!(packs, 4);
     }
 
     #[test]
@@ -1386,7 +1347,13 @@ mod tests {
             data[..8].copy_from_slice(&i.to_le_bytes());
             let (id, bytes) = blob(&data);
             assert_eq!(bytes.len(), size);
-            if should_seal(&w, bytes.len() as u64, 0, cap, None, MAX_PACK_ENTRIES) {
+            if should_seal(
+                &w,
+                Incoming::raw(bytes.len() as u64, 0),
+                cap,
+                None,
+                usize::MAX,
+            ) {
                 break;
             }
             w.push_raw(id, &bytes).unwrap();
@@ -1400,17 +1367,17 @@ mod tests {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
         let mut w = PackWriter::new();
+        let entry = Incoming::raw(1, 0);
         // An empty writer never seals, whatever the bound.
-        assert!(!should_seal(&w, 1, 0, u64::MAX, None, 0));
+        assert!(!should_seal(&w, entry, u64::MAX, None, 0));
         for hash in &hashes {
             w.push_raw(*hash, &store.read(hash).unwrap()).unwrap();
         }
-        assert!(!should_seal(&w, 1, 0, u64::MAX, None, 4));
-        assert!(should_seal(&w, 1, 0, u64::MAX, None, 3));
-        assert!(should_seal(&w, 1, 0, u64::MAX, None, 2));
-        // The format's own bound is the production one.
-        assert_eq!(MAX_PACK_ENTRIES, pack::MAX_WRITE_ENTRIES);
-        assert!(!should_seal(&w, 1, 0, u64::MAX, None, MAX_PACK_ENTRIES));
+        assert!(!should_seal(&w, entry, u64::MAX, None, 4));
+        assert!(should_seal(&w, entry, u64::MAX, None, 3));
+        assert!(should_seal(&w, entry, u64::MAX, None, 2));
+        // The format's own bound applies whatever the caller passes.
+        assert!(!should_seal(&w, entry, u64::MAX, None, usize::MAX));
     }
 
     #[test]
@@ -1532,71 +1499,140 @@ mod tests {
         assert!(sizes.iter().all(|&size| size > serialized_bound(0, 0)));
     }
 
-    #[test]
-    fn the_pack_estimate_splits_before_the_decoded_floor() {
-        let (_dir, store) = store();
-        // A delta stream that claims a result of 512 MiB. The estimate counts
-        // the result and the stream as decoded bytes, against 2 GiB.
-        let delta = |salt: u8| {
-            let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
-            stream[5..9].copy_from_slice(&(1_u32 << 29).to_le_bytes());
-            transfer::PlannedDelta {
-                target: [salt; 32],
-                base: [0; 32],
-                stream,
-            }
-        };
-        let plan = |count: u8| transfer::PackPlan {
+    /// A delta over `base` whose stream is a header alone, claiming a base of
+    /// `base_len` bytes and a result of `result` bytes.
+    fn header_delta(salt: u8, base: Hash, base_len: u32, result: u32) -> transfer::PlannedDelta {
+        let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
+        stream[1..5].copy_from_slice(&base_len.to_le_bytes());
+        stream[5..9].copy_from_slice(&result.to_le_bytes());
+        transfer::PlannedDelta {
+            target: [salt; 32],
+            base,
+            stream,
+        }
+    }
+
+    fn estimated_packs(store: &ObjectStore, deltas: Vec<transfer::PlannedDelta>) -> usize {
+        let plan = transfer::PackPlan {
             raw: Vec::new(),
-            deltas: (0..count).map(delta).collect(),
+            deltas,
             self_contained: false,
         };
-        let packs = |count| {
-            estimate_pack_sizes_with(&store, &plan(count), u64::MAX, None, usize::MAX)
-                .unwrap()
-                .len()
+        estimate_pack_sizes_with(store, &plan, u64::MAX, None, usize::MAX)
+            .unwrap()
+            .len()
+    }
+
+    /// The estimate counts every entry as compressed, so a pack seals no later
+    /// in the real seal than in the estimate: the real packs are never more.
+    #[test]
+    fn a_real_seal_never_makes_more_packs_than_the_estimate_counts() {
+        // A fixed generator: the property holds for every sequence.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
         };
-        // The wire size of a pack is its deltas' bases and streams, framed.
-        let one = estimate_pack_sizes_with(&store, &plan(1), u64::MAX, None, usize::MAX).unwrap();
-        let stream = kit_core::delta::HEADER_LEN as u64;
-        assert_eq!(one, [serialized_bound(HASH_LEN as u64 + stream, 1)]);
-        // Three of them (1.5 GiB) fit, a fourth reaches 2 GiB and a little more.
-        assert_eq!(packs(3), 1);
-        assert_eq!(packs(4), 2);
-        assert_eq!(packs(6), 2);
-        assert_eq!(packs(7), 3);
+        let packs = |entries: &[(u64, u64)], real: bool| {
+            let mut fill = PackFill::default();
+            let mut count = 0;
+            for &(len, actual) in entries {
+                let add = Incoming::raw(len, if real { actual } else { len });
+                if fill.seals_before(add, 3 << 30, None, 7) {
+                    count += 1;
+                    fill = PackFill::default();
+                }
+                fill = fill.with(add);
+            }
+            count + usize::from(fill.entries() > 0)
+        };
+        for _ in 0..2000 {
+            let entries: Vec<(u64, u64)> = (0..next(40))
+                .map(|_| {
+                    let len = 1 + next(600 << 20);
+                    // A real entry decodes to its length when it compresses,
+                    // and to nothing when it is stored plain.
+                    let actual = if next(2) == 0 { len } else { 0 };
+                    (len, actual)
+                })
+                .collect();
+            assert!(packs(&entries, true) <= packs(&entries, false));
+        }
     }
 
     #[test]
-    fn the_pack_estimate_fits_a_pack_that_decodes_to_exactly_the_floor() {
+    fn the_pack_estimate_splits_before_the_decoded_budget_of_the_default_reader() {
         let (_dir, store) = store();
-        // A result and a stream that together decode to half the floor.
-        let result = (pack::MIN_TOTAL_DECODED / 2) as usize - kit_core::delta::HEADER_LEN;
-        let delta = |salt: u8| {
-            let mut stream = vec![0_u8; kit_core::delta::HEADER_LEN];
-            stream[5..9].copy_from_slice(&u32::try_from(result).unwrap().to_le_bytes());
-            transfer::PlannedDelta {
-                target: [salt; 32],
-                base: [0; 32],
-                stream,
-            }
+        // A delta stream that claims a result of 256 MiB. The estimate counts
+        // the result and the stream as decoded bytes, against 1 GiB.
+        let plan = |count: u8| {
+            (0..count)
+                .map(|salt| header_delta(salt, [0; 32], 0, 1 << 28))
+                .collect::<Vec<_>>()
         };
-        let packs = |count: u8| {
-            let plan = transfer::PackPlan {
+        // The wire size of a pack is its deltas' bases and streams, framed.
+        let one = estimate_pack_sizes_with(
+            &store,
+            &transfer::PackPlan {
                 raw: Vec::new(),
-                deltas: (0..count).map(delta).collect(),
+                deltas: plan(1),
                 self_contained: false,
-            };
-            estimate_pack_sizes_with(&store, &plan, u64::MAX, None, usize::MAX)
-                .unwrap()
-                .len()
+            },
+            u64::MAX,
+            None,
+            usize::MAX,
+        )
+        .unwrap();
+        let stream = kit_core::delta::HEADER_LEN as u64;
+        assert_eq!(one, [serialized_bound(HASH_LEN as u64 + stream, 1)]);
+        // Three of them (768 MiB) fit, a fourth reaches 1 GiB and a little more.
+        assert_eq!(estimated_packs(&store, plan(3)), 1);
+        assert_eq!(estimated_packs(&store, plan(4)), 2);
+        assert_eq!(estimated_packs(&store, plan(6)), 2);
+        assert_eq!(estimated_packs(&store, plan(7)), 3);
+    }
+
+    #[test]
+    fn the_pack_estimate_fits_a_pack_that_decodes_to_exactly_the_default_budget() {
+        let (_dir, store) = store();
+        // A result and a stream that together decode to half the budget.
+        let result = u32::try_from(DecodeLimits::DEFAULT_MAX_DECODED_BYTES / 2).unwrap()
+            - u32::try_from(kit_core::delta::HEADER_LEN).unwrap();
+        let packs = |count: u8| {
+            estimated_packs(
+                &store,
+                (0..count)
+                    .map(|salt| header_delta(salt, [0; 32], 0, result))
+                    .collect(),
+            )
         };
         assert_eq!(packs(2), 1);
         assert_eq!(packs(3), 2);
     }
 
     #[test]
-    fn only_packs_from_the_threshold_up_count_toward_the_ticket_budget() {
+    fn the_pack_estimate_counts_the_longest_base_and_not_every_base() {
+        let (_dir, store) = store();
+        // Each delta decodes to 256 MiB, with its 9-byte stream, and takes its own
+        // 128 MiB base. Bases are listed one after the other, so a reader holds
+        // one at a time: three deltas and the longest base reach 896 MiB, and
+        // a fourth delta passes 1 GiB.
+        let delta = |salt: u8| header_delta(salt, [salt; 32], 1 << 27, 1 << 28);
+        let packs = |count: u8| estimated_packs(&store, (0..count).map(delta).collect());
+        assert_eq!(packs(3), 1);
+        assert_eq!(packs(4), 2);
+        // With 256 MiB bases, two deltas and one base reach 768 MiB, and a
+        // third delta passes 1 GiB. If a pack counted every base, two would
+        // not fit.
+        let big = |salt: u8| header_delta(salt, [salt; 32], 1 << 28, 1 << 28);
+        assert_eq!(estimated_packs(&store, (0..2).map(big).collect()), 1);
+        assert_eq!(estimated_packs(&store, (0..3).map(big).collect()), 2);
+    }
+
+    #[test]
+    fn only_packs_from_the_threshold_up_are_ticketed() {
         let limits = |budget, threshold| UploadLimits {
             max_pack_bytes: None,
             data_packs_per_advance: budget,
@@ -1607,27 +1643,6 @@ mod tests {
         assert!(ticketed_pack(limits(Some(6), None), 0));
         assert!(!ticketed_pack(limits(Some(6), Some(100)), 99));
         assert!(ticketed_pack(limits(Some(6), Some(100)), 100));
-        assert_eq!(
-            estimated_ticketed_count(&[99, 100, 101], limits(Some(6), Some(100))),
-            2
-        );
-        // The budget itself is allowed; one pack past it is not.
-        let sizes = [100, 100, 100];
-        assert!(!estimate_exceeds_ticket_budget(
-            &sizes,
-            limits(Some(3), Some(100)),
-            3
-        ));
-        assert!(estimate_exceeds_ticket_budget(
-            &sizes,
-            limits(Some(2), Some(100)),
-            2
-        ));
-        assert!(!estimate_exceeds_ticket_budget(
-            &sizes,
-            limits(Some(4), Some(100)),
-            4
-        ));
     }
 
     #[test]
