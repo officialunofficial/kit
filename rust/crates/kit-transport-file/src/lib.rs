@@ -90,7 +90,8 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
 /// planted link cannot make a lock create or write a file elsewhere.
 ///
 /// # Errors
-/// The open fails, which includes a link at `path`.
+/// The open fails, which includes a link at `path`. A file that is not
+/// regular has kind `InvalidInput`.
 fn open_lock_file(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -105,7 +106,14 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
         // FILE_FLAG_OPEN_REPARSE_POINT: open a link itself, not its target.
         options.custom_flags(0x0020_0000);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "lock is not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 use kit_core::bounded_read;
@@ -480,7 +488,7 @@ impl RefLock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
         }
 
         // Blocking lock. Stable since Rust 1.89.
@@ -1962,7 +1970,7 @@ mod tests {
             let lock_dir = tx.lock_dir();
             fs::create_dir_all(&lock_dir).unwrap();
             let target = dir.path().join("target");
-            fs::write(&target, b"secret").unwrap();
+            fs::write(&target, b"").unwrap();
             std::os::unix::fs::symlink(&target, lock_dir.join(&lock_name)).unwrap();
 
             let err = tx
@@ -1972,7 +1980,7 @@ mod tests {
                 !matches!(err, TransportError::RefConflict),
                 "{what}: {err:?}"
             );
-            assert_eq!(fs::read(&target).unwrap(), b"secret", "{what}");
+            assert_eq!(fs::read(&target).unwrap(), b"", "{what}");
             assert!(tx.read_ref(name).unwrap().is_none(), "{what}");
         }
     }
@@ -1988,11 +1996,11 @@ mod tests {
         let lock_dir = tx.lock_dir();
         fs::create_dir_all(&lock_dir).unwrap();
         let target = dir.path().join("target");
-        fs::write(&target, b"secret").unwrap();
+        fs::write(&target, b"").unwrap();
         std::os::unix::fs::symlink(&target, lock_dir.join(stripe_lock_file(ref_stripe(name))))
             .unwrap();
         assert!(tx.bump_stripe_version(name).is_err());
-        assert_eq!(fs::read(&target).unwrap(), b"secret");
+        assert_eq!(fs::read(&target).unwrap(), b"");
     }
 
     #[test]

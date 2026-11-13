@@ -118,14 +118,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - A pack read charges 896 bytes of memory per entry, up from 704. The old
-  figure was below the real cost with a long store path. A client now refuses
-  a pack of more than about 2.39 million entries (a small pack) or 4.79 million
-  entries (a 256 MiB pack), where it refused more than about 3.05 million and
-  6.10 million.
-- `rebase` and `bisect` walk up to 1,000,000 commits, as `merge` and `log`
-  do. A branch with more commits to replay, a base with more ancestors, or a
-  bisect range with more candidates fails with an error that names the
-  1,000,000-commit limit. The limit was 10,000.
+  figure was below the real cost of a pack read with a long store path. A
+  client now refuses a pack of more than about 2.40 million entries (a small
+  pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
+  about 3.05 million and 6.10 million.
+- `rebase` walks up to 1,000,000 ancestors of its base, and `bisect` walks
+  up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
+  range, as `merge` and `log` do. A longer walk fails with an error that
+  names the 1,000,000-commit limit. The limit was 10,000. A rebase still
+  replays at most 10,000 commits.
 - A fetch no longer fails when its packs pass the staging budget. It stages
   packs without the lock while they fit, then takes the lock and downloads,
   checks, applies and records each later pack before the next. A clone of a

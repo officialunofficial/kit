@@ -960,7 +960,7 @@ Branches / refs:
   resumable state; `--skip` drops the current commit. See "Resolving
   conflicts" below. A commit to replay or an ancestor of the base that is
   missing, corrupt or not a commit fails the rebase before any change. So
-  does a branch with more than 1,000,000 commits to replay, or a base with
+  does a branch with more than 10,000 commits to replay, or a base with
   more than 1,000,000 ancestors, with an error that names the limit.
   `-i`/`--interactive` opens the todo list in `$EDITOR` before any
   mutation. Each line is `<command> <commit> <subject>`, oldest-first
