@@ -2660,3 +2660,63 @@ mod kani_proofs {
         assert!(verify_chunk(&id, &forged, 1, &proof).is_ok());
     }
 }
+
+#[cfg(test)]
+mod random_input_tests {
+    #![allow(clippy::cast_possible_truncation)] // the random values are bounded
+
+    use super::*;
+
+    /// Random leaf counts, zero included, and random positions, valid and
+    /// invalid: the streaming builders return what the level build returns,
+    /// proofs and errors alike.
+    #[test]
+    fn streaming_proofs_and_errors_equal_the_level_build_on_random_inputs() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut below = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for round in 0..700_u64 {
+            let n = match below(4) {
+                0 => below(40),
+                1 => 1 + below(5000),
+                2 => ((1u64 << below(13)) + below(3)).saturating_sub(1),
+                _ => below(300),
+            } as usize;
+            let leaves: Vec<Hash> = (0..n)
+                .map(|i| crate::hash::hash(&((i as u64) ^ (round << 32)).to_le_bytes()))
+                .collect();
+            let reference = build_bmt(&leaves);
+            let count = u32_of(n);
+            let span = u64::from(count) + 3;
+            for _ in 0..5 {
+                let (a, b) = (below(span) as u32, below(span) as u32);
+                assert_eq!(
+                    range_proof_streaming(count, leaves.iter().copied(), a, b),
+                    reference.range_proof(a, b),
+                    "range n={n} {a}..={b}"
+                );
+                assert_eq!(
+                    multi_proof_streaming(count, leaves.iter().copied(), [a]),
+                    reference.proof(a),
+                    "single n={n} at {a}"
+                );
+                let mut positions: Vec<u32> = (0..below(12)).map(|_| below(span) as u32).collect();
+                if below(4) != 0 {
+                    positions.sort_unstable();
+                    if below(3) != 0 {
+                        positions.dedup();
+                    }
+                }
+                assert_eq!(
+                    multi_proof_streaming(count, leaves.iter().copied(), positions.iter().copied()),
+                    reference.multi_proof(positions.iter().copied()),
+                    "multi n={n} {positions:?}"
+                );
+            }
+        }
+    }
+}
