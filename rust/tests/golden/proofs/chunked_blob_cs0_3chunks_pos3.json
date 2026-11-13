@@ -1,16 +1,22 @@
 {
   "bin": "chunked_blob_cs0_3chunks_pos3.bin",
-  "blake3": "01e3bb9513a728a1305f42ce121cb075ea671e6129af3eb7887d621fe060d7ad",
+  "blake3": "65063710c5e8be6fe4a9b85ac19b4ff698cf578375e6fe85ae0da8b00d025fb5",
   "chunk_hashes_hex": [
     "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
   ],
   "chunk_size": 0,
+  "chunk_spans": [
+    [
+      "700000",
+      "1000000"
+    ]
+  ],
   "description": "`chunked_blob_cs0_3chunks` from ../objects/, single chunk proof.",
   "expect": "accept",
   "kind": "chunk",
   "max_items": 1,
   "name": "chunked_blob_cs0_3chunks_pos3",
-  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
+  "object_id_hex": "ec977e00e22d242df081590048270d0d5f98b6e34dcce104b66f4322e53f04f7",
   "position": 3,
   "proof_kind": "single",
   "size": 69,

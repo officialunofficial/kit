@@ -1,0 +1,14 @@
+{
+  "bin": "neg_range_past_span.bin",
+  "blake3": "797ea022eee7c1f8d1748950627a655ad1ad78d511c0b06bfac26bfeda51f15c",
+  "commit_id_hex": "021aa0ad6a02f7b07968379b72c583c2f5c0bebc570b6b4bf42207766b8fb85e",
+  "description": "A range at offset 20 of chunk 1, whose blob holds 24 bytes but whose span is 16.",
+  "expect": "reject",
+  "name": "neg_range_past_span",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the range reaches past the committed span",
+  "selector": "range(chunk=1,offset=20,len=2)",
+  "size": 665
+}

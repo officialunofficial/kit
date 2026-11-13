@@ -1,9 +1,9 @@
 {
-  "blake3": "660df7fda8c046b36e5be5653356e7a12742f81844c8f23185ce41eb2f08e8a3",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "26951cc5355983a6cd228e86c6d8dd6e85b053d2dadfdf2aad40e0bad806fbb1",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "expect": {
     "accept": false,
-    "expand_to": 1000058,
+    "expand_to": 1000057,
     "reject_reason": "span_encoding"
   },
   "name": "neg_chunk_count_too_large",
@@ -15,10 +15,10 @@
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "00c1843d"
+        "hex": "c1843d"
       }
     ]
   },
   "schema_version": 1,
-  "size": 57
+  "size": 56
 }

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_chunk_length_differs_from_span.bin",
+  "blake3": "c261262bb8fa985ffdbe2eddc592fd321d5fe08e70ceaa958d590f3e68c79278",
+  "commit_id_hex": "83d6f03b9e9a25e14244890d36dd5d4e88463cf37d5cfee5f99cc4d851b2da34",
+  "description": "Chunk 0 of a fixed-size layout (chunk_size 16) whose blob holds 8 bytes where its span is 16.",
+  "expect": "reject",
+  "name": "neg_chunk_length_differs_from_span",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the blob's length is not the span's length",
+  "selector": "chunk(0) [holds 8 bytes]",
+  "size": 560
+}

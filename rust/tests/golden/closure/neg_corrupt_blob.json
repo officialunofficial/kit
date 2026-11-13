@@ -1,6 +1,6 @@
 {
   "bin": "neg_corrupt_blob.manifest.bin",
-  "blake3": "48e301346ec790f0c71ae6b8dc82204b66b9cc3700f7a4de7375ec077121d6aa",
+  "blake3": "fb5a9d661d0fb27e995abf32b1f51b13fb3c3a340ced1a087e75cea4e7880a5e",
   "description": "One blob's magic byte flipped so deserialize fails. The blob it replaces is missing and the damaged bytes are unreferenced.",
   "expect": "incomplete",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_corrupt_blob",
   "pack_hashes": [
-    "6c392b97186fbde41c99cd796e5f5de8dfb085e9fc0c30dfd37dc46acff81834"
+    "6fd7e45345f17d0c467da6f56074da1e4810708d6e1f13a4ac92eab99a7f9516"
   ],
   "reason": "missing",
-  "root_hex": "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
+  "root_hex": "f8a1b1e91b8005890a876ac55621d79d23665e26eaac2f00be55f3d9b2224d45",
   "size": 71,
   "unreferenced": [],
   "verified": 0

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_fixed_end_off_by_one.bin",
+  "blake3": "c7b2de1fdb780c238533971e93a5dc56bdf4f98fce046230a767bb489f4b795a",
+  "commit_id_hex": "d92e172758f759fd2cce65a00ab24883fb567366b8a945a9b857cd0cc044185a",
+  "description": "Chunk 1 of a fixed-size layout (chunk_size 16) whose span ends at 31.",
+  "expect": "reject",
+  "name": "neg_span_fixed_end_off_by_one",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "a fixed-size chunk does not end where its layout says",
+  "selector": "chunk(1)",
+  "size": 567
+}

@@ -1,7 +1,7 @@
 {
   "bin": "fastcdc_v2_manifest_2mib.bin",
-  "blake3": "4887c1abe8638986ee5f45bf1deec39bbe9819e1312b0596aa9936585a9ca76e",
+  "blake3": "cf83db10e784b7d46b659f6364800c133a3d4da116e61233f53909a256caf1de",
   "description": "FastCDC v2 chunked blob manifest (chunk_size 0x8000_0002) of the 2 MiB splitmix64 stream (seed 0x4B49_5446_4344_4332); object id in MANIFEST.txt",
   "name": "fastcdc_v2_manifest_2mib",
-  "size": 950
+  "size": 1182
 }

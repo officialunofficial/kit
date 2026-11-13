@@ -1,0 +1,39 @@
+{
+  "bin": "chunk_overlap_second.bin",
+  "blake3": "264f1c634f59018cc9e4107eab837dce0df3818489edd9971f2305e9ec68ddf8",
+  "commit_id_hex": "20ac4cb6728dca450d823097fbc73831ed72b2ef5799fa73a73323565ea5c1b9",
+  "description": "Chunk 1 of a forged file whose chunks cover [0, 12) and [8, 16).",
+  "disclosed": {
+    "chunk_inner_root_hex": "aec6d5e273e10afcefd19c5d86e5d340ebcd605685a7e3f8331e69f946553f90",
+    "leaf_id_hex": "a427b81561fbc60f4445b516305ddbf646ee346b056dab7fbe114d512067d66f",
+    "path": [
+      {
+        "mode": 1,
+        "name_hex": "66697865642e62696e"
+      }
+    ],
+    "payload": {
+      "bytes_blake3": "7a2aca76314e4c62100cf6d759d2606b35183ebfe4a30f7b5293b7adf7144a3d",
+      "chunk_size": 0,
+      "end": "16",
+      "index": 1,
+      "kind": "chunk",
+      "len": 18,
+      "start": "8",
+      "total_size": 16
+    },
+    "signature_valid": true,
+    "signer_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
+    "step_inner_roots_hex": [
+      "fd3f5e1d9a718d87017315b6d413f50de5af847ccc01639cf70cdbc69d189e9e"
+    ],
+    "tree_hash_hex": "5bb8e6705cb72b5aa4f64d667fde2c94db278510079b87637287c8f36c4783a6"
+  },
+  "expect": "accept",
+  "name": "chunk_overlap_second",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "selector": "chunk(1)",
+  "size": 528
+}

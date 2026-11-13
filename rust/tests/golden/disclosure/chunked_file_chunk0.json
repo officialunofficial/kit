@@ -1,0 +1,39 @@
+{
+  "bin": "chunked_file_chunk0.bin",
+  "blake3": "1eb9fadd97b3b7511923b34ce169326f82816ffb492a22394025b65aff46dde5",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
+  "description": "Chunk index 0 of the chunked file: it starts at offset 0.",
+  "disclosed": {
+    "chunk_inner_root_hex": "fdda7b9359f9f68f20a5a618fabc9eb9df0dcc1b6b0f6eda99b172db89ac4049",
+    "leaf_id_hex": "569a33c77e04be8d479fe1290f77963660810e4f2a7ee1a878f7542145257df1",
+    "path": [
+      {
+        "mode": 1,
+        "name_hex": "6368756e6b65642e62696e"
+      }
+    ],
+    "payload": {
+      "bytes_blake3": "83db4cbfd2066ddb3daca80eb9f1c8f18a67d3e21b6ed072b797d574f37e80ef",
+      "chunk_size": 0,
+      "end": "29499",
+      "index": 0,
+      "kind": "chunk",
+      "len": 29509,
+      "start": "0",
+      "total_size": 1048577
+    },
+    "signature_valid": true,
+    "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "step_inner_roots_hex": [
+      "bce6c65a7027dd686620c30ebf9af4b271b68d02a7b96adf40b39298c176e861"
+    ],
+    "tree_hash_hex": "434ffc6afa2cb34aca16f751265d109047bda1acda264220e92922131afa7cef"
+  },
+  "expect": "accept",
+  "name": "chunked_file_chunk0",
+  "path_hex": [
+    "6368756e6b65642e62696e"
+  ],
+  "selector": "chunk(0)",
+  "size": 30179
+}

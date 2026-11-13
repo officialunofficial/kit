@@ -1,18 +1,32 @@
 {
   "bin": "chunked_blob_cs0_3chunks_range1to3.bin",
-  "blake3": "3ef104b3df0ff73e10f0e5be99cdcdc5e462a35fa2616772a4d42810c1cfbe0b",
+  "blake3": "22a35698b8655bd7f77314547e5debd5c7957186430b4e684c995ce6b706a99d",
   "chunk_hashes_hex": [
     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
     "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
     "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
   ],
   "chunk_size": 0,
+  "chunk_spans": [
+    [
+      "0",
+      "300000"
+    ],
+    [
+      "300000",
+      "700000"
+    ],
+    [
+      "700000",
+      "1000000"
+    ]
+  ],
   "description": "`chunked_blob_cs0_3chunks` from ../objects/, range proof over all 3 chunks.",
   "expect": "accept",
   "kind": "chunk",
   "max_items": 3,
   "name": "chunked_blob_cs0_3chunks_range1to3",
-  "object_id_hex": "afbb936cbd2702c2628f188e38cd91284aa0d1d90197587935e5c04787d3674c",
+  "object_id_hex": "ec977e00e22d242df081590048270d0d5f98b6e34dcce104b66f4322e53f04f7",
   "proof_kind": "range",
   "size": 37,
   "start": 1,

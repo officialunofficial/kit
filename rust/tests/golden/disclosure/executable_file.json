@@ -1,7 +1,7 @@
 {
   "bin": "executable_file.bin",
-  "blake3": "0845072fca5ee67aa7af64b62c02301f62ada6d38d126ee7112ca518629beb7f",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "7cf2b4d5c231037221f175ec1efbe20a478373707c9e07302f1625145d85a9fe",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "description": "A file with the Executable entry mode.",
   "disclosed": {
     "chunk_inner_root_hex": null,
@@ -20,9 +20,9 @@
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [
-      "0554f091edd7efe582ee9e5dec12a091734f8a002dd9387d01299b675ce157d2"
+      "bce6c65a7027dd686620c30ebf9af4b271b68d02a7b96adf40b39298c176e861"
     ],
-    "tree_hash_hex": "a7e483c901dfea906d9ff88336269ddd64fa6e04aa872b2228e9e79d14588b3b"
+    "tree_hash_hex": "434ffc6afa2cb34aca16f751265d109047bda1acda264220e92922131afa7cef"
   },
   "expect": "accept",
   "name": "executable_file",

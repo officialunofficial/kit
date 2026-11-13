@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_first_start_not_zero.bin",
+  "blake3": "66fb2368d8cb422c49bfc64b7562be3d8951ee3dedf9f2429ed2611cc79198d3",
+  "commit_id_hex": "0ae295049be4d8d0060c1615d2c25a03220aa14e3940ac862ee4eb76279683f0",
+  "description": "Chunk 0 whose span starts at 4.",
+  "expect": "reject",
+  "name": "neg_span_first_start_not_zero",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "index 0 and start 0 disagree",
+  "selector": "chunk(0)",
+  "size": 528
+}

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_moved.bin",
+  "blake3": "9fd0ea1ef573dea7fbf4b4fcece5ccba29bb9c5e5f08cdd5de4afa8d95936c18",
+  "commit_id_hex": "4b42ea32fc2f112ba35af06cbc813b9239c409d06a4fc8fd94cd7314fd8d9872",
+  "description": "Chunk 1 with the span [9, 21) where the tree commits [8, 20).",
+  "expect": "reject",
+  "name": "neg_span_moved",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the claimed span is not the committed span",
+  "selector": "chunk(1) [claims span 9..21]",
+  "size": 564
+}

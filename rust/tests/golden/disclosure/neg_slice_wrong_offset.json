@@ -1,7 +1,7 @@
 {
   "bin": "neg_slice_wrong_offset.bin",
-  "blake3": "71c5fe992fb2e050ddabfdde07573a48ff66e216c474a8ac417fdd29503ea14f",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "f74e5cc198ae824e26bf54da281df1156dfb5064ac388bef248305e442834f11",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "description": "A genuine Bao slice for chunk 0 (offset 0) is claimed to be at offset 1024 (chunk 1).",
   "expect": "reject",
   "name": "neg_slice_wrong_offset",
@@ -10,5 +10,5 @@
   ],
   "reject_reason": "Bao slice does not verify at the claimed offset",
   "selector": "range(offset=1024,len=32) [slice built for offset=0]",
-  "size": 1616
+  "size": 1615
 }

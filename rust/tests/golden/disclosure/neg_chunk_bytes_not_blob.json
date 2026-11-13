@@ -1,0 +1,14 @@
+{
+  "bin": "neg_chunk_bytes_not_blob.bin",
+  "blake3": "2d0bdc6d827ff77dc566a3484a7bdac8c08131477fa823058fee7f4f68d6823e",
+  "commit_id_hex": "f14e119fe98acf70242840b8cc54272c12b8473949e43a58d96fe4c03d7b517f",
+  "description": "Chunk 1 whose bytes are twelve raw bytes, not a Blob object.",
+  "expect": "reject",
+  "name": "neg_chunk_bytes_not_blob",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "a chunk is one blob",
+  "selector": "chunk(1)",
+  "size": 522
+}
