@@ -4,6 +4,7 @@
 //! gets. A command turns a [`libkit::Error`] into a code with [`exit_code`]
 //! and into the text for stderr with [`message`].
 
+use kit_core::ops::DiffError;
 use kit_core::store::StoreError;
 use kit_core::worktree::WorktreeError;
 use libkit::signing::ErrorKind;
@@ -175,6 +176,9 @@ fn diff_exit_code(error: &diff::Error) -> u8 {
         | diff::Error::UnknownRevision(_)
         | diff::Error::NoMergeBaseBetween { .. }
         | diff::Error::NoMergeBase => exit::DATAERR,
+        // A file or a stored blob is above the size that kit holds in memory.
+        diff::Error::ReadObject(WorktreeError::ContentTooLarge { .. })
+        | diff::Error::BuildTree(WorktreeError::FileTooLarge(_)) => exit::NOINPUT,
         diff::Error::Tree(_)
         | diff::Error::MergeBase(_)
         | diff::Error::ResolveHead(_)
@@ -335,6 +339,11 @@ fn status_exit_code(error: &status::Error) -> u8 {
     match error {
         // The caller gave a threshold that is not a number.
         status::Error::InvalidRenameThreshold(_) => exit::USAGE,
+        // A worktree file or a stored blob is above the size that kit holds
+        // in memory.
+        status::Error::Compare(DiffError::Worktree(
+            WorktreeError::FileTooLarge(_) | WorktreeError::ContentTooLarge { .. },
+        )) => exit::NOINPUT,
         status::Error::NotARepository(_)
         | status::Error::HeadTree(_)
         | status::Error::ReadIndex(_)
@@ -394,6 +403,8 @@ fn add_exit_code(error: &add::Error) -> u8 {
             // input can trigger.
             WorktreeError::ChunkBatchLengthMismatch { .. } => exit::SOFTWARE,
         },
+        // A staged blob is above the size that kit holds in memory.
+        add::Error::ReadStagedBlob(WorktreeError::ContentTooLarge { .. }) => exit::NOINPUT,
         add::Error::NotARepository(_)
         | add::Error::ReadIndex(_)
         | add::Error::IgnoreFile(_)
@@ -813,6 +824,42 @@ mod tests {
             (
                 status::Error::HeadTree("x".to_owned()).into(),
                 exit::GENERAL_ERROR,
+            ),
+            (
+                status::Error::Compare(DiffError::Worktree(WorktreeError::FileTooLarge(path())))
+                    .into(),
+                exit::NOINPUT,
+            ),
+            (
+                status::Error::Compare(DiffError::Worktree(WorktreeError::ContentTooLarge {
+                    size: 1,
+                }))
+                .into(),
+                exit::NOINPUT,
+            ),
+            (
+                diff::Error::ReadObject(WorktreeError::ContentTooLarge { size: 1 }).into(),
+                exit::NOINPUT,
+            ),
+            (
+                diff::Error::BuildTree(WorktreeError::FileTooLarge(path())).into(),
+                exit::NOINPUT,
+            ),
+            (
+                diff::Error::BuildTree(WorktreeError::InvalidUtf8).into(),
+                exit::GENERAL_ERROR,
+            ),
+            (
+                add::Error::ReadStagedBlob(WorktreeError::ContentTooLarge { size: 1 }).into(),
+                exit::NOINPUT,
+            ),
+            (
+                add::Error::ReadFile {
+                    path: path(),
+                    source: WorktreeError::FileTooLarge(path()),
+                }
+                .into(),
+                exit::NOINPUT,
             ),
             (add::Error::NoPaths.into(), exit::USAGE),
             (add::Error::SymlinkTargetNotUtf8.into(), exit::DATAERR),

@@ -16,7 +16,7 @@
 //! The index changes in the order of the walk, whichever way the hash ran.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -28,10 +28,10 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Object};
 use kit_core::observer::Observer;
 pub use kit_core::ops::PatchHunk;
-use kit_core::ops::{apply_hunks_subset, enumerate_hunks};
+use kit_core::ops::{BINARY_SNIFF_LEN, apply_hunks_subset, enumerate_hunks, is_binary};
 use kit_core::serialize;
-use kit_core::store::{EphemeralSink, ObjectSink, ObjectStore, StoreError};
-use kit_core::worktree::{self, WorktreeError};
+use kit_core::store::{HashOnlySink, ObjectSink, ObjectStore, StoreError};
+use kit_core::worktree::{self, LoadedBlob, WorktreeError};
 use kit_sync::fanout;
 use kit_sync::worktree::{index_tracks_path_or_descendant, read_or_seed_index_from_head};
 
@@ -305,9 +305,10 @@ pub fn stage(
     // One durability batch for the whole call. A staged object costs no full
     // flush until the commit below, which runs before the index write.
     let batch = store.batch();
-    // A dry run hashes into memory, so the store gets no object.
-    let ephemeral = EphemeralSink::new(&store);
-    let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &ephemeral } else { &batch };
+    // A dry run only hashes, so the store gets no object and the run keeps
+    // none in memory.
+    let hash_only = HashOnlySink::new();
+    let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &hash_only } else { &batch };
 
     if request.all {
         add_whole_tree(cwd, sink, &mut idx)?;
@@ -998,16 +999,27 @@ fn patch_one_file(
 
     // The base is the staged blob, or the blob that HEAD seeded. A new file
     // has an empty base. The other side is the content in the tree.
-    let base = match idx.find_entry(&rel_str) {
+    let staged = match idx.find_entry(&rel_str) {
         Some(i) if idx.entries[i].status != EntryStatus::Removed => {
-            worktree::read_blob(store, &idx.entries[i].object_hash)
-                .map_err(Error::ReadStagedBlob)?
+            LoadedBlob::load(store, &idx.entries[i].object_hash).map_err(Error::ReadStagedBlob)?
         }
-        _ => Vec::new(),
+        _ => LoadedBlob::empty(),
     };
     let previous_status = idx
         .find_entry(&rel_str)
         .map_or(EntryStatus::Blob, |i| idx.entries[i].status);
+
+    // A binary side has no hunks. Both sides are tested on a bounded prefix
+    // before either is read whole, so a large binary file is skipped without
+    // a full read. A text side above the in-memory limit is refused below.
+    if patch_sides_are_binary(store, &staged, &abs)? {
+        observer.event(&Event::BinarySkipped { path: rel_str });
+        return Ok(PatchOutcome {
+            staged: false,
+            quit: false,
+        });
+    }
+    let base = staged.into_content(store).map_err(Error::ReadStagedBlob)?;
     let (opened_meta, work_bytes) =
         worktree::read_regular_file_bounded(&abs).map_err(|source| Error::ReadFile {
             path: abs.clone(),
@@ -1060,6 +1072,50 @@ fn patch_one_file(
         total: hunks.len(),
     });
     Ok(PatchOutcome { staged: true, quit })
+}
+
+/// Whether the staged blob or the file at `abs` is binary. The test reads a
+/// bounded prefix of each side.
+fn patch_sides_are_binary(
+    store: &ObjectStore,
+    staged: &LoadedBlob,
+    abs: &Path,
+) -> Result<bool, Error> {
+    let staged_prefix = staged
+        .prefix(store, BINARY_SNIFF_LEN)
+        .map_err(Error::ReadStagedBlob)?;
+    let work_prefix =
+        read_file_prefix(abs, BINARY_SNIFF_LEN).map_err(|source| Error::ReadFile {
+            path: abs.to_path_buf(),
+            source: WorktreeError::Io(source),
+        })?;
+    Ok(is_binary(&staged_prefix) || is_binary(&work_prefix))
+}
+
+/// Up to `max_len` leading bytes of the regular file at `path`. The final
+/// component is not followed if it is a symlink.
+fn read_file_prefix(path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if !path.symlink_metadata()?.file_type().is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path is not a regular file",
+            ));
+        }
+        std::fs::File::open(path)?
+    };
+    let mut prefix = Vec::new();
+    file.take(max_len as u64).read_to_end(&mut prefix)?;
+    Ok(prefix)
 }
 
 /// Refuse a named path that leaves the repository through a symlink above it.

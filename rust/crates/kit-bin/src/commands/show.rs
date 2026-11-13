@@ -215,7 +215,7 @@ pub(super) fn write_commit_diff(
                     kit_core::ops::WhitespaceMode::Exact,
                 )
             })
-            .map_err(|e| (e, exit::GENERAL_ERROR))?;
+            .map_err(super::diff::patch_failure)?;
         }
     }
     Ok(!diff.entries().is_empty())

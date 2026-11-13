@@ -27,8 +27,8 @@ use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::ConflictRecord;
 use kit_core::ops::diff::{DiffKind, diff_trees};
 use kit_core::ops::merge::{Conflict, ConflictKind};
-use kit_core::store::{EphemeralSink, ObjectStore, StoreError};
-use kit_core::worktree::{self, MAX_FILE_BYTES, WorktreeError};
+use kit_core::store::{EphemeralSink, HashOnlySink, ObjectStore, StoreError};
+use kit_core::worktree::{self, WorktreeError};
 use kit_sync::worktree::{
     current_head_tree, read_or_seed_index_from_head, restore_worktree_and_index,
 };
@@ -866,12 +866,16 @@ fn worktree_object(store: &ObjectStore, abs: &Path) -> Result<Option<(EntryStatu
         return Ok(Some((EntryStatus::Symlink, h)));
     }
     if ft.is_file() {
-        let (opened, bytes) =
-            worktree::read_regular_file_bounded(abs).map_err(|e| Error::ReadFile {
-                path: abs.to_path_buf(),
-                source: io::Error::other(e),
+        // The hash streams a large file one chunk at a time. A dry sink
+        // keeps no object, because the caller compares the id only.
+        let (h, opened) =
+            worktree::hash_file_with_metadata(&HashOnlySink::new(), abs).map_err(|e| match e {
+                WorktreeError::Io(_) | WorktreeError::FileTooLarge(_) => Error::ReadFile {
+                    path: abs.to_path_buf(),
+                    source: io::Error::other(e),
+                },
+                other => Error::StoreFile(other),
             })?;
-        let h = worktree::store_file_object(store, &bytes).map_err(Error::StoreFile)?;
         let status = if is_executable(&opened) {
             EntryStatus::Executable
         } else {
@@ -919,6 +923,14 @@ pub fn ensure_staged(
     Ok(())
 }
 
+/// The size above which the scan for markers skips a file.
+///
+/// A conflict writes markers only when both sides are single blobs, and a
+/// chunked side is never text-merged. A file above the limit is not scanned.
+/// The limit does not follow the size that kit hashes, so a larger hash limit
+/// never grows the scan.
+const MARKER_SCAN_LIMIT: u64 = 1024 * 1024 * 1024;
+
 /// The first recorded path whose file still holds a complete marker block.
 ///
 /// Only text conflicts hold markers. A directory holds none, so a
@@ -926,20 +938,26 @@ pub fn ensure_staged(
 /// skipped.
 ///
 /// # Errors
-/// [`Error::ReadFile`] when a file cannot be read or is larger than
-/// [`MAX_FILE_BYTES`].
+/// [`Error::ReadFile`] when a file cannot be read.
 pub fn first_unresolved_marker(
     root: &Path,
     records: &[ConflictRecord],
 ) -> Result<Option<String>, Error> {
     for r in records {
         let abs = root.join(&r.path);
-        if fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir()) {
+        let meta = fs::symlink_metadata(&abs);
+        if meta.as_ref().is_ok_and(fs::Metadata::is_dir) {
             continue;
         }
-        let data = match bounded_read::read_capped(&abs, MAX_FILE_BYTES) {
+        // A file above the scan limit is skipped without a read.
+        if meta.is_ok_and(|m| m.len() > MARKER_SCAN_LIMIT) {
+            continue;
+        }
+        let data = match bounded_read::read_capped(&abs, MARKER_SCAN_LIMIT) {
             Ok(d) => d,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            // The file grew past the limit after the size check.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => continue,
             Err(source) => return Err(Error::ReadFile { path: abs, source }),
         };
         if file_has_markers(&data) {

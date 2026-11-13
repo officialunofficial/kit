@@ -57,7 +57,7 @@ mod memory_overlay;
 mod source;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
-pub use source::{DisplaySource, EphemeralSink, ObjectSource};
+pub use source::{DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
 
 /// Where a chunk's bytes sit in a worktree file, so a sink that keeps no
 /// copy of them can read them back.

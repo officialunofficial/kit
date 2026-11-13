@@ -9,6 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
+  none. It counts the objects and the bytes.
 - `SyncOptions::max_staged_bytes` sets the most bytes a fetch stages without
   the repository lock. It defaults to 64 GiB. `kit` has no flag for it.
 - The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
@@ -160,6 +162,20 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit diff`, `kit show` and `kit format-patch` print `Binary files differ`
+  for a binary pair after a read of the first bytes of each side. They read
+  both sides whole before. A text file above the in-memory limit, in the
+  worktree or the store, now fails `kit diff` and `kit status` with exit `66`
+  (`NOINPUT`), as `kit add` does, where they exited `1`. `kit diff` prints no
+  header line for a file whose patch it cannot read.
+- `kit add -p` skips a binary file after a read of its first bytes, and
+  refuses a text file above the in-memory limit, or a staged blob above it,
+  with exit `66`. It read the whole file and the whole staged blob first.
+- `kit add --dry-run` hashes without keeping any object, so a file of many new
+  chunks costs no memory per chunk.
+- `kit merge --continue` and `kit rebase --continue` hash a resolved file one
+  chunk at a time, and no longer read it whole. The scan for conflict markers
+  skips a file above 1 GiB, where it failed on one.
 - Push planning fails when its closure walk reaches the 10,000,000-object
   cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
   return `OperationLimitExceeded` there instead of a cut set, so a push no

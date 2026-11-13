@@ -29,12 +29,12 @@ fn run_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn kit");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(stdin)
-        .expect("write stdin");
+    // The command can exit before it reads its input, such as on a refusal.
+    // The write then fails with a broken pipe, which is not a test failure.
+    match child.stdin.take().expect("stdin").write_all(stdin) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        other => other.expect("write stdin"),
+    }
     let out = child.wait_with_output().expect("output");
     drop(xdg);
     out
