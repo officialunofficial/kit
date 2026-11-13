@@ -34,10 +34,9 @@ pub use diff::{
     merge_blob_3way, status_diff, status_diff_observed, text_patch, unified_hunks,
     unified_hunks_opts,
 };
-pub use gc::{GcReport, GcRootsError, LiveSet, collect_roots, live_objects, run_gc};
+pub use gc::{GcReport, GcRootsError, LiveSet, collect_roots, run_gc};
 pub use graph::{
-    ClosureMode, check_closure_present, children, collect_ancestor_set, reachable_closure,
-    reachable_closure_checked, reachable_objects, reachable_snapshot,
+    ClosureMode, check_closure_present, children, reachable_objects, reachable_snapshot,
 };
 pub use merge::{
     Conflict, ConflictKind, MergeResult, find_merge_base, find_merge_base_strict, is_ancestor,

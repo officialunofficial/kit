@@ -34,7 +34,7 @@ each pulls in.
 ## Merge operations without a filesystem
 
 `ops::{merge_trees, revert, cherry_pick}` accept any `ObjectSource + ObjectSink`.
-`find_merge_base`, `is_ancestor` and `collect_ancestor_set` only need reads.
+`find_merge_base` and `is_ancestor` only need reads.
 They end a path at a missing object, for push and its shallow boundaries;
 `find_merge_base_strict` and `is_ancestor_strict` fail with an error that names
 the commit instead.

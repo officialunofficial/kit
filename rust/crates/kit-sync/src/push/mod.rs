@@ -835,7 +835,7 @@ enum PackSink<'a> {
 /// apply order, threaded straight into [`advance_packmap`].
 ///
 /// A single linear left-to-right pass over the plan's already-ordered
-/// `raw ++ deltas` sequence is enough: [`transfer::plan_pack`] never
+/// `raw ++ deltas` sequence is enough: [`transfer::plan_pack_with`] never
 /// deltas an entry against a base introduced earlier in THIS push
 /// (every delta's base is already on the remote from a prior push), so
 /// packs can be sealed independently the instant one would exceed the

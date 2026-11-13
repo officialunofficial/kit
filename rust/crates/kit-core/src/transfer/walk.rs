@@ -127,7 +127,7 @@ impl HeldCommits {
 /// A chunked file the walk keeps: its manifest, the commit that brought it,
 /// and the manifest it replaces at the same path in a parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Manifest {
+pub struct ChunkList {
     /// The commit whose tree brought the manifest.
     pub commit: Hash,
     /// The manifest's id.
@@ -171,7 +171,7 @@ impl ChunkMemory {
 #[derive(Debug)]
 pub struct PushWalk {
     objects: BTreeSet<Hash>,
-    manifests: Vec<Manifest>,
+    manifests: Vec<ChunkList>,
 }
 
 /// A new commit, read once.
@@ -296,7 +296,7 @@ impl PushWalk {
 
     /// The kept manifests, oldest commit first.
     #[must_use]
-    pub fn manifests(&self) -> &[Manifest] {
+    pub fn manifests(&self) -> &[ChunkList] {
         &self.manifests
     }
 
@@ -405,7 +405,7 @@ struct Builder<'a> {
     held: &'a HeldCommits,
     limits: WalkLimits,
     objects: BTreeSet<Hash>,
-    manifests: Vec<Manifest>,
+    manifests: Vec<ChunkList>,
     /// Kept objects that are not commits.
     non_commit: usize,
     /// The new commits, then the other roots. An object is brought by one.
@@ -518,7 +518,7 @@ impl Builder<'_> {
                         let old = beside.iter().map(|parent| parent.object_hash).find(|old| {
                             matches!(self.store.object_type(old), Ok(ObjectType::ChunkedBlob))
                         });
-                        self.manifests.push(Manifest {
+                        self.manifests.push(ChunkList {
                             commit: self.roots[owner],
                             id: new.object_hash,
                             old,
@@ -552,7 +552,7 @@ impl Builder<'_> {
             }
             match ty {
                 ObjectType::Blob | ObjectType::Delta => {}
-                ObjectType::ChunkedBlob => self.manifests.push(Manifest {
+                ObjectType::ChunkedBlob => self.manifests.push(ChunkList {
                     commit: self.roots[owner],
                     id,
                     old: None,

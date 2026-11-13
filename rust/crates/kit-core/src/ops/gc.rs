@@ -134,8 +134,8 @@ pub enum GcRootsError {
 
 /// Collect the complete set of GC retention roots for the repo at
 /// the repository described by `layout`. The returned hashes are roots,
-/// not the closure — feed them to `reachable_closure` (or use
-/// [`live_objects`]) to get the full keep-set.
+/// not the closure — feed them to the mark that `run_gc` runs to
+/// get the full keep-set.
 ///
 /// The all-zero hash is filtered out (an unset ref / `ORIG_HEAD`).
 ///
@@ -278,7 +278,7 @@ fn collect_tree_roots(
     Ok(())
 }
 
-/// Most distinct chunk ids [`live_objects`] holds: 134,217,728, which is 4 GiB
+/// Most distinct chunk ids `live_objects_with` holds: 134,217,728, which is 4 GiB
 /// of ids. Past it the mark fails with [`GcRootsError::TooManyChunks`]. The
 /// chunk id buffer is checked at a compaction, so before the error it can hold
 /// about twice that.
@@ -351,8 +351,8 @@ impl LiveSet {
     }
 
     /// Live chunks, counted in [`len`](Self::len) too.
-    #[must_use]
-    pub fn chunks_len(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn chunks_len(&self) -> usize {
         self.chunks.len()
     }
 
@@ -458,7 +458,7 @@ fn mark_live(
         }
         objects.insert(h);
         // A blob or delta is a leaf. Its type is all gc needs, so its
-        // content is not read or verified (see [`live_objects`]).
+        // content is not read or verified (see `live_objects_with`).
         if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
             continue;
         }
@@ -510,16 +510,25 @@ fn manifest_listing(
     Ok(hash::ZERO)
 }
 
+/// `live_objects_with` at the default limits.
+#[cfg(test)]
+pub(crate) fn live_objects(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+) -> Result<LiveSet, GcRootsError> {
+    live_objects_with(store, layout, MarkLimits::DEFAULT)
+}
+
 /// The full live-object keep-set for `kit gc`: the closure over every
 /// retention root from [`collect_roots`], with chunks held apart (see
 /// [`LiveSet`]).
 ///
 /// The closure follows commits, trees, tags and parents like
-/// [`super::graph::reachable_closure`]. The chunks of a manifest count toward
+/// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob or a delta.
 ///
 /// Does not verify leaf (blob/delta) content integrity as part of the
-/// walk — see [`super::graph::reachable_closure`]'s "Content integrity
+/// walk — see [`super::graph::reachable_objects`]'s "Content integrity
 /// of leaves" doc section. `gc` is therefore no longer an incidental
 /// corruption-detection pass over blob content the way it was before the
 /// object-type short-circuit; it still fails closed on a *missing* object, just not on a
@@ -532,10 +541,6 @@ fn manifest_listing(
 /// [`GcRootsError::Truncated`] past [`MAX_REACHABLE`] objects,
 /// [`GcRootsError::TooManyChunks`] past [`MAX_LIVE_CHUNKS`] distinct chunks,
 /// or [`GcRootsError::ChunkNotBlob`] for a chunk of another kind.
-pub fn live_objects(store: &ObjectStore, layout: &RepoLayout) -> Result<LiveSet, GcRootsError> {
-    live_objects_with(store, layout, MarkLimits::DEFAULT)
-}
-
 fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -568,7 +573,7 @@ pub struct GcReport {
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
-/// roots ([`live_objects`]) plus every unreachable object younger than
+/// roots (`live_objects_with`) plus every unreachable object younger than
 /// `grace_secs` (relative to `now_secs`); delete the rest. With
 /// `dry_run`, computes the report without deleting anything.
 ///
@@ -585,7 +590,7 @@ pub struct GcReport {
 /// holds the id of every loose object.
 ///
 /// # Errors
-/// [`GcRootsError`] from [`live_objects`], store enumeration, or a delete.
+/// [`GcRootsError`] from `live_objects_with`, store enumeration, or a delete.
 /// An error from the sweep itself leaves the objects of earlier directories
 /// pruned, which is safe because only unreachable objects are.
 pub fn run_gc(
@@ -1016,19 +1021,6 @@ mod tests {
         // contains every object from both commits.
         let live = live_objects_with(&s, &md, MarkLimits::DEFAULT).unwrap();
         assert!(live.contains(&c1) && live.contains(&c2));
-    }
-
-    #[test]
-    fn reachable_closure_is_union_of_single_root_closures() {
-        let (_d, s) = repo();
-        let (c1, b1) = commit_one(&s, b"a", b"a", vec![]);
-        let (c2, b2) = commit_one(&s, b"b", b"b", vec![]);
-        let multi = super::super::graph::reachable_closure(&s, [&c1, &c2]).unwrap();
-        let single1 = super::super::graph::reachable_objects(&s, &c1).unwrap();
-        let single2 = super::super::graph::reachable_objects(&s, &c2).unwrap();
-        let union: BTreeSet<Hash> = single1.union(&single2).copied().collect();
-        assert_eq!(multi, union);
-        assert!([c1, b1, c2, b2].iter().all(|h| multi.contains(h)));
     }
 
     #[test]

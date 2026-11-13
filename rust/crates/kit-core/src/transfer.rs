@@ -2,7 +2,7 @@
 //! discovery wire format.
 //!
 //! These sit ABOVE the on-disk pack format (SPEC-PACKFILE / SPEC-DELTA)
-//! and below the transport. The push path uses [`plan_pack`] to decide
+//! and below the transport. The push path uses [`plan_pack_with`] to decide
 //! which objects of a ref's closure to send, and how — raw, or as a delta
 //! against a base the remote already holds. The plan is then serialised
 //! with [`crate::pack::PackWriter`] into one or more packs — split when
@@ -44,7 +44,7 @@ use self::walk::{ChunkMemory, HeldCommits, MAX_CHUNK_MEMORY, MAX_HELD_SCAN, Push
 /// toward nothing.
 pub const MAX_PUSH_WALK: usize = 10_000_000;
 
-/// The limit [`plan_pack`] and [`plan_pack_with`] report when a walk reaches
+/// The limit [`plan_pack_with`] reports when a walk reaches
 /// [`MAX_PUSH_WALK`].
 pub const PUSH_WALK_LIMIT: &str = "10,000,000-object push walk";
 
@@ -223,7 +223,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// The returned map is `new_hash -> base_hash`. Every base is reachable
 /// from `old_tip`, so a remote that already holds `old_tip` holds the
 /// base. The caller still gates on whether the delta actually saves bytes
-/// ([`plan_pack`]).
+/// ([`plan_pack_with`]).
 ///
 /// # Errors
 ///
@@ -339,7 +339,7 @@ fn pair_entry(
 /// encoder's match-block size, so a shared 16-byte run is a shared feature.
 const FEATURE_WINDOW: usize = 16;
 /// Number of min-hash "super-features" sampled per chunk. Small keeps the
-/// index cheap; the delta size-gate in [`plan_pack`] is the final judge of a
+/// index cheap; the delta size-gate in [`plan_pack_with`] is the final judge of a
 /// pick, so a few features are enough signal to rank candidates.
 const FEATURE_COUNT: usize = 4;
 /// Most chunks of either manifest for which a shifted file is paired by
@@ -566,27 +566,9 @@ impl PackPlan {
     }
 }
 
-/// Plan the pack for pushing `new_tip` to a remote whose current tip is
-/// `old_tip` (`None` for a first push or a remote we cannot diff against).
-///
-/// Plans from what changed: it walks the commits the remote lacks and keeps
-/// the entries of each tree that differ from the trees of its parents (see
-/// [`walk::PushWalk`]). An object the remote holds is not re-sent when a
-/// parent has it at the same path or the remote head's snapshot holds it
-/// (the identical-object dedup, preferred over delta). It then delta-encodes
-/// changed chunks against same-path prior chunks where that actually saves
-/// bytes, falling back to raw otherwise. A plan may send an object the remote
-/// holds. It never omits one the remote lacks.
-///
-/// Delta candidates are encoded one at a time, sequentially — see
-/// [`plan_pack_with`] for a version that lets a caller fan that step out
-/// across a thread pool.
-///
-/// # Errors
-///
-/// See [`plan_pack_with`]. An `old_tip` that this store lacks is treated as
-/// "diff unavailable" (full-closure, all-raw push) rather than an error.
-pub fn plan_pack(
+/// [`plan_pack_with`] with a sequential delta encoder, for tests.
+#[cfg(test)]
+pub(crate) fn plan_pack(
     store: &ObjectStore,
     new_tip: Hash,
     old_tip: Option<Hash>,
@@ -611,8 +593,7 @@ pub struct DeltaCandidate {
 }
 
 /// Encode one [`DeltaCandidate`] against `store`. Returns `None` when the
-/// delta stream would not actually shrink the payload — [`plan_pack`] and
-/// [`plan_pack_with`] both fall back to sending `target` raw in that case.
+/// delta stream would not actually shrink the payload — [`plan_pack_with`] falls back to sending `target` raw in that case.
 ///
 /// Reads both `target`'s and `base`'s bytes and runs [`delta::encode`]'s
 /// block-hash-table build plus greedy scan — both CPU-bound and
@@ -670,8 +651,21 @@ pub fn encode_delta_candidate_with_base(
     ))
 }
 
-/// [`plan_pack`], but with an explicit `encode_deltas` batch callback in
-/// place of the built-in sequential loop over [`encode_delta_candidate`].
+/// Plan the pack for pushing `new_tip` to a remote whose current tip is
+/// `old_tip` (`None` for a first push or a remote we cannot diff against).
+///
+/// Plans from what changed: it walks the commits the remote lacks and keeps
+/// the entries of each tree that differ from the trees of its parents (see
+/// [`walk::PushWalk`]). An object the remote holds is not re-sent when a
+/// parent has it at the same path or the remote head's snapshot holds it
+/// (the identical-object dedup, preferred over delta). It then delta-encodes
+/// changed chunks against same-path prior chunks where that actually saves
+/// bytes, falling back to raw otherwise. A plan may send an object the remote
+/// holds. It never omits one the remote lacks.
+///
+/// The caller supplies the `encode_deltas` batch callback that encodes the
+/// delta candidates, for example with [`encode_delta_candidate`] in a
+/// sequential loop.
 ///
 /// `kit-core` has no thread-pool dependency of its own — it stays usable
 /// from wasm targets, which have no OS threads — so the fan-out decision
@@ -679,8 +673,7 @@ pub fn encode_delta_candidate_with_base(
 /// native, rayon-backed push path passes a parallel `encode_deltas`
 /// (mirroring the `prepare_raw_batch`/`prepare_delta_batch` compression
 /// fan-out already in `remote_dispatch/mod.rs`, but for the diffing step
-/// itself rather than the post-plan zstd pass); [`plan_pack`] passes a
-/// plain sequential loop.
+/// itself rather than the post-plan zstd pass).
 ///
 /// `encode_deltas` receives every delta candidate for this plan in one
 /// batch, in the order they were discovered (BLAKE3/send-set order), and

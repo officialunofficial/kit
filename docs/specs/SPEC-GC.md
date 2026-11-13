@@ -15,7 +15,7 @@ roots + live closure (`ops::gc`), the recovery log + retention
 policy (`ops::recovery`), and the producers (amend/reset/rebase record
 the superseded tip) &mdash; **and the `kit gc` command itself** are all
 shipped. `kit gc` runs `recovery::expire` → `ops::gc::run_gc`
-(`live_objects` then prune `store ∖ live`, skipping objects within the
+(the mark, then prune `store ∖ live`, skipping objects within the
 grace window) under the locks SPEC-CONCURRENCY §4 assigns to `gc`
 (the worktree registry lock, then every registered tree's per-tree
 lock &mdash; no separate lock guards the recovery-log expire step; the
@@ -68,7 +68,7 @@ before sweeping. An absent index alone means no staging roots. Only the current
 index format is supported (SPEC-INDEX).
 
 The live keep-set is the reachable closure over those roots, held in two
-parts: `ops::gc::live_objects(store, layout)` returns a `LiveSet` of
+parts: the gc mark returns a `LiveSet` of
 `objects` and `chunks`. Walk semantics match `reachable_objects`
 (commits/remixes → tree + parents, trees → entries, tags → target;
 blobs/deltas are leaves), with one difference: the walk queues no chunk of a
@@ -105,7 +105,7 @@ set. In particular:
   atomic-write temp files are ignored.)
 - A root or referenced object missing from the store during the closure
   walk (`StoreError::ObjectNotFound`) propagates.
-- If the walk reaches [`MAX_REACHABLE`] objects, `live_objects` returns
+- If the walk reaches [`MAX_REACHABLE`] objects, the mark returns
   `GcRootsError::Truncated` &mdash; beyond the cap the "unreachable" verdict is
   unsound, so gc must abort rather than prune. Push planning fails
   closed the same way: the push walk counts the commits the remote holds, the
@@ -114,7 +114,7 @@ set. In particular:
   whose walk reaches it fails before it publishes a pack. The walk never
   returns a partial plan. A held commit that this store cannot read ends its
   path and only makes the push send more.
-- If the distinct chunk ids pass their cap, `live_objects` returns
+- If the distinct chunk ids pass their cap, the mark returns
   `GcRootsError::TooManyChunks`. A manifest that lists an object that is not
   a blob or a delta gives `GcRootsError::ChunkNotBlob`, which names the
   manifest and the chunk. A chunk missing from the store is
@@ -156,7 +156,7 @@ moving the ref, and `stash pop` records the popped commit (op token
 entry &mdash; each per the lock set SPEC-CONCURRENCY §4 assigns to that
 command &mdash; and the **`kit gc` command** consumes them: under
 gc's lock set (SPEC-CONCURRENCY §4) it expires the recovery log,
-computes `live_objects`, then prunes `store ∖ live`, keeping unreachable
+computes the mark, then prunes `store ∖ live`, keeping unreachable
 objects younger than the grace window (default 14 days; `--grace-secs 0`
 prunes all, `--dry-run` previews).
 
@@ -201,7 +201,7 @@ are disjoint, so gc cannot delete a pushed object, and a pushed ref is not
 a gc root.
 
 `kit gc` reads its clock once, as `now`, after it takes its locks and
-before it expires the recovery log and computes `live_objects`. Its sweep
+before it expires the recovery log and computes the mark. Its sweep
 deletes an unreachable object when `now - mtime >= grace`, where `mtime`
 is the object file's on-disk modification time, and keeps any object
 whose `mtime` cannot be read (`ops::gc::run_gc`). An implementation MUST
@@ -284,7 +284,7 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 
 | Invariant | Enforced by |
 |---|---|
-| No live object is ever pruned | prune set is `store ∖ live_objects`, the reachable closure over the complete `collect_roots` set ("Retention roots") |
+| No live object is ever pruned | prune set is `store ∖ live`, the reachable closure over the complete `collect_roots` set ("Retention roots") |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

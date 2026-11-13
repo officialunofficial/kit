@@ -214,7 +214,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reused. gc reports those objects as kept.
 - The closure check before a fetch publishes a ref reads each chunk's type
   and no longer counts chunks toward its 10,000,000-object cap. A repository
-  of many large files can be fetched. Push still counts every chunk.
+  of many large files can be fetched.
 - `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
   cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
   it grows, so memory stays near twice the 32 bytes of each distinct chunk
@@ -223,7 +223,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deletes anything, and refuses a chunk that is not a blob or a delta, as
   `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one
   object directory at a time. The summary line shows the live chunk count.
-  `live_objects` returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
+  The gc mark returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
 - `kit add` makes the chunks of a large file durable in windows of 4,096
   chunks, and no longer stages every chunk of the file until the command
   ends. The staged set of one file stays bounded whatever the file's size. The
@@ -343,6 +343,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from it. The unticketed fallback of six is gone. `plan_push_steps` with no
   ticket allowance returns one step. `Plan::prepare` is unchanged for
   `max_tickets` of two or more.
+- **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
+  `ops::graph::ANCESTOR_LIMIT`, `collect_ancestor_set`,
+  `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
+  and `transfer::plan_pack` and `LiveSet::chunks_len` are gone. Only tests
+  used them. Use `reachable_objects`, `reachable_snapshot`, `plan_pack_with`
+  and the walks the commands run. `transfer::walk::Manifest` is renamed
+  `ChunkList`.
 - Planning a push no longer pairs the chunks of a file with more than 65,536
   chunks (about 4 GiB) by content when an edit changes its chunk count. It
   read every chunk of both versions for that. Its changed chunks are sent
@@ -376,7 +383,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without following a link. A link planted at a lock path fails the write and
   leaves its target as it was. The files were opened through a link before.
 - Push planning fails when its closure walk reaches the 10,000,000-object
-  cap. `reachable_closure`, `reachable_objects` and `reachable_snapshot`
+  cap. `reachable_objects` and `reachable_snapshot`
   return `OperationLimitExceeded` there instead of a cut set, so a push no
   longer sends a pack without the objects past the cut and then moves the
   branch. A cut in the walk of the remote's tip is no error: the push treats
