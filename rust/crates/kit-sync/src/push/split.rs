@@ -22,17 +22,17 @@
 //!   returns at a path, a chunked file reached by another path) or less (a
 //!   moved directory).
 //! * [`Cutter::cut`] cuts the chain: it finds the furthest commit whose real
-//!   plan fits the budget, by binary search over real plans, up to the commit
-//!   the weights say would fill the budget at best. The least step, a single
-//!   commit or the first advance forced to hold the remote head, is checked
-//!   with the real plan and, if its estimate is over budget, an exact local
-//!   dry seal.
+//!   plan fits the budget, by binary search over real plans from the commit
+//!   the weights say would fill the budget at best, and on past it while plans
+//!   fit. The least step, a single commit or the first advance forced to hold
+//!   the remote head, is checked with the real plan and, if its estimate is
+//!   over budget, an exact local dry seal.
 //!
 //! The caller's pack payload cap is a preferred size. When one commit (or the
 //! first advance, forced to hold the remote head) weighs more than the budget
 //! can carry at that size, [`plan_split`] raises the cap for the whole push to
-//! what that commit needs (again, up to a few times, when a cut finds a step the
-//! weights missed), never past the format maximum or the
+//! what that step needs, found by the cut that cannot make it smaller and
+//! repeated, up to a few times, if a later step needs more, never past the format maximum or the
 //! largest pack the remote accepts. Every cut, probe and upload then uses the
 //! same value.
 
@@ -355,6 +355,10 @@ fn plan_weight(store: &ObjectStore, plan: &PackPlan) -> Result<StepWeight, PushE
 /// A step no cut can divide that does not fit the budget at the current cap.
 struct Overflow {
     weight: StepWeight,
+    /// The chain position the step ends at.
+    to: usize,
+    /// The step was forced to reach the remote head.
+    holds_remote_head: bool,
     /// The refusal to give when no larger pack helps.
     error: PushError,
 }
@@ -401,24 +405,6 @@ impl Cutter<'_> {
         Ok((plan, packs))
     }
 
-    /// What the real plan of the step from `from` to `to`, which no cut can
-    /// divide, weighs when it needs more than the budget's packs at this
-    /// cutter's cap, and `None` when it fits. A step that weighs little is not
-    /// probed: the weights size the search, and [`Cutter::cut`] checks every
-    /// step it chooses.
-    fn forced(&self, from: usize, to: usize) -> Result<Option<StepWeight>, PushError> {
-        let weight = self.weights[to] - self.weights[from];
-        let wcap = pack_weight_cap(self.cap, self.limits.max_pack_bytes);
-        if weight <= wcap.saturating_mul((self.budget / 2) as u64) {
-            return Ok(None);
-        }
-        let (plan, packs) = self.probe(from, to)?;
-        if packs <= self.budget {
-            return Ok(None);
-        }
-        Ok(Some(plan_weight(self.store, &plan)?))
-    }
-
     /// The furthest position after `from` whose cumulative weight stays within
     /// `limit`, at least `from + 1`.
     fn furthest(&self, from: usize, limit: u64) -> usize {
@@ -430,9 +416,26 @@ impl Cutter<'_> {
             .min(self.weights.len() - 1)
     }
 
+    /// The furthest position after `from` up to `over` whose real plan fits
+    /// the budget, given that every position up to `fits` does. Plans grow
+    /// with the position, so a binary search finds it.
+    fn widest(&self, from: usize, mut fits: usize, mut over: usize) -> Result<usize, PushError> {
+        while fits < over {
+            let mid = fits + (over - fits).div_ceil(2);
+            if self.probe(from, mid)?.1 <= self.budget {
+                fits = mid;
+            } else {
+                over = mid - 1;
+            }
+        }
+        Ok(fits)
+    }
+
     /// The end position of the step that starts at `from`: the furthest one
-    /// whose real plan fits the budget. The weights bound where to look, and
-    /// each probe is a real plan, so a step is never trusted to fit. The least
+    /// whose real plan fits the budget. The weights say where to start looking
+    /// and never decide: each position taken has been probed with its real
+    /// plan, and the search goes on past the weights' ceiling while plans fit
+    /// (a moved directory weighs all it holds and sends none of it). The least
     /// step cannot be divided; it is checked exactly, and `Cut::TooBig` says
     /// what it weighs when it does not fit.
     fn cut(&self, from: usize) -> Result<Cut, PushError> {
@@ -449,13 +452,16 @@ impl Cutter<'_> {
         let ceiling = self
             .furthest(from, wcap.saturating_mul(self.budget as u64))
             .max(least);
-        let (mut fits, mut over) = (least, ceiling);
-        while fits < over {
-            let mid = fits + (over - fits).div_ceil(2);
-            if self.probe(from, mid)?.1 <= self.budget {
-                fits = mid;
+        let end = self.weights.len() - 1;
+        let mut fits = self.widest(from, least, ceiling)?;
+        let (mut reached, mut stride) = (ceiling, 1);
+        while fits == reached && reached < end {
+            let next = (reached + stride).min(end);
+            if self.probe(from, next)?.1 <= self.budget {
+                (fits, reached, stride) = (next, next, stride * 2);
             } else {
-                over = mid - 1;
+                fits = self.widest(from, fits, next - 1)?;
+                break;
             }
         }
         if fits > least {
@@ -495,6 +501,8 @@ impl Cutter<'_> {
             Ok(_) => Ok(None),
             Err(PushError::PushTooLarge { packs, limit, .. }) => Ok(Some(Overflow {
                 weight,
+                to,
+                holds_remote_head,
                 error: PushError::PushTooLarge {
                     packs,
                     limit,
@@ -664,40 +672,10 @@ pub(super) fn plan_split(
     // The pack size is fixed here, once: every cut, probe and upload of this
     // push uses it. It grows past the preferred size only when something no
     // cut can divide, a single commit or the first advance (forced to hold
-    // the remote head), needs more than the budget's packs. The heavy steps
-    // are found by their weights; a step the weights miss is found by the cut
-    // that checks it, and the cut starts again at the larger size.
+    // the remote head), needs more than the budget's packs. The cut that finds
+    // such a step says what it weighs, and every cut starts again at the
+    // larger size.
     let mut payload_cap = pack_payload_cap;
-    let mut forced_first = StepWeight::default();
-    let mut needs_more = false;
-    if cutter.must_reach > 0
-        && let Some(weight) = cutter.forced(0, cutter.must_reach)?
-    {
-        forced_first = weight;
-        needs_more = true;
-    }
-    let mut heaviest = (0, StepWeight::default());
-    for commit in 0..chain.commits.len() {
-        if let Some(weight) = cutter.forced(commit, commit + 1)? {
-            needs_more = true;
-            if weight.total > heaviest.1.total {
-                heaviest = (commit, weight);
-            }
-        }
-    }
-    if needs_more {
-        let (commit, weight) = heaviest;
-        let raised = raised_payload_cap(
-            limits,
-            budget,
-            weight.total,
-            forced_first.total,
-            weight.largest.max(forced_first.largest),
-        )?
-        .ok_or_else(|| too_heavy(&cutter, budget, commit))?;
-        payload_cap = raised.max(cutter.cap);
-        cutter.cap = effective_payload_cap(payload_cap, limits.max_pack_bytes)?;
-    }
     let mut attempts = 0;
     'cut: loop {
         let mut steps = Vec::new();
@@ -721,18 +699,24 @@ pub(super) fn plan_split(
                         overflow.weight.total,
                         0,
                         overflow.weight.largest,
-                    )?
-                    .map(|cap| effective_payload_cap(cap.max(cutter.cap), limits.max_pack_bytes))
-                    .transpose()?;
-                    match raised {
-                        Some(cap) if cap > cutter.cap && attempts < MAX_RAISES => {
-                            attempts += 1;
-                            payload_cap = cap;
-                            cutter.cap = cap;
-                            continue 'cut;
-                        }
-                        _ => return Err(overflow.error),
+                    )?;
+                    let Some(raised) = raised else {
+                        // Not even the largest pack carries it. Holding the
+                        // remote head is the way out of the first advance.
+                        return Err(if overflow.holds_remote_head {
+                            overflow.error
+                        } else {
+                            too_heavy(&cutter, budget, overflow.to - 1)
+                        });
+                    };
+                    let cap = effective_payload_cap(raised.max(cutter.cap), limits.max_pack_bytes)?;
+                    if cap <= cutter.cap || attempts >= MAX_RAISES {
+                        return Err(overflow.error);
                     }
+                    attempts += 1;
+                    payload_cap = cap;
+                    cutter.cap = cap;
+                    continue 'cut;
                 }
             }
         }
@@ -1872,6 +1856,76 @@ mod step_fit_tests {
             RefWriteCondition::Match(remote),
         )
         .unwrap();
+        assert_every_step_seals(&store, &plan, remote, limits);
+    }
+
+    #[test]
+    fn a_directory_deleted_and_restored_does_not_raise_the_pack_or_refuse_the_push() {
+        let (_dir, store) = store();
+        let files: Vec<(String, Hash)> = (0..40)
+            .map(|i| (format!("g{i:02}"), blob(&store, 200 + i, 3000)))
+            .collect();
+        let held = tree_of(&store, &files);
+        let remote = commit(&store, tree(&store, &[("d", held)]), vec![], 1);
+        let deleted = commit(
+            &store,
+            tree(&store, &[("z", blob(&store, 1, 10))]),
+            vec![remote],
+            2,
+        );
+        let mut tip = commit(
+            &store,
+            tree(&store, &[("d", held), ("z", blob(&store, 1, 10))]),
+            vec![deleted],
+            3,
+        );
+        let mut extra: Vec<(String, Hash)> = vec![("d".to_string(), held)];
+        for i in 0..12_u8 {
+            extra.push((format!("n{i:02}"), blob(&store, 500 + u64::from(i), 3000)));
+            tip = commit(&store, tree_of(&store, &extra), vec![tip], 10 + i);
+        }
+        for max in [None, Some(8192)] {
+            let limits = ticketed(max);
+            let plan = split(
+                &store,
+                tip,
+                remote,
+                limits,
+                RefWriteCondition::Match(remote),
+            )
+            .unwrap();
+            assert_eq!(plan.payload_cap, 4096, "{max:?}");
+            assert_every_step_seals(&store, &plan, remote, limits);
+        }
+    }
+
+    #[test]
+    fn a_directory_renamed_in_every_commit_does_not_make_a_step_of_each() {
+        let (_dir, store) = store();
+        let files: Vec<(String, Hash)> = (0..40)
+            .map(|i| (format!("g{i:02}"), blob(&store, 200 + i, 3000)))
+            .collect();
+        let moved = tree_of(&store, &files);
+        let remote = commit(&store, tree(&store, &[("a", moved)]), vec![], 1);
+        let mut tip = remote;
+        let mut extra: Vec<(String, Hash)> = Vec::new();
+        for i in 0..24_u8 {
+            extra.push((format!("n{i:02}"), blob(&store, 500 + u64::from(i), 1000)));
+            let name = if i % 2 == 0 { "b" } else { "a" };
+            let mut entries = extra.clone();
+            entries.push((name.to_string(), moved));
+            tip = commit(&store, tree_of(&store, &entries), vec![tip], 10 + i);
+        }
+        let limits = ticketed(None);
+        let plan = split(
+            &store,
+            tip,
+            remote,
+            limits,
+            RefWriteCondition::Match(remote),
+        )
+        .unwrap();
+        assert!(plan.steps.len() <= 3, "{} steps", plan.steps.len());
         assert_every_step_seals(&store, &plan, remote, limits);
     }
 }
