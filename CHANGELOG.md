@@ -184,8 +184,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
   The `kit-client` crate reads it too, as described under Changed.
   **Breaking:** the field is public on
-  `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and its
-  view types, so a struct literal that names every field no longer compiles.
+  `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and
+  `GetServerInfoResponseView`, so a struct literal that names every field no longer compiles.
   Add the field, or end the literal with `..Default::default()`.
 
 ### Changed
@@ -193,7 +193,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking, format:** a chunked file's id commits the byte span of every
   chunk, so one log-size proof proves the chunk that holds any offset. Every
   chunked file id changes. A repository written before this change is
-  refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`), and
+  refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`, and
+  `kit_core::store::FORMAT_VALUE` is `"bmt-v2"`), and
   there is no migration. Trees, blobs, commits and tags keep their ids.
   - The manifest is schema `0x02` of type `0x05`, `22 + 40 * n` bytes: the
     22-byte header, then per chunk a 32-byte id and the `u64` offset one
@@ -324,7 +325,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SyncOptions::max_staged_bytes` and their builders
   `SyncOptions::with_staging_dir` and `SyncOptions::with_max_staged_bytes` are
   removed, so a field read or a call no longer compiles. Remove them; a fetch
-  stages nothing and needs no replacement. The publish step no longer fails with `SyncError::RepoLock`
+  stages nothing and needs no replacement. (`max_staged_bytes` and its builder
+  were never in a release: they came after 0.7.3.) The publish step no longer fails with `SyncError::RepoLock`
   when another process holds `worktree.lock`: it waits, unless `SyncOptions::lock_wait` bounds the wait. A caller
   with an observer that never cancels waits as long as the holder does, and a fetch
   that waits holds its prune guard, so gc prunes nothing meanwhile.
@@ -384,9 +386,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ticket allowance returns one step. `Plan::prepare` is unchanged for
   `max_tickets` of two or more.
 - **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
-  `ops::graph::ANCESTOR_LIMIT` (the limit name `"10,000-commit ancestor walk"`;
-  nothing replaces it, because every ancestor walk now takes the cap and the
-  limit name of its caller and reports it in `AncestorError::Limit`),
+  `ops::graph::ANCESTOR_LIMIT` (the limit name `"10,000-commit ancestor walk"`,
+  added after 0.7.3; nothing replaces it, because each capped history walk now
+  takes the cap and the limit name of its caller and reports it in
+  `AncestorError::Limit`),
   `collect_ancestor_set`,
   `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
   and `transfer::plan_pack` are gone. Only tests
@@ -501,7 +504,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of memory above the manifest itself and now stays within the manifest's own
   size. The proof bytes, ids and signatures are the same.
 - **Breaking:** `kit_core::pack::PACK_ENTRY_RESIDENT_COST` is 896, up from
-  704. A pack read charges 896 bytes of memory per entry, up from 704. The old
+  704: a pack read charges that many bytes of memory per entry. The old
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small
   pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
@@ -661,8 +664,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   condition allows it. A node lists at most 4,096 packs
   (`ROLLOVER_MAX_PACKS`), 131,080 bytes: a chain that holds more keeps
   appending. **Breaking:** the public constant
-  `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS` is 4,096, up from 1,024,
-  so code that derives a size or a bound from it changes. A reader accepts
+  `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS` is 4,096, up from 1,024
+  (the constant itself was added after 0.7.3), so code that derives a size or
+  a bound from it changes. A reader accepts
   the node as before. A server that limits a node to 1,024 packs must accept 4,096
   before it is used with this client. A fresh clone downloads every pack of the branch.
   With the `fetch-grow` row of the multi-writer benchmark, the largest
