@@ -989,8 +989,8 @@ maximum-wire-length regressions.
 
 **Always:** `kit gc` counts no chunk of a chunked file toward its 10,000,000
 object cap. Its live set holds the chunks apart, as a sorted vector of ids
-that holds no duplicate and no id that is also an object. Every chunk is a blob
-or a delta. A chunk of another kind, a missing or corrupt object, a distinct
+that holds no duplicate and no id that is also an object. Every chunk is a
+blob. A chunk of another kind, a missing or corrupt object, a distinct
 chunk count past 134,217,728 and a walk past the object cap each end the mark
 with an error. The whole mark, every chunk type read included, ends before gc
 lists or deletes an object. The sweep lists one `objects/<2 hex>/` directory at

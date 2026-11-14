@@ -83,7 +83,7 @@ chunked blob.
   duplicates and disjoint from `objects`. It is capped at 134,217,728
   distinct ids, which is 4 GiB of ids. The id buffer is checked at a
   compaction, so it can hold about twice that before the error. Each chunk
-  MUST be a blob or a delta, since a chunk is a leaf and gc cannot tell what
+  MUST be a blob, since a chunk is a leaf and gc cannot tell what
   an object of another kind reaches. An object of another kind that a manifest
   lists, and that the walk reaches no other way, is an error, not a chunk. A manifest that another manifest lists
   as a chunk and that is also reached as a file is an object, and its own
@@ -126,7 +126,7 @@ set. In particular:
   path and only makes the push send more.
 - If the distinct chunk ids pass their cap, the mark returns
   `GcRootsError::TooManyChunks`. A manifest that lists an object that is not
-  a blob or a delta gives `GcRootsError::ChunkNotBlob`, which names the
+  a blob gives `GcRootsError::ChunkNotBlob`, which names the
   manifest and the chunk. A chunk missing from the store is
   `StoreError::ObjectNotFound`.
 - The whole mark, every chunk type read included, ends before gc lists or
@@ -299,7 +299,7 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
 | gc counts no chunk toward the object cap | `LiveSet` holds chunks apart from `objects`; only `objects` is capped at `MAX_REACHABLE` ("Retention roots") |
-| A chunk that is not a blob or a delta aborts gc | the mark reads the type of each distinct chunk and returns `GcRootsError::ChunkNotBlob` before the sweep lists an object ("Fail-closed requirement") |
+| A chunk that is not a blob aborts gc | the mark reads the type of each distinct chunk and returns `GcRootsError::ChunkNotBlob` before the sweep lists an object ("Fail-closed requirement") |
 | gc holds neither every loose object nor an uncompacted chunk buffer | the sweep lists one `objects/<2 hex>/` directory at a time, and the chunk ids are compacted before the buffer grows past its threshold ("Retention roots") |
 | A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.kit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
 | A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
