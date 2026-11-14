@@ -332,7 +332,13 @@ pub(crate) fn walk(
                 out.skipped_known += 1;
                 if let Some(reach) = out.visited.get_mut(&id) {
                     match answer {
-                        Known::Blob(len) => reach.blob_len = Some(len),
+                        // A known blob is held to the edges into it as a
+                        // blob the walk reads is.
+                        Known::Blob(len) => {
+                            if admit_type(reach, &mut out.corrupt, id, ObjectType::Blob) {
+                                reach.blob_len = Some(len);
+                            }
+                        }
                         _ => reach.frontier = true,
                     }
                 }
@@ -374,25 +380,12 @@ pub(crate) fn walk(
                 },
             }
         }
-        let bit = type_bit(object.object_type());
         let Some(reach_entry) = out.visited.get_mut(&id) else {
             continue;
         };
-        if reach_entry.allowed & bit == 0 {
-            // A zero set was reported when the edges first disagreed.
-            if reach_entry.allowed != 0 {
-                out.corrupt.push((
-                    id,
-                    format!(
-                        "{:?} object where the referencing entry requires another type",
-                        object.object_type()
-                    ),
-                ));
-                reach_entry.allowed = 0;
-            }
+        if !admit_type(reach_entry, &mut out.corrupt, id, object.object_type()) {
             continue;
         }
-        reach_entry.allowed &= bit;
         if let Object::Blob(blob) = &object {
             reach_entry.blob_len = Some(blob.data.len() as u64);
         }
@@ -417,6 +410,31 @@ pub(crate) fn walk(
     out.corrupt.sort_by_key(|(id, _)| *id);
     out.bad_roots.sort_by_key(|(id, _)| *id);
     Ok(out)
+}
+
+/// Hold an id of object type `ty` to the types its edges allow. Returns
+/// whether `ty` is allowed, and narrows the allowed set to it. A refusal is
+/// reported once, as corrupt, and empties the set; a set an earlier
+/// disagreement emptied was reported then.
+fn admit_type(
+    reach: &mut Reach,
+    corrupt: &mut Vec<(Hash, String)>,
+    id: Hash,
+    ty: ObjectType,
+) -> bool {
+    let bit = type_bit(ty);
+    if reach.allowed & bit == 0 {
+        if reach.allowed != 0 {
+            corrupt.push((
+                id,
+                format!("{ty:?} object where the referencing entry requires another type"),
+            ));
+            reach.allowed = 0;
+        }
+        return false;
+    }
+    reach.allowed &= bit;
+    true
 }
 
 /// Mark `id` reached through an edge that allows `kind`. An id joins
