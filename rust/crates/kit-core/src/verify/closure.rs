@@ -59,6 +59,11 @@ pub trait ObjectSource {
     /// verification result; the closure walker always deserializes the bytes
     /// and re-derives the object id itself.
     ///
+    /// The walk asks for each id once, except a chunked-file manifest, which
+    /// it asks for a second time to check its chunk lengths. A source must
+    /// serve a manifest again, and a source that counts fetches counts it
+    /// twice.
+    ///
     /// # Errors
     ///
     /// Returns a source error when the requested object cannot be fetched.

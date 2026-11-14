@@ -726,6 +726,60 @@ mod tests {
         ));
     }
 
+    /// A closure that passed the check, and whose chunk file was damaged in
+    /// the local store afterwards, is not blamed on the remote: the check
+    /// reads the whole closure of the tip, not only what the fetch received.
+    #[test]
+    fn a_chunk_damaged_in_the_local_store_is_not_blamed_on_the_remote() {
+        let (dir, store) = store();
+        let one = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"12345".to_vec(),
+            }),
+        );
+        let two = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"1234567".to_vec(),
+            }),
+        );
+        let manifest = put(
+            &store,
+            &Object::ChunkedBlob(ChunkedBlob::new(12, 0, [(one, 5), (two, 12)]).unwrap()),
+        );
+        let tip = commit_over_file(&store, manifest);
+        verify_closure_present(&store, &tip).unwrap();
+
+        // Flip one bit of the length field of the first chunk's file.
+        let hex = kit_core::hash::to_hex(&one);
+        let path = RepoLayout::single(dir.path())
+            .objects_dir()
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[6] ^= 0x01;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+
+        let error = verify_closure_present(&store, &tip).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SyncError::RemoteObject(KitError::ChunkLengthMismatch { .. })
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "fetched history has a chunk that does not fit its manifest: chunk 0 holds 4 bytes, but its span is 5 bytes"
+        );
+        assert!(!error.to_string().contains("remote sent"));
+    }
+
     #[test]
     fn a_chunk_that_is_not_a_blob_is_a_remote_object_error() {
         let (_dir, store) = store();

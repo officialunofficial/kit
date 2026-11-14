@@ -424,10 +424,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rules, and `merkle::verify_chunk` says in its first line that it checks the
   fold only.
 - **Breaking:** `SyncError` has a new variant, `RemoteObject`, and so does
-  `libkit::transfer::Error`. A fetch whose remote sent a chunk of another
-  length than its span, or a chunk that is not a blob, fails with it. It was
-  `SyncError::Store`. It is not a trigger to rebuild the applied-pack record.
-  A caller that matches `SyncError` with no wildcard has to name it.
+  `libkit::transfer::Error`. A fetch whose history has a chunk of another
+  length than its span, or a chunk that is not a blob, fails with it. The
+  check reads the whole closure of the fetched tip in the local store, so the
+  text says "fetched history has a chunk that does not fit its manifest" and
+  does not say who sent it. It was `SyncError::Store`. It is not a trigger to
+  rebuild the applied-pack record. A caller that matches `SyncError` with no
+  wildcard has to name it.
+- **Breaking:** the closure walk fetches each chunked-file manifest a second
+  time, to check its chunk lengths after the walk. An `ObjectSource` has to
+  serve a manifest again; with a source that serves each id only once, the walk
+  reports the manifest corrupt ("manifest absent when its chunks were checked").
 - **Breaking:** the text of `KitError::TooManyChunks` reads
   `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
   matches the message text updates the number. The variant is the same.

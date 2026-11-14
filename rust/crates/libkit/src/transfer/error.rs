@@ -156,10 +156,13 @@ pub enum Error {
         "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
     )]
     ClosureTooLarge(usize),
-    /// The remote sent a chunk that does not fit the manifest that names it:
-    /// not a blob, or a blob of another length than its span. Nothing was
+    /// The fetched history has a chunk that does not fit the manifest that
+    /// names it: not a blob, or a blob of another length than its span. The
+    /// check reads everything the fetched tip reaches in the local store, so
+    /// the mismatch may come from what this fetch received, such as a manifest
+    /// whose span is wrong, or from damage to the local store. Nothing was
     /// published. NOT a self-heal trigger.
-    #[error("remote sent an object that does not fit its manifest: {0}")]
+    #[error("fetched history has a chunk that does not fit its manifest: {0}")]
     RemoteObject(KitError),
     /// A commit/remix/tag newly introduced by this fetch failed Ed25519
     /// signature verification via [`kit_core::sign::verify_commit`] /

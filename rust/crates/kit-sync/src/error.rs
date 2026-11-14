@@ -89,10 +89,13 @@ pub enum SyncError {
     /// still absent locally.
     #[error("remote is missing object {0} needed to reconstruct the ref")]
     RemoteMissingObject(String),
-    /// The remote sent a chunk that does not fit the manifest that names it:
-    /// not a blob, or a blob of another length than its span. Nothing was
+    /// The fetched history has a chunk that does not fit the manifest that
+    /// names it: not a blob, or a blob of another length than its span. The
+    /// check reads everything the fetched tip reaches in the local store, so
+    /// the mismatch may come from what this fetch received, such as a manifest
+    /// whose span is wrong, or from damage to the local store. Nothing was
     /// published. Never retried as local staleness.
-    #[error("remote sent an object that does not fit its manifest: {0}")]
+    #[error("fetched history has a chunk that does not fit its manifest: {0}")]
     RemoteObject(KitError),
     /// The fetched tip's closure exceeds the verification cap, so
     /// completeness could not be confirmed. Fails closed.
