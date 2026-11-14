@@ -364,8 +364,8 @@ pub struct ChunkedIdFold {
     chunk_count: u32,
     /// Entries pushed so far.
     pushed: u32,
-    /// The end of the last entry pushed, `0` before the first.
-    prev_end: u64,
+    /// The chunk leaves, which keep the end of the last entry pushed.
+    leaves: ChunkLeaves,
 }
 
 impl ChunkedIdFold {
@@ -390,7 +390,7 @@ impl ChunkedIdFold {
             chunk_size,
             chunk_count,
             pushed: 0,
-            prev_end: 0,
+            leaves: ChunkLeaves::new(),
         })
     }
 
@@ -409,14 +409,13 @@ impl ChunkedIdFold {
             self.pushed,
             self.chunk_size,
             self.total_size,
-            self.prev_end,
+            self.leaves.prev_end(),
             end,
         )?;
         self.fold
-            .push(&chunked_chunk_leaf_raw(self.prev_end, end, chunk))
+            .push(&self.leaves.next_leaf(chunk, end))
             .map_err(|_| KitError::TooManyChunks)?;
         self.pushed += 1;
-        self.prev_end = end;
         Ok(())
     }
 
@@ -453,7 +452,11 @@ impl ChunkedIdFold {
         if self.pushed != self.chunk_count {
             return Err(KitError::ChunkedBlobLength);
         }
-        crate::serialize::check_last_end(self.total_size, self.pushed as usize, self.prev_end)?;
+        crate::serialize::check_last_end(
+            self.total_size,
+            self.pushed as usize,
+            self.leaves.prev_end(),
+        )?;
         Ok(wrap_id(ObjectKind::ChunkedBlob, &self.fold.root()))
     }
 }
@@ -1073,13 +1076,42 @@ pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
 /// `[start, end)` and its id. It binds both offsets, so one proof of the
 /// leaf gives a chunk's place in the file and its committed length. The
 /// fixed-width body keeps the leaf from aliasing any other kind of leaf.
-/// [`ChunkedBlob::leaf_sequence`] places it.
+/// [`ChunkLeaves`] places it.
 pub(crate) fn chunked_chunk_leaf_raw(start: u64, end: u64, chunk_id: &Hash) -> Hash {
     let mut body = [0u8; 16 + HASH_LEN];
     body[..8].copy_from_slice(&start.to_le_bytes());
     body[8..16].copy_from_slice(&end.to_le_bytes());
     body[16..].copy_from_slice(chunk_id);
     domain_digest(CBLOB_CHUNK_DOMAIN, &body)
+}
+
+/// The chunk leaves of a manifest, one entry at a time. Each leaf takes the
+/// start of its span from the end of the entry before it, `0` for the first,
+/// and this is the one place that end is tracked: [`ChunkedBlob::leaf_sequence`]
+/// and [`ChunkedIdFold`] both build their chunk leaves here.
+#[derive(Debug)]
+pub(crate) struct ChunkLeaves {
+    prev_end: u64,
+}
+
+impl ChunkLeaves {
+    pub(crate) const fn new() -> Self {
+        Self { prev_end: 0 }
+    }
+
+    /// The end of the last entry given to [`Self::next_leaf`], `0` before the
+    /// first.
+    pub(crate) const fn prev_end(&self) -> u64 {
+        self.prev_end
+    }
+
+    /// The leaf of the next entry, whose span runs from [`Self::prev_end`] to
+    /// `end`.
+    pub(crate) fn next_leaf(&mut self, chunk_id: &Hash, end: u64) -> Hash {
+        let leaf = chunked_chunk_leaf_raw(self.prev_end, end, chunk_id);
+        self.prev_end = end;
+        leaf
+    }
 }
 
 /// The leaf digest for one `Tree` entry. The `name_len` u32-LE prefix is
