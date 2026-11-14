@@ -424,9 +424,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rules, and `merkle::verify_chunk` says in its first line that it checks the
   fold only.
 - **Breaking:** `SyncError` has a new variant, `RemoteObject`, and so does
-  `libkit::transfer::Error`. A fetch whose remote sent a chunk of another
-  length than its span, or a chunk that is not a blob, fails with it. It was
-  `SyncError::Store`. It is not a trigger to rebuild the applied-pack record.
+  `libkit::transfer::Error`. A fetch whose history has a chunk of another
+  length than its span, or a chunk that is not a blob, fails with it. The
+  check reads the whole closure of the fetched tip in the local store, so the
+  text says "fetched history has a chunk that does not fit its manifest" and
+  does not say who sent it. It was `SyncError::Store`. It is not a trigger to rebuild the applied-pack record.
   A caller that matches `SyncError` with no wildcard has to name it.
 - **Breaking:** the text of `KitError::TooManyChunks` reads
   `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
@@ -708,7 +710,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   corrupt, as it is for a blob the walk reads.
 - The closure walk keeps only the ids of the manifests it reads and checks each
   manifest's chunk lengths in turn after the walk, so a history with many
-  versions of a large file no longer holds all their manifests at once.
+  versions of a large file no longer holds all their manifests at once. The
+  walk therefore fetches each manifest a second time, and an `ObjectSource`
+  must serve a manifest again.
 - `kit prove --range` with an offset and length that overflow exits 65, like
   every other bad range. A `.kit/format` longer than 64 bytes or not UTF-8 is
   an incompatible repository format.

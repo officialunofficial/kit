@@ -583,6 +583,27 @@ mod tests {
         src.assert_each_fetched_at_most_once();
     }
 
+    /// A closure with a chunked file: every id is fetched once, except the
+    /// manifest, which is fetched a second time to check its chunk lengths.
+    #[test]
+    fn each_object_of_a_push_with_a_chunked_file_is_fetched_once_and_its_manifest_twice() {
+        let mut src = Source::default();
+        let one = src.blob(b"12345");
+        let two = src.blob(b"1234567");
+        let big = src.put(&Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(12, 0, [(one, 5), (two, 12)]).unwrap(),
+        ));
+        let tree = src.tree(&[(b"big", big)]);
+        let commit = src.commit(tree, vec![], b"a chunked file");
+        let report = verify_push(&[commit], ClosureMode::History, &mut src, |_| Known::No).unwrap();
+        assert!(report.is_accepted(), "{report:?}");
+        assert_eq!(src.fetches.len(), src.objects.len());
+        for (id, n) in &src.fetches {
+            let expected = if *id == big { 2 } else { 1 };
+            assert_eq!(*n, expected, "fetches of {}", crate::hash::to_hex(id));
+        }
+    }
+
     #[test]
     fn remix_sources_never_followed() {
         let mut src = Source::default();
