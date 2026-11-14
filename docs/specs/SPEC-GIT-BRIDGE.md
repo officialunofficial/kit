@@ -49,11 +49,12 @@ re-verifies.
 ### 1.2 Version keying
 
 The mapping in this document is defined for kit objects whose
-prologue carries `schema_version = 0x01` (SPEC-OBJECTS §2). The
-emitted `kit-schema` header records that version. A bridge
-encountering an object with any other `schema_version` MUST refuse
-that object (and therefore every ref whose closure contains it) with
-an actionable error. Future kit schema versions extend this spec
+prologue carries the `schema_version` of their type (SPEC-OBJECTS §2):
+`0x02` for a chunked blob and `0x01` for every other type. The
+emitted `kit-schema` header records the mapping version. A bridge
+encountering an object whose `schema_version` is not the version of
+its type MUST refuse that object (and therefore every ref whose
+closure contains it) with an actionable error. Future kit schema versions extend this spec
 with a new mapping section; they do not alter the v1 mapping.
 
 ### 1.3 Non-goals (v1)
@@ -702,7 +703,7 @@ under steps 2–3**; SHA-1 remains a locator everywhere else (§2).
 |---|---|
 | Two implementations translating the same kit history emit byte- and SHA-identical git objects, with no shared state | translation is a pure function of source object bytes (fork mode: of *(store, import map)*); no clock, locale, config, or key material consulted (§1.4) |
 | Every translated object reconstructs to bit-exact kit bytes and its original signature re-verifies | the §3/§4/§7.1/§12.1 refusal set (oversize plain blobs, non-canonical manifests, git-illegal names) plus the verification-only inverse (§9), which fails closed on anything not bridge-shaped |
-| Only `schema_version = 0x01` objects are ever translated | version keying refuses any other prologue, per ref (§1.2) |
+| Only objects with the `schema_version` of their type are ever translated | version keying refuses any other prologue, per ref (§1.2) |
 | A carried signature never verifies over git bytes; SHA-1 is a locator, never identity or proof | shallow/deep verification rebuilds kit signing bytes only (§10); integrity rides on BLAKE3 + Ed25519 (§2, §11) |
 | An all-zero signature reports "unsigned", never "tampered" | pinned reporting rule (§10) |
 | A translated ref head is bound to its kit identity, not its git sha | `git-bridge/v1` subject digest is blake3; `gitCommit` is a predicate-side locator (§11) |

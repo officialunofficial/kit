@@ -512,8 +512,8 @@ fn fetch_objects_inner(
 
             // Step 3: publish under a repo lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
-            // has no deadline: the work above is done, and an interrupt
-            // ends it. The fetch holds only the shared lock of the prune
+            // has a deadline only when `lock_wait` sets one: the work above
+            // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune
             // guard, and no process blocks on the exclusive one, so this
             // wait cannot deadlock.
             let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;

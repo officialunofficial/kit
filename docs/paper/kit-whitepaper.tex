@@ -132,8 +132,8 @@ commit id, a verifier can check offline that a path, a chunk or a byte range
 belongs to the commit, and that a served object set holds every object the
 commit reaches. Each verifier returns what it authenticated rather than what it
 was told. A disclosure bundle grows with path depth and with the logarithm of
-directory size and chunk count (linear in the chunk index when an absolute file
-offset is required), not with repository size: in our committed vectors a file
+directory size and chunk count, not with repository size, and an absolute file
+offset costs no more at the last chunk than at the first: in our committed vectors a file
 at depth 3 (two directories below the root) costs 635 bytes, 318 of them the
 bundle header, commit id and signed commit, and each further directory of $M$
 entries adds about $75 + |\mathit{name}| + 32\lceil\log_2 M\rceil$ bytes. We
@@ -209,12 +209,13 @@ the commit id; and a completeness verdict that needs no repository.
         objects that commits already share.
   \item \emph{Disclosure as a hash chain from $c^\star$}
         (\cref{sec:disclosure}). Each step is checked against the id the step
-        above authenticated. Length proofs give absolute file offsets without
-        disclosing earlier chunks. The verifier returns the path, leaf id and
-        offsets it proved. Bundle size grows with path depth times the
-        logarithm of directory width, plus the logarithm of the chunk count
-        (linear in the chunk index when an absolute offset is required), plus
-        the payload. It does not grow with repository size.
+        above authenticated. A chunk leaf commits the chunk's byte span, so one
+        proof of a chunk gives its absolute file offset without disclosing
+        earlier chunks. The verifier returns the path, leaf id and offsets it
+        proved. Bundle size grows with path depth times the logarithm of
+        directory width, plus the logarithm of the chunk count, plus the
+        payload. It does not grow with repository size or with the chunk
+        index.
   \item \emph{Closure as an offline completeness verdict}
         (\cref{sec:closure}). The verifier keys every supplied object by its
         recomputed id, walks from the caller's root, and reports missing,
@@ -380,12 +381,15 @@ L_{M-1})\bigr)$.
 \end{definition}
 
 \begin{definition}[Chunked-blob id]\label{def:chunked}
-A chunked blob with total size $s$, chunk-size field $z$ and chunk ids
-$c_0, \dots, c_{K-1}$ has leaves
-$L_0 = \D(\str{kit-cblob-meta-v1}, \mathrm{le}_{64}(s) \cc \mathrm{le}_{32}(z))$
-and $L_{i+1} = c_i$, and id $\mathrm{id}(B) =
+A chunked blob with total size $s$, chunk-size field $z$ and chunks
+$(c_i, e_i)_{i<K}$, where $c_i$ is the id of chunk $i$ and $e_i$ the end of its
+byte span, with $e_{-1} = 0$ and span $[e_{i-1}, e_i)$, has leaves
+$L_0 = \D(\str{kit-cblob-meta-v2}, \mathrm{le}_{64}(s) \cc \mathrm{le}_{32}(z))$
+and $L_{i+1} = \D(\str{kit-cblob-chunk-v1}, \mathrm{le}_{64}(e_{i-1}) \cc
+\mathrm{le}_{64}(e_i) \cc c_i)$, and id $\mathrm{id}(B) =
 \D\bigl(\str{kit.chunked\textbackslash 0},\, \BMT(L_0, \dots, L_K)\bigr)$.
-Chunk $i$ sits at position $i+1$.
+Chunk $i$ sits at position $i+1$. The stored manifest is $22 + 40K$ bytes, one
+40-byte entry per chunk (an id and an end).
 \end{definition}
 
 \paragraph{What the wrap and the count prevent.}
@@ -398,7 +402,9 @@ Without the outer type wrap, an empty tree and an empty chunked blob, or a
 one-entry tree and a one-chunk blob over the same child, could share an id, so
 a verifier that compared a proof with a bare inner root could accept a tree as
 a chunked file. (iii) The metadata leaf binds the total size $s$ and the
-chunk-size field $z$, which the chunk list does not determine. The length
+chunk-size field $z$, which the chunk list does not determine, and each chunk
+leaf binds the chunk's span with its id, so one proof of a chunk gives its place
+in the file and its committed length. The length
 prefix in a tree leaf stops $(\str{ab}, m, h)$ and $(\str{a}, m, \str{b} \cc
 h')$ from aliasing. Every domain tag and magic is unique and never changes
 (\cref{app:tags}).
@@ -490,10 +496,10 @@ A bundle holds the commit id, the commit bytes, one \emph{step} per path
 component (root first), and a payload. A step carries the
 entry's name, mode and child id, the parent tree's inner root, the entry's
 position, and a single-leaf proof. The payload is the leaf object's canonical
-bytes (\emph{Object}), one chunk with a proof over the metadata leaf and the
-chunk's position (\emph{Chunk}), or a Bao slice against the blob or chunk id
-(\emph{Range}). A range inside a chunk may add \emph{length proofs} for the
-preceding chunks.
+bytes (\emph{Object}), one chunk with its span and a proof over the metadata leaf
+and the chunk's leaf (\emph{Chunk}), or a Bao slice against the blob or chunk id
+(\emph{Range}). A range inside a chunk carries the same chunk header, so its
+absolute offset is the span start plus the offset in the chunk.
 
 \begin{figure}[!htb]
 \centering
@@ -555,11 +561,13 @@ VerifyDisclosure(c*, B):
     expected := s.child_id
   path := [(s.name, s.mode) for s in B.steps]; leaf_id := expected
   Object: id_of(strict_decode(bytes)) == leaf_id
-  Chunk:  meta := D("kit-cblob-meta-v1", le64(total) || le32(cs))  # computed here
-          D("kit.chunked\0", fold({0: meta, i+1: H(bytes)}, proof)) == leaf_id
+  Chunk:  meta := D("kit-cblob-meta-v2", le64(total) || le32(cs))  # computed here
+          leaf := D("kit-cblob-chunk-v1", le64(start) || le64(end) || H(bytes))
+          D("kit.chunked\0", fold({0: meta, i+1: leaf}, proof)) == leaf_id
+          span rules; |bytes| as a blob == end - start
   Range:  len > 0; [chunk header: as Chunk, with chunk_id in place of H(bytes)]
-          Bao slice at offset o+10, length len, against blob or chunk id
-          length proofs: empty, or exactly indices 0..i-1, each verified
+          o + len <= end - start; Bao slice at offset o+10, length len,
+          against blob or chunk id; absolute offset := start + o
   return (path, leaf_id, payload, offsets, signer, signature_valid)
 \end{lstlisting}
 \end{algorithm}
@@ -573,8 +581,7 @@ used to allocate. The whole-bundle cap is checked before any decoding.
 \paragraph{Return what was proved.}
 The verifier never trusts a path, offset, position or length from the prover.
 It returns what it authenticated: the path as (name, mode) pairs, the leaf id,
-the offset, the chunk index, and the absolute offset when length proofs cover
-every preceding chunk. The caller compares these with its request. A bundle
+the offset, the chunk index and span, and the absolute offset. The caller compares these with its request. A bundle
 that discloses \texttt{README.md} when the caller asked for
 \texttt{secrets.env} verifies, and it is the caller that must notice the
 different path. \Cref{prop:disclosure} is stated over these returned values.
@@ -583,21 +590,24 @@ the embedded key. The library reports an invalid signature; it does not reject
 the bundle, which leaves signer policy to the caller.
 
 \paragraph{Absolute offsets and their cost.}
-A Bao slice proves bytes at an offset inside one blob. To place a range inside
-the file, the bundle adds, for each preceding chunk, a Bao slice over that
-chunk's first 10 canonical bytes, against the chunk id. This proves the chunk's
-length without its content, and the verifier requires the proofs to cover
-exactly chunks $0..i-1$. The cost is linear in the chunk index: one length
-proof costs 1,523 bytes in \cref{tab:sizes}, so a chunk near the end of a
-1~GiB file ($K \approx 16{,}384$) needs about 25~MB of length proofs, still
-under the bundle cap. Binding running offsets into the chunk leaves, a
-prefix-sum Merkle tree, would make this logarithmic; we leave it as future
-work.
+A Bao slice proves bytes at an offset inside one blob. A chunk leaf commits the
+chunk's span $[\mathit{start}, \mathit{end})$, so the same multi-proof that
+places the chunk gives the absolute offset, $\mathit{start}$ plus the offset in
+the chunk, and no proof for an earlier chunk is needed. The cost is the
+16-byte span in the chunk header, and it does not depend on the chunk index. The
+verifier applies the span rules of the specification: a span is non-empty and
+inside the file, the first chunk starts at 0, the last ends at the total size,
+and a fixed-size layout follows its formula. A disclosure proves the committed
+span, not that the manifest is well formed or that each span equals the length
+of its chunk. A \emph{Chunk} payload is checked against its span, and a
+\emph{Range} only lies inside it. Closure verification and store admission
+check that spans equal real lengths.
 
 \paragraph{Ranges across chunks.}
-A range across chunk boundaries is proved by a container that pairs one anchor
-range, which fixes the absolute offset, with whole-chunk bundles for the
-following chunks.
+A range across chunk boundaries is proved by a container of whole-chunk bundles
+with consecutive indices. It needs no anchor: each bundle proves its own span,
+consecutive spans must meet, and the range must lie inside the first and last
+spans.
 
 % ---------------------------------------------------------------------------
 \section{Closure verification}\label{sec:closure}
@@ -752,7 +762,8 @@ $n_1/\cdots/n_k$ with modes $m_1, \ldots, m_k$ ending at $\ell$, and $x$ is the
 canonical bytes of $\ell$ (\emph{Object}); chunk $i$ of $\ell$, with the
 returned total size and chunk-size field (\emph{Chunk}); or the content at the
 returned offset and length of the blob $\ell$ or of its chunk $i$
-(\emph{Range}). A returned absolute offset is the offset of $x$ in the file.
+(\emph{Range}). A returned absolute offset is the span start that the manifest
+of $S$ commits to for chunk $i$, plus the offset of $x$ in the chunk.
 \end{proposition}
 \begin{proof}[Sketch]
 Line~4 gives $\Hb(\text{commit bytes}) = \Hb(\beta(C))$, so the commit bytes
@@ -764,14 +775,13 @@ $n_1/\cdots/n_j$ in $S$''. The wrapped fold equals that id, so by
 makes $(n_j, m_j, \mathit{child}_j)$ the entry of $S$; the mode check keeps
 every non-final child a tree. For \emph{Object}, $\mathrm{id}(x) = \ell$ pins
 the flat bytes, or the Merkle leaves and so, by canonical encoding, the bytes.
-For \emph{Chunk}, the wrapped multi-proof, whose metadata leaf the
-verifier computes itself, makes, by \cref{lem:bmt}, the total size, the
-chunk-size field and $\Hb(x)$, the chunk id, those of $S$. For \emph{Range},
+For \emph{Chunk}, the wrapped multi-proof, whose metadata leaf and chunk leaf
+the verifier computes itself, makes, by \cref{lem:bmt}, the total size, the
+chunk-size field, the span and $\Hb(x)$, the chunk id, those of $S$. For \emph{Range},
 the Bao root is $\Hb$ of the canonical bytes, and a slice that decodes to other
-bytes gives a collision of BLAKE3 or its chaining values (A1). Each length
-proof pins the \texttt{le32} length of a chunk whose id is bound to its
-position, and the set must cover exactly $0..i-1$, so the absolute offset is
-the sum in $S$.
+bytes gives a collision of BLAKE3 or its chaining values (A1). The chunk leaf pins
+the span start, so the absolute offset is the start in $S$ plus the offset in
+the chunk.
 \end{proof}
 
 \begin{remark}
@@ -844,20 +854,19 @@ every chunk index gives an exact worst case of 27 (864 bytes), since the paths
 from positions $0$ and $i+1$ meet by the top level and odd trailing nodes need
 none. The same computation reproduces the sibling counts of \cref{tab:sizes}.
 Proof size grows with path depth and the logarithm of directory size and chunk
-count, plus one length proof per preceding chunk when an absolute offset is
-required, not with repository size.
+count, not with repository size or with the chunk index.
 
 \paragraph{Fixture.}
-We measured every accepting disclosure vector committed with the specification
+We measured the accepting disclosure vectors built on one fixture
 (\cref{app:repro}). The fixture has a 279-byte signed commit, a 5-entry root
 tree and a 1,048,577-byte file that FastCDC splits into 15 chunks.
 
 \begin{table}[!htb]
 \centering\footnotesize\setlength{\tabcolsep}{3pt}
-\caption{Selected accepting disclosure vectors, in bytes (all ten are in
+\caption{Selected accepting disclosure vectors, in bytes (all eleven are in
 \cref{tab:sizes-all}). ``Sibl.'' lists sibling digests per step. ``Payload''
-is canonical object or chunk bytes, or a Bao slice; for the absolute-offset
-row the second figure is its one length proof. Every bundle also holds a
+is canonical object or chunk bytes, or a Bao slice; for a chunk or a chunk range the chunk proof has
+the sibling count in parentheses. Every bundle also holds a
 5-byte header, the 32-byte commit id and the 279-byte commit with a 2-byte
 length.}
 \label{tab:sizes}
@@ -867,10 +876,9 @@ Disclosure & Total & Steps & Sibl. & Payload & Kind (chunk proof) \\
 \midrule
 file at root                &    533 & 182 & 3       &     30 & object \\
 file at depth 3 (two dirs)  &    635 & 272 & 1, 0, 0 &     42 & object \\
-whole small blob as range   &  2,138 & 180 & 3       &  1,618 & range, 1,536 B \\
-64 B in chunk 1             &  2,087 & 182 & 3       &  1,352 & range, 64 B (4 sibl.) \\
-same, absolute offset       &  3,610 & 182 & 3       & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
-whole chunk 1               & 19,258 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+whole small blob as range   &  2,137 & 180 & 3       &  1,618 & range, 1,536 B \\
+64 B in chunk 1             &  2,102 & 182 & 3       &  1,352 & range, 64 B (4 sibl.) \\
+whole chunk 1               & 19,274 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -884,9 +892,8 @@ siblings and short names. The proof for \texttt{sub}, the last entry of the
 pairs with itself, and the two one-entry subdirectories need none. A range is
 dominated by its Bao slice, which carries each 1~KiB block it touches plus
 parent nodes: 1,352 bytes for 64 content bytes and 1,618 bytes for a whole
-1,536-byte blob. The absolute offset adds one length proof for chunk~0: 1,523
-bytes, of which 1,352 are its slice. A whole-chunk disclosure is about the
-chunk's size.
+1,536-byte blob. A range inside a chunk adds its chunk header and a
+multi-proof, and returns the absolute offset at no further cost. A whole-chunk disclosure is about the chunk's size.
 
 \paragraph{Real repositories.}
 To test the claim on real directory widths, we computed, for every file at the
@@ -1003,8 +1010,10 @@ root is the id, and a range needs no extra commitment (\cref{sec:objects}).
         ``file $F$ is in the commit'' cannot be checked from $F$'s bytes alone
         without the layout. Annotation slots let a third party derive new
         commit ids for a signed commit (\cref{sec:signing}).
-  \item \textbf{Offsets.} Absolute offsets cost one length proof per preceding
-        chunk (\cref{sec:disclosure}).
+  \item \textbf{Spans.} A disclosure proves the span a manifest commits to,
+        not that the manifest is well formed or that each span equals the
+        length of its chunk; closure verification and store admission check
+        that (\cref{sec:disclosure}).
   \item \textbf{Attestations.} An envelope verifies if any one trusted key
         signed it (no threshold or predicate policy), and push and fetch do
         not transfer attestations.
@@ -1027,8 +1036,7 @@ or a byte range in hundreds of bytes to a few KiB plus the content, and let a
 verifier decide offline whether a served set is complete. Both verifiers check
 the binding hash first, bound sizes before allocation and return what they
 proved. \kit{} is alpha software and its disclosure format is a draft
-specification. Absence proofs, logarithmic absolute offsets, signer identity
-and freshness remain open.
+specification. Absence proofs, signer identity and freshness remain open.
 
 \section*{Disclosures}
 
@@ -1103,7 +1111,7 @@ Value & Use & Bytes \\
 \midrule
 \str{kit.commit\textbackslash 0}, \str{kit.remix\textbackslash 0}, \str{kit.tag\textbackslash 0} & signing digests (SPEC-SIGNING \S2) & 11, 10, 8 \\
 \str{kit.tree\textbackslash 0}, \str{kit.chunked\textbackslash 0} & Merkle id wraps (SPEC-MERKLE-OBJECTS \S2) & 9, 12 \\
-\str{kit-tree-entry-v1}, \str{kit-cblob-meta-v1} & entry and chunk-metadata leaves & 17, 17 \\
+\str{kit-tree-entry-v1}, \str{kit-cblob-meta-v2}, \str{kit-cblob-chunk-v1} & entry, chunk-metadata and chunk leaves & 17, 17, 18 \\
 \str{DSSEv1\ } & DSSE pre-authentication encoding & 7 \\
 \midrule
 \bytes{KOB1}, \bytes{KDPB}, \bytes{KDSP}, \bytes{KCLM} & object, bundle, span, closure manifest magics & 4 each \\
@@ -1123,11 +1131,12 @@ allocation.}\label{tab:bounds}
 \toprule
 Limit & Value & Limit & Value \\
 \midrule
-bundle $B_{\max}$ (checked first) & 64~MiB & entries or chunks per object & $10^6$ \\
-commit bytes in a bundle & 4~MiB & object or chunk payload & 1~GiB \\
-steps $d_{\max}$ & 128 & length proofs & $10^6$ \\
-entry name & 1--255 bytes & length-proof slice & 8~KiB \\
-proof siblings & $\mathit{max\_items} \times 32$ & objects per closure $n_{\max}$ & $10^7$ \\
+bundle $B_{\max}$ (checked first) & 64~MiB & entries per tree & $10^6$ \\
+commit bytes in a bundle & 4~MiB & chunks per manifest & 8,388,608 \\
+steps $d_{\max}$ & 128 & object or chunk payload & 1~GiB \\
+entry name & 1--255 bytes & chunks per span container & $10^6$ \\
+proof siblings & $\mathit{max\_items} \times 32$ & span container & 64~MiB \\
+objects per closure $n_{\max}$ & $10^7$ & & \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1145,14 +1154,15 @@ each vector's BLAKE3. Each set passes a Rust test and a Python check in
 the specification; the Python checks use a pure-Python BLAKE3 and implement
 Ed25519 from RFC~8032, and \texttt{scripts/check-golden.sh} runs them all.
 
-For the verifiers of this paper the corpus holds 10 accepting and 18 rejecting
-disclosure vectors, 12 accepting and 7 rejecting proof vectors, and 13 closure
-vectors: 4 complete (one with an unreferenced extra), 3 incomplete (missing
-chunk, corrupt blob, wrong root) and 6 rejected (delta entry, compressed entry,
+For the verifiers of this paper the corpus holds 18 accepting and 33 rejecting
+disclosure vectors, 12 accepting and 8 rejecting proof vectors, and 23 closure
+vectors: 5 complete (two with an unreferenced extra), 12 incomplete (a missing
+chunk, a corrupt blob, a wrong root, an object of the wrong type under an
+edge, a chunk whose length is not its span) and 6 rejected (delta entry, compressed entry,
 pack-hash mismatch, manifest root mismatch, manifest version~2, manifest
 trailing byte). Disclosure rejections include a forged inner root, swapped
-steps, a forged total size, a Bao slice at the wrong offset, 129 steps and
-commit bytes that decode to a tag.
+steps, a forged total size, a Bao slice at the wrong offset, a wrong span, 129
+steps and commit bytes that decode to a tag.
 
 The Ed25519 vector set pins the verdict on torsion, small-order and
 non-canonical inputs and passes an independent Python check, and the
@@ -1162,18 +1172,20 @@ formal model covers \cref{prop:disclosure,prop:closure,prop:replay}.
 
 \subsection{All disclosure vectors}\label{app:vectors}
 
-We measured every accepting vector in \texttt{rust/tests/golden/disclosure/} by
-decoding it with \texttt{decode\_bundle} from
-\texttt{scripts/golden/disclosure\_ref.py} and summing each field
-(\cref{tab:sizes-all}). Totals equal the file sizes and the sidecars'
-\texttt{size} fields.
+We measured the accepting vectors of \texttt{rust/tests/golden/disclosure/} by
+decoding each with \texttt{decode\_bundle} from
+\texttt{scripts/golden/disclosure\_ref.py} and summing each field. The 11
+built on the 279-byte commit fixture of \cref{sec:eval} are in
+\cref{tab:sizes-all}. The other 7 accepting vectors (two overlapping and two
+same-id chunk pairs, a one-chunk file and two fixed-layout vectors) use a
+smaller fixture with a 283-byte commit, and the tool lists them. Totals equal
+the file sizes and the sidecars' \texttt{size} fields.
 
 \begin{table}[!htb]
 \centering\footnotesize\setlength{\tabcolsep}{3pt}
 \caption{Accepting disclosure vectors, in bytes. ``Sibl.'' lists sibling
 digests per step. ``Payload'' is canonical object or chunk bytes, or a Bao
-slice; for \texttt{with\_offsets} the second figure is its one length proof.
-Every bundle also holds a 5-byte header, the 32-byte commit id and the 279-byte
+slice. Every bundle also holds a 5-byte header, the 32-byte commit id and the 279-byte
 commit with a 2-byte length.}
 \label{tab:sizes-all}
 \begin{tabular}{@{}lrrlrl@{}}
@@ -1184,12 +1196,13 @@ Vector & Total & Steps & Sibl. & Payload & Kind (chunk proof) \\
 \texttt{executable\_file}           &    527 & 178 & 3       &     28 & object \\
 \texttt{shallow\_file}              &    533 & 182 & 3       &     30 & object \\
 \texttt{nested\_file\_3levels}      &    635 & 272 & 1, 0, 0 &     42 & object \\
-\texttt{small\_blob\_range\_last\_partial\_block} & 1,114 & 180 & 3 & 594 & range, 512 B \\
-\texttt{small\_blob\_range\_first\_block}  & 2,138 & 180 & 3 & 1,618 & range, 1,024 B \\
-\texttt{small\_blob\_range\_whole}  &  2,138 & 180 & 3       &  1,618 & range, 1,536 B \\
-\texttt{chunked\_range\_no\_offsets}   & 2,087 & 182 & 3   &  1,352 & range, 64 B (4 sibl.) \\
-\texttt{chunked\_range\_with\_offsets} & 3,610 & 182 & 3   & 1,352 + 1,523 & range, 64 B (4 sibl.) \\
-\texttt{chunked\_file\_chunk1}      & 19,258 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+\texttt{small\_blob\_range\_last\_partial\_block} & 1,113 & 180 & 3 & 594 & range, 512 B \\
+\texttt{small\_blob\_range\_first\_block}  & 2,137 & 180 & 3 & 1,618 & range, 1,024 B \\
+\texttt{small\_blob\_range\_whole}  &  2,137 & 180 & 3       &  1,618 & range, 1,536 B \\
+\texttt{chunked\_range}   & 2,102 & 182 & 3   &  1,352 & range, 64 B (4 sibl.) \\
+\texttt{chunked\_file\_chunk0}      & 30,179 & 182 & 3       & 29,509 & chunk (3 sibl.) \\
+\texttt{chunked\_file\_chunk1}      & 19,274 & 182 & 3       & 18,572 & chunk (4 sibl.) \\
+\texttt{chunked\_file\_chunk\_last} & 7,709 & 182 & 3       & 6,944 & chunk (6 sibl.) \\
 \bottomrule
 \end{tabular}
 \end{table}

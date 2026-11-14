@@ -219,13 +219,16 @@ See SPEC-OBJECTS §7 for the container. Key points for chunking:
 - `chunk_size` names the chunker, not a size: **0** for FastCDC v1,
   **`0x8000_0002`** for FastCDC v2 (§11.2). Any other value is a
   fixed-size manifest (SPEC-OBJECTS §7).
-- `chunks` = ordered list of chunk BLAKE3 hashes.
+- `chunks` = ordered list of entries, each a chunk BLAKE3 hash and the
+  end offset of the chunk's span (SPEC-OBJECTS §7). Each end is the sum
+  of the lengths of the chunks up to and including that chunk.
 - Each chunk is itself stored as a `blob` object (SPEC-OBJECTS §3)
   under its content hash.
 
 A reader reassembles the file by concatenating `chunks[0].data ||
-chunks[1].data || ... || chunks[n-1].data` and verifying the length
-equals `total_size`.
+chunks[1].data || ... || chunks[n-1].data`, checking that each chunk's
+length equals its span, and verifying the total length equals
+`total_size`.
 
 ---
 
