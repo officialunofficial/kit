@@ -159,8 +159,9 @@ pub enum Error {
     /// The fetched history has a chunk that does not fit the manifest that
     /// names it: not a blob, or a blob of another length than its span. The
     /// check reads everything the fetched tip reaches in the local store, so
-    /// the chunk may have arrived in this fetch or been damaged in the store
-    /// since. Nothing was published. NOT a self-heal trigger.
+    /// the mismatch may come from what this fetch received, such as a manifest
+    /// whose span is wrong, or from damage to the local store. Nothing was
+    /// published. NOT a self-heal trigger.
     #[error("fetched history has a chunk that does not fit its manifest: {0}")]
     RemoteObject(KitError),
     /// A commit/remix/tag newly introduced by this fetch failed Ed25519

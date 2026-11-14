@@ -718,20 +718,20 @@ walking a hand-rolled map would accept a different set than
 `kit_core::verify::push::tests::history_vs_snapshot` /
 `remix_sources_never_followed`.
 
-## Streaming closure verification reads only reachable objects, each once
+## Streaming closure verification reads only reachable objects, each once except a manifest's re-check
 
 **Always:** `verify_closure_streaming` and `verify_push` queue and fetch each visited id at
 most once (so repeated references do not grow the queue), except a
 chunked-file manifest, which is fetched a second time when its chunks are
 checked (so a source must serve a manifest again). They fetch no id outside the
 selected snapshot/history closure, and drop an
-object's bytes after extracting its child ids; it reports
-`unreferenced_checked = false` because it cannot enumerate objects it never
-requested.
+object's bytes after extracting its child ids. `verify_closure_streaming`
+reports `unreferenced_checked = false` because it cannot enumerate objects it
+never requested.
 
 **Because:** local closure verification must scale with the checked closure,
 not with the size of the repository's unrelated object store, while a
-duplicate (beyond the one manifest re-fetch) or out-of-closure fetch would defeat the source's bounded,
+duplicate (beyond each manifest's one re-fetch) or out-of-closure fetch would defeat the source's bounded,
 pull-based contract.
 
 **If violated:** a large local store can turn a small closure check into an

@@ -92,8 +92,9 @@ pub enum SyncError {
     /// The fetched history has a chunk that does not fit the manifest that
     /// names it: not a blob, or a blob of another length than its span. The
     /// check reads everything the fetched tip reaches in the local store, so
-    /// the chunk may have arrived in this fetch or been damaged in the store
-    /// since. Nothing was published. Never retried as local staleness.
+    /// the mismatch may come from what this fetch received, such as a manifest
+    /// whose span is wrong, or from damage to the local store. Nothing was
+    /// published. Never retried as local staleness.
     #[error("fetched history has a chunk that does not fit its manifest: {0}")]
     RemoteObject(KitError),
     /// The fetched tip's closure exceeds the verification cap, so
