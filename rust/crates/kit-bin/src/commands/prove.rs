@@ -247,6 +247,7 @@ pub(crate) fn map_prove_error(e: &VerifyError) -> u8 {
         | VerifyError::SelectorLeafMismatch
         | VerifyError::RangeOutOfBounds
         | VerifyError::ZeroLengthRange
+        | VerifyError::OffsetOverflow
         | VerifyError::ChunkIndexOutOfRange { .. }
         | VerifyError::NotACommitOrRemix(_) => exit::DATAERR,
         _ => exit::GENERAL_ERROR,
@@ -263,6 +264,15 @@ mod tests {
         let mut full: Vec<String> = vec!["kit prove".into()];
         full.extend_from_slice(args);
         ProveOpts::try_parse_from(full)
+    }
+
+    #[test]
+    fn a_range_that_overflows_exits_like_any_bad_range() {
+        assert_eq!(map_prove_error(&VerifyError::OffsetOverflow), exit::DATAERR);
+        assert_eq!(
+            map_prove_error(&VerifyError::RangeOutOfBounds),
+            exit::DATAERR
+        );
     }
 
     #[test]

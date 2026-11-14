@@ -5,6 +5,7 @@
 //! from. A program matches on the variant to choose its exit code and its
 //! advice.
 
+use kit_core::object::KitError;
 use kit_core::ops::restore;
 use kit_core::pack::PackError;
 use kit_core::protocol::TransportError;
@@ -155,6 +156,11 @@ pub enum Error {
         "fetched history is too large to verify (closure exceeds the {0}-object cap); refusing to publish an unverified ref"
     )]
     ClosureTooLarge(usize),
+    /// The remote sent a chunk that does not fit the manifest that names it:
+    /// not a blob, or a blob of another length than its span. Nothing was
+    /// published. NOT a self-heal trigger.
+    #[error("remote sent an object that does not fit its manifest: {0}")]
+    RemoteObject(KitError),
     /// A commit/remix/tag newly introduced by this fetch failed Ed25519
     /// signature verification via [`kit_core::sign::verify_commit`] /
     /// `verify_remix` / `verify_tag` — the exact check `kit verify <rev>`
@@ -393,6 +399,7 @@ impl From<kit_sync::SyncError> for Error {
             },
             S::RemoteMissingObject(h) => Self::RemoteMissingObject(h),
             S::ClosureTooLarge(n) => Self::ClosureTooLarge(n),
+            S::RemoteObject(e) => Self::RemoteObject(e),
             S::UnsignedOrInvalidObject { hash, reason } => {
                 Self::UnsignedOrInvalidObject { hash, reason }
             }
