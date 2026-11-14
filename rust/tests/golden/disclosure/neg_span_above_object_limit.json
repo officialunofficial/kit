@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_above_object_limit.bin",
+  "blake3": "e435106b853c5237aaab098787be66875df6e45d53db6b2fbb79fc9aa4def4b1",
+  "commit_id_hex": "191c7255cf0affe57e2043c1d5fdf0d098d340b60b9bda061f20c9f378bab785",
+  "description": "A chunk whose span is one byte longer than a chunk blob can be.",
+  "expect": "reject",
+  "name": "neg_span_above_object_limit",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the span is longer than a blob can be",
+  "selector": "chunk(0)",
+  "size": 496
+}

@@ -143,11 +143,11 @@ impl LoadedBlob {
                     .unwrap_or(max_len)
                     .min(max_len);
                 let mut data = Vec::with_capacity(cap);
-                for chunk in manifest.chunks() {
+                for index in 0..manifest.chunks().len() {
                     if data.len() >= max_len {
                         break;
                     }
-                    data.extend_from_slice(&read_chunk(store, chunk)?);
+                    data.extend_from_slice(&read_chunk_at(store, manifest, index)?);
                 }
                 data.truncate(max_len);
                 Ok(Cow::Owned(data))
@@ -162,9 +162,10 @@ impl LoadedBlob {
     /// # Errors
     /// - [`WorktreeError::Store`] if a chunk is missing.
     /// - [`WorktreeError::Io`] if a chunk is not a `Blob`.
-    /// - [`WorktreeError::Object`] if the concatenated chunks do not total
-    ///   the manifest's `total_size`. The read stops at the first chunk
-    ///   that takes the running length past `total_size`.
+    /// - [`WorktreeError::Object`] if a chunk's length differs from its
+    ///   span in the manifest, or the concatenated chunks do not total the
+    ///   manifest's `total_size`. The read stops at the first chunk that
+    ///   takes the running length past `total_size`.
     /// - [`WorktreeError::ContentTooLarge`] if the manifest's `total_size`
     ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), before any
     ///   chunk is read.
@@ -205,8 +206,8 @@ impl LoadedBlob {
             Self::Inline(data) => Ok(out.write_all(data)?),
             Self::Chunked(manifest) => {
                 let mut written: u64 = 0;
-                for chunk in manifest.chunks() {
-                    let part = read_chunk(store, chunk)?;
+                for index in 0..manifest.chunks().len() {
+                    let part = read_chunk_at(store, manifest, index)?;
                     // Stop at the first chunk that passes `total_size`, so a
                     // manifest that repeats one chunk cannot write without
                     // end.
@@ -250,6 +251,30 @@ fn read_chunk<S: crate::store::ObjectSource + ?Sized>(
         Object::Blob(b) => Ok(b.data),
         other => Err(not_a_blob("chunk", chunk, &other)),
     }
+}
+
+/// Chunk `index` of `manifest`: a `Blob` whose length is the chunk's span
+/// (SPEC-OBJECTS §7). `index` must be below the chunk count.
+fn read_chunk_at<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    manifest: &ChunkedBlob,
+    index: usize,
+) -> WorktreeResult<Vec<u8>> {
+    let data = read_chunk(store, &manifest.chunks()[index])?;
+    manifest.check_chunk_length(u32::try_from(index).unwrap_or(u32::MAX), data.len() as u64)?;
+    Ok(data)
+}
+
+/// [`read_chunk_at`] in [`crate::store::StoreError`]'s domain, as
+/// [`read_blob_chunk`] is to [`read_chunk`].
+fn read_blob_chunk_at<S: crate::store::ObjectSource + ?Sized>(
+    store: &S,
+    manifest: &ChunkedBlob,
+    index: usize,
+) -> Result<Vec<u8>, crate::store::StoreError> {
+    let data = read_blob_chunk(store, &manifest.chunks()[index])?;
+    manifest.check_chunk_length(u32::try_from(index).unwrap_or(u32::MAX), data.len() as u64)?;
+    Ok(data)
 }
 
 /// Read one manifest chunk's raw bytes, requiring a `Blob`, in
@@ -303,8 +328,8 @@ pub fn content_fingerprint<S: crate::store::ObjectSource + ?Sized>(
         }
         Object::ChunkedBlob(manifest) => {
             let mut size = 0usize;
-            for chunk in manifest.chunks() {
-                let data = read_blob_chunk(store, chunk)?;
+            for index in 0..manifest.chunks().len() {
+                let data = read_blob_chunk_at(store, &manifest, index)?;
                 size = size
                     .checked_add(data.len())
                     .ok_or(StoreError::ObjectTooLarge)?;
@@ -379,6 +404,19 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
     }
 }
 
+/// Whether chunk `ia` of `ma` and chunk `ib` of `mb` have spans of one
+/// length. A chunk with one id but two lengths is not skipped: reading it
+/// reports the manifest whose span is wrong.
+fn same_length(ma: &ChunkedBlob, ia: usize, mb: &ChunkedBlob, ib: usize) -> bool {
+    let len = |m: &ChunkedBlob, i: usize| {
+        u32::try_from(i)
+            .ok()
+            .and_then(|i| m.span(i))
+            .map(|(start, end)| end - start)
+    };
+    len(ma, ia) == len(mb, ib)
+}
+
 /// Compare two [`ChunkedBlob`] manifests for content equality, skipping
 /// any chunk both sides reference by the same content-addressed hash:
 /// identical hash means identical bytes by construction — the same trust
@@ -449,6 +487,7 @@ fn chunked_content_eq<S: crate::store::ObjectSource + ?Sized>(
             && ia < ma.chunks().len()
             && ib < mb.chunks().len()
             && ma.chunks()[ia] == mb.chunks()[ib]
+            && same_length(ma, ia, mb, ib)
         {
             ia += 1;
             ib += 1;
@@ -458,9 +497,9 @@ fn chunked_content_eq<S: crate::store::ObjectSource + ?Sized>(
 
         if pos_a == buf_a.len() {
             buf_a = match ma.chunks().get(ia) {
-                Some(h) => {
+                Some(_) => {
                     ia += 1;
-                    let data = read_blob_chunk(store, h)?;
+                    let data = read_blob_chunk_at(store, ma, ia - 1)?;
                     read_a = read_a
                         .checked_add(data.len() as u64)
                         .ok_or(crate::store::StoreError::ObjectTooLarge)?;
@@ -472,9 +511,9 @@ fn chunked_content_eq<S: crate::store::ObjectSource + ?Sized>(
         }
         if pos_b == buf_b.len() {
             buf_b = match mb.chunks().get(ib) {
-                Some(h) => {
+                Some(_) => {
                     ib += 1;
-                    let data = read_blob_chunk(store, h)?;
+                    let data = read_blob_chunk_at(store, mb, ib - 1)?;
                     read_b = read_b
                         .checked_add(data.len() as u64)
                         .ok_or(crate::store::StoreError::ObjectTooLarge)?;
@@ -591,7 +630,8 @@ pub fn content_eq_reader<S: crate::store::ObjectSource + ?Sized, R: io::Read>(
 struct ContentCursor {
     data: Vec<u8>,
     offset: usize,
-    chunks: std::vec::IntoIter<Hash>,
+    manifest: Option<ChunkedBlob>,
+    next: usize,
     expected: u64,
     loaded: u64,
 }
@@ -609,14 +649,14 @@ impl ContentCursor {
     /// (e.g. [`content_eq`] deciding whether the chunked fast path
     /// applies).
     fn from_object(object: Object) -> Result<Self, crate::store::StoreError> {
-        let (data, chunks, expected) = match object {
+        let (data, manifest, expected) = match object {
             Object::Blob(b) => {
                 let size = b.data.len() as u64;
-                (b.data, Vec::new(), size)
+                (b.data, None, size)
             }
             Object::ChunkedBlob(m) => {
                 let size = m.total_size();
-                (Vec::new(), m.into_chunks(), size)
+                (Vec::new(), Some(m), size)
             }
             _ => {
                 return Err(crate::store::StoreError::Io(io::Error::other(
@@ -628,7 +668,8 @@ impl ContentCursor {
         Ok(Self {
             data,
             offset: 0,
-            chunks: chunks.into_iter(),
+            manifest,
+            next: 0,
             expected,
             loaded,
         })
@@ -639,7 +680,11 @@ impl ContentCursor {
         store: &S,
     ) -> Result<&[u8], crate::store::StoreError> {
         while self.offset == self.data.len() {
-            let Some(hash) = self.chunks.next() else {
+            let Some(manifest) = self
+                .manifest
+                .as_ref()
+                .filter(|m| self.next < m.chunks().len())
+            else {
                 if self.loaded != self.expected {
                     return Err(crate::object::KitError::ChunkedBlobSizeMismatch {
                         expected: self.expected,
@@ -649,7 +694,8 @@ impl ContentCursor {
                 }
                 return Ok(&[]);
             };
-            let data = read_blob_chunk(store, &hash)?;
+            let data = read_blob_chunk_at(store, manifest, self.next)?;
+            self.next += 1;
             self.loaded = self
                 .loaded
                 .checked_add(data.len() as u64)
@@ -677,13 +723,18 @@ mod equality_tests {
         let data = vec![7; usize::try_from(super::super::CHUNK_THRESHOLD + 17).unwrap()];
         let inline = put(&store, &Object::Blob(Blob { data: data.clone() }));
         let cdc = super::super::store_file_object(&store, &data).unwrap();
-        let chunks = data
+        let chunks: Vec<_> = data
             .chunks(65_536)
-            .map(|b| put(&store, &Object::Blob(Blob { data: b.to_vec() })))
+            .map(|b| {
+                (
+                    put(&store, &Object::Blob(Blob { data: b.to_vec() })),
+                    b.len() as u64,
+                )
+            })
             .collect();
         let fixed = put(
             &store,
-            &Object::ChunkedBlob(ChunkedBlob::new(data.len() as u64, 65_536, chunks).unwrap()),
+            &Object::ChunkedBlob(crate::object::testing::sized(65_536, chunks).unwrap()),
         );
         assert_ne!(inline, cdc);
         assert_ne!(fixed, cdc);
@@ -718,7 +769,9 @@ mod equality_tests {
         for (total_size, chunks) in [(2, vec![a]), (2, vec![a, [42; 32]])] {
             let bad = put(
                 &store,
-                &Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, chunks).unwrap()),
+                &Object::ChunkedBlob(
+                    crate::object::testing::spread(total_size, 0, chunks).unwrap(),
+                ),
             );
             assert!(content_eq(&store, &bad, &b).is_err());
             assert!(content_eq_bytes(&store, &bad, b"b").is_err());
@@ -737,10 +790,14 @@ mod equality_tests {
 
     fn manifest(store: &ObjectStore, parts: &[&[u8]]) -> ChunkedBlob {
         let total_size: u64 = parts.iter().map(|p| p.len() as u64).sum();
+        let mut end = 0;
         ChunkedBlob::new(
             total_size,
             0,
-            parts.iter().map(|p| chunk(store, p)).collect(),
+            parts.iter().map(|p| {
+                end += p.len() as u64;
+                (chunk(store, p), end)
+            }),
         )
         .unwrap()
     }
@@ -760,7 +817,7 @@ mod equality_tests {
             store: &store,
             reads: std::cell::Cell::new(0),
         };
-        let manifest = crate::object::ChunkedBlob::new(
+        let manifest = crate::object::testing::spread(
             crate::worktree::MAX_FILE_BYTES + 1,
             0,
             vec![[1u8; 32], [2u8; 32]],
@@ -777,7 +834,7 @@ mod equality_tests {
         assert_eq!(source.reads.get(), 0);
 
         // At the limit the reader goes on to the chunks, which are missing.
-        let at_limit = ChunkedBlob::new(
+        let at_limit = crate::object::testing::spread(
             crate::worktree::MAX_FILE_BYTES,
             0,
             vec![[1u8; 32], [2u8; 32]],
@@ -815,7 +872,9 @@ mod equality_tests {
         // The header allows one byte at least per chunk, so the chunks hold
         // more than `total_size` here.
         let repeated = chunk(&store, &[7u8; 1000]);
-        let manifest = ChunkedBlob::new(1000, 0, vec![repeated; 1000]).unwrap();
+        // Each span is the chunk's 1000 bytes, so only the total is short.
+        let ends = (1..=1000u64).map(|n| n * 1000).collect();
+        let manifest = ChunkedBlob::new_unchecked(1000, 0, vec![repeated; 1000], ends);
         let source = CountingSource {
             store: &store,
             reads: std::cell::Cell::new(0),
@@ -876,7 +935,8 @@ mod equality_tests {
     fn write_content_rejects_a_short_total_size() {
         let (_dir, store) = fresh_store();
         let a = chunk(&store, &[1; 100]);
-        let bad = |total_size| ChunkedBlob::new(total_size, 0, vec![a, a]).unwrap();
+        let bad =
+            |total_size| ChunkedBlob::new_unchecked(total_size, 0, vec![a, a], vec![100, 200]);
         for total_size in [150, 250] {
             let mut out = SizedWrites::default();
             let err = LoadedBlob::Chunked(bad(total_size))
@@ -977,7 +1037,9 @@ mod equality_tests {
         let a = chunk(&store, &[1; 100]);
         let stored = put(
             &store,
-            &Object::ChunkedBlob(ChunkedBlob::new(100 * 1000, 0, vec![a; 1000]).unwrap()),
+            &Object::ChunkedBlob(
+                crate::object::testing::spread(100 * 1000, 0, vec![a; 1000]).unwrap(),
+            ),
         );
         let source = CountingSource {
             store: &store,
@@ -1003,7 +1065,7 @@ mod equality_tests {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"hello ");
         let y = chunk(&store, b"world");
-        let ma = ChunkedBlob::new(11, 0, vec![x, y]).unwrap();
+        let ma = crate::object::testing::sized(0, vec![(x, 6), (y, 5)]).unwrap();
         let mb = ma.clone();
         assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
     }
@@ -1024,22 +1086,13 @@ mod equality_tests {
     fn chunked_shared_prefix_then_misaligned_equal_suffix() {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"shared-prefix-");
-        let ma = ChunkedBlob::new(
-            14 + 4,
-            0,
-            [x].into_iter()
-                .chain(manifest(&store, &[b"ab", b"cd"]).into_chunks())
-                .collect(),
-        )
-        .unwrap();
-        let mb = ChunkedBlob::new(
-            14 + 4,
-            0,
-            [x].into_iter()
-                .chain(manifest(&store, &[b"a", b"bcd"]).into_chunks())
-                .collect(),
-        )
-        .unwrap();
+        let prefixed = |suffix: &[&[u8]]| {
+            let mut parts: Vec<(Hash, u64)> = vec![(x, 14)];
+            parts.extend(suffix.iter().map(|p| (chunk(&store, p), p.len() as u64)));
+            crate::object::testing::sized(0, parts).unwrap()
+        };
+        let ma = prefixed(&[b"ab", b"cd"]);
+        let mb = prefixed(&[b"a", b"bcd"]);
         // `x` is skipped by id; "ab"+"cd" vs "a"+"bcd" is read and resynced.
         assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
     }
@@ -1048,9 +1101,9 @@ mod equality_tests {
     fn chunked_append_differs_via_total_size_without_reading() {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"shared");
-        let ma = ChunkedBlob::new(6, 0, vec![x]).unwrap();
+        let ma = crate::object::testing::sized(0, vec![(x, 6)]).unwrap();
         let y = chunk(&store, b"-more");
-        let mb = ChunkedBlob::new(11, 0, vec![x, y]).unwrap();
+        let mb = crate::object::testing::sized(0, vec![(x, 6), (y, 5)]).unwrap();
         assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
         assert!(!super::chunked_content_eq(&store, &mb, &ma).unwrap());
     }
@@ -1059,8 +1112,8 @@ mod equality_tests {
     fn chunked_same_total_size_different_content_after_shared_prefix() {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"shared-");
-        let ma = ChunkedBlob::new(7 + 2, 0, vec![x, chunk(&store, b"ab")]).unwrap();
-        let mb = ChunkedBlob::new(7 + 2, 0, vec![x, chunk(&store, b"ba")]).unwrap();
+        let ma = crate::object::testing::sized(0, vec![(x, 7), (chunk(&store, b"ab"), 2)]).unwrap();
+        let mb = crate::object::testing::sized(0, vec![(x, 7), (chunk(&store, b"ba"), 2)]).unwrap();
         assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
     }
 
@@ -1068,11 +1121,11 @@ mod equality_tests {
     fn chunked_split_differently_but_actually_different_content() {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"shared-");
-        let ma = ChunkedBlob::new(7 + 4, 0, vec![x, chunk(&store, b"abcd")]).unwrap();
-        let mb = ChunkedBlob::new(
-            7 + 4,
+        let ma =
+            crate::object::testing::sized(0, vec![(x, 7), (chunk(&store, b"abcd"), 4)]).unwrap();
+        let mb = crate::object::testing::sized(
             0,
-            vec![x, chunk(&store, b"ab"), chunk(&store, b"cX")],
+            vec![(x, 7), (chunk(&store, b"ab"), 2), (chunk(&store, b"cX"), 2)],
         )
         .unwrap();
         assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
@@ -1100,7 +1153,7 @@ mod equality_tests {
         let (_dir, store) = fresh_store();
         let x = chunk(&store, b"ab"); // 2 real bytes
         // 999 is wrong on both sides, identically.
-        let ma = ChunkedBlob::new(999, 0, vec![x]).unwrap();
+        let ma = ChunkedBlob::new_unchecked(999, 0, vec![x], vec![2]);
         let mb = ma.clone();
         assert!(super::chunked_content_eq(&store, &ma, &mb).unwrap());
     }
@@ -1125,8 +1178,8 @@ mod equality_tests {
         let a90 = vec![b'a'; 90];
         let b90 = vec![b'b'; 90];
         // 100 is wrong (the real sum is 90), and equal on both sides.
-        let ma = ChunkedBlob::new(100, 0, vec![chunk(&store, &a90)]).unwrap();
-        let mb = ChunkedBlob::new(100, 0, vec![chunk(&store, &b90)]).unwrap();
+        let ma = ChunkedBlob::new_unchecked(100, 0, vec![chunk(&store, &a90)], vec![90]);
+        let mb = ChunkedBlob::new_unchecked(100, 0, vec![chunk(&store, &b90)], vec![90]);
         let err = super::chunked_content_eq(&store, &ma, &mb).unwrap_err();
         assert!(
             matches!(
@@ -1150,8 +1203,8 @@ mod equality_tests {
         let a80 = vec![b'a'; 80];
         let b100 = vec![b'b'; 100];
         // 100 is wrong for ma (the real sum is 80) and correct for mb.
-        let ma = ChunkedBlob::new(100, 0, vec![chunk(&store, &a80)]).unwrap();
-        let mb = ChunkedBlob::new(100, 0, vec![chunk(&store, &b100)]).unwrap();
+        let ma = ChunkedBlob::new_unchecked(100, 0, vec![chunk(&store, &a80)], vec![80]);
+        let mb = crate::object::testing::sized(0, vec![(chunk(&store, &b100), 100)]).unwrap();
         let err = super::chunked_content_eq(&store, &ma, &mb).unwrap_err();
         assert!(
             matches!(
@@ -1302,11 +1355,10 @@ mod equality_tests {
     #[test]
     fn chunked_content_eq_drains_the_longer_side_when_one_runs_out_of_chunks() {
         let (_dir, store) = fresh_store();
-        let short = ChunkedBlob::new(10, 0, vec![chunk(&store, b"aaaa")]).unwrap();
-        let long = ChunkedBlob::new(
-            10,
+        let short = ChunkedBlob::new_unchecked(10, 0, vec![chunk(&store, b"aaaa")], vec![4]);
+        let long = crate::object::testing::sized(
             0,
-            vec![chunk(&store, b"aaaab"), chunk(&store, b"bbbbb")],
+            vec![(chunk(&store, b"aaaab"), 5), (chunk(&store, b"bbbbb"), 5)],
         )
         .unwrap();
         let err = super::chunked_content_eq(&store, &short, &long).unwrap_err();
@@ -1324,6 +1376,30 @@ mod equality_tests {
         );
     }
 
+    /// A chunk both sides name by id is skipped only when both spans have
+    /// its length. Here the second manifest gives the shared chunk a span of
+    /// 3 bytes, so the chunk is read and the wrong manifest is reported.
+    #[test]
+    fn chunked_content_eq_reads_a_shared_chunk_whose_spans_differ() {
+        let (_dir, store) = fresh_store();
+        let first = chunk(&store, b"12345");
+        let second = chunk(&store, b"1234567890");
+        let right = ChunkedBlob::new(15, 0, vec![(first, 5), (second, 15)]).unwrap();
+        let wrong = ChunkedBlob::new(15, 0, vec![(first, 3), (second, 15)]).unwrap();
+        assert!(super::chunked_content_eq(&store, &right, &right).unwrap());
+        let err = super::chunked_content_eq(&store, &right, &wrong).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::store::StoreError::Decode(crate::object::KitError::ChunkLengthMismatch {
+                    index: 0,
+                    ..
+                })
+            ),
+            "got {err:?}"
+        );
+    }
+
     /// After one side has run out of chunks, a zero-length chunk on the
     /// other does not end the walk: the chunks behind it are still read,
     /// so a missing one surfaces.
@@ -1333,8 +1409,10 @@ mod equality_tests {
         let shared = chunk(&store, b"abcde");
         let empty = chunk(&store, b"");
         let missing = [0xEE; 32];
-        let a = ChunkedBlob::new(5, 0, vec![shared]).unwrap();
-        let b = ChunkedBlob::new(5, 0, vec![shared, empty, missing]).unwrap();
+        let a = crate::object::testing::sized(0, vec![(shared, 5)]).unwrap();
+        // A zero-length chunk has an empty span, which a manifest cannot hold;
+        // this one is built past that rule to reach the reader.
+        let b = ChunkedBlob::new_unchecked(5, 0, vec![shared, empty, missing], vec![5, 5, 5]);
         let err = super::chunked_content_eq(&store, &a, &b).unwrap_err();
         assert!(
             matches!(err, crate::store::StoreError::ObjectNotFound(_)),
@@ -1346,7 +1424,8 @@ mod equality_tests {
     #[test]
     fn a_chunked_blob_is_as_long_as_its_total_size() {
         let (_dir, store) = fresh_store();
-        let manifest = ChunkedBlob::new(7, 0, vec![chunk(&store, b"abcdefg")]).unwrap();
+        let manifest =
+            crate::object::testing::spread(7, 0, vec![chunk(&store, b"abcdefg")]).unwrap();
         assert_eq!(LoadedBlob::Chunked(manifest).len(), 7);
     }
 }

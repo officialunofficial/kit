@@ -748,8 +748,9 @@ fn restore_blob(
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
             let result = (|| -> RestoreResult<()> {
                 let mut written: u64 = 0;
-                for ch in cb.chunks() {
+                for (index, ch) in (0u32..).zip(cb.chunks()) {
                     let buf = read_chunk_bytes(store, ch)?;
+                    cb.check_chunk_length(index, buf.len() as u64)?;
                     written += buf.len() as u64;
                     if written > cb.total_size() {
                         break;
@@ -811,18 +812,11 @@ where
             // reads out across threads — see this function's and
             // `restore_tree_to_worktree_with`'s docs.
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
-            let result = write_chunk_batches(
-                store,
-                cb.chunks(),
-                cb.total_size(),
-                batch_size,
-                read_chunks,
-                &mut tmp,
-            )
-            .and_then(|written| {
-                cb.check_reassembled_size(written)
-                    .map_err(RestoreError::from)
-            });
+            let result = write_chunk_batches(store, &cb, batch_size, read_chunks, &mut tmp)
+                .and_then(|written| {
+                    cb.check_reassembled_size(written)
+                        .map_err(RestoreError::from)
+                });
             let written = if observe && result.is_ok() {
                 tmp.metadata().ok()
             } else {
@@ -885,11 +879,13 @@ fn finish_or_discard_tmp(
     result
 }
 
-/// Read `chunks` in batches of `batch_size` via `read_chunks` and append
-/// each batch to `out`, returning the total bytes written. A batch that
-/// would take the running total past `limit` is not written and fails
-/// with [`object::KitError::ChunkedBlobSizeMismatch`], so a manifest
-/// cannot make the restore write more than its declared `total_size`.
+/// Read the chunks of `manifest` in batches of `batch_size` via
+/// `read_chunks` and append each batch to `out`, returning the total bytes
+/// written. A chunk whose length differs from its span fails with
+/// [`object::KitError::ChunkLengthMismatch`] before its batch is written. A
+/// batch that would take the running total past the manifest's `total_size`
+/// is not written and fails with [`object::KitError::ChunkedBlobSizeMismatch`],
+/// so a manifest cannot make the restore write more than its declared size.
 ///
 /// With more than one batch on a threaded target, the write of batch N
 /// is overlapped with the read of batch N+1: a scoped writer thread
@@ -899,8 +895,7 @@ fn finish_or_discard_tmp(
 /// which has no threads) takes the plain sequential loop.
 fn write_chunk_batches<F>(
     store: &ObjectStore,
-    chunks: &[Hash],
-    limit: u64,
+    manifest: &object::ChunkedBlob,
     batch_size: usize,
     read_chunks: &F,
     out: &mut fs::File,
@@ -908,13 +903,20 @@ fn write_chunk_batches<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    let read_batch = |batch: &[Hash]| -> RestoreResult<Vec<Vec<u8>>> {
+    let chunks = manifest.chunks();
+    let limit = manifest.total_size();
+    // `first` is the index of the batch's first chunk.
+    let read_batch = |first: usize, batch: &[Hash]| -> RestoreResult<Vec<Vec<u8>>> {
         let bufs = read_chunks(store, batch)?;
         if bufs.len() != batch.len() {
             return Err(RestoreError::ChunkBatchLengthMismatch {
                 expected: batch.len(),
                 actual: bufs.len(),
             });
+        }
+        for (index, buf) in (first..).zip(&bufs) {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
+            manifest.check_chunk_length(index, buf.len() as u64)?;
         }
         Ok(bufs)
     };
@@ -931,8 +933,8 @@ where
                 Ok(written)
             });
             let mut read_err = None;
-            for batch in chunks.chunks(batch_size) {
-                match read_batch(batch) {
+            for (n, batch) in chunks.chunks(batch_size).enumerate() {
+                match read_batch(n * batch_size, batch) {
                     // A failed send means the writer already hit an I/O
                     // error; stop reading and surface it from the join.
                     Ok(bufs) => {
@@ -959,8 +961,8 @@ where
     }
 
     let mut written: u64 = 0;
-    for batch in chunks.chunks(batch_size) {
-        let bufs = read_batch(batch)?;
+    for (n, batch) in chunks.chunks(batch_size).enumerate() {
+        let bufs = read_batch(n * batch_size, batch)?;
         written += write_batch_within(out, &bufs, written, limit)?;
     }
     Ok(written)
@@ -1695,7 +1697,7 @@ mod tests {
     fn temporary_file_entries(store: &ObjectStore) -> Vec<(&'static str, EntryMode, Hash)> {
         let plain = put_blob(store, b"data");
         let chunks = vec![put_blob(store, b"da"), put_blob(store, b"ta")];
-        let chunked = Object::ChunkedBlob(crate::object::ChunkedBlob::new(4, 2, chunks).unwrap());
+        let chunked = Object::ChunkedBlob(crate::object::testing::spread(4, 2, chunks).unwrap());
         let chunked = store
             .write(&serialize::serialize(&chunked).unwrap())
             .unwrap();
@@ -2125,7 +2127,7 @@ mod tests {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
         let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(
+            crate::object::testing::spread(
                 8,
                 0,
                 vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
@@ -2165,7 +2167,7 @@ mod tests {
             put_blob(&store, b"#!/bin/sh\n"),
         );
         let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(
+            crate::object::testing::spread(
                 8,
                 0,
                 vec![put_blob(&store, b"big-"), put_blob(&store, b"file")],
@@ -2393,7 +2395,7 @@ mod tests {
         let c1 = put_blob(&store, b"chunked ");
         let c2 = put_blob(&store, b"world!");
         let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(7 + 8 + 6, 8, vec![c0, c1, c2]).unwrap(),
+            crate::object::testing::sized(0, vec![(c0, 7), (c1, 8), (c2, 6)]).unwrap(),
         );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
@@ -2423,7 +2425,7 @@ mod tests {
         let c1 = put_blob(&store, b"chunked ");
         let c2 = put_blob(&store, b"world!");
         let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(7 + 8 + 6, 0, vec![c0, c1, c2]).unwrap(),
+            crate::object::testing::spread(7 + 8 + 6, 0, vec![c0, c1, c2]).unwrap(),
         );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
@@ -2472,7 +2474,7 @@ mod tests {
         let total_size: u64 = chunk_data.iter().map(|c| c.len() as u64).sum();
         let chunks: Vec<Hash> = chunk_data.iter().map(|c| put_blob(&store, c)).collect();
         let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(total_size, 0, chunks.clone()).unwrap(),
+            crate::object::testing::spread(total_size, 0, chunks.clone()).unwrap(),
         );
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
@@ -2525,17 +2527,16 @@ mod tests {
     }
 
     /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."
-    /// A manifest whose forged `total_size` disagrees with its (valid)
-    /// chunks must fail restore instead of writing wrong-length content.
+    /// A manifest whose chunk is not as long as its span must fail restore
+    /// instead of writing wrong-length content.
     #[test]
-    fn restore_rejects_chunked_total_size_mismatch() {
+    fn restore_rejects_a_chunk_that_is_not_its_span() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
         let c0 = put_blob(&store, b"Hello, ");
         let c1 = put_blob(&store, b"world!");
-        let cb = Object::ChunkedBlob(
-            crate::object::ChunkedBlob::new(7 + 6 + 1, 0, vec![c0, c1]).unwrap(),
-        );
+        // The second span is one byte longer than its chunk.
+        let cb = Object::ChunkedBlob(object::ChunkedBlob::new(14, 0, [(c0, 7), (c1, 14)]).unwrap());
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2550,24 +2551,25 @@ mod tests {
         assert!(
             matches!(
                 err,
-                RestoreError::Object(object::KitError::ChunkedBlobSizeMismatch {
-                    expected: 14,
-                    actual: 13,
+                RestoreError::Object(object::KitError::ChunkLengthMismatch {
+                    index: 1,
+                    expected: 7,
+                    actual: 6,
                 })
             ),
-            "expected ChunkedBlobSizeMismatch, got {err:?}"
+            "expected ChunkLengthMismatch, got {err:?}"
         );
         assert!(!target.path().join("out.txt").exists());
     }
 
-    /// Chunks that total more than the manifest's `total_size` must fail
-    /// restore without leaving a temp file in the target directory.
+    /// A chunk longer than its span must fail restore without leaving a temp
+    /// file in the target directory.
     #[test]
     fn restore_rejects_chunked_overrun_and_leaves_no_tmp_file() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
         let big = put_blob(&store, &[7u8; 64]);
-        let cb = Object::ChunkedBlob(crate::object::ChunkedBlob::new(10, 10, vec![big]).unwrap());
+        let cb = Object::ChunkedBlob(object::ChunkedBlob::new(10, 0, [(big, 10)]).unwrap());
         let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
         let tree = put_tree_with(
             &store,
@@ -2582,25 +2584,34 @@ mod tests {
         assert!(
             matches!(
                 err,
-                RestoreError::Object(object::KitError::ChunkedBlobSizeMismatch { .. })
+                RestoreError::Object(object::KitError::ChunkLengthMismatch {
+                    index: 0,
+                    expected: 10,
+                    actual: 64,
+                })
             ),
             "got {err:?}"
         );
         assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
     }
 
-    /// The worktree restore path reports an overrun with the length the
-    /// write would have reached, not a placeholder, and removes its temp file.
-    /// The sequential and threaded writers must agree.
+    /// The worktree restore path names the chunk that is longer than its
+    /// span, and removes its temp file, whether the manifest fits one batch
+    /// or several.
     #[test]
-    fn worktree_restore_overrun_error_reports_the_length_it_would_reach() {
+    fn worktree_restore_names_a_chunk_longer_than_its_span() {
         for chunk_count in [1usize, 2 * RESTORE_CHUNK_BATCH + 1] {
-            let declared = chunk_count as u64 + 9;
             let (_d, store) = fresh_store();
             let target = TempDir::new().unwrap();
             let big = put_blob(&store, &[7u8; 64]);
+            // Each span is one byte; the chunk holds 64.
             let cb = Object::ChunkedBlob(
-                crate::object::ChunkedBlob::new(declared, 0, vec![big; chunk_count]).unwrap(),
+                object::ChunkedBlob::new(
+                    chunk_count as u64,
+                    0,
+                    (1..=chunk_count as u64).map(|n| (big, n)),
+                )
+                .unwrap(),
             );
             let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
             let tree = put_tree_with(
@@ -2623,15 +2634,65 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    RestoreError::Object(object::KitError::ChunkedBlobSizeMismatch {
-                        expected,
-                        actual
-                    }) if expected == declared && actual > declared && actual < u64::MAX / 2
+                    RestoreError::Object(object::KitError::ChunkLengthMismatch {
+                        index: 0,
+                        expected: 1,
+                        actual: 64,
+                    })
                 ),
                 "got {err:?}"
             );
             assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
         }
+    }
+
+    /// A wrong chunk in a later batch is named by its index in the manifest,
+    /// not by its place in the batch.
+    #[test]
+    fn worktree_restore_names_the_index_of_a_wrong_chunk_in_a_later_batch() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let good = put_blob(&store, b"x");
+        let bad = put_blob(&store, &[7u8; 64]);
+        let count = 2 * RESTORE_CHUNK_BATCH + 1;
+        let wrong = RESTORE_CHUNK_BATCH + 2;
+        let cb = Object::ChunkedBlob(
+            object::ChunkedBlob::new(
+                count as u64,
+                0,
+                (0..count).map(|i| (if i == wrong { bad } else { good }, i as u64 + 1)),
+            )
+            .unwrap(),
+        );
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.bin".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Object(object::KitError::ChunkLengthMismatch {
+                    index,
+                    expected: 1,
+                    actual: 64,
+                }) if index as usize == wrong
+            ),
+            "got {err:?}"
+        );
     }
 
     #[cfg(unix)]

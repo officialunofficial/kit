@@ -553,22 +553,18 @@ fn commit_objects(store: &ObjectStore, files: &[(&str, Hash)], parents: &[Hash],
 
 /// A chunked file of the given chunk contents.
 fn chunked_file(store: &ObjectStore, chunks: &[&str]) -> Hash {
-    let ids: Vec<Hash> = chunks
+    let mut end = 0u64;
+    let entries: Vec<(Hash, u64)> = chunks
         .iter()
         .map(|data| {
-            put(
-                store,
-                &Object::Blob(Blob {
-                    data: data.repeat(200).into_bytes(),
-                }),
-            )
+            let data = data.repeat(200).into_bytes();
+            end += data.len() as u64;
+            (put(store, &Object::Blob(Blob { data })), end)
         })
         .collect();
     put(
         store,
-        &Object::ChunkedBlob(
-            kit_core::object::ChunkedBlob::new(ids.len() as u64 * 200, 0, ids).unwrap(),
-        ),
+        &Object::ChunkedBlob(kit_core::object::ChunkedBlob::new(end, 0, entries).unwrap()),
     )
 }
 

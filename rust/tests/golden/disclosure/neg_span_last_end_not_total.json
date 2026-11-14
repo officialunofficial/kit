@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_last_end_not_total.bin",
+  "blake3": "35cf93171dcb4fd82e37afacadca4bb4be88d0e31c979663619cd28a13239a3e",
+  "commit_id_hex": "d3eae74021427d36009137ef12aa5dfee85f9d89da691dcf8c9289f2a1ca91a1",
+  "description": "The last chunk whose span ends at 16, short of total_size 20.",
+  "expect": "reject",
+  "name": "neg_span_last_end_not_total",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the last chunk does not end at total_size",
+  "selector": "chunk(1)",
+  "size": 528
+}

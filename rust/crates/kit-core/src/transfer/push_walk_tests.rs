@@ -10,9 +10,7 @@ use super::tests::{
 };
 use super::walk::{ChunkMemory, HeldCommits, PushWalk, take_counted};
 use super::*;
-use crate::object::{
-    ChunkedBlob, Commit, EntryMode, Identity, Remix, RemixSource, Tag, Tree, TreeEntry,
-};
+use crate::object::{Commit, EntryMode, Identity, Remix, RemixSource, Tag, Tree, TreeEntry};
 use crate::ops::graph::{check_closure_present, reachable_objects};
 use crate::pack::{PackReader, PackWriter};
 
@@ -521,7 +519,7 @@ fn wide_file(s: &ObjectStore, chunks: usize) -> Hash {
         .collect();
     put(
         s,
-        &Object::ChunkedBlob(ChunkedBlob::new((chunks * 4) as u64, 0, ids).unwrap()),
+        &Object::ChunkedBlob(crate::object::testing::spread((chunks * 4) as u64, 0, ids).unwrap()),
     )
 }
 
@@ -1094,7 +1092,7 @@ fn a_manifest_that_lists_a_non_blob_is_a_typed_error() {
     let tree = tree_of(&s, &[]);
     let m = put(
         &s,
-        &Object::ChunkedBlob(ChunkedBlob::new(1, 0, vec![tree]).unwrap()),
+        &Object::ChunkedBlob(crate::object::testing::spread(1, 0, vec![tree]).unwrap()),
     );
     let c = commit(&s, tree_of(&s, &[("f", m)]), &[], "bad");
     assert!(matches!(
@@ -1188,7 +1186,9 @@ fn pool_big(s: &ObjectStore, k: u8) -> Hash {
         .collect();
     put(
         s,
-        &Object::ChunkedBlob(ChunkedBlob::new(chunks.len() as u64 * 600, 0, chunks).unwrap()),
+        &Object::ChunkedBlob(
+            crate::object::testing::spread(chunks.len() as u64 * 600, 0, chunks).unwrap(),
+        ),
     )
 }
 
@@ -1367,7 +1367,8 @@ mod random_histories {
                 put(
                     s,
                     &Object::ChunkedBlob(
-                        ChunkedBlob::new(chunks.len() as u64 * 600, 0, chunks).unwrap(),
+                        crate::object::testing::spread(chunks.len() as u64 * 600, 0, chunks)
+                            .unwrap(),
                     ),
                 )
             }

@@ -119,18 +119,16 @@ pub fn translate_chunked<S: ObjectSource>(
     }
     let mut body = Vec::new();
     let mut lengths = Vec::with_capacity(manifest.chunks().len());
-    for chunk_hash in manifest.chunks() {
+    for (index, chunk_hash) in (0u32..).zip(manifest.chunks()) {
         match source.read_object(chunk_hash)? {
             Object::Blob(b) => {
-                // Stop at the first chunk that passes the declared total, so
-                // a manifest that repeats one chunk cannot grow `body`.
-                if (body.len() as u64).saturating_add(b.data.len() as u64) > manifest.total_size() {
-                    return Err(BridgeError::Source(format!(
-                        "chunked blob {}: chunks exceed the {} bytes the manifest declares",
-                        kit_core::to_hex(hash),
-                        manifest.total_size()
-                    )));
-                }
+                manifest
+                    .check_chunk_length(index, b.data.len() as u64)
+                    .map_err(|e| {
+                        BridgeError::Source(format!("chunked blob {}: {e}", kit_core::to_hex(hash)))
+                    })?;
+                // Each chunk holds exactly its committed span, and the spans
+                // end at `total_size`, so `body` is exactly `total_size` long.
                 lengths.push(b.data.len());
                 body.extend_from_slice(&b.data);
             }
@@ -142,14 +140,6 @@ pub fn translate_chunked<S: ObjectSource>(
                 )));
             }
         }
-    }
-    if body.len() as u64 != manifest.total_size() {
-        return Err(BridgeError::Source(format!(
-            "chunked blob {}: concatenated {} bytes, manifest says {}",
-            kit_core::to_hex(hash),
-            body.len(),
-            manifest.total_size()
-        )));
     }
     // §4 item 3: boundaries must equal the pinned FastCDC output, or
     // §9's re-chunking reconstructs a different manifest.

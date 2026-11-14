@@ -496,10 +496,6 @@ pub(crate) const TOOLS: &[ToolSpec] = &[
                         "range",
                         prop("Byte range as OFFSET:LEN (conflicts with chunk)"),
                     ),
-                    (
-                        "with_offsets",
-                        json!({ "type": "boolean", "description": "Authenticate absolute offsets; only valid with range" }),
-                    ),
                     ("output", prop("File to write the disclosure bundle to")),
                 ],
                 &["repo_path", "revision", "output"],
@@ -1014,9 +1010,6 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             if let Some(range) = opt_str(args, "range") {
                 no_dash(&range, "range")?;
                 out.extend(["--range".into(), range]);
-            }
-            if args.get("with_offsets").and_then(Value::as_bool) == Some(true) {
-                out.push("--with-offsets".into());
             }
             let output = req_str(args, "output")?;
             no_dash(&output, "output")?;

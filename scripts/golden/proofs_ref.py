@@ -5,15 +5,18 @@
 #   rust/tests/golden/proofs/
 #
 # The check shares no code with the Rust crates. It reads only
-# SPEC-MERKLE-OBJECTS sections 1 to 5. BLAKE3 and the leaf and root rules come
-# from objects_ref.py, which is written from the same spec.
+# SPEC-MERKLE-OBJECTS sections 1 to 5, with the chunk-offsets leaves of the
+# kit 0.8.0 plan (section 4.3). BLAKE3 and the leaf and root rules come from
+# objects_ref.py, which is written from the same spec.
 #
 # For each vector the check:
 #   * compares the proof file with the size and BLAKE3 in its sidecar and in
 #     MANIFEST.txt;
 #   * decodes the proof strictly: big-endian leaf count, minimal varint
 #     sibling count, the max_items * 32 bound and no trailing byte;
-#   * rebuilds the leaves from the sidecar, folds the proof level by level
+#   * rebuilds the leaves from the sidecar (a chunk leaf is built from the
+#     `chunk_spans` pair of decimal strings [start, end] and the chunk hash at the same index of
+#     `chunk_hashes_hex`), folds the proof level by level
 #     with the sibling selection of section 5.3, and compares the wrapped
 #     result with the object id;
 #   * checks that the outcome (accept or reject) matches the sidecar.
@@ -37,6 +40,10 @@ MAX_LEVELS = 32
 
 class Reject(Exception):
     """The proof does not verify."""
+
+
+class SidecarError(Exception):
+    """The sidecar does not describe a proof in the current format."""
 
 
 def decode_proof(data, max_items):
@@ -100,6 +107,43 @@ def fold(leaf_count, siblings, leaves):
     return blake3(struct.pack(">I", leaf_count) + nodes[0])
 
 
+def encode_proof(leaf_count, siblings):
+    """SPEC-MERKLE-OBJECTS section 5.2: big-endian leaf count, minimal varint
+    sibling count, then the siblings."""
+    out = bytearray(struct.pack(">I", leaf_count))
+    n = len(siblings)
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            break
+    return bytes(out) + b"".join(siblings)
+
+
+def prove(raw_leaves, positions):
+    """The proof for `positions` over the raw leaves, in the order that `fold`
+    consumes siblings (SPEC-MERKLE-OBJECTS sections 5.3 and 5.5). Returns
+    (leaf_count, siblings)."""
+    leaf_count = len(raw_leaves)
+    level = [blake3(struct.pack(">I", i) + leaf) for i, leaf in enumerate(raw_leaves)]
+    known = sorted(set(positions))
+    siblings = []
+    while len(level) > 1:
+        size = len(level)
+        parents = set()
+        for pos in known:
+            sib = (pos + 1 if pos + 1 < size else pos) if pos % 2 == 0 else pos - 1
+            if sib != pos and sib not in known:
+                siblings.append(level[sib])
+            parents.add(pos // 2)
+        if size % 2:
+            level.append(level[-1])
+        level = [blake3(level[i] + level[i + 1]) for i in range(0, len(level), 2)]
+        known = sorted(parents)
+    return leaf_count, siblings
+
+
 def verify(leaf_count, siblings, leaves, domain, object_id):
     """Fold the leaves, wrap the result and compare it with the object id."""
     folded = fold(leaf_count, siblings, leaves)
@@ -120,7 +164,17 @@ def leaves_for(meta):
         ]
         domain, base = o.TREE_DOMAIN, 0
     else:
-        leaves = [bytes.fromhex(h) for h in meta["chunk_hashes_hex"]]
+        hashes = [bytes.fromhex(h) for h in meta["chunk_hashes_hex"]]
+        if "chunk_spans" not in meta:
+            raise SidecarError("chunk proof sidecar has no chunk_spans")
+        spans = meta["chunk_spans"]
+        if len(spans) != len(hashes):
+            raise SidecarError("chunk_spans and chunk_hashes_hex differ in length")
+        # Span values are decimal strings (plan section 13): values near the
+        # u64 maximum lose precision as JSON numbers.
+        if not all(isinstance(v, str) and v.isascii() and v.isdigit() for pair in spans for v in pair):
+            raise SidecarError("chunk_spans values must be decimal strings")
+        leaves = [o.chunk_leaf(int(a), int(b), h) for (a, b), h in zip(spans, hashes)]
         domain, base = o.CHUNKED_DOMAIN, 1
     kind = meta["proof_kind"]
     if kind == "single":
@@ -146,6 +200,9 @@ def check_vector(root, name):
         domain, leaves = leaves_for(meta)
         verify(leaf_count, siblings, leaves, domain, bytes.fromhex(meta["object_id_hex"]))
         outcome = "accept"
+    except SidecarError as e:
+        o.fail(f"proofs/{name}: {e}")
+        return "error"
     except Reject as e:
         outcome = "reject"
         if meta["expect"] == "accept":
@@ -160,7 +217,7 @@ def main():
     root = sys.argv[1]
     files, man = o.check_files(root, "proofs")
     seen = [check_vector(root, n) for n in sorted(files)]
-    expect(set(seen) == {"accept", "reject"}, "vectors cover both outcomes")
+    expect(set(seen) - {"error"} == {"accept", "reject"}, "vectors cover both outcomes")
     expect(len(seen) == len(man), "every MANIFEST.txt entry has a vector")
     if o.FAILURES:
         sys.exit(1)

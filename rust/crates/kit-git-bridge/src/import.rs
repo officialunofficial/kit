@@ -32,7 +32,7 @@ pub const MAX_TAG_CHAIN: usize = 16;
 pub const MAX_TREE_DEPTH: usize = 128;
 
 /// This implementation's import-spec version (SPEC-GIT-IMPORT §1.2).
-pub const IMPORT_SPEC_VERSION: u32 = 1;
+pub const IMPORT_SPEC_VERSION: u32 = 2;
 
 /// Where the driver reads git objects from. [`CatFileBatch`] for real
 /// repositories; an in-memory map for hermetic tests/vectors.
@@ -525,7 +525,7 @@ impl<S: GitSource, K: ObjectSink> Importer<'_, S, K> {
                     data: body[b.offset..b.offset + b.length].to_vec(),
                 }),
             )?;
-            chunks.push(self.write_object(&chunk)?);
+            chunks.push((self.write_object(&chunk)?, (b.offset + b.length) as u64));
         }
         let manifest = ser(
             id,

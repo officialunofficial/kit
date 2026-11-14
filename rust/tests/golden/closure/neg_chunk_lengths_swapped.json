@@ -1,0 +1,19 @@
+{
+  "bin": "neg_chunk_lengths_swapped.manifest.bin",
+  "blake3": "7174044082491a89c8ab10c8002cdda85ec1e8afd4f4da0bc9779054d4e20819",
+  "corrupt_chunk_index": 0,
+  "description": "A ChunkedBlob with the spans [0, 7) and [7, 12) over chunks of 5 and 7 bytes: the lengths add up to the total, but neither fits its span.",
+  "expect": "incomplete",
+  "ids": [],
+  "mode": "snapshot",
+  "n_packs": 1,
+  "name": "neg_chunk_lengths_swapped",
+  "pack_hashes": [
+    "4dba8324e14e0e88091dfc544b4c89779f422bb3954e54220093ef78b1651f4b"
+  ],
+  "reason": "corrupt",
+  "root_hex": "00757caa67a91bc533632a24cc6e2561a6b1f32af300b0687329c9a00cec4bf9",
+  "size": 71,
+  "unreferenced": [],
+  "verified": 0
+}

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_middle_ends_at_total.bin",
+  "blake3": "fdf06e813526e97b305c538d334274880c75b1eee6b4f1996e3c9560a65fed5f",
+  "commit_id_hex": "c75433f41110ea99492de64ef5a438b1f9ef2b4304b0263ddcf3aa1888e92883",
+  "description": "A middle chunk whose span ends at total_size.",
+  "expect": "reject",
+  "name": "neg_span_middle_ends_at_total",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "a chunk that is not the last ends at total_size",
+  "selector": "chunk(1)",
+  "size": 564
+}

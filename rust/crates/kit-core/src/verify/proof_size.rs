@@ -1,6 +1,7 @@
 //! Exact KDPB/KDSP lengths from metadata, without constructing Merkle or Bao
 //! proofs. Chunk lengths describe canonical Blob content, excluding its ten
-//! header bytes. All results enforce the 64 MiB wire cap.
+//! header bytes; they are the spans of the manifest's `ends`, so the caller
+//! reads no chunk to size a range. All results enforce the 64 MiB wire cap.
 
 use super::span::{RangeProofError, RangeProofKind};
 use super::{MAX_BUNDLE_BYTES, MAX_COMMIT_BYTES, VerifyError};
@@ -136,7 +137,7 @@ pub fn blob_range_proof_size(
         .checked_add(10)
         .ok_or(RangeProofError::OffsetOverflow)?;
     let slice = bao_slice_size(canonical_blob_bytes, bao_offset, len)?;
-    capped(prefix_size(commit_bytes, steps)? + 1 + 16 + vector_size(slice) + 1)
+    capped(prefix_size(commit_bytes, steps)? + 1 + 16 + vector_size(slice))
 }
 
 fn canonical_length(content: u64, index: usize) -> Result<u64, RangeProofError> {
@@ -149,9 +150,10 @@ fn canonical_length(content: u64, index: usize) -> Result<u64, RangeProofError> 
 }
 
 /// Exact chunked KDPB/KDSP size from indexed lengths through the last
-/// included chunk. Metadata after the span is unnecessary: `total_chunks`
-/// alone fixes the Merkle shape. The caller checks the manifest's total
-/// content bounds before collecting these lengths.
+/// included chunk, which are the spans of the manifest's chunks. Metadata
+/// after the span is unnecessary: `total_chunks` alone fixes the Merkle
+/// shape. The caller checks the manifest's total content bounds before
+/// collecting these lengths.
 ///
 /// # Errors
 /// Invalid metadata, zero length, overflow, insufficient length prefix,
@@ -190,7 +192,6 @@ pub struct ChunkedRangeSizer {
     offset: u64,
     end: u64,
     cap: u64,
-    preceding: u128,
     cursor: u64,
     index: usize,
     first: Option<usize>,
@@ -228,7 +229,6 @@ impl ChunkedRangeSizer {
             offset,
             end,
             cap: max_encoded_size.min(MAX_BUNDLE_BYTES as u64),
-            preceding: 0,
             cursor: 0,
             index: 0,
             first: None,
@@ -269,31 +269,25 @@ impl ChunkedRangeSizer {
             .checked_add(content)
             .ok_or(RangeProofError::OffsetOverflow)?;
         let plan = if self.first.is_none() && self.offset >= next {
-            let slice = bao_slice_size(canonical, 0, 10)?;
-            self.preceding += 36 + proof_size(self.count, &[position])? + vector_size(slice);
-            self.check(self.prefix + self.preceding)?;
+            // A chunk before the range adds nothing to the proof: the leaf of
+            // the chunk that holds the range commits its own start.
             None
         } else {
             let first_index = *self.first.get_or_insert(index);
             let chunk_proof = proof_size(self.count, &[0, position])?;
             if index == first_index {
                 let single = self.end <= next;
-                let (local_offset, selected_len) = if single {
-                    (self.offset - self.cursor, self.end - self.offset)
-                } else {
-                    (0, 1)
-                };
-                let slice = bao_slice_size(canonical, local_offset + 10, selected_len)?;
-                let range_size = self.check(
-                    self.prefix
-                        + 81
-                        + chunk_proof
-                        + 16
-                        + vector_size(slice)
-                        + varint_size(first_index as u64)
-                        + self.preceding,
-                )?;
                 if single {
+                    let slice = bao_slice_size(
+                        canonical,
+                        self.offset - self.cursor + 10,
+                        self.end - self.offset,
+                    )?;
+                    // Prefix, then the `Some` tag, the chunk header (97
+                    // bytes with its proof), the range offset and length,
+                    // and the slice.
+                    let range_size =
+                        self.check(self.prefix + 97 + chunk_proof + 16 + vector_size(slice))?;
                     self.finished = true;
                     return Ok(Some(EncodedRangePlan {
                         kind: RangeProofKind::Kdpb,
@@ -302,9 +296,12 @@ impl ChunkedRangeSizer {
                         encoded_size: range_size,
                     }));
                 }
-                self.container = 53 + vector_size(range_size);
+                // The container: magic, version, commit, offset and length.
+                self.container = 53;
             }
-            let chunk_size = self.check(self.prefix + 48 + chunk_proof + vector_size(canonical))?;
+            // One `Chunk` bundle: prefix, the header fields (64 bytes with
+            // its proof) and the chunk's canonical bytes.
+            let chunk_size = self.check(self.prefix + 64 + chunk_proof + vector_size(canonical))?;
             self.container += vector_size(chunk_size);
             let encoded_size =
                 self.check(self.container + varint_size((index - first_index + 1) as u64))?;
@@ -326,7 +323,6 @@ impl ChunkedRangeSizer {
 #[allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
-    use crate::object::ChunkedBlob;
     use commonware_codec::EncodeSize;
 
     #[test]
@@ -356,7 +352,7 @@ mod tests {
     #[test]
     fn merkle_sizes_match_odd_even_and_power_of_two_shapes() {
         for chunks in 1u32..=70 {
-            let manifest = ChunkedBlob::new(
+            let manifest = crate::object::testing::spread(
                 u64::from(chunks),
                 0,
                 (0..chunks).map(|n| [n as u8; 32]).collect(),
@@ -406,7 +402,7 @@ mod tests {
             include_bytes!(
                 "../../../../tests/golden/disclosure/small_blob_range_last_partial_block.bin"
             ),
-            include_bytes!("../../../../tests/golden/disclosure/chunked_range_with_offsets.bin"),
+            include_bytes!("../../../../tests/golden/disclosure/chunked_range.bin"),
         ];
         for golden in goldens {
             let (_, commit, steps, payload) = super::super::decode_disclosure(golden).unwrap();
@@ -434,13 +430,16 @@ mod tests {
                     offset_in_blob,
                     len,
                     slice,
-                    chunk_len_proofs,
                 } => {
-                    let mut lengths: Vec<u64> = chunk_len_proofs
-                        .iter()
-                        .map(|proof| canonical_slice_length(&proof.slice) - 10)
-                        .collect();
-                    let offset = lengths.iter().sum::<u64>() + offset_in_blob;
+                    // The chunks before this one only place its span: one
+                    // stand-in length for each, summing to the span's start.
+                    let index = chunk.index as usize;
+                    let mut lengths: Vec<u64> = Vec::new();
+                    if index > 0 {
+                        lengths.push(chunk.start - (index as u64 - 1));
+                        lengths.extend(std::iter::repeat_n(1, index - 1));
+                    }
+                    let offset = chunk.start + offset_in_blob;
                     lengths.push(canonical_slice_length(&slice) - 10);
                     chunked_range_proof_size(
                         commit.len() as u64,
@@ -492,12 +491,15 @@ mod tests {
     }
 
     #[test]
-    fn preceding_cap_and_prefix_only_metadata_are_enforced() {
+    fn preceding_chunks_add_nothing_and_prefix_only_metadata_is_enforced() {
+        // Forty thousand chunks before the range add no byte to its proof.
         let lengths = vec![65536; 40000];
-        assert!(matches!(
-            chunked_range_proof_size(200, &[], 50000, &lengths, 39999 * 65536, 1),
-            Err(RangeProofError::ProofTooLarge)
-        ));
+        let far = chunked_range_proof_size(200, &[], 50000, &lengths, 39999 * 65536, 1).unwrap();
+        let near = chunked_range_proof_size(200, &[], 50000, &lengths[..1], 0, 1).unwrap();
+        assert_eq!((far.first, far.last), (39999, 39999));
+        assert!(far.encoded_size >= near.encoded_size);
+        // Only the proof's sibling hashes differ, at most one per tree level.
+        assert!(far.encoded_size <= near.encoded_size + 16 * 32);
         let result = chunked_range_proof_size(200, &[], 50000, &[100], 99, 1).unwrap();
         assert_eq!((result.first, result.last), (0, 0));
         assert!(matches!(result.kind, RangeProofKind::Kdpb));
@@ -542,8 +544,13 @@ mod tests {
                         .unwrap()
                 })
                 .collect();
-            let manifest =
-                Object::ChunkedBlob(ChunkedBlob::new(lengths.iter().sum(), 0, chunks).unwrap());
+            let manifest = Object::ChunkedBlob(
+                crate::object::testing::sized(
+                    0,
+                    chunks.into_iter().zip(lengths.iter().copied()).collect(),
+                )
+                .unwrap(),
+            );
             let leaf = store.write(&serialize(&manifest).unwrap()).unwrap();
             let name = vec![b'f'; name_len];
             let tree = Object::Tree(Tree {
@@ -595,8 +602,7 @@ mod tests {
                     len,
                 )
                 .unwrap();
-                let built =
-                    build_range_proof_from(&store, &id, &[&name], offset, len, None).unwrap();
+                let built = build_range_proof_from(&store, &id, &[&name], offset, len).unwrap();
                 let bytes = match built {
                     RangeProof::Kdpb(bytes) => {
                         assert_eq!(plan.kind, RangeProofKind::Kdpb);

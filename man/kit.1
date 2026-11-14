@@ -1213,7 +1213,7 @@ instead emits JSONL with
 and
 .Cm text
 keys.
-.It Cm prove Ar rev Op Ar path Oo Fl Fl chunk Ar N | Fl Fl range Ar OFFSET:LEN Oc Op Fl Fl with-offsets Oo Fl o Ar file Oc Oo Fl Fl format Ns = Ns Cm json Oc
+.It Cm prove Ar rev Op Ar path Oo Fl Fl chunk Ar N | Fl Fl range Ar OFFSET:LEN Oc Oo Fl o Ar file Oc Oo Fl Fl format Ns = Ns Cm json Oc
 Build a disclosure bundle proving that
 .Ar path
 (omitted: the root tree), a
@@ -1225,10 +1225,7 @@ byte range belongs to
 .Fl Fl chunk
 and
 .Fl Fl range
-are mutually exclusive;
-.Fl Fl with-offsets
-is only valid with
-.Fl Fl range .
+are mutually exclusive.
 Writes the bundle to
 .Fl o Ar file
 or to stdout when stdout is not a TTY.

@@ -5,7 +5,8 @@
 #   rust/tests/golden/disclosure/
 #
 # The check shares no code with the Rust crates. It reads only SPEC-DISCLOSURE
-# sections 2 to 6, SPEC-MERKLE-OBJECTS and SPEC-OBJECTS, and the public
+# sections 2 to 6 and 8, SPEC-MERKLE-OBJECTS and SPEC-OBJECTS, with the
+# chunk-offsets changes of the kit 0.8.0 plan (section 4.7) applied, and the public
 # description of the Bao slice encoding (an 8-byte little-endian content
 # length, then the nodes of the BLAKE3 tree in pre-order). BLAKE3 and the
 # strict object parsers come from objects_ref.py; the proof folding comes from
@@ -14,12 +15,14 @@
 # For each vector the check:
 #   * compares the bundle with the size and BLAKE3 in its sidecar and in
 #     MANIFEST.txt;
-#   * decodes the bundle strictly: magic, version 2, bounded vectors, minimal
+#   * decodes the bundle strictly: magic, version 3, bounded vectors, minimal
 #     varints and no trailing byte;
-#   * verifies the commit id, the commit signature, every tree step, the
-#     payload and any length proofs, in the order of section 4, including the
-#     check that an Object payload has the type that the leaf mode names and
-#     that a Chunk or Range payload has a leaf mode that is not Tree;
+#   * verifies the commit id, the commit signature, every tree step and the
+#     payload, in the order of section 4 and of plan 4.7 (the eight checks of
+#     a chunked leaf), including the check that an Object payload has the type
+#     that the leaf mode names and that a Chunk or Range payload has a leaf
+#     mode that is not Tree;
+#   * verifies a KDSP v2 span container (verify_span), which carries no anchor;
 #   * compares the result with the `disclosed` summary in the sidecar, or
 #     checks that the bundle is rejected when the sidecar says so.
 #
@@ -43,9 +46,11 @@ from objects_ref import blake3, domain_digest, expect  # noqa: E402
 MAX_BUNDLE_BYTES = 64 << 20
 MAX_COMMIT_BYTES = 4 << 20
 MAX_TREE_DEPTH = 128
-MAX_CHUNKS = 8_388_608
-MAX_OBJECT = 1 << 30
-MAX_LEN_SLICE = 8 << 10
+MAX_OBJECT = o.MAX_RAW_OBJECT_SIZE
+BUNDLE_VERSION = 3
+SPAN_VERSION = 2
+MAX_SPAN_BYTES = 64 << 20
+MAX_SPAN_CHUNKS = 1_000_000
 TREE_MODE = 2
 D = "disclosure"
 
@@ -151,16 +156,6 @@ def bao_slice(slice_bytes, root, start, length):
     return bytes(out), total
 
 
-def length_proof(slice_bytes, chunk_id):
-    """SPEC-DISCLOSURE section 4.1. Returns the proven content length."""
-    if len(slice_bytes) > MAX_LEN_SLICE:
-        raise Reject("length slice over the bound")
-    head, _ = bao_slice(slice_bytes, chunk_id, 0, 10)
-    if head[:6] != bytes([o.BLOB]) + o.PROLOGUE_MAGIC + bytes([o.SCHEMA_VERSION]):
-        raise Reject("length slice is not a blob prologue")
-    return struct.unpack("<I", head[6:10])[0]
-
-
 # ------------------------------------------------------------- codec
 
 
@@ -210,7 +205,7 @@ def decode_bundle(data):
         if b.take(4) != b"KDPB":
             raise Reject("bad magic")
         version = b.u8()
-        if version != 2:
+        if version != BUNDLE_VERSION:
             raise Reject(f"unsupported bundle version {version}")
         out = {"commit_id": b.take(32), "commit_bytes": b.vec(MAX_COMMIT_BYTES)}
         steps = []
@@ -235,10 +230,14 @@ def decode_bundle(data):
         if kind == 0:
             out["bytes"] = b.vec(MAX_OBJECT)
         elif kind == 1:
+            # Plan 4.7: Chunk { total_size, chunk_size, index, start, end,
+            # inner_root, proof, bytes }; integers big-endian.
             out["chunk"] = {
                 "total_size": b.be64(),
                 "chunk_size": b.be32(),
                 "index": b.be32(),
+                "start": b.be64(),
+                "end": b.be64(),
                 "inner_root": b.take(32),
                 "proof": b.proof(2),
             }
@@ -250,6 +249,8 @@ def decode_bundle(data):
                     "total_size": b.be64(),
                     "chunk_size": b.be32(),
                     "index": b.be32(),
+                    "start": b.be64(),
+                    "end": b.be64(),
                     "inner_root": b.take(32),
                     "chunk_id": b.take(32),
                     "proof": b.proof(2),
@@ -258,19 +259,6 @@ def decode_bundle(data):
             out["offset"] = b.be64()
             out["len"] = b.be64()
             out["slice"] = b.vec(MAX_OBJECT)
-            proofs = []
-            for _ in range(b.varint()):
-                if len(proofs) >= MAX_CHUNKS:
-                    raise Reject("too many length proofs")
-                proofs.append(
-                    {
-                        "index": b.be32(),
-                        "chunk_id": b.take(32),
-                        "proof": b.proof(1),
-                        "slice": b.vec(MAX_LEN_SLICE),
-                    }
-                )
-            out["len_proofs"] = proofs
         else:
             raise Reject("unknown payload kind")
         b.end()
@@ -282,45 +270,52 @@ def decode_bundle(data):
 # ------------------------------------------------------- verification
 
 
-def meta_leaf(total_size, chunk_size):
-    return domain_digest(b"kit-cblob-meta-v1", struct.pack("<Q", total_size) + struct.pack("<I", chunk_size))
-
-
-def check_chunk_proof(hdr, chunk_hash, leaf_id):
-    """Wrap check first, then the {0, index + 1} multi-proof (section 4)."""
-    if domain_digest(o.CHUNKED_DOMAIN, hdr["inner_root"]) != leaf_id:
-        raise Reject("chunk inner root does not wrap to the leaf id")
-    leaf_count, siblings = hdr["proof"]
-    leaves = {
-        0: meta_leaf(hdr["total_size"], hdr["chunk_size"]),
-        hdr["index"] + 1: chunk_hash,
-    }
-    try:
-        folded = p.fold(leaf_count, siblings, leaves)
-    except p.Reject as e:
-        raise Reject(str(e))
-    if folded != hdr["inner_root"]:
-        raise Reject("chunk proof does not fold to the declared inner root")
-
-
 def check_layout(hdr):
-    """SPEC-OBJECTS section 7: total_size must fit the layout, as when a
-    manifest is decoded. The chunk count comes from the folded proof."""
+    """The header-only check that stays (SPEC-OBJECTS section 7,
+    `check_chunked_total_size`): total_size must fit the layout. The chunk
+    count comes from the proof's leaf count."""
     try:
         o.check_chunked_layout(hdr["total_size"], hdr["chunk_size"], hdr["proof"][0] - 1)
     except ValueError as e:
         raise Reject(str(e))
 
 
-def check_fixed_len(hdr, index, actual):
-    """SPEC-OBJECTS section 7: in a fixed-size layout every chunk but the last
-    holds exactly chunk_size bytes, and the last holds the rest of total_size."""
-    if hdr["chunk_size"] in o.CONTENT_DEFINED:
-        return
-    count = hdr["proof"][0] - 1
-    want = hdr["chunk_size"] if index + 1 < count else hdr["total_size"] - index * hdr["chunk_size"]
-    if actual != want:
-        raise Reject("a fixed-size chunk has the wrong length")
+def check_chunk_header(hdr, chunk_id, leaf_id):
+    """Plan 4.7 as ordered by plan section 13, item 2, for a chunked leaf
+    (the leaf-type and len == 0 checks come before this): the wrap and
+    declared-root check, step 1 (the multi-proof), then the header-only total
+    check on (total_size, chunk_size, leaf_count - 1), then steps 2 to 5.
+    leaf_count is trusted only once the proof has folded to the id."""
+    if domain_digest(o.CHUNKED_DOMAIN, hdr["inner_root"]) != leaf_id:
+        raise Reject("chunk inner root does not wrap to the leaf id")
+    start, end, index = hdr["start"], hdr["end"], hdr["index"]
+    total, size = hdr["total_size"], hdr["chunk_size"]
+    leaf_count, siblings = hdr["proof"]
+    # 1. The chunk leaf is built from (start, end, chunk id); the meta leaf is
+    # computed here from total_size and chunk_size, never supplied.
+    leaves = {0: o.meta_leaf(total, size), index + 1: o.chunk_leaf(start, end, chunk_id)}
+    try:
+        folded = p.fold(leaf_count, siblings, leaves)
+    except p.Reject as e:
+        raise Reject(str(e))
+    if folded != hdr["inner_root"]:
+        raise Reject("chunk proof does not fold to the declared inner root")
+    check_layout(hdr)
+    # 2. start < end <= total_size, and the chunk fits in one object.
+    if not start < end <= total:
+        raise Reject("span outside the file")
+    if end - start > o.MAX_CHUNK_LEN:
+        raise Reject("span above the object limit")
+    # 3. The first chunk starts at 0, and only the first.
+    if (index == 0) != (start == 0):
+        raise Reject("index 0 and start 0 disagree")
+    # 4. The last chunk ends at total_size, and only the last.
+    if (index + 1 == leaf_count - 1) != (end == total):
+        raise Reject("last index and end == total_size disagree")
+    # 5. A fixed layout has one span for each index.
+    if size not in o.CONTENT_DEFINED:
+        if start != index * size or end != min(start + size, total):
+            raise Reject("a fixed-size chunk has the wrong span")
 
 
 def verify_bundle(data, trusted_commit_id):
@@ -405,11 +400,15 @@ def verify_bundle(data, trusted_commit_id):
         result["payload"] = {"kind": "object", "len": len(b["bytes"]), "bytes_blake3": blake3(b["bytes"]).hex()}
     elif kind == 1:
         hdr = b["chunk"]
-        check_chunk_proof(hdr, blake3(b["bytes"]), leaf_id)
-        check_layout(hdr)
-        if len(b["bytes"]) < 10:
-            raise Reject("chunk is shorter than a blob prologue")
-        check_fixed_len(hdr, hdr["index"], len(b["bytes"]) - 10)
+        chunk_id = blake3(b["bytes"])
+        check_chunk_header(hdr, chunk_id, leaf_id)
+        # 6. The bytes are a Blob whose length field equals end - start.
+        try:
+            blob = o.parse_blob(b["bytes"])
+        except ValueError as e:
+            raise Reject(f"chunk bytes are not a blob: {e}")
+        if blob["len"] != hdr["end"] - hdr["start"]:
+            raise Reject("blob length differs from the span")
         result["_content"] = b["bytes"]
         result["chunk_inner_root_hex"] = hdr["inner_root"].hex()
         result["payload"] = {
@@ -417,6 +416,9 @@ def verify_bundle(data, trusted_commit_id):
             "total_size": hdr["total_size"],
             "chunk_size": hdr["chunk_size"],
             "index": hdr["index"],
+            # Span values are decimal strings in every sidecar (plan section 13).
+            "start": str(hdr["start"]),
+            "end": str(hdr["end"]),
             "len": len(b["bytes"]),
             "bytes_blake3": blake3(b["bytes"]).hex(),
         }
@@ -425,37 +427,18 @@ def verify_bundle(data, trusted_commit_id):
             raise Reject("zero-length range")
         hdr = b["hdr"]
         if hdr is None:
-            if b["len_proofs"]:
-                raise Reject("length proofs on a plain blob")
-            blob_id, absolute, chunk = leaf_id, b["offset"], None
+            blob_id, start, chunk = leaf_id, 0, None
         else:
-            check_chunk_proof(hdr, hdr["chunk_id"], leaf_id)
-            check_layout(hdr)
+            check_chunk_header(hdr, hdr["chunk_id"], leaf_id)
             result["chunk_inner_root_hex"] = hdr["inner_root"].hex()
-            blob_id = hdr["chunk_id"]
+            blob_id, start = hdr["chunk_id"], hdr["start"]
             chunk = {k: hdr[k] for k in ("total_size", "chunk_size", "index")}
-            if hdr["index"] == 0:
-                if b["len_proofs"]:
-                    raise Reject("length proofs on chunk 0")
-                absolute = b["offset"]
-            elif not b["len_proofs"]:
-                absolute = None
-            else:
-                if sorted(e["index"] for e in b["len_proofs"]) != list(range(hdr["index"])):
-                    raise Reject("length proofs do not cover exactly 0..index")
-                total = 0
-                for e in b["len_proofs"]:
-                    leaf_count, siblings = e["proof"]
-                    try:
-                        folded = p.fold(leaf_count, siblings, {e["index"] + 1: e["chunk_id"]})
-                    except p.Reject as err:
-                        raise Reject(str(err))
-                    if folded != hdr["inner_root"]:
-                        raise Reject("length proof does not fold to the inner root")
-                    length = length_proof(e["slice"], e["chunk_id"])
-                    check_fixed_len(hdr, e["index"], length)
-                    total += length
-                absolute = total + b["offset"]
+            chunk["start"], chunk["end"] = str(hdr["start"]), str(hdr["end"])
+            # 7. The range lies inside the committed span, and only the span: a
+            # real chunk longer than its span is not measured (plan section 13,
+            # item 3), because bytes past the span cannot be disclosed.
+            if b["offset"] + b["len"] > hdr["end"] - hdr["start"]:
+                raise Reject("range past the committed span")
         content, _ = bao_slice(b["slice"], blob_id, b["offset"] + 10, b["len"])
         result["_content"] = content
         result["payload"] = {
@@ -463,11 +446,133 @@ def verify_bundle(data, trusted_commit_id):
             "len": b["len"],
             "bytes_blake3": blake3(content).hex(),
             "offset_in_blob": b["offset"],
-            "absolute_offset": absolute,
+            # 8. Always present: start + offset_in_blob (start is 0 for a plain blob).
+            "absolute_offset": start + b["offset"],
             "blob_id_hex": blob_id.hex(),
             "chunk": chunk,
         }
     return result
+
+
+class SpanReject(Exception):
+    """A KDSP v2 container does not verify. `reason` is the label of the
+    SPEC-DISCLOSURE section 8.2 contract, as changed by plan 4.7."""
+
+    def __init__(self, reason, detail=""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+class SpanReader:
+    """The KDSP reader: bounded takes, and LEB128 varints that are minimal and
+    at most u32 (SPEC-DISCLOSURE section 8.1). Every failure is span_encoding."""
+
+    def __init__(self, data):
+        self.data, self.pos = data, 0
+
+    def take(self, n):
+        if n > len(self.data) - self.pos:
+            raise SpanReject("span_encoding")
+        out = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return out
+
+    def varint(self, cap):
+        value = 0
+        for i in range(5):
+            b = self.take(1)[0]
+            if (i > 0 and b == 0) or (i == 4 and b > 15):
+                raise SpanReject("span_encoding")
+            value |= (b & 0x7F) << (7 * i)
+            if not b & 0x80:
+                if value > cap:
+                    raise SpanReject("span_encoding")
+                return value
+        raise SpanReject("span_encoding")
+
+    def vector(self):
+        return self.take(self.varint(min(MAX_SPAN_BYTES, len(self.data) - self.pos)))
+
+
+def decode_span(data):
+    """Plan 4.7: "KDSP", version 2, commit_id, offset, len, then the chunk
+    bundles. No anchor. Fixed integers big-endian, lengths as LEB128 varints
+    (SPEC-DISCLOSURE sections 3 and 8.1)."""
+    if len(data) > MAX_SPAN_BYTES:
+        raise SpanReject("span_too_large")
+    r = SpanReader(data)
+    if r.take(4) != b"KDSP":
+        raise SpanReject("span_magic")
+    if r.take(1) != bytes([SPAN_VERSION]):
+        raise SpanReject("span_version")
+    out = {"commit_id": r.take(32)}
+    out["offset"] = struct.unpack(">Q", r.take(8))[0]
+    out["len"] = struct.unpack(">Q", r.take(8))[0]
+    count = r.varint(MAX_SPAN_CHUNKS)
+    if count > len(data) - r.pos:
+        raise SpanReject("span_encoding")
+    out["bundles"] = [r.vector() for _ in range(count)]
+    if r.pos != len(data):
+        raise SpanReject("span_trailing_bytes")
+    return out
+
+
+def verify_span(data, trusted_commit_id):
+    """Plan 4.7, in order: size, magic, version, encoding, trailing bytes,
+    commit, range arithmetic, count; each bundle verifies; every payload is a
+    Chunk with the same path, leaf, total_size, chunk_size and inner root;
+    indices are consecutive; end_i == start_(i+1); start_first <= offset <
+    end_first; offset + len <= end_last; offset + len > start_last.
+    Returns the decoded container and the per-chunk results."""
+    sp = decode_span(data)
+    if sp["commit_id"] != trusted_commit_id:
+        raise SpanReject("span_commit")
+    offset, length = sp["offset"], sp["len"]
+    if length == 0 or offset + length >= 1 << 64:
+        raise SpanReject("span_range_arithmetic")
+    if len(sp["bundles"]) < 2:
+        raise SpanReject("span_chunk_count")
+    results = []
+    for raw in sp["bundles"]:
+        try:
+            results.append(verify_bundle(raw, trusted_commit_id))
+        except Reject as e:
+            raise SpanReject("span_inner_invalid", str(e))
+    if any(res["_bundle"]["kind"] != 1 for res in results):
+        raise SpanReject("span_chunk_selector")
+    first = results[0]
+    for res in results:
+        if res["path"] != first["path"] or res["leaf_id_hex"] != first["leaf_id_hex"]:
+            raise SpanReject("span_leaf_context")
+    for res in results:
+        a, b = first["_bundle"]["chunk"], res["_bundle"]["chunk"]
+        if any(a[k] != b[k] for k in ("total_size", "chunk_size", "inner_root")):
+            raise SpanReject("span_chunk_context")
+    chunks = [res["_bundle"]["chunk"] for res in results]
+    for prev, nxt in zip(chunks, chunks[1:]):
+        if nxt["index"] != prev["index"] + 1:
+            raise SpanReject("span_chunk_order")
+    for prev, nxt in zip(chunks, chunks[1:]):
+        if prev["end"] != nxt["start"]:
+            raise SpanReject("span_chunk_chain")
+    if not chunks[0]["start"] <= offset < chunks[0]["end"]:
+        raise SpanReject("span_range_outside")
+    if offset + length > chunks[-1]["end"]:
+        raise SpanReject("span_range_outside")
+    if offset + length <= chunks[-1]["start"]:
+        raise SpanReject("span_last_unneeded")
+    # The disclosed bytes: each Blob's content, in order, sliced to the range.
+    content = b"".join(res["_content"][10:] for res in results)
+    base = chunks[0]["start"]
+    return {
+        "span": sp,
+        "results": results,
+        "path": first["path"],
+        "leaf_id_hex": first["leaf_id_hex"],
+        "offset": offset,
+        "len": length,
+        "content": content[offset - base : offset + length - base],
+    }
 
 
 def main():

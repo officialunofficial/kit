@@ -354,9 +354,20 @@ fn golden_proof_vectors_via_wasm() {
                     hashes[0].as_str().unwrap().to_string()
                 };
                 let position = u32::try_from(sidecar["position"].as_u64().unwrap()).unwrap();
+                // The sidecar writes spans as decimal strings so a value near
+                // `u64::MAX` survives JSON.
+                let (start, end) = sidecar["chunk_spans"]
+                    .as_array()
+                    .and_then(|spans| spans.first())
+                    .map_or((0, 1), |span| {
+                        let decimal = |v: &serde_json::Value| v.as_str().unwrap().parse().unwrap();
+                        (decimal(&span[0]), decimal(&span[1]))
+                    });
                 let result = verify_chunk(
                     sidecar["object_id_hex"].as_str().unwrap(),
                     &chunk_hex,
+                    start,
+                    end,
                     position,
                     &bin,
                 );
@@ -420,13 +431,13 @@ fn oversize_inputs_return_err() {
     assert!(chunked_blob_decode(&oversized).is_err());
     assert!(blob_bao_encode(&oversized).is_err());
 
-    // A well-framed KDPB v2 bundle whose commit_bytes length (5_000_000)
+    // A well-framed KDPB v3 bundle whose commit_bytes length (5_000_000)
     // is above the 4 MiB cap. The bytes, an empty step list and an empty
     // object payload follow, so the body is otherwise complete. Only the
     // cap rejects it, and it does so as a malformed body. A decoder without
     // the cap would read it and fail later with a different error.
     let mut oversize_commit = Vec::from(*b"KDPB");
-    oversize_commit.push(2);
+    oversize_commit.push(3);
     oversize_commit.extend_from_slice(&[0u8; 32]);
     oversize_commit.extend_from_slice(&[0xC0, 0x96, 0xB1, 0x02]);
     oversize_commit.resize(oversize_commit.len() + OVER_CAP, 0);

@@ -84,7 +84,7 @@ pub fn reconstruct_blob(body: &[u8]) -> Result<Reconstructed, BridgeError> {
         );
     }
     let mut extras = Vec::new();
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), body)
+    let chunks: Vec<(Hash, u64)> = ChunkIterator::new(FastCdc::v1(), body)
         .map(|b| {
             let chunk = Object::Blob(Blob {
                 data: body[b.offset..b.offset + b.length].to_vec(),
@@ -93,7 +93,7 @@ pub fn reconstruct_blob(body: &[u8]) -> Result<Reconstructed, BridgeError> {
                 .map_err(|e| BridgeError::Integrity(format!("chunk serialize: {e}")))?;
             let h = kit_core::hash::hash(&bytes);
             extras.push((h, bytes));
-            Ok::<_, BridgeError>(h)
+            Ok::<_, BridgeError>((h, (b.offset + b.length) as u64))
         })
         .collect::<Result<_, _>>()?;
     let manifest = Object::ChunkedBlob(

@@ -301,6 +301,8 @@ fn payload_json(payload: &DisclosedPayload) -> String {
             total_size,
             chunk_size,
             index,
+            start,
+            end,
             ..
         } => {
             obj.field_str("kind", "chunk")
@@ -308,13 +310,17 @@ fn payload_json(payload: &DisclosedPayload) -> String {
                 .field_str("bytes_blake3", &bytes_blake3)
                 .field_u64("index", u64::from(*index))
                 .field_u64("total_size", *total_size)
-                .field_u64("chunk_size", u64::from(*chunk_size));
+                .field_u64("chunk_size", u64::from(*chunk_size))
+                .field_u64("start", *start)
+                .field_u64("end", *end);
         }
         DisclosedPayload::Range {
             blob_id,
             chunk,
             offset_in_blob,
             absolute_offset,
+            start,
+            end,
             ..
         } => {
             obj.field_str("kind", "range")
@@ -334,14 +340,17 @@ fn payload_json(payload: &DisclosedPayload) -> String {
                 }
             }
             obj.field_u64("offset_in_blob", *offset_in_blob);
-            match absolute_offset {
-                Some(off) => {
-                    obj.field_u64("absolute_offset", *off);
-                }
-                None => {
-                    obj.field_raw("absolute_offset", "null");
+            for (key, value) in [("start", start), ("end", end)] {
+                match value {
+                    Some(value) => {
+                        obj.field_u64(key, *value);
+                    }
+                    None => {
+                        obj.field_raw(key, "null");
+                    }
                 }
             }
+            obj.field_u64("absolute_offset", *absolute_offset);
         }
     }
     obj.finish()

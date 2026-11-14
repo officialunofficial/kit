@@ -45,8 +45,9 @@
 //! id            = wrap_id(kind, bmt_root(leaves))
 //!               = domain_digest(TYPE_DOMAIN, bmt_root(leaves))
 //!
-//! ChunkedBlob   leaves = [meta_leaf] ++ chunks
-//!   meta_leaf   = domain_digest("kit-cblob-meta-v1", total_size_le ‖ chunk_size_le)
+//! ChunkedBlob   leaves = [meta_leaf] ++ chunk_leaves
+//!   meta_leaf   = domain_digest("kit-cblob-meta-v2", total_size_le ‖ chunk_size_le)
+//!   chunk_leaf  = domain_digest("kit-cblob-chunk-v1", start_le ‖ end_le ‖ chunk_id)
 //!   chunk i     -> BMT position i+1   (meta is position 0)
 //!
 //! Tree          leaves = entries (existing lex order)
@@ -89,14 +90,16 @@ use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
 use crate::hash::{HASH_LEN, Hash, Hasher, domain_digest, hash};
-use crate::object::{ChunkedBlob, Tree, TreeEntry};
+use crate::object::{ChunkedBlob, KitError, Tree, TreeEntry};
 
 /// Type domain for the outer identity wrap of a `ChunkedBlob`.
 const CHUNKED_TYPE_DOMAIN: &[u8] = b"kit.chunked\x00";
 /// Type domain for the outer identity wrap of a `Tree`.
 const TREE_TYPE_DOMAIN: &[u8] = b"kit.tree\x00";
 /// Leaf domain binding a `ChunkedBlob`'s `total_size`/`chunk_size`.
-const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v1";
+const CBLOB_META_DOMAIN: &[u8] = b"kit-cblob-meta-v2";
+/// Leaf domain binding a `ChunkedBlob` chunk's byte span and id.
+const CBLOB_CHUNK_DOMAIN: &[u8] = b"kit-cblob-chunk-v1";
 /// Leaf domain for a `Tree` entry's `(name, mode, object_hash)` triple.
 const TREE_ENTRY_DOMAIN: &[u8] = b"kit-tree-entry-v1";
 
@@ -174,9 +177,6 @@ pub enum MerkleError {
     /// A fold was given more than `u32::MAX` leaves.
     #[error("merkle tree has more than u32::MAX leaves")]
     TooManyLeaves,
-    /// Raw chunk id bytes are not a whole number of 32-byte ids.
-    #[error("chunk id bytes are not a whole number of 32-byte ids")]
-    PartialChunkId,
 }
 
 impl From<CodecError> for MerkleError {
@@ -336,82 +336,125 @@ impl BmtFold {
     }
 }
 
-/// Computes a `ChunkedBlob` id from its header fields and its chunk ids,
-/// one chunk id at a time.
+/// Computes a `ChunkedBlob` id from its header fields and its entries, one
+/// entry at a time.
 ///
 /// The id equals [`compute_chunked_id`] of the same manifest. Memory is
 /// O(log n) in the chunk count, so a caller can address a manifest
-/// without decoding it whole: read `total_size` and `chunk_size` from the
-/// header, then push the chunk ids in order, one at a time with
-/// [`Self::push`] or as the raw id bytes of a manifest with
-/// [`Self::push_ids`].
+/// without decoding it whole: read `total_size`, `chunk_size` and
+/// `chunk_count` from the header, then push each entry's chunk id and end
+/// offset in order, one at a time with [`Self::push`] or as the whole
+/// 40-byte entries of a manifest with [`Self::push_entries`], and
+/// [`Self::finish`].
 ///
-/// The fold applies none of the decode checks of SPEC-OBJECTS §7, and the
-/// id does not bind `chunk_count` by itself. A caller that reads a raw
-/// manifest checks the prologue, checks the header with
-/// [`crate::serialize::check_chunked_header`], checks that the object is
-/// exactly `22 + 32 * chunk_count` bytes long, and pushes exactly
-/// `chunk_count` ids. Otherwise it addresses a manifest that no reader
-/// decodes, or a different manifest.
+/// The fold runs the decode checks of SPEC-OBJECTS §7 that the entries
+/// carry: [`Self::new`] checks the count cap and the size cap, [`Self::push`]
+/// runs [`crate::serialize::check_chunk_entry`], the decoder's own per-entry
+/// function, and [`Self::finish`] checks the entry count and the last end. So
+/// the fold refuses the manifests a decoder refuses, at the same entry. The
+/// caller still reads the prologue and checks that the object is
+/// `22 + 40 * chunk_count` bytes long ([`crate::serialize::CHUNKED_HEADER_LEN`],
+/// [`crate::serialize::CHUNKED_ENTRY_LEN`]), which is the decoder's checks
+/// 1 and 2.
 #[derive(Debug)]
 pub struct ChunkedIdFold {
     fold: BmtFold,
+    total_size: u64,
+    chunk_size: u32,
+    chunk_count: u32,
+    /// Entries pushed so far.
+    pushed: u32,
+    /// The end of the last entry pushed, `0` before the first.
+    prev_end: u64,
 }
 
 impl ChunkedIdFold {
     /// Start a fold for a manifest with these header fields. The metadata
     /// leaf takes position 0.
-    #[must_use]
-    // The expect cannot fire: the leaves before the chunks are few, far
-    // below `u32::MAX`.
+    ///
+    /// # Errors
+    /// [`KitError::TooManyChunks`] for a `chunk_count` above
+    /// [`crate::serialize::MAX_CHUNKS`], and
+    /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
+    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
+    // The expect cannot fire: one leaf is far below `u32::MAX`.
     #[allow(clippy::missing_panics_doc)]
-    pub fn new(total_size: u64, chunk_size: u32) -> Self {
+    pub fn new(total_size: u64, chunk_size: u32, chunk_count: u32) -> Result<Self, KitError> {
+        crate::serialize::check_chunked_header(total_size, chunk_count)?;
         let mut fold = BmtFold::new();
-        for leaf in ChunkedBlob::leaf_sequence(total_size, chunk_size, core::iter::empty()) {
-            fold.push(&leaf)
-                .expect("the leaves before the chunks fit u32");
+        fold.push(&chunked_meta_leaf_raw(total_size, chunk_size))
+            .expect("one leaf fits u32");
+        Ok(Self {
+            fold,
+            total_size,
+            chunk_size,
+            chunk_count,
+            pushed: 0,
+            prev_end: 0,
+        })
+    }
+
+    /// Append the next entry: the chunk id and the offset one past the
+    /// chunk's last byte.
+    ///
+    /// # Errors
+    /// [`KitError::ChunkedBlobLength`] when the header's `chunk_count`
+    /// entries have been pushed already, and the errors of
+    /// [`crate::serialize::check_chunk_entry`].
+    pub fn push(&mut self, chunk: &Hash, end: u64) -> Result<(), KitError> {
+        if self.pushed >= self.chunk_count {
+            return Err(KitError::ChunkedBlobLength);
         }
-        Self { fold }
+        crate::serialize::check_chunk_entry(
+            self.pushed,
+            self.chunk_size,
+            self.total_size,
+            self.prev_end,
+            end,
+        )?;
+        self.fold
+            .push(&chunked_chunk_leaf_raw(self.prev_end, end, chunk))
+            .map_err(|_| KitError::TooManyChunks)?;
+        self.pushed += 1;
+        self.prev_end = end;
+        Ok(())
     }
 
-    /// Append the next chunk id.
+    /// Append the entries in `entries`, a run of whole 40-byte entries as
+    /// they sit in a manifest's encoding, in order. A caller can pass a
+    /// manifest's entry bytes in slices of any whole-entry length.
     ///
     /// # Errors
-    /// [`MerkleError::TooManyLeaves`] once the fold holds `u32::MAX`
-    /// leaves.
-    pub fn push(&mut self, chunk: &Hash) -> Result<(), MerkleError> {
-        self.fold.push(chunk)
-    }
-
-    /// Append the chunk ids in `ids`, a run of whole 32-byte ids as they
-    /// sit in a manifest's encoding, in order. A caller can pass a
-    /// manifest's id bytes in slices of any whole-id length.
-    ///
-    /// # Errors
-    /// [`MerkleError::PartialChunkId`] if `ids` is not a whole number of
-    /// ids, before any id is pushed, and [`MerkleError::TooManyLeaves`]
-    /// once the fold holds `u32::MAX` leaves.
-    pub fn push_ids(&mut self, ids: &[u8]) -> Result<(), MerkleError> {
-        let (ids, rest) = ids.as_chunks::<HASH_LEN>();
+    /// [`KitError::ChunkedBlobLength`] if `entries` is not a whole number
+    /// of entries, before any entry is pushed, and the errors of
+    /// [`Self::push`].
+    #[allow(clippy::missing_panics_doc)] // the expects split a 40-byte entry
+    pub fn push_entries(&mut self, entries: &[u8]) -> Result<(), KitError> {
+        let (entries, rest) = entries.as_chunks::<{ crate::serialize::CHUNKED_ENTRY_LEN }>();
         if !rest.is_empty() {
-            return Err(MerkleError::PartialChunkId);
+            return Err(KitError::ChunkedBlobLength);
         }
-        for id in ids {
-            self.fold.push(id)?;
+        for entry in entries {
+            let (chunk, end) = entry.split_at(HASH_LEN);
+            let chunk: Hash = chunk.try_into().expect("an entry starts with a 32-byte id");
+            let end = u64::from_le_bytes(end.try_into().expect("an entry ends with 8 bytes"));
+            self.push(&chunk, end)?;
         }
         Ok(())
     }
 
-    /// The bare (pre-wrap) BMT root, as [`chunked_inner_root`] returns it.
-    #[must_use]
-    pub fn inner_root(&self) -> Hash {
-        self.fold.root()
-    }
-
-    /// The object id, as [`compute_chunked_id`] returns it.
-    #[must_use]
-    pub fn id(&self) -> Hash {
-        wrap_id(ObjectKind::ChunkedBlob, &self.fold.root())
+    /// Close the fold and return the object id, as [`compute_chunked_id`]
+    /// returns it.
+    ///
+    /// # Errors
+    /// [`KitError::ChunkedBlobLength`] unless exactly `chunk_count` entries
+    /// were pushed, and the errors of [`crate::serialize::check_last_end`].
+    pub fn finish(self) -> Result<Hash, KitError> {
+        if self.pushed != self.chunk_count {
+            return Err(KitError::ChunkedBlobLength);
+        }
+        crate::serialize::check_last_end(self.total_size, self.pushed as usize, self.prev_end)?;
+        Ok(wrap_id(ObjectKind::ChunkedBlob, &self.fold.root()))
     }
 }
 
@@ -1018,12 +1061,25 @@ impl Proof {
 /// from the chunk list and without it they could be forged (a
 /// second-preimage hole). [`ChunkedBlob::leaf_sequence`] places it, and
 /// [`verify_chunk_with_meta_leaf`] (which, by design, never has a manifest;
-/// see that function's docs) takes it from a caller.
+/// see that function's docs) computes it itself.
 pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
     let mut body = [0u8; 12];
     body[..8].copy_from_slice(&total_size.to_le_bytes());
     body[8..].copy_from_slice(&chunk_size.to_le_bytes());
     domain_digest(CBLOB_META_DOMAIN, &body)
+}
+
+/// The leaf digest for one `ChunkedBlob` chunk: the chunk's byte span
+/// `[start, end)` and its id. It binds both offsets, so one proof of the
+/// leaf gives a chunk's place in the file and its committed length. The
+/// fixed-width body keeps the leaf from aliasing any other kind of leaf.
+/// [`ChunkedBlob::leaf_sequence`] places it.
+pub(crate) fn chunked_chunk_leaf_raw(start: u64, end: u64, chunk_id: &Hash) -> Hash {
+    let mut body = [0u8; 16 + HASH_LEN];
+    body[..8].copy_from_slice(&start.to_le_bytes());
+    body[8..16].copy_from_slice(&end.to_le_bytes());
+    body[16..].copy_from_slice(chunk_id);
+    domain_digest(CBLOB_CHUNK_DOMAIN, &body)
 }
 
 /// The leaf digest for one `Tree` entry. The `name_len` u32-LE prefix is
@@ -1044,10 +1100,10 @@ fn chunked_leaves(cb: &ChunkedBlob) -> impl Iterator<Item = Hash> + '_ {
     cb.leaves()
 }
 
-/// The leaf count of a `ChunkedBlob`'s tree, counted from its leaves. A
-/// slice iterator counts in O(1), so this does not walk the chunks.
+/// The leaf count of a `ChunkedBlob`'s tree: the metadata leaf and one
+/// leaf per chunk. It does not walk the chunks.
 fn chunked_leaf_count(cb: &ChunkedBlob) -> u32 {
-    u32_of(cb.leaves().count())
+    u32_of(cb.chunks().len() + 1)
 }
 
 /// The raw leaves of a `Tree`: one per entry.
@@ -1103,16 +1159,17 @@ pub const TREE_EMPTY_ID: Hash = [
 // Position lookup
 // ---------------------------------------------------------------------------
 
-/// BMT position of `chunk_hash` within `cb`, or `None` if absent. The
-/// returned position is the chunk index **+ 1** (the metadata leaf
-/// occupies position 0).
+/// BMT position of the first chunk of `cb` with id `chunk_hash`, or `None`
+/// if absent. The returned position is the chunk index **+ 1** (the
+/// metadata leaf occupies position 0). A chunk id can sit at several
+/// indices, each with its own span; a caller that knows the index adds 1
+/// itself.
 #[must_use]
 pub fn chunk_position(cb: &ChunkedBlob, chunk_hash: &Hash) -> Option<u32> {
-    cb.leaves()
-        .enumerate()
-        .skip(1)
-        .find(|(_, leaf)| leaf == chunk_hash)
-        .map(|(position, _)| u32_of(position))
+    cb.chunks()
+        .iter()
+        .position(|chunk| chunk == chunk_hash)
+        .map(|index| u32_of(index + 1))
 }
 
 /// BMT position (= entry index) of the entry named `name` within `tree`,
@@ -1241,36 +1298,56 @@ pub fn verify_tree_entries_multi(
     check_wrapped(ObjectKind::Tree, &root, tree_id)
 }
 
-/// Verify that the chunk `chunk_hash` at `position` belongs to the
-/// `ChunkedBlob` whose id is `chunked_id`. Rejects `position == 0`: that
-/// position is the metadata leaf, not a chunk, so a valid BMT proof of it
-/// must never be accepted as a chunk proof (see `verify_chunk_rejects_meta_leaf`).
+/// A chunk as its leaf commits it: the chunk id and the byte span
+/// `[start, end)` it covers in the file (SPEC-MERKLE-OBJECTS §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpannedChunk {
+    /// The chunk's blob id.
+    pub id: Hash,
+    /// The offset of the chunk's first byte.
+    pub start: u64,
+    /// The offset one past the chunk's last byte.
+    pub end: u64,
+}
+
+impl SpannedChunk {
+    /// The raw leaf digest this chunk has in its manifest's tree.
+    fn leaf(&self) -> Hash {
+        chunked_chunk_leaf_raw(self.start, self.end, &self.id)
+    }
+}
+
+/// Verify that `chunk` at `position` belongs to the `ChunkedBlob` whose id
+/// is `chunked_id`. Rejects `position == 0`: that position is the
+/// metadata leaf, not a chunk, so a valid BMT proof of it must never be
+/// accepted as a chunk proof (see `verify_chunk_rejects_meta_leaf`).
 pub fn verify_chunk(
     chunked_id: &Hash,
-    chunk_hash: &Hash,
+    chunk: &SpannedChunk,
     position: u32,
     proof: &Proof,
 ) -> Result<(), MerkleError> {
     if position == 0 {
         return Err(MerkleError::PositionOutOfRange(0));
     }
-    let root = proof.reconstruct_element_root(chunk_hash, position)?;
+    let root = proof.reconstruct_element_root(&chunk.leaf(), position)?;
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
 
-/// Verify that `chunk_hashes` (in chunk order, starting at `start`) belong
-/// to the `ChunkedBlob` whose id is `chunked_id`. Rejects a range whose
-/// `start` is 0 (the metadata leaf).
+/// Verify that `chunks` (in chunk order, starting at BMT position `start`)
+/// belong to the `ChunkedBlob` whose id is `chunked_id`. Rejects a range
+/// whose `start` is 0 (the metadata leaf).
 pub fn verify_chunks_range(
     chunked_id: &Hash,
     start: u32,
-    chunk_hashes: &[Hash],
+    chunks: &[SpannedChunk],
     proof: &Proof,
 ) -> Result<(), MerkleError> {
     if start == 0 {
         return Err(MerkleError::PositionOutOfRange(0));
     }
-    let root = proof.reconstruct_range_root(start, chunk_hashes)?;
+    let leaves: Vec<Hash> = chunks.iter().map(SpannedChunk::leaf).collect();
+    let root = proof.reconstruct_range_root(start, &leaves)?;
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
 
@@ -1279,13 +1356,13 @@ pub fn verify_chunks_range(
 /// ascending. Rejects any position `== 0` (the metadata leaf).
 pub fn verify_chunks_multi(
     chunked_id: &Hash,
-    chunks: &[(Hash, u32)],
+    chunks: &[(SpannedChunk, u32)],
     proof: &Proof,
 ) -> Result<(), MerkleError> {
     if chunks.iter().any(|(_, pos)| *pos == 0) {
         return Err(MerkleError::PositionOutOfRange(0));
     }
-    let elements: Vec<(Hash, u32)> = chunks.to_vec();
+    let elements: Vec<(Hash, u32)> = chunks.iter().map(|(c, pos)| (c.leaf(), *pos)).collect();
     let root = proof.reconstruct_multi_root(&elements)?;
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
@@ -1293,8 +1370,8 @@ pub fn verify_chunks_multi(
 /// Verify, in one multi-proof, that (a) a `ChunkedBlob`'s metadata leaf —
 /// computed HERE from the caller's *claimed* `total_size`/`chunk_size`,
 /// never accepted as an externally supplied leaf digest — and (b) the
-/// chunk `chunk_hash` at `chunk_position` (= chunk index + 1) both belong
-/// to the `ChunkedBlob` whose id is `chunked_id`.
+/// leaf of `chunk` (its id and span) at `chunk_position` (= chunk index
+/// + 1) both belong to the `ChunkedBlob` whose id is `chunked_id`.
 ///
 /// This is the one sanctioned way a proof over position 0 is ever
 /// accepted from outside this module: the verifier derives the meta leaf
@@ -1305,12 +1382,12 @@ pub fn verify_chunks_multi(
 /// one always proves exactly `{0, chunk_position}` together. Used by
 /// `crate::verify` (SPEC-DISCLOSURE) to
 /// authenticate a disclosed chunk's `total_size`/`chunk_size`
-/// announcement alongside its content id, in a single proof.
+/// announcement alongside its content id and span, in a single proof.
 pub(crate) fn verify_chunk_with_meta_leaf(
     chunked_id: &Hash,
     total_size: u64,
     chunk_size: u32,
-    chunk_hash: &Hash,
+    chunk: &SpannedChunk,
     chunk_position: u32,
     proof: &Proof,
 ) -> Result<(), MerkleError> {
@@ -1318,7 +1395,7 @@ pub(crate) fn verify_chunk_with_meta_leaf(
         return Err(MerkleError::PositionOutOfRange(0));
     }
     let meta_leaf = chunked_meta_leaf_raw(total_size, chunk_size);
-    let elements = [(meta_leaf, 0u32), (*chunk_hash, chunk_position)];
+    let elements = [(meta_leaf, 0u32), (chunk.leaf(), chunk_position)];
     let root = proof.reconstruct_multi_root(&elements)?;
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
@@ -1342,7 +1419,50 @@ mod tests {
     use crate::object::EntryMode;
 
     fn cb(total: u64, chunk_size: u32, chunks: &[u8]) -> ChunkedBlob {
-        ChunkedBlob::new(total, chunk_size, chunks.iter().map(|b| [*b; 32]).collect()).unwrap()
+        crate::object::testing::spread(total, chunk_size, chunks.iter().map(|b| [*b; 32]).collect())
+            .unwrap()
+    }
+
+    /// The leaf digests of `chunk_offsets_expected.json`, which a reference
+    /// wrote from the spec: the values at the top of the `u64` range, the
+    /// empty file, and a start and end swapped.
+    #[test]
+    fn leaf_digests_match_the_reference_file() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../scripts/golden/chunk_offsets_expected.json");
+        let file: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let decimal = |v: &serde_json::Value| v.as_str().unwrap().parse::<u64>().unwrap();
+        let leaves = file["leaf_digests"].as_array().unwrap();
+        assert_eq!(leaves.len(), 5);
+        for leaf in leaves {
+            let name = leaf["name"].as_str().unwrap();
+            let got = if leaf["domain"] == "kit-cblob-meta-v2" {
+                let chunk_size = u32::try_from(leaf["chunk_size"].as_u64().unwrap()).unwrap();
+                chunked_meta_leaf_raw(decimal(&leaf["total_size"]), chunk_size)
+            } else {
+                let id: Hash = hex::decode(leaf["chunk_id_hex"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                chunked_chunk_leaf_raw(decimal(&leaf["start"]), decimal(&leaf["end"]), &id)
+            };
+            assert_eq!(
+                hex::encode(got),
+                leaf["digest_hex"].as_str().unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Chunk `index` of `c` as its leaf commits it.
+    fn sc(c: &ChunkedBlob, index: u32) -> SpannedChunk {
+        let (start, end) = c.span(index).unwrap();
+        SpannedChunk {
+            id: c.chunks()[index as usize],
+            start,
+            end,
+        }
     }
 
     fn entry(name: &[u8], mode: EntryMode, h: u8) -> TreeEntry {
@@ -1431,7 +1551,7 @@ mod tests {
     #[test]
     fn chunk_position_skips_the_meta_leaf_and_finds_the_first_repeat() {
         let meta = chunked_meta_leaf_raw(100, 0);
-        let c = ChunkedBlob::new(100, 0, vec![[4; 32], meta, [4; 32]]).unwrap();
+        let c = crate::object::testing::spread(100, 0, vec![[4; 32], meta, [4; 32]]).unwrap();
         assert_eq!(chunk_position(&c, &meta), Some(2));
         assert_eq!(chunk_position(&c, &[4; 32]), Some(1));
     }
@@ -1459,8 +1579,45 @@ mod tests {
             let pos = chunk_position(&c, &[byte; 32]).unwrap();
             assert_eq!(pos, u32_of(idx) + 1);
             let proof = build_chunk_proof(&c, pos).unwrap();
-            verify_chunk(&id, &[byte; 32], pos, &proof).unwrap();
-            assert!(verify_chunk(&id, &[0xFF; 32], pos, &proof).is_err());
+            let chunk = sc(&c, u32_of(idx));
+            verify_chunk(&id, &chunk, pos, &proof).unwrap();
+            assert!(
+                verify_chunk(
+                    &id,
+                    &SpannedChunk {
+                        id: [0xFF; 32],
+                        ..chunk
+                    },
+                    pos,
+                    &proof
+                )
+                .is_err()
+            );
+            // The span is committed: moving either end breaks the proof.
+            assert!(
+                verify_chunk(
+                    &id,
+                    &SpannedChunk {
+                        start: chunk.start + 1,
+                        ..chunk
+                    },
+                    pos,
+                    &proof
+                )
+                .is_err()
+            );
+            assert!(
+                verify_chunk(
+                    &id,
+                    &SpannedChunk {
+                        end: chunk.end + 1,
+                        ..chunk
+                    },
+                    pos,
+                    &proof
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1476,7 +1633,16 @@ mod tests {
             .expect("meta leaf is a valid BMT element at position 0");
         // ...but `verify_chunk` MUST reject it: position 0 is never a chunk.
         assert_eq!(
-            verify_chunk(&id, &meta_leaf, 0, &proof),
+            verify_chunk(
+                &id,
+                &SpannedChunk {
+                    id: meta_leaf,
+                    start: 0,
+                    end: 1
+                },
+                0,
+                &proof
+            ),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }
@@ -1488,19 +1654,29 @@ mod tests {
         let pos = chunk_position(&c, &[20; 32]).unwrap(); // index 1 -> position 2
         let proof = build_chunks_multi_proof(&c, [0, pos]).unwrap();
 
-        verify_chunk_with_meta_leaf(&id, 100, 0, &[20; 32], pos, &proof).unwrap();
+        let chunk = sc(&c, 1);
+        verify_chunk_with_meta_leaf(&id, 100, 0, &chunk, pos, &proof).unwrap();
 
         // Forged total_size must be rejected — the meta leaf the verifier
         // computes no longer folds to the real root.
-        assert!(verify_chunk_with_meta_leaf(&id, 101, 0, &[20; 32], pos, &proof).is_err());
+        assert!(verify_chunk_with_meta_leaf(&id, 101, 0, &chunk, pos, &proof).is_err());
         // Forged chunk_size, likewise.
-        assert!(verify_chunk_with_meta_leaf(&id, 100, 64, &[20; 32], pos, &proof).is_err());
-        // Wrong chunk hash at the right position.
-        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &[0xFF; 32], pos, &proof).is_err());
+        assert!(verify_chunk_with_meta_leaf(&id, 100, 64, &chunk, pos, &proof).is_err());
+        // Wrong chunk hash, or a moved span, at the right position.
+        let other = SpannedChunk {
+            id: [0xFF; 32],
+            ..chunk
+        };
+        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &other, pos, &proof).is_err());
+        let moved = SpannedChunk {
+            end: chunk.end - 1,
+            ..chunk
+        };
+        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &moved, pos, &proof).is_err());
         // Position 0 is never accepted as `chunk_position`, even though
         // it is a structurally valid multi-proof position.
         assert_eq!(
-            verify_chunk_with_meta_leaf(&id, 100, 0, &[10; 32], 0, &proof),
+            verify_chunk_with_meta_leaf(&id, 100, 0, &sc(&c, 0), 0, &proof),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }
@@ -1611,18 +1787,9 @@ mod tests {
         let c = cb(100, 0, &[1, 2, 3, 4]);
         let chunked_id = compute_chunked_id(&c);
         let chunk_proof = build_chunks_multi_proof(&c, [1, 3]).unwrap();
-        verify_chunks_multi(
-            &chunked_id,
-            &[(c.chunks()[0], 1), (c.chunks()[2], 3)],
-            &chunk_proof,
-        )
-        .unwrap();
+        verify_chunks_multi(&chunked_id, &[(sc(&c, 0), 1), (sc(&c, 2), 3)], &chunk_proof).unwrap();
         assert_eq!(
-            verify_chunks_multi(
-                &chunked_id,
-                &[(c.chunks()[2], 3), (c.chunks()[0], 1)],
-                &chunk_proof
-            ),
+            verify_chunks_multi(&chunked_id, &[(sc(&c, 2), 3), (sc(&c, 0), 1)], &chunk_proof),
             Err(MerkleError::UnsortedPosition(1))
         );
         assert_eq!(
@@ -1642,12 +1809,12 @@ mod tests {
         let id = compute_chunked_id(&c);
         let proof = build_chunks_range_proof(&c, 0, 1).unwrap();
         assert_eq!(
-            verify_chunks_range(&id, 0, &c.chunks()[..2], &proof),
+            verify_chunks_range(&id, 0, &[sc(&c, 0), sc(&c, 1)], &proof),
             Err(MerkleError::PositionOutOfRange(0))
         );
         let multi = build_chunks_multi_proof(&c, [0, 2]).unwrap();
         assert_eq!(
-            verify_chunks_multi(&id, &[(c.chunks()[0], 0), (c.chunks()[1], 2)], &multi),
+            verify_chunks_multi(&id, &[(sc(&c, 0), 0), (sc(&c, 1), 2)], &multi),
             Err(MerkleError::PositionOutOfRange(0))
         );
     }
@@ -1951,19 +2118,18 @@ mod tests {
         }
     }
 
-    /// The id of a `FastCDC` manifest of `count` generated 16 KiB chunks.
-    /// Chunk `i` is `i` as a little-endian u64, zero-padded to 32 bytes.
+    /// A fixed-size manifest of `count` generated 16 KiB chunks. Chunk `i`
+    /// is `i` as a little-endian u32, zero-padded to 32 bytes, and ends at
+    /// `(i + 1) * 16384`.
     fn generated_manifest(count: u32) -> ChunkedBlob {
         ChunkedBlob::new(
             u64::from(count) * 16 * 1024,
-            0,
-            (0..count)
-                .map(|i| {
-                    let mut id = [0u8; 32];
-                    id[..8].copy_from_slice(&u64::from(i).to_le_bytes());
-                    id
-                })
-                .collect(),
+            16 * 1024,
+            (0..count).map(|i| {
+                let mut id = [0u8; 32];
+                id[..4].copy_from_slice(&i.to_le_bytes());
+                (id, (u64::from(i) + 1) * 16 * 1024)
+            }),
         )
         .unwrap()
     }
@@ -1971,9 +2137,9 @@ mod tests {
     /// The level-build ids of `generated_manifest(1_000_001)` and
     /// `generated_manifest(MAX_CHUNKS)`.
     const ID_AT_1_000_001_CHUNKS: &str =
-        "b0dca84f37350aeb6cfbf8f240f4c6a0d68b795d8412057bbc8fdfbbde0da767";
+        "d46d3b161a5f29df5c491f2c71d6848c59b28cec51febb46d387a06da654554a";
     const ID_AT_THE_CHUNK_CAP: &str =
-        "2703e358293c235eb9103a36a25088cba7133be0cc4a957787632ecd8b77140e";
+        "ad85a55884e6975af68fccb6247c501a90dc64c5750c14bf4e6f267c9a1cc544";
 
     /// A manifest just past the old 1,000,000-chunk cap keeps the id the
     /// level build gives it.
@@ -1984,6 +2150,21 @@ mod tests {
             crate::hash::to_hex(&compute_chunked_id(&manifest)),
             ID_AT_1_000_001_CHUNKS
         );
+        assert_eq!(
+            crate::hash::to_hex(&fold_id(&generated_manifest(1_000_001))),
+            ID_AT_1_000_001_CHUNKS
+        );
+    }
+
+    /// The id `ChunkedIdFold` gives a manifest fed entry by entry.
+    fn fold_id(manifest: &ChunkedBlob) -> Hash {
+        let count = u32::try_from(manifest.chunks().len()).unwrap();
+        let mut fold =
+            ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), count).unwrap();
+        for (chunk, end) in manifest.entries() {
+            fold.push(&chunk, end).unwrap();
+        }
+        fold.finish().unwrap()
     }
 
     /// The level build gives the pinned ids, and the fold gives the same id
@@ -2007,6 +2188,7 @@ mod tests {
                 "level build at {count}"
             );
             assert_eq!(compute_chunked_id(&manifest), levels, "fold at {count}");
+            assert_eq!(fold_id(&manifest), levels, "entry fold at {count}");
         }
     }
 
@@ -2016,37 +2198,42 @@ mod tests {
     fn chunked_id_fold_matches_compute_chunked_id() {
         for n in [0u8, 1, 2, 3, 7, 8, 9] {
             let manifest = cb(u64::from(n) * 5, 0, &(1..=n).collect::<Vec<_>>());
-            let mut fold = ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size());
-            for chunk in manifest.chunks() {
-                fold.push(chunk).unwrap();
+            let mut fold =
+                ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), u32::from(n))
+                    .unwrap();
+            for (chunk, end) in manifest.entries() {
+                fold.push(&chunk, end).unwrap();
             }
-            assert_eq!(fold.id(), compute_chunked_id(&manifest));
-            assert_eq!(fold.inner_root(), chunked_inner_root(&manifest));
+            assert_eq!(fold.finish().unwrap(), compute_chunked_id(&manifest));
             assert_eq!(
-                fold.inner_root(),
+                chunked_inner_root(&manifest),
                 build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>()).root
             );
         }
     }
 
-    /// Folding a manifest's raw id bytes, in uneven slices, gives the
-    /// decoded manifest's id, and a partial id is refused.
+    /// Folding a manifest's raw entry bytes, in uneven whole-entry slices,
+    /// gives the decoded manifest's id, and a partial entry is refused.
     #[test]
-    fn push_ids_matches_the_decoded_manifest() {
+    fn push_entries_matches_the_decoded_manifest() {
         let manifest = generated_manifest(1000);
         let bytes =
             crate::serialize::serialize(&crate::object::Object::ChunkedBlob(manifest.clone()))
                 .unwrap();
         // Prologue 6, total_size 8, chunk_size 4, chunk_count 4.
-        let ids = &bytes[22..];
-        let mut fold = ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size());
-        for slice in [&ids[..32], &ids[32..32 * 7], &ids[32 * 7..]] {
-            fold.push_ids(slice).unwrap();
+        let entries = &bytes[22..];
+        let mut fold =
+            ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), 1000).unwrap();
+        for slice in [&entries[..40], &entries[40..40 * 7], &entries[40 * 7..]] {
+            fold.push_entries(slice).unwrap();
         }
-        assert_eq!(fold.id(), compute_chunked_id(&manifest));
-        let mut partial = ChunkedIdFold::new(0, 0);
-        assert_eq!(partial.push_ids(&[0; 33]), Err(MerkleError::PartialChunkId));
-        assert_eq!(partial.id(), ChunkedIdFold::new(0, 0).id());
+        assert_eq!(fold.finish().unwrap(), compute_chunked_id(&manifest));
+        let mut partial =
+            ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), 1000).unwrap();
+        assert_eq!(
+            partial.push_entries(&entries[..41]),
+            Err(KitError::ChunkedBlobLength)
+        );
     }
 
     /// A fold refuses a leaf past `u32::MAX` instead of wrapping its
@@ -2355,13 +2542,26 @@ mod kani_proofs {
     fn toy_h2(a: &[u8], b: &[u8]) -> Hash {
         toy(a, b)
     }
+    /// The body's first 16 bytes, the 16 after them and its last 16 are
+    /// mixed, so a change in a chunk leaf's span (the first 16 bytes) or in
+    /// any byte of its chunk id (the last 32) reaches the digest. Loop-free,
+    /// like `toy`.
     fn toy_domain_digest(domain: &[u8], body: &[u8]) -> Hash {
-        toy(body, domain)
+        fn word(x: &[u8]) -> u128 {
+            let mut w = [0u8; 16];
+            let n = x.len().min(16);
+            w[..n].copy_from_slice(&x[..n]);
+            u128::from_le_bytes(w)
+        }
+        let middle = body.get(16..).unwrap_or(&[]);
+        let tail = &body[body.len().saturating_sub(16)..];
+        let mixed =
+            (word(body) ^ word(middle).rotate_left(8) ^ word(tail).rotate_left(24)).to_le_bytes();
+        toy(&mixed, domain)
     }
     fn toy_hash(data: &[u8]) -> Hash {
         toy(data, &[])
     }
-
     /// SPEC-MERKLE-OBJECTS §5.3/§5.4: number of wire siblings a
     /// single-leaf proof of `position` in a `leaf_count`-leaf tree
     /// consumes (odd trailing nodes fold with themselves, no sibling).
@@ -2450,7 +2650,12 @@ mod kani_proofs {
             && proof.siblings.len() == spec_sibling_count(proof.leaf_count, position);
         assert_eq!(folded.is_ok(), shape_ok);
 
-        let chunk = verify_chunk(&id, &leaf, position, &proof);
+        let span = SpannedChunk {
+            id: leaf,
+            start: kani::any(),
+            end: kani::any(),
+        };
+        let chunk = verify_chunk(&id, &span, position, &proof);
         if position == 0 {
             assert_eq!(chunk, Err(MerkleError::PositionOutOfRange(0)));
         }
@@ -2548,11 +2753,37 @@ mod kani_proofs {
     /// §3.1 leaf list `[meta, chunks…]`, and its id computed through the
     /// §2 domain wrap of the spec-built root.
     fn chunked_fixture<const N: usize>() -> (ChunkedBlob, Vec<Hash>) {
-        let cb =
-            ChunkedBlob::new_unchecked(kani::any(), kani::any(), kani::any::<[Hash; N]>().to_vec());
-        let mut leaves = vec![chunked_meta_leaf_raw(cb.total_size(), cb.chunk_size())];
-        leaves.extend_from_slice(cb.chunks());
+        let total: u64 = kani::any();
+        let chunk_size: u32 = kani::any();
+        let ids: [Hash; N] = kani::any();
+        let ends: [u64; N] = kani::any();
+        let cb = ChunkedBlob::new_unchecked(total, chunk_size, ids.to_vec(), ends.to_vec());
+        // The leaves by hand, from SPEC-MERKLE-OBJECTS §3.1, not through the
+        // code under test.
+        let mut meta = [0u8; 12];
+        meta[..8].copy_from_slice(&total.to_le_bytes());
+        meta[8..].copy_from_slice(&chunk_size.to_le_bytes());
+        let mut leaves = vec![crate::hash::domain_digest(b"kit-cblob-meta-v2", &meta)];
+        let mut start = 0u64;
+        for (id, end) in ids.iter().zip(ends) {
+            let mut body = [0u8; 48];
+            body[..8].copy_from_slice(&start.to_le_bytes());
+            body[8..16].copy_from_slice(&end.to_le_bytes());
+            body[16..].copy_from_slice(id);
+            leaves.push(crate::hash::domain_digest(b"kit-cblob-chunk-v1", &body));
+            start = end;
+        }
         (cb, leaves)
+    }
+
+    /// Chunk `index` of `cb` with the span the manifest commits.
+    fn spanned(cb: &ChunkedBlob, index: u32) -> SpannedChunk {
+        let (start, end) = cb.span(index).unwrap();
+        SpannedChunk {
+            id: cb.chunks()[index as usize],
+            start,
+            end,
+        }
     }
 
     /// Spec-built proof for chunk `pos` (1-based, concrete) of an
@@ -2571,7 +2802,7 @@ mod kani_proofs {
             spec_sibling_count(proof.leaf_count, pos)
         );
         assert_eq!(
-            verify_chunk(&id, &cb.chunks()[(pos - 1) as usize], pos, &proof),
+            verify_chunk(&id, &spanned(&cb, pos - 1), pos, &proof),
             Ok(())
         );
     }
@@ -2669,7 +2900,11 @@ mod kani_proofs {
             leaf_count: 3,
             siblings,
         };
-        let forged: Hash = kani::any();
+        let forged = SpannedChunk {
+            id: kani::any(),
+            start: kani::any(),
+            end: kani::any(),
+        };
         assert!(verify_chunk(&id, &forged, 1, &proof).is_ok());
     }
 }

@@ -1,28 +1,28 @@
 {
   "bin": "unreferenced_undecodable_extra.manifest.bin",
-  "blake3": "42690e011ab5d807abc614b23ffd38717e6ec836da32c15d6757234d7e21b5d2",
+  "blake3": "f9a86334e97806eb8c00a6c96f193cb87ed5b259b061184028d09c4c00842f16",
   "description": "Bytes that decode to no object are supplied; unreferenced, still complete.",
   "expect": "accept",
   "ids": [
     "1a6196a1fa62528a7f063961082605ce0607f5154549ed897c740368871115d1",
+    "2e316e36c7e9ff583e22f6980fcbaee2e8db6843632a177d9133fc44975f9b2e",
     "3a056150fb8dbdd13507eb67e7b13c67dde0658368151381b3aeb431373db772",
     "4f024791c53cd90d98fdcc4d245743ace83de8df37b79d1afe99c5dd6c6382ad",
-    "8c42e5ddb073dcee4c6d9754c0f1026ed73f04b80c8025e132430083f836ef07",
+    "543104ee64e1a98ac01e2a096a021a14bd454d06b12f4192881d2731b3bcb8c6",
     "9b72443311af4f7aea17ed35950c9f712ea3cac594965081dbebbb721944d320",
-    "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
     "af42b597b898859e3cbb938919c7877140cf9cffec0c303be78e46f14e3d64ad",
     "bf23bdae6bc394c54e30250314c42405439199ccbef0223d09c6770937e26e12",
-    "d0b975470d14ec60e9b728014d4fa7c64d2af411969c82ea9d05da0e3e000b2c",
-    "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde"
+    "e8b91e2d0eff68db1cb2bfcbc5eb1aaee3f43d37d22a58a708bb41291d11ccde",
+    "f8a1b1e91b8005890a876ac55621d79d23665e26eaac2f00be55f3d9b2224d45"
   ],
   "mode": "snapshot",
   "n_packs": 1,
   "name": "unreferenced_undecodable_extra",
   "pack_hashes": [
-    "6b445f76a40236fa7e4434a49875ca5ce1dc8944f78e624ec744e83c756ec7ac"
+    "d485c83fbf336f6e733ca77ec0f7705d2fa0413bb38e9171f3cf3ab2943d1dbf"
   ],
   "reason": "unreferenced",
-  "root_hex": "a273bf064da865c9d6eae5206cc24b719d0a8aba95335b1234ead318de351c93",
+  "root_hex": "f8a1b1e91b8005890a876ac55621d79d23665e26eaac2f00be55f3d9b2224d45",
   "size": 71,
   "unreferenced": [
     "e86318c0b1a2865cff31dcf2c7b4326b045b57d37da28374de95b066cb31173c"

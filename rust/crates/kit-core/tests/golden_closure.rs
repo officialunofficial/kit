@@ -226,11 +226,14 @@ fn build_fixture() -> ClosureFixture {
     let exec = store_file_object(&store, b"#!/bin/sh\necho hi\n").unwrap();
 
     let chunked_bytes = common::prng_bytes(3, CHUNKED_FILE_LEN);
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &chunked_bytes)
+    let chunks: Vec<(Hash, u64)> = ChunkIterator::new(FastCdc::v1(), &chunked_bytes)
         .take(chunked_bytes.len() + 1)
         .map(|b| {
             let data = chunked_bytes[b.offset..b.offset + b.length].to_vec();
-            write_object(&store, Object::Blob(Blob { data }))
+            (
+                write_object(&store, Object::Blob(Blob { data })),
+                (b.offset + b.length) as u64,
+            )
         })
         .collect();
     assert!(chunks.len() > 1, "fixture file must split into chunks");
@@ -543,16 +546,16 @@ fn build_vectors() -> Vec<Vector> {
         let (seven_id, seven_bytes) = object_bytes(Object::Blob(Blob {
             data: b"1234567".to_vec(),
         }));
-        let chunked = |chunks: &[Hash]| {
+        let chunked = |total, chunk_size, entries: &[(Hash, u64)]| {
             object_bytes(Object::ChunkedBlob(
-                ChunkedBlob::new(13, 0, chunks.to_vec()).unwrap(),
+                ChunkedBlob::new(total, chunk_size, entries.to_vec()).unwrap(),
             ))
         };
-        let (names_tree_id, names_tree_bytes) = chunked(&[inner_id]);
-        let (sum_id, sum_bytes) = chunked(&[five_id, seven_id]);
-        let (fixed_id, fixed_bytes) = object_bytes(Object::ChunkedBlob(
-            ChunkedBlob::new(12, 6, vec![five_id, seven_id]).unwrap(),
-        ));
+        let (names_tree_id, names_tree_bytes) = chunked(13, 0, &[(inner_id, 13)]);
+        // The lengths 5 and 7 are swapped against the spans 7 and 5: they
+        // still add up to the total, but neither chunk fits its span.
+        let (swapped_id, swapped_bytes) = chunked(12, 0, &[(five_id, 7), (seven_id, 12)]);
+        let (fixed_id, fixed_bytes) = chunked(12, 6, &[(five_id, 6), (seven_id, 12)]);
         for (name, description, mode, target, objects) in [
             (
                 "neg_tree_mode_names_blob",
@@ -577,17 +580,17 @@ fn build_vectors() -> Vec<Vector> {
             ),
             (
                 "neg_fixed_chunk_length",
-                "A ChunkedBlob of chunk_size 6 and total_size 12 whose chunks hold 5 and 7 bytes.",
+                "A ChunkedBlob of chunk_size 6 and total_size 12 whose chunks hold 5 and 7 bytes, not the 6 and 6 of its spans.",
                 EntryMode::Blob,
                 fixed_id,
                 vec![fixed_bytes, five_bytes.clone(), seven_bytes.clone()],
             ),
             (
-                "neg_chunk_length_sum",
-                "The chunk lengths of a ChunkedBlob add up to 12, but its total_size is 13.",
+                "neg_chunk_lengths_swapped",
+                "A ChunkedBlob with the spans [0, 7) and [7, 12) over chunks of 5 and 7 bytes: the lengths add up to the total, but neither fits its span.",
                 EntryMode::Blob,
-                sum_id,
-                vec![sum_bytes, five_bytes, seven_bytes],
+                swapped_id,
+                vec![swapped_bytes, five_bytes, seven_bytes],
             ),
         ] {
             let (tree_id, tree_bytes) = object_bytes(Object::Tree(Tree {
@@ -600,7 +603,12 @@ fn build_vectors() -> Vec<Vector> {
             let (root, commit_bytes) = signed_commit(tree_id);
             let mut objects = objects;
             objects.extend([commit_bytes, tree_bytes]);
-            v.push(corrupt_vector(name, description, root, &objects));
+            let mut vector = corrupt_vector(name, description, root, &objects);
+            if name.contains("chunk_length") {
+                // The lowest chunk whose length is not its span.
+                vector.json["corrupt_chunk_index"] = json!(0);
+            }
+            v.push(vector);
         }
 
         // Two entries name one absent object, as a tree and as a file. The
@@ -1142,7 +1150,16 @@ fn verify_vector(name: &str, want_digest: &str) {
                     "{name}: expected incomplete, report was complete"
                 );
                 match sidecar["reason"].as_str().unwrap() {
-                    "corrupt" => assert!(!report.corrupt.is_empty(), "{name}: {report:?}"),
+                    "corrupt" => {
+                        assert!(!report.corrupt.is_empty(), "{name}: {report:?}");
+                        if let Some(index) = sidecar["corrupt_chunk_index"].as_u64() {
+                            let want = format!("chunk {index} holds");
+                            assert!(
+                                report.corrupt.iter().any(|(_, why)| why.starts_with(&want)),
+                                "{name}: {report:?}"
+                            );
+                        }
+                    }
                     "missing" | "missing root" => {
                         assert!(!report.missing.is_empty(), "{name}: {report:?}");
                     }

@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_empty.bin",
+  "blake3": "7acb36f56e669a2e9cff7bdcfd323ac44685cb9927c552d6a9486ed8bdcd4e6a",
+  "commit_id_hex": "f01ff50bb9551b58bd53859ce690903dc61895d019abd52d4bbdce2b957b625b",
+  "description": "A chunk whose span is empty.",
+  "expect": "reject",
+  "name": "neg_span_empty",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the span is empty",
+  "selector": "chunk(0)",
+  "size": 520
+}

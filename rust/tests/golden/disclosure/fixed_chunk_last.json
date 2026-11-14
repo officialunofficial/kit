@@ -1,11 +1,11 @@
 {
   "bin": "fixed_chunk_last.bin",
-  "blake3": "007057d3a4346c970e800eb9bef2862d241e5075648cec809e13b8a066d9fe15",
-  "commit_id_hex": "764a3fcf7476443f995ea04f8a77a6cfe2031be29bac449cf12fbedbfa743925",
+  "blake3": "8ea7c83fa1381d0cccc9a6b99494b7eb689cdf2f312dff4a777994243aa5623d",
+  "commit_id_hex": "c5eb8598e5cb153f3ecdd40612ca29937722533142b93375eb97f59b13e3366e",
   "description": "The last chunk of a fixed-size layout, holding the 5 bytes left of total_size 53.",
   "disclosed": {
-    "chunk_inner_root_hex": "50338ace06a7546c4643e971da75c6cfba69940480e2ac6645cee8e2920d6863",
-    "leaf_id_hex": "1daf86605f4f34e2f0e664fdccda9ad8af1554abbafa313f92e632375ed7efc7",
+    "chunk_inner_root_hex": "6efc753f6d5e5a840a7d9b46f16e96b9011e750eb1df852285c6e83cf890d6cb",
+    "leaf_id_hex": "23c17960962ed2bb53abb46565a32ede1b7894e04a46d19827ca4d160c78cc78",
     "path": [
       {
         "mode": 1,
@@ -13,19 +13,21 @@
       }
     ],
     "payload": {
-      "bytes_blake3": "b1a863b148eaebb31ff87ec35f780922b1efd14b0bb7c6f134dfe50416531b54",
+      "bytes_blake3": "9410a9bf1afe6ae0cbd6f65932aa0ea0ac0a8c5a10468787b35ea88861ee40b1",
       "chunk_size": 16,
+      "end": "53",
       "index": 3,
       "kind": "chunk",
       "len": 15,
+      "start": "48",
       "total_size": 53
     },
     "signature_valid": true,
-    "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "signer_hex": "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737",
     "step_inner_roots_hex": [
-      "0b9fa285f0caf761e31e0b9481feb0b41ad1d6677af6ce71a1df570630e3d5a6"
+      "0a22b1ce7529e68e81fceb9d1b266d0c84a6e6c53103181432cc51b32dff29e1"
     ],
-    "tree_hash_hex": "9951f22dc860baa2f8c63a933d7b6fcbe649bf2e3d8611c75898e4c8bae6a565"
+    "tree_hash_hex": "e82be58594f1c0ed1cde58d51727f12fd2787242a739bd57541ddb4c359a0080"
   },
   "expect": "accept",
   "name": "fixed_chunk_last",
@@ -33,5 +35,5 @@
     "66697865642e62696e"
   ],
   "selector": "chunk(3)",
-  "size": 548
+  "size": 557
 }

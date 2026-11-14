@@ -858,10 +858,11 @@ fn mint_attestations(
             |branch| format!("refs/remotes/{remote_name}/{branch}"),
         );
         let predicate = format!(
-            "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":1}}",
+            "{{\"gitCommit\":\"{}\",\"refName\":\"{}\",\"remoteUrl\":\"{}\",\"schemaVersion\":1,\"specVersion\":{}}}",
             sha1_hex(git_id),
             json_escape(&kit_ref),
-            json_escape(remote_url)
+            json_escape(remote_url),
+            IMPORT_SPEC_VERSION
         );
         let head_bytes = obj_store.read(kit_hash).map_err(|e| {
             step(

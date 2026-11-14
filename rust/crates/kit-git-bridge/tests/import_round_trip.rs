@@ -780,7 +780,7 @@ fn cached_chunk_fixture() -> (tempfile::TempDir, kit_core::ObjectStore, Hash, Ha
     let manifest = store
         .write(
             &kit_core::serialize(&Object::ChunkedBlob(
-                ChunkedBlob::new(5, 0, vec![chunk]).unwrap(),
+                ChunkedBlob::new(5, 0, vec![(chunk, 5)]).unwrap(),
             ))
             .unwrap(),
         )

@@ -56,7 +56,7 @@ fn fixture() -> (tempfile::TempDir, kit_core::hash::Hash) {
     let h = store
         .write(
             &serialize::serialize(&Object::ChunkedBlob(
-                ChunkedBlob::new(6, 0, chunks).unwrap(),
+                ChunkedBlob::new(6, 0, chunks.into_iter().zip([2u64, 6])).unwrap(),
             ))
             .unwrap(),
         )

@@ -50,7 +50,7 @@ Every stored object begins with:
 offset  size  field              value
 0       1     object_type        one of 0x01..0x07 (see §1)
 1       4     magic              ASCII "KOB1" = 0x4B 0x4F 0x42 0x31
-5       1     schema_version     0x01
+5       1     schema_version     0x01, or 0x02 for object_type 0x05 (chunked_blob)
 6       …     body               type-specific (see §3-§8)
 ```
 
@@ -68,7 +68,13 @@ The prologue applies to **all seven object types**. Rationale:
 Readers MUST reject any of:
 - `object_type` not in `0x01..0x07` → `InvalidObjectType`
 - `magic` != `"KOB1"` → `InvalidMagic`
-- `schema_version` != `0x01` → `UnsupportedObjectVersion`
+- `schema_version` other than the version of the object's type →
+  `UnsupportedObjectVersion`. The version of `chunked_blob` (`0x05`) is
+  `0x02`. The version of every other type is `0x01`.
+
+A reader parses `object_type` first and then compares `schema_version` with
+that type's version. The commit signing bytes (SPEC-SIGNING §3) copy the
+commit prologue, so they keep `0x01`.
 
 There is no v0. kit does not read kit-era bytes.
 
@@ -310,72 +316,130 @@ The tag object is content-addressed like every other object; its hash is
 ## 7. Chunked blob (`0x05`)
 
 ```
-[prologue 6]
+[prologue 6]                              schema_version 0x02 for this type
 [u64 LE total_size]
 [u32 LE chunk_size]                       0 or 0x8000_0002 == content-defined (FastCDC)
 [u32 LE chunk_count]                      0..=8_388_608
 repeat chunk_count:
     [32 bytes chunk_hash]                 each chunk stored as its own blob
+    [u64 LE end_offset]                   offset one past the chunk's last byte
 ```
 
-`chunk_size = 0` indicates the manifest was produced by FastCDC v1 and
-chunk lengths are recovered by re-reading each chunk blob. See
-SPEC-FASTCDC.
-`chunk_size = 0x8000_0002` indicates the manifest was produced by
-FastCDC v2 (SPEC-FASTCDC §11); chunk lengths are recovered the same way.
-Every other `chunk_size` indicates fixed-size chunking with the stated
-size (every chunk but the last is exactly that size, and the final chunk
-holds between 1 and that many bytes). The two content-defined values are
-the layouts the rules below call content-defined.
+The object is `22 + 40 * chunk_count` bytes. Entry `i` starts at byte
+`22 + 40 * i`. Entries are interleaved, so a writer appends as it cuts and a
+reader finds the chunk of a byte offset by binary search over fixed-width
+entries.
 
-Reassembly: concatenate each `chunk_hash` blob's contents in order.
-The concatenated length MUST equal `total_size`.
+The **span** of chunk `i` is `[start_i, end_i)`, with `start_0 = 0` and
+`start_i = end_{i-1}`. The span is the byte range the chunk holds in the
+file. The manifest commits it: a chunk's blob MUST hold exactly `end_i -
+start_i` bytes of content.
 
-Readers MUST reject a manifest at decode time when `total_size` is
-impossible for its layout:
+`chunk_size = 0` indicates the manifest was produced by FastCDC v1. See
+SPEC-FASTCDC. `chunk_size = 0x8000_0002` indicates the manifest was produced
+by FastCDC v2 (SPEC-FASTCDC §11). Every other `chunk_size` indicates
+fixed-size chunking with the stated size: every chunk but the last is exactly
+that size, and the final chunk holds between 1 and that many bytes. The two
+content-defined values are the layouts the rules below call content-defined.
 
-- `total_size` is above 128 GiB (137,438,953,472).
-- `chunk_count` is `0` and `total_size` is not `0`.
-- `chunk_count` is above `0` and `total_size` is less than `chunk_count`.
-- the layout is fixed-size and `total_size` is above
-  `chunk_count * chunk_size`.
-- the layout is fixed-size, `chunk_count` is above `0` and `total_size` is
-  not above `(chunk_count - 1) * chunk_size`.
+**Header check.** The header alone (`total_size`, `chunk_size`, `chunk_count`)
+MUST satisfy all of these. This is the check a disclosure verifier runs
+without the entries (SPEC-DISCLOSURE §4). Each rule has its own label:
 
-Readers MUST NOT size a buffer from `total_size`. Readers MUST stop
-writing when the running byte count passes `total_size`.
+- `total_size` is at most 128 GiB (137,438,953,472), else `total_size above
+  the file limit`.
+- `chunk_count` is `0` only when `total_size` is `0`, else `total_size
+  without chunks`.
+- when the layout is content-defined and `chunk_count` is above `0`,
+  `total_size` is at least `chunk_count`, else `total_size below
+  chunk_count`.
+- when the layout is fixed-size and `chunk_count` is above `0`, `total_size`
+  is above `(chunk_count - 1) * chunk_size` and at most
+  `chunk_count * chunk_size`, else `total_size outside the fixed-size layout`.
 
-Writers MUST refuse to encode a manifest that a reader rejects: a
-`chunk_count` above 8,388,608 or a `total_size` that breaks a rule above.
-A manifest is otherwise stored under an id no reader can decode.
+The decoder and the id fold do not run the whole header check. Their header
+step is decoding checks 1 and 3 below (the count cap and the 128 GiB cap).
+The entries then carry the rest: a manifest that passes every decoding check
+satisfies every rule above. The whole header check runs only in the disclosure
+verifier, on `leaf_count - 1`.
 
-The 128 GiB bound is the largest file kit stores. The chunk cap,
-8,388,608, is that bound cut at the 16 KiB FastCDC minimum chunk size
-(SPEC-FASTCDC). A reader that holds a whole file in memory, such as a
-text diff, blame or a git export, MAY refuse a file above its own
-smaller limit. It refuses with a typed error and before it reads a
-chunk. kit's limit for such readers is 1 GiB.
+**Entry check.** One function checks each entry. The decoder and the id fold
+(SPEC-MERKLE-OBJECTS §1.2) both run it, so both refuse at the same entry with
+the same label. For entry `i` with `end_{-1} = 0`, in this order:
+
+1. `end_i > end_{i-1}`, else `end not increasing`.
+2. `end_i - end_{i-1}` is at most `MAX_RAW_OBJECT_SIZE - 10` (1 GiB less the
+   10-byte Blob prologue), else `chunk length above the object limit`.
+3. `end_i <= total_size`, else `end above total_size`.
+4. In a fixed-size layout, `end_i == min((i + 1) * chunk_size, total_size)`,
+   else `fixed layout end`. The arithmetic MUST be checked.
+
+**Decoding.** A reader MUST run these checks in this order. Each has its own
+error and its own label. An object shorter than the 22-byte header is
+refused first, as `truncated`. All arithmetic in the decoder, the fold and
+the verifier MUST be checked; an overflow is refused with the label of the
+step it occurs in.
+
+1. `chunk_count` is at most 8,388,608, else `TooManyChunks` (`too many
+   chunks`).
+2. The object is exactly `22 + 40 * chunk_count` bytes, else `manifest
+   length`. This check comes before any allocation, so a short body under a
+   large `chunk_count` allocates nothing.
+3. `total_size` is at most 128 GiB, else `total_size above the file limit`.
+4. Each entry passes the entry check.
+5. The last end equals `total_size`. With no entries, `total_size` is `0`.
+   Check 4 already refuses an end above `total_size`, so this check refuses a
+   last end below it (`last end below total_size`) and a manifest with no
+   entries and a non-zero `total_size` (`total_size without chunks`).
+
+These checks imply every rule of the header check. The header check stays as
+its own check for a verifier that holds no entries.
+
+An entry with `end_0 = 0` refuses as `end not increasing`. A fixed-size layout
+whose last end is off by one refuses as `fixed layout end`.
+
+A `schema_version` other than `0x02` is `UnsupportedObjectVersion` (§2),
+refused when the prologue is read, before `truncated` and the checks above.
+
+Reassembly: concatenate each `chunk_hash` blob's contents in order. A reader
+MUST check each chunk's content length against its span, not only the
+concatenated length. The concatenated length then equals `total_size`.
+
+Readers MUST NOT size a buffer from `total_size`. Readers MUST stop writing
+when the running byte count passes `total_size`.
+
+Writers MUST refuse to encode a manifest that a reader rejects, and MUST pass
+each chunk's length when they build one. A manifest is otherwise stored under
+an id no reader can decode.
+
+The 128 GiB bound is the largest file kit stores. The chunk cap, 8,388,608,
+is that bound cut at the 16 KiB FastCDC minimum chunk size (SPEC-FASTCDC).
+The largest manifest is `22 + 40 * 8,388,608` = 335,544,342 bytes, under the
+1 GiB object cap. A reader that holds a whole file in memory, such as a text
+diff, blame or a git export, MAY refuse a file above its own smaller limit. It
+refuses with a typed error and before it reads a chunk. kit's limit for such
+readers is 1 GiB.
 
 File-content equality MUST be independent of the chosen valid Blob or
 ChunkedBlob representation. Equal object IDs permit a fast path; otherwise
 comparisons MUST verify the referenced objects and compare the full ordered
 byte stream, bounded by the manifest and one chunk per side. A missing chunk,
-wrong-type chunk or inconsistent total length is an error even if an earlier
-byte already differed. Mode equality is a separate condition. Derived raw
-content hashes may index rename candidates, but MUST NOT replace object IDs;
-candidate matches are confirmed by byte comparison.
+wrong-type chunk or chunk whose length differs from its span is an error even
+if an earlier byte already differed. Mode equality is a separate condition.
+Derived raw content hashes may index rename candidates, but MUST NOT replace
+object IDs; candidate matches are confirmed by byte comparison.
 
 Status, diff, staging, merge decisions and overwrite protection use this
 content contract. Restaging equal bytes preserves the previous staged object
 ID. Writer chunking policy does not invalidate an otherwise conforming object.
 
-`chunk_count > 8_388_608` → `TooManyChunks`.
-
 **Identity:** a `ChunkedBlob`'s object id is its Binary Merkle Tree root
-(leaves = a metadata leaf binding `total_size`/`chunk_size`, then the
-chunk ids), NOT `BLAKE3` of these manifest bytes. The byte layout above is
-unchanged; only the byte→id function differs. See
-[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.1.
+(leaves = a metadata leaf binding `total_size`/`chunk_size`, then one leaf
+per chunk binding its span and its id), NOT `BLAKE3` of these manifest bytes.
+The byte layout above is unchanged by this; only the byte→id function
+differs. See [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) §3.1. Because the
+leaves commit the spans, a disclosure proves a chunk's byte offsets with one
+proof of logarithmic size (SPEC-DISCLOSURE).
 
 ---
 
@@ -444,7 +508,7 @@ Objects > 1 GiB MUST be rejected.
 
 `.kit/` directory: presence of `.kit/objects` is the repository marker.
 A conforming repository MUST also carry a `.kit/format` file declaring
-the object-addressing format (`bmt-v1`); an implementation MUST refuse to
+the object-addressing format (`bmt-v2`); an implementation MUST refuse to
 open a repository whose marker is absent or unrecognized
 (`IncompatibleRepoFormat`) rather than mis-read a store without the marker
 under the current id rule. See SPEC-INDEX for the `.kit/index` sidecar.
@@ -490,19 +554,25 @@ This prevents trivial amplification and prologue-replay attacks.
 | Version | Released | Changes                                                          |
 |---------|----------|------------------------------------------------------------------|
 | `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
+| `0x02`  |          | `chunked_blob` only: 40-byte entries that carry end offsets (§7). |
 
-`schema_version` stays at `0x01`. Adding the `tag` object type (`0x07`)
-is an **additive object-type allocation within v1**: it introduces
-a new `object_type` byte and a new body layout but changes no existing
-type's bytes, so `schema_version` is NOT bumped and every pre-tag golden
-vector is unaffected. A version bump is reserved for changes that alter
-an existing type's layout.
+`schema_version` is per object type. It is `0x02` for `chunked_blob`
+(`0x05`) and `0x01` for every other type. A version bump is reserved for
+changes that alter an existing type's layout: the end offsets in each
+`chunked_blob` entry are such a change. An old reader gets
+`UnsupportedObjectVersion` for a new manifest, not a length error.
+
+Adding the `tag` object type (`0x07`) is an **additive object-type allocation
+within v1**: it introduces a new `object_type` byte and a new body layout but
+changes no existing type's bytes, so `schema_version` is NOT bumped and every
+pre-tag golden vector is unaffected.
 
 Merkle object addressing (`Tree`/`ChunkedBlob` keyed by BMT root,
-[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) leaves every
-type's **bytes** unchanged and does not bump `schema_version`.
-The mandatory `.kit/format` = `bmt-v1` repository marker (§10) guards
-the addressing scheme. A store without the marker is refused at open.
+[SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md)) leaves every type's **bytes**
+unchanged. The mandatory `.kit/format` = `bmt-v2` repository marker (§10)
+guards the addressing scheme, including the leaves of §7 that commit chunk
+spans. A store without the marker, or with another value, is refused at open
+with `IncompatibleRepoFormat`. There is no migration.
 
 Future versions MUST increment `schema_version` and MUST preserve the
 `"KOB1"` magic prefix. The magic byte string is normative &mdash; readers are
@@ -541,10 +611,10 @@ multi-version readers.
 6. **Remix with two sources (identical upstream_id, distinct
    commit_hash)**: verify sort orders by secondary key.
 7. **ChunkedBlob with `chunk_size=0` and 3 chunks**: verify prologue
-   present and length=6+8+4+4+32*3=118. `ChunkedBlob` is also
+   present and length=6+8+4+4+40*3=142. `ChunkedBlob` is also
    **merkelized** (§10 / SPEC-MERKLE-OBJECTS): its id is the
    domain-wrapped Merkle root over its chunk leaves plus the metadata
-   leaf, not a flat `BLAKE3` of these 118 bytes. Record both the
+   leaf, not a flat `BLAKE3` of these 142 bytes. Record both the
    serialized bytes and the merkelized id separately.
 8. **Annotated tag** (`target_type=0x03`, ed25519 tagger, non-empty
    message, all-zero signature): `Tag` is a flat type &mdash; record
@@ -562,15 +632,26 @@ multi-version readers.
     object of §13.7. Record the encoded proof bytes, the proven chunk's
     position (chunk index + 1, per SPEC-MERKLE-OBJECTS §3.1/§5.5), and
     the object id it verifies against.
-12. **ChunkedBlob bounds** (§7): a reader accepts a FastCDC manifest of
+12. **ChunkedBlob bounds** (§7): the header check accepts a FastCDC header of
     2 chunks with `total_size` 128 GiB and refuses one with 128 GiB + 1. A
     header that declares 8,388,608 chunks passes the count check, and one
     that declares 8,388,609 fails `TooManyChunks` before any chunk id is
-    read.
+    read. A header that declares 8,388,608 chunks with a short body fails
+    `manifest length` before any allocation.
+13. **ChunkedBlob manifests**: the manifest bytes and id for 0, 1, 2, 3 and
+    5 chunks, content-defined and fixed-size, and the leaf digest of §3.1 of
+    SPEC-MERKLE-OBJECTS with asymmetric maximum values, so a big-endian or
+    swapped implementation fails. Refused manifests, each breaking one rule
+    and naming the label of the first failing check: an end that does not
+    increase, `end_0 = 0`, a last end that is not `total_size`, a chunk longer
+    than `MAX_RAW_OBJECT_SIZE - 10`, a fixed-size end off by one, `22 + 40n ±
+    1` bytes, a count above the cap with a short body, type `0x05` with
+    `schema_version` `0x01`, and another type with `schema_version` `0x02`.
 
-Vectors 1–7 are committed under `rust/tests/golden/objects/`; vector 12
-is the layout table of `rust/crates/kit-core/tests/golden.rs` and
-`scripts/golden/objects_ref.py`; the tag
+Vectors 1–7 are committed under `rust/tests/golden/objects/`; vectors 12
+and 13 are the layout and manifest tables of
+`rust/crates/kit-core/tests/golden.rs` and `scripts/golden/objects_ref.py`,
+with `scripts/golden/chunk_offsets_expected.json`; the tag
 vectors 8–9 under `rust/tests/golden/tags/`; the proof vectors 10–11
 (alongside range/multi-leaf and negative proof vectors not individually
 enumerated above) under `rust/tests/golden/proofs/`, per
@@ -587,7 +668,7 @@ mechanism that enforces or detects each:
 
 | Invariant | Enforced by |
 |---|---|
-| Every stored object is one of the seven known types under `"KOB1"`/`schema_version 0x01` | prologue rejection: `InvalidObjectType`/`InvalidMagic`/`UnsupportedObjectVersion` (§2) |
+| Every stored object is one of the seven known types under `"KOB1"` and the `schema_version` of its type (`0x02` for `chunked_blob`, `0x01` otherwise) | prologue rejection: `InvalidObjectType`/`InvalidMagic`/`UnsupportedObjectVersion` (§2) |
 | An object's bytes always match its id | read-time recomputation under the type-dependent id rule → `HashMismatch`; for merkelized types this also proves the child set present and correctly ordered (§10) |
 | No stored object exceeds 1 GiB | storage-layer rejection (§3, §10) |
 | An object encodes exactly its declared layout, nothing more | trailing-byte rule → `TrailingData` (§11) |
@@ -598,8 +679,9 @@ mechanism that enforces or detects each:
 | Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity`/`IdentityTooLarge`/`UnknownIdentityKind` (§9) |
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |
-| Reassembled `ChunkedBlob` content is exactly `total_size` bytes | reassembly length check (§7) |
-| A merkle-addressing reader never mis-reads a store without the marker | mandatory `.kit/format` = `bmt-v1` marker → `IncompatibleRepoFormat` (§10, §12) |
+| A `ChunkedBlob`'s spans are increasing, end at `total_size`, and follow the fixed layout | the decode checks (§7) |
+| Every chunk of a `ChunkedBlob` holds exactly the length of its span, and the content is exactly `total_size` bytes | per-chunk length check at reassembly (§7) |
+| A merkle-addressing reader never mis-reads a store without the marker | mandatory `.kit/format` = `bmt-v2` marker → `IncompatibleRepoFormat` (§10, §12) |
 | A visible object is durable; refs/index/log entries reference only durable objects | atomic temp-file and rename write and the ordering invariant (§10.1) |
 
 These are format-level guarantees. Signature guarantees are specified in

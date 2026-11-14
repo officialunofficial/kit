@@ -187,11 +187,14 @@ fn build_vectors() -> (MemSource, Vec<(&'static str, Hash)>) {
 
     // 9. chunked blob (>1 MiB), pinned by ids only.
     let big = chunked_content();
-    let chunks: Vec<Hash> = ChunkIterator::new(FastCdc::v1(), &big)
+    let mut end = 0u64;
+    let chunks: Vec<(Hash, u64)> = ChunkIterator::new(FastCdc::v1(), &big)
         .map(|b| {
-            src.put(Object::Blob(Blob {
+            end += b.length as u64;
+            let id = src.put(Object::Blob(Blob {
                 data: big[b.offset..b.offset + b.length].to_vec(),
-            }))
+            }));
+            (id, end)
         })
         .collect();
     let manifest = src.put(Object::ChunkedBlob(

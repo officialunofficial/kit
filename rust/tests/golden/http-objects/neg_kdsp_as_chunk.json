@@ -1,0 +1,34 @@
+{
+  "blake3": "c3d85c3a55b2e5e15abd9cefa395998842994561445dc9b4488b47720822182f",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_inner_invalid"
+  },
+  "name": "neg_kdsp_as_chunk",
+  "recipe": {
+    "segments": [
+      {
+        "length": 54,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "eba802"
+      },
+      {
+        "length": 37995,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 18664,
+        "offset": 19331,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 56716
+}

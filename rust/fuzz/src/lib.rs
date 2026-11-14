@@ -582,17 +582,31 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
             h
         })
         .collect();
-    // At most 64 chunks and one input byte per chunk at least, so the header
-    // rules always hold.
-    let cb = ChunkedBlob::new(input.len() as u64, 0, chunks.clone())
-        .expect("a header within the manifest bounds");
+    // Chunk `i` covers the input bytes `[32 i, 32 (i + 1))`, up to the last
+    // byte of the (at most 64 * 32 byte) input it is carved from. That is at
+    // least one byte per chunk, so the manifest rules always hold.
+    let total = input.len().min(64 * 32) as u64;
+    let span = |i: usize| (i as u64 * 32, ((i as u64 + 1) * 32).min(total));
+    let cb = ChunkedBlob::new(
+        total,
+        0,
+        chunks.iter().enumerate().map(|(i, id)| (*id, span(i).1)),
+    )
+    .expect("a header within the manifest bounds");
     let cid = merkle::compute_chunked_id(&cb);
     assert_eq!(cid.len(), 32);
     if !chunks.is_empty() {
         // position 0 is the meta leaf; chunk i is at position i+1.
         let pos = (input.first().copied().unwrap_or(0) as usize % chunks.len()) as u32 + 1;
         if let Ok(proof) = merkle::build_chunk_proof(&cb, pos) {
-            merkle::verify_chunk(&cid, &chunks[(pos - 1) as usize], pos, &proof)
+            let i = (pos - 1) as usize;
+            let (start, end) = span(i);
+            let chunk = merkle::SpannedChunk {
+                id: chunks[i],
+                start,
+                end,
+            };
+            merkle::verify_chunk(&cid, &chunk, pos, &proof)
                 .expect("freshly built chunk proof must verify");
         }
         // Adversarial proof bytes / position must reject without panicking.
@@ -601,7 +615,12 @@ pub fn merkle_proof_one_iteration(input: &[u8]) {
         // decoded proof to `verify_chunk` — a decode failure is itself a
         // clean rejection.
         if let Ok(proof) = merkle::Proof::decode(input, 1) {
-            let _ = merkle::verify_chunk(&cid, &chunks[0], 0, &proof);
+            let chunk = merkle::SpannedChunk {
+                id: chunks[0],
+                start: 0,
+                end: span(0).1,
+            };
+            let _ = merkle::verify_chunk(&cid, &chunk, 0, &proof);
         }
     }
 
@@ -648,12 +667,12 @@ const GOOD_SPAN: &[u8] = include_bytes!("../../tests/golden/http-objects/span_tw
 /// Exercise the KDSP verifier on arbitrary bytes. The trusted id is the
 /// committed fixture's real commit, and a copy of the input with that commit
 /// spliced into the header is also verified, so mutated containers get past
-/// the commit comparison and reach the anchor and chunk checks.
+/// the commit comparison and reach the chain and chunk checks.
 pub fn span_decode_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(MAX_INPUT)];
     let commit: [u8; 32] = GOOD_SPAN[5..37].try_into().expect("committed commit id");
     let _ = kit_core::verify::span::verify_disclosure_span(&commit, input);
-    if input.len() >= 37 && input.starts_with(b"KDSP\x01") {
+    if input.len() >= 37 && input.starts_with(b"KDSP\x02") {
         let mut patched = input.to_vec();
         patched[5..37].copy_from_slice(&commit);
         let _ = kit_core::verify::span::verify_disclosure_span(&commit, &patched);
@@ -749,12 +768,16 @@ pub fn build_span_fixture() -> SpanFixture {
     let plaintext: Vec<u8> = (0..CHUNK * CHUNKS)
         .map(|i| u8::try_from(i % 251).expect("byte") ^ 0x5a)
         .collect();
-    let chunk_ids: Vec<[u8; 32]> = plaintext
+    let chunk_ids: Vec<([u8; 32], u64)> = plaintext
         .chunks(CHUNK)
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let bytes = kit_core::serialize::serialize(&Object::Blob(Blob { data: c.to_vec() }))
                 .expect("serialize chunk");
-            store.write(&bytes).expect("write chunk")
+            (
+                store.write(&bytes).expect("write chunk"),
+                ((i + 1) * CHUNK) as u64,
+            )
         })
         .collect();
     let manifest = ChunkedBlob::new(plaintext.len() as u64, CHUNK as u32, chunk_ids)
@@ -809,8 +832,6 @@ pub fn verify_span_one_iteration(input: &[u8]) {
 pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     use kit_core::verify::span::{RangeProof, build_range_proof_from};
 
-    const CHUNK: usize = SPAN_CHUNK;
-    const CHUNKS: usize = SPAN_CHUNKS;
     let SpanFixture {
         store,
         commit_id,
@@ -825,9 +846,7 @@ pub fn verify_span_one_iteration_with(input: &[u8], fixture: &SpanFixture) {
     let total = plaintext.len() as u64;
     let offset = word(0) % total;
     let len = 1 + word(2) % (total - offset);
-    let boundaries: Vec<u64> = (0..=CHUNKS as u64).map(|i| i * CHUNK as u64).collect();
-    let hints = (byte(4) & 1 == 1).then_some(boundaries.as_slice());
-    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len, hints)
+    let proof = build_range_proof_from(store, &commit_id, &[b"f.bin"], offset, len)
         .expect("in-range proof must build");
     let expected = &plaintext
         [usize::try_from(offset).expect("offset")..usize::try_from(offset + len).expect("end")];
@@ -3516,18 +3535,16 @@ mod tests {
     #[test]
     fn disclosure_decode_target_runs_within_caps() {
         run_iterated_unit(disclosure_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"KDPB\x01", &[0xFF; 64][..]] {
+        for case in [&b""[..], b"KDPB\x03", &[0xFF; 64][..]] {
             run_one(case, disclosure_decode_one_iteration).expect("guardrails held");
         }
-        // A range payload that declares 1,000,000 length proofs and holds
-        // 100 bytes after the count.
-        let mut huge_count = b"KDPB\x02".to_vec();
+        // A range payload whose slice declares 1,000,000 bytes and holds 100.
+        let mut huge_count = b"KDPB\x03".to_vec();
         huge_count.extend_from_slice(&[0; 32]); // commit id
         huge_count.extend_from_slice(&[0, 0]); // no commit bytes, no steps
         huge_count.push(2); // range payload
         huge_count.push(0); // no chunk header
         huge_count.extend_from_slice(&[0; 16]); // offset and length
-        huge_count.push(0); // empty slice
         huge_count.extend_from_slice(&[0xC0, 0x84, 0x3D]); // 1,000,000
         huge_count.extend_from_slice(&[0; 100]);
         run_one(&huge_count, disclosure_decode_one_iteration).expect("guardrails held");
@@ -3536,7 +3553,7 @@ mod tests {
     #[test]
     fn span_decode_target_runs_within_caps() {
         run_iterated_unit(span_decode_one_iteration).expect("guardrails held");
-        for case in [&b""[..], b"KDSP\x01", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDSP\x02", &[0xff; 64][..]] {
             run_one(case, span_decode_one_iteration).expect("guardrails held");
         }
         let mut nonminimal = GOOD_SPAN[..53].to_vec();
@@ -3565,7 +3582,7 @@ mod tests {
     fn verify_span_target_runs_within_caps() {
         let fixture = build_span_fixture();
         run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
-        for case in [&b""[..], b"KDPB\x02", &[0xff; 64][..]] {
+        for case in [&b""[..], b"KDPB\x03", &[0xff; 64][..]] {
             let started = Instant::now();
             verify_span_one_iteration_with(case, &fixture);
             assert!(started.elapsed() <= PER_ITER, "iteration exceeded PER_ITER");

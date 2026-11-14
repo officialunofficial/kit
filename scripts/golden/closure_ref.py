@@ -18,8 +18,9 @@
 #     to no object are unreferenced, never corrupt;
 #   * walks the closure from the trusted root with the mode of the manifest,
 #     checks that every entry mode and chunk reference names an object of a
-#     fitting type, and that the chunk lengths of a chunked blob add up to its
-#     total_size;
+#     fitting type, and that each chunk blob of a chunked blob holds exactly
+#     the length of its committed span `end - start` (plan 4.8; one rule for
+#     both layouts, each chunk checked on its own);
 #   * compares the outcome (accept, incomplete or reject) with the sidecar,
 #     including the verified count, the sorted id list and the unreferenced
 #     ids.
@@ -118,7 +119,7 @@ def object_id(data):
         return o.tree_id(o.parse_tree(data)["entries"])
     if kind == o.CHUNKED:
         c = o.parse_chunked(data)
-        return o.chunked_id(c["total"], c["chunk_size"], c["chunks"])
+        return o.chunked_id(c["total"], c["chunk_size"], c["chunks"], c["ends"])
     parse = {
         o.BLOB: o.parse_blob,
         o.COMMIT: o.parse_commit,
@@ -164,6 +165,11 @@ def children(data, mode):
     return []
 
 
+# The lowest wrong chunk index of each corrupt manifest from the last walk
+# (plan section 13, item 7). A sidecar may name it as `corrupt_chunk_index`.
+WRONG_INDEX = {}
+
+
 def walk(root, mode, payloads):
     """Return (verified ids, missing ids, corrupt ids, unreferenced ids)."""
     objects = {}
@@ -200,28 +206,27 @@ def walk(root, mode, payloads):
         data = objects.get(oid)
         if not kinds or (data is not None and data[0] not in kinds):
             corrupt.add(oid)
-    # Chunk lengths add up to total_size once every chunk is a read blob, and
-    # in a fixed-size layout each chunk holds the length the layout requires.
+    # Plan 4.8, SPEC-DISCLOSURE 7.4 item 10 after the change: each chunk blob
+    # that was read holds exactly the length of its span (end - start). One
+    # rule for both layouts; each chunk is checked on its own, so a chunk of
+    # the wrong length makes the manifest corrupt even when another chunk is
+    # missing. A chunk that is absent or not a Blob is not measured here (it
+    # is incomplete or corrupt already). The sum needs no check of its own: the
+    # decoder made the last end equal total_size and the spans contiguous.
+    WRONG_INDEX.clear()
     for oid in visited:
         data = objects[oid]
         if data[0] != o.CHUNKED:
             continue
         manifest = o.parse_chunked(data)
-        lens = []
-        for chunk in manifest["chunks"]:
+        for i, (chunk, (start, end)) in enumerate(zip(manifest["chunks"], o.spans_of(manifest["ends"]))):
             blob = objects.get(chunk)
             if blob is None or blob[0] != o.BLOB:
+                continue
+            if o.parse_blob(blob)["len"] != end - start:
+                corrupt.add(oid)
+                WRONG_INDEX[oid] = i  # the lowest wrong index is the one reported
                 break
-            lens.append(o.parse_blob(blob)["len"])
-        else:
-            size, count = manifest["chunk_size"], len(lens)
-            fixed = [
-                size if i + 1 < count else manifest["total"] - i * size for i in range(count)
-            ]
-            if sum(lens) != manifest["total"]:
-                corrupt.add(oid)
-            elif size not in o.CONTENT_DEFINED and lens != fixed:
-                corrupt.add(oid)
     unreferenced = sorted((set(objects) - set(seen)) | unreferenced_junk)
     return sorted(set(visited) - corrupt), missing, sorted(corrupt), unreferenced
 
@@ -255,6 +260,11 @@ def check_vector(root_dir, sidecar_name, man):
         return "reject"
     if missing or corrupt:
         o.expect(expect == "incomplete", f"{name}: incomplete but sidecar says {expect}")
+        if "corrupt_chunk_index" in meta:
+            o.expect(
+                sorted(WRONG_INDEX.values())[:1] == [meta["corrupt_chunk_index"]],
+                f"{name}: lowest wrong chunk index",
+            )
         if meta.get("reason") == "corrupt":
             o.expect(len(corrupt) > 0, f"{name}: expected a corrupt object")
         if meta.get("reason") == "missing":

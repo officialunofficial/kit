@@ -373,7 +373,9 @@ fn fixed_size_chunking_is_refused() {
     );
     let manifest = put(
         &store,
-        &Object::ChunkedBlob(kit_core::object::ChunkedBlob::new(4096, 4096, vec![chunk]).unwrap()),
+        &Object::ChunkedBlob(
+            kit_core::object::ChunkedBlob::new(4096, 4096, vec![(chunk, 4096)]).unwrap(),
+        ),
     );
     let mut known = HashMap::new();
     let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
@@ -436,7 +438,7 @@ impl kit_git_bridge::translate::ObjectSource for CountingSource<'_> {
 }
 
 #[test]
-fn repeated_chunk_stops_at_the_declared_total() {
+fn a_missing_chunk_stops_the_read_after_repeated_chunks() {
     let (_d, store) = store();
     let chunk = put(
         &store,
@@ -444,8 +446,17 @@ fn repeated_chunk_stops_at_the_declared_total() {
             data: vec![7u8; 600 * 1024],
         }),
     );
-    let manifest =
-        kit_core::object::ChunkedBlob::new(1200 * 1024 + 1, 0, vec![chunk; 1000]).unwrap();
+    // One chunk twice, then a one-byte chunk that is not in the store.
+    let manifest = kit_core::object::ChunkedBlob::new(
+        1200 * 1024 + 1,
+        0,
+        vec![
+            (chunk, 600 * 1024),
+            (chunk, 1200 * 1024),
+            ([9u8; 32], 1200 * 1024 + 1),
+        ],
+    )
+    .unwrap();
     let source = CountingSource {
         store: &store,
         reads: std::cell::Cell::new(0),
@@ -453,11 +464,7 @@ fn repeated_chunk_stops_at_the_declared_total() {
     let hash = Hash::from([1u8; 32]);
     let err = kit_git_bridge::translate::translate_chunked(&hash, &manifest, &source).unwrap_err();
     assert!(matches!(err, BridgeError::Source(_)), "got {err}");
-    assert!(
-        source.reads.get() <= 4,
-        "read {} chunks",
-        source.reads.get()
-    );
+    assert_eq!(source.reads.get(), 3);
 }
 
 /// A manifest above the 1 GiB git blob cap is refused before any chunk is
@@ -468,7 +475,10 @@ fn manifest_above_the_blob_cap_is_refused_before_any_read() {
     let manifest = kit_core::object::ChunkedBlob::new(
         kit_core::worktree::MAX_FILE_BYTES + 1,
         0,
-        vec![[1u8; 32], [2u8; 32]],
+        vec![
+            ([1u8; 32], kit_core::worktree::MAX_FILE_BYTES / 2),
+            ([2u8; 32], kit_core::worktree::MAX_FILE_BYTES + 1),
+        ],
     )
     .unwrap();
     let source = CountingSource {
@@ -491,7 +501,10 @@ fn manifest_above_the_blob_cap_is_refused_before_any_read() {
     let at_cap = kit_core::object::ChunkedBlob::new(
         kit_core::worktree::MAX_FILE_BYTES,
         manifest.chunk_size(),
-        manifest.into_chunks(),
+        vec![
+            ([1u8; 32], kit_core::worktree::MAX_FILE_BYTES / 2),
+            ([2u8; 32], kit_core::worktree::MAX_FILE_BYTES),
+        ],
     )
     .unwrap();
     let err = kit_git_bridge::translate::translate_chunked(&hash, &at_cap, &source).unwrap_err();
@@ -510,7 +523,9 @@ fn below_threshold_manifest_is_refused() {
     );
     let manifest = put(
         &store,
-        &Object::ChunkedBlob(kit_core::object::ChunkedBlob::new(4096, 0, vec![chunk]).unwrap()),
+        &Object::ChunkedBlob(
+            kit_core::object::ChunkedBlob::new(4096, 0, vec![(chunk, 4096)]).unwrap(),
+        ),
     );
     let mut known = HashMap::new();
     let err = translate_closure(&store, &manifest, &mut known, &mut |_, _| Ok(())).unwrap_err();
@@ -533,7 +548,12 @@ fn non_canonical_boundaries_are_refused() {
     let manifest = put(
         &store,
         &Object::ChunkedBlob(
-            kit_core::object::ChunkedBlob::new(big.len() as u64, 0, vec![chunk]).unwrap(),
+            kit_core::object::ChunkedBlob::new(
+                big.len() as u64,
+                0,
+                vec![(chunk, big.len() as u64)],
+            )
+            .unwrap(),
         ),
     );
     let mut known = HashMap::new();

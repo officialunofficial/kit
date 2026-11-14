@@ -401,8 +401,6 @@ complete -c kit -n "__fish_seen_subcommand_from prove" \
 complete -c kit -n "__fish_seen_subcommand_from prove" \
     -l range -d "Byte range OFFSET:LEN" -r
 complete -c kit -n "__fish_seen_subcommand_from prove" \
-    -l with-offsets -d "Authenticate absolute offsets with --range"
-complete -c kit -n "__fish_seen_subcommand_from prove" \
     -s o -l output -d "Write bundle to file" -r
 complete -c kit -n "__fish_seen_subcommand_from prove" \
     -l format -d "Output format" -xa "default json"

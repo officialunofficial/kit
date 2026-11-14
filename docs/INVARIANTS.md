@@ -492,19 +492,18 @@ whole-file reader allocates up to 128 GiB, or a changed fold gives
 existing objects new ids.
 
 **Enforced by:** `serialize::tests::serialize_refuses_a_manifest_the_reader_refuses`,
-`serialize::tests::accepts_the_chunk_cap_in_the_header`,
-`golden::chunk_count_cap_matches_spec` and
-`golden::chunked_blob_layout_rules_match_spec` (with
-`scripts/golden/objects_ref.py`), `merkle::tests::fold_root_matches_level_build`,
+`serialize::tests::rejects_each_bad_entry_with_its_own_error`,
+`serialize::tests::a_manifest_is_laid_out_as_22_plus_40_per_chunk`,
+`golden::chunk_count_cap_matches_spec` (with
+`scripts/golden/objects_ref.py`) and `golden_chunk_offsets`, `merkle::tests::fold_root_matches_level_build`,
 `merkle::tests::root_matches_commonware`, the pinned ids of
 `merkle::tests::chunked_id_at_1_000_001_chunks_is_pinned` and
 `merkle::tests::chunked_id_at_the_chunk_cap_is_pinned` (ignored lane), every
 merkelized id in `rust/tests/golden/`, and
 `worktree::blob::equality_tests::into_content_refuses_content_above_the_memory_limit`,
 `ops::blame::tests::blame_refuses_a_file_above_the_memory_limit`,
-`verify::tests::range_disclosure_refuses_a_file_above_the_memory_limit`,
-`ops::blame::tests::blame_stops_a_repeated_chunk_at_the_declared_size`,
-`verify::tests::range_disclosure_stops_a_repeated_chunk_at_the_declared_size` and
+`ops::blame::tests::blame_stops_a_repeated_chunk_at_its_span`,
+`verify::tests::range_disclosure_refuses_a_chunk_that_is_not_its_span` and
 `round_trip::manifest_above_the_blob_cap_is_refused_before_any_read`.
 
 ## A worktree file up to the chunked bound ingests in bounded memory
@@ -517,8 +516,8 @@ memory (`read_regular_file_bounded`, and `add -p`) keeps the 1 GiB limit
 (`worktree::MAX_FILE_BYTES`). The manifest is serialized once, and its list of
 chunk ids is freed before the bytes are stored.
 
-**Because:** the streaming paths hold one window of chunks and a few copies of a
-32-byte id per chunk, however large the file. The old 1 GiB check refused files that
+**Because:** the streaming paths hold one window of chunks and a few copies of an
+id and an end offset (40 bytes) per chunk, however large the file. The old 1 GiB check refused files that
 those paths handle.
 
 **If violated:** a file between 1 GiB and 128 GiB cannot be added, or an ingest
@@ -581,7 +580,7 @@ independent check `scripts/golden/proofs_ref.py`.
 
 **Always:** every check `kit_core::verify` performs — a path step, a
 chunk, a byte range — is stated against an authenticated object id
-(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v2
+(a commit id, a step's `child_id`, a `ChunkedBlob`/chunk id). A v3
 bundle carries a bare inner root on each step and chunk header; that
 field is wrap-checked against the trusted id (`domain_digest(TYPE_DOMAIN,
 inner_root) == expected_id`) **before** it is used for anything, then
@@ -610,7 +609,7 @@ wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
 
 ## Declared disclosure inner roots wrap and match the proof fold
 
-**Always:** for every v2 disclosure `Step` and chunk header,
+**Always:** for every v3 disclosure `Step` and chunk header,
 `domain_digest(TYPE_DOMAIN, inner_root)` equals the parent Tree id or
 ChunkedBlob leaf id, and the proof folds to exactly that declared
 `inner_root`. Version byte `1` is rejected.
@@ -628,65 +627,63 @@ verifier would disagree on the same bundle.
 
 **Enforced by:** `rust/crates/kit-core/tests/native_commonware_disclosure.rs`
 (every accept golden verified with only bundle fields, upstream
-`commonware_storage::bmt::Proof`, and `hash::domain_digest`; the three
-v2 negatives fail at wrap or upstream verify) and
+`commonware_storage::bmt::Proof`, and `hash::domain_digest`; the
+negatives fail at wrap or upstream verify) and
 `rust/tests/golden/disclosure/neg_inner_root_forged.*`,
 `neg_inner_root_fold_mismatch.*`, `neg_bundle_version_1.*`.
 
-## Disclosed absolute offsets require a complete length-proof set
+## A disclosed chunk's span is committed by its leaf
 
-**Always:** `DisclosedPayload::Range::absolute_offset` is `Some(...)`
-only when either the leaf is a plain `Blob` (nothing to sum) or the
-disclosed chunk is index 0 (nothing precedes it), or `chunk_len_proofs`
-verifiably covers exactly the index set `0..index` with no gaps and no
-duplicates. Any other shape of `chunk_len_proofs` — a gap, a duplicate,
-an index `>= index`, or one entry that fails to verify — is a typed
-[`VerifyError::IncompleteLengthProofSet`], never a silent `None`. A
-*non-empty* `chunk_len_proofs` on a chunk-index-0 range, or on a plain
-`Blob` leaf, has nothing preceding it to describe and is rejected
-outright as `VerifyError::UnexpectedLengthProofs`, never silently
-ignored either.
+**Always:** `DisclosedPayload::Chunk` and `DisclosedPayload::Range` report
+the span `[start, end)` of the chunk, and the verifier accepts it only when
+the leaf at the chunk's position is `domain_digest("kit-cblob-chunk-v1",
+le64(start) || le64(end) || chunk_id)` and it folds into the authenticated
+leaf. The span is also possible: it lies inside the file, it is no longer
+than one Blob can be, the first chunk starts at 0, the last ends at
+`total_size`, and a fixed-size layout gives the span. The chunk bytes are
+one Blob whose content length is `end - start`, and a range lies inside
+that span. `absolute_offset` is `start + offset_in_blob`, always present for
+a chunked range.
 
-**Because:** a partial or malformed length-proof set does not sum to a
-value that means anything; treating it as "absent" (`None`) rather than
-rejecting it outright would let a caller silently miss that an absolute
-offset was *claimed but not actually provable*, rather than being told
-plainly that the request failed. The chunk-0/plain-`Blob` case is the
-same principle at its edge: an entry that describes nothing real is not
-merely irrelevant, it is evidence of a malformed or lying builder.
+**Because:** the manifest binds each chunk's end, so the file offset of a
+byte follows from one chunk's proof. A length the leaf does not commit
+would let a builder move a chunk to another offset, or claim a chunk
+longer than its bytes.
 
-**If violated:** an application relying on `absolute_offset` for, say,
-byte-accurate DA-layer indexing could be handed a value derived from an
-incomplete sum — or worse, silently receive `None` for a bundle that
-*looked* like it was trying to prove one, masking a builder bug or a
-malicious short-fill.
+**If violated:** an application that trusts `absolute_offset` for
+byte-accurate indexing would take a value that no manifest commits.
 
-**Enforced by:** `kit_core::verify::tests::incomplete_length_proof_set_is_rejected`
-and `rust/tests/golden/disclosure/neg_incomplete_length_proof_set.*`;
-`kit_core::verify::tests::len_proofs_on_chunk0_are_rejected` and
-`rust/tests/golden/disclosure/neg_len_proofs_on_chunk0.*` (SPEC-DISCLOSURE §4/§4.1).
+**Enforced by:** `kit_core::verify` span-rule tests, the golden vectors
+`rust/tests/golden/disclosure/neg_span_*`, `neg_chunk_bytes_not_blob`,
+`neg_chunk_length_differs_from_span` and `neg_range_past_span`, and the
+independent reference `scripts/golden/chunk_offsets_ref.py`
+(SPEC-DISCLOSURE §4).
 
 ## KDSP spans bind every chunk to one authenticated byte range
 
-**Always:** an accepted KDSP container has one trusted commit, authenticated
-path and leaf, a complete preceding length-proof set, and consecutive chunk
-bundles. Its absolute boundaries come from verified canonical Blob content
-lengths. The requested range starts in the first included chunk and ends in
-the last, with no unnecessary last chunk. A malformed container returns its
-first SPEC-DISCLOSURE §8.2 reason and no partial output bytes. A range-proof
-builder checks untrusted boundary hints against the chunk bytes it reads and
-does not read a chunk after the span.
+**Always:** an accepted KDSP container (version 2) has one trusted commit,
+authenticated path and leaf, and consecutive chunk bundles. Each bundle
+proves its chunk's span, and the spans chain: the first included chunk's
+`start` is at or before the requested offset, each next chunk starts where
+the previous one ended, and the last chunk's `end` reaches the end of the
+range, with no unnecessary last chunk. No preceding chunk is proven. A
+malformed container returns its first SPEC-DISCLOSURE §8.2 reason
+(`span_chunk_chain` for a chain that breaks) and no partial output bytes. A
+range-proof builder reads only the chunks the range touches, finding them
+by binary search over the manifest's ends, and does not read a chunk after
+the span.
 
-**Because:** a chunk-size marker or unchecked hint is not a proof of a content
-boundary, and combining individually valid bundles from different contexts
-would not authenticate their concatenation as one requested range.
+**Because:** the span a leaf commits is a proof of a content boundary, and
+combining individually valid bundles from different contexts would not
+authenticate their concatenation as one requested range.
 
 **If violated:** a caller can receive bytes at the wrong absolute offset or
 from the wrong leaf, or accept an incomplete range as a valid disclosure.
 
 **Enforced by:** `kit_core::verify::span` and its unit tests,
 `rust/crates/kit-core/tests/golden_http_objects.rs` product/reference parity
-and builder byte-identity checks
+and builder byte-identity checks, and the vectors `neg_chunk_chain` and
+`neg_span_*`
 (SPEC-DISCLOSURE §8 and SPEC-HTTP-OBJECTS §5.2).
 
 ## Closure walks share one `children` function
@@ -761,6 +758,11 @@ server, never a global content store. A source that does not have a base
 and a source that may not serve it give the same `DeltaBaseMissing` error;
 an unverified source's bytes are re-derived, so a wrong object is never
 used as a base.
+
+A chunk the `known` callback answers `Known::Yes` has no length, so
+its manifest is reported corrupt; answer `Known::Blob(len)` and the walk
+checks the chunk against its span
+(`verify::push::tests::a_known_chunk_is_checked_against_its_span`).
 
 A `known` tip is skipped whole, including the commit/remix/tag type check
 `verify_push` applies to every fetched tip. Callers MUST type-check known

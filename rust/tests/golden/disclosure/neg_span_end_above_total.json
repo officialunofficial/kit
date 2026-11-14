@@ -1,0 +1,14 @@
+{
+  "bin": "neg_span_end_above_total.bin",
+  "blake3": "7c3fd74fccba50170d8bdbd36651b116d5642e2aa3d2b76b618be0f71429b2a0",
+  "commit_id_hex": "68b70c226b57a32945217309b955cb0e993759b488b451625acc4b2451ae10eb",
+  "description": "A chunk whose span ends at 12, past total_size 8.",
+  "expect": "reject",
+  "name": "neg_span_end_above_total",
+  "path_hex": [
+    "66697865642e62696e"
+  ],
+  "reject_reason": "the span reaches past total_size",
+  "selector": "chunk(0)",
+  "size": 500
+}

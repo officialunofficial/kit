@@ -1,0 +1,44 @@
+{
+  "bin": "chunked_range.bin",
+  "blake3": "6b0a876040912043532d7d9e7ec95cba44ce8bca1e3c7b1ea3ca5d2793ddb8d7",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
+  "description": "A 64-byte range inside a non-first chunk; the absolute offset is the committed start of the chunk plus the offset in it.",
+  "disclosed": {
+    "chunk_inner_root_hex": "fdda7b9359f9f68f20a5a618fabc9eb9df0dcc1b6b0f6eda99b172db89ac4049",
+    "leaf_id_hex": "569a33c77e04be8d479fe1290f77963660810e4f2a7ee1a878f7542145257df1",
+    "path": [
+      {
+        "mode": 1,
+        "name_hex": "6368756e6b65642e62696e"
+      }
+    ],
+    "payload": {
+      "absolute_offset": 29531,
+      "blob_id_hex": "d2f39d7303d349fdbd98cb32bb234fcede0975e4d7a811c9f64a496106f7e873",
+      "bytes_blake3": "b68b5040078dcd91248ef913815a5e9132b31b5366273a486dbb8f85c825fe52",
+      "chunk": {
+        "chunk_size": 0,
+        "end": "48061",
+        "index": 1,
+        "start": "29499",
+        "total_size": 1048577
+      },
+      "kind": "range",
+      "len": 64,
+      "offset_in_blob": 32
+    },
+    "signature_valid": true,
+    "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+    "step_inner_roots_hex": [
+      "bce6c65a7027dd686620c30ebf9af4b271b68d02a7b96adf40b39298c176e861"
+    ],
+    "tree_hash_hex": "434ffc6afa2cb34aca16f751265d109047bda1acda264220e92922131afa7cef"
+  },
+  "expect": "accept",
+  "name": "chunked_range",
+  "path_hex": [
+    "6368756e6b65642e62696e"
+  ],
+  "selector": "range(offset=29531,len=64)",
+  "size": 2102
+}

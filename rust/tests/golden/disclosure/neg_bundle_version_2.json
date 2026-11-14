@@ -1,0 +1,14 @@
+{
+  "bin": "neg_bundle_version_2.bin",
+  "blake3": "85d0dada9155a29e77feef16df3e785c71a35af93238bb84df54ea5725f69113",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
+  "description": "The version byte is 2, the version before chunks carried their spans.",
+  "expect": "reject",
+  "name": "neg_bundle_version_2",
+  "path_hex": [
+    "7368616c6c6f772e747874"
+  ],
+  "reject_reason": "unsupported bundle version 2",
+  "selector": "object",
+  "size": 533
+}

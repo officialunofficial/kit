@@ -831,7 +831,15 @@ mod tests {
         source.put(
             old_manifest,
             &Object::ChunkedBlob(
-                ChunkedBlob::new(3_000_000, 0, vec![old_chunk0, old_chunk1]).unwrap(),
+                ChunkedBlob::new(
+                    3_000_000,
+                    0,
+                    vec![
+                        (old_chunk0, BINARY_SNIFF_LEN as u64 + 1000),
+                        (old_chunk1, 3_000_000),
+                    ],
+                )
+                .unwrap(),
             ),
         );
         let new_chunk0 = fake_hash(4);
@@ -846,7 +854,15 @@ mod tests {
         source.put(
             new_manifest,
             &Object::ChunkedBlob(
-                ChunkedBlob::new(4_000_000, 0, vec![new_chunk0, new_chunk1]).unwrap(),
+                ChunkedBlob::new(
+                    4_000_000,
+                    0,
+                    vec![
+                        (new_chunk0, BINARY_SNIFF_LEN as u64 + 500),
+                        (new_chunk1, 4_000_000),
+                    ],
+                )
+                .unwrap(),
             ),
         );
 
@@ -1004,10 +1020,18 @@ mod tests {
         total_size: u64,
     ) -> (Hash, Hash) {
         let (chunk0, chunk1, manifest) = (fake_hash(tag), fake_hash(tag + 1), fake_hash(tag + 2));
+        let first_end = first.len() as u64;
         source.put(chunk0, &Object::Blob(Blob { data: first }));
         source.put(
             manifest,
-            &Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, vec![chunk0, chunk1]).unwrap()),
+            &Object::ChunkedBlob(
+                ChunkedBlob::new(
+                    total_size,
+                    0,
+                    vec![(chunk0, first_end), (chunk1, total_size)],
+                )
+                .unwrap(),
+            ),
         );
         (manifest, chunk1)
     }

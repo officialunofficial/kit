@@ -257,9 +257,11 @@ Three layers, from authoritative to advisory:
      "refName": "<full kit ref name>",
      "remoteUrl": "<attested remote, §8>",
      "schemaVersion": 1,
-     "specVersion": 1
+     "specVersion": 2
    }
    ```
+
+   `specVersion` is the import-spec version of §1.2.
 
    Because parents are inside signed commit bytes, a head attestation
    transitively pins the imported closure. Envelopes are stored like

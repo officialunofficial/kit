@@ -55,7 +55,7 @@ pub fn chunk_boundaries(bytes: &[u8]) -> Result<ChunkerResult, JsValue> {
 /// return `{ root_hash_hex, chunks: [{ offset, len, hash_hex }], bytes_len }`.
 ///
 /// `root_hash_hex` is the object's content id — the BMT root of the manifest,
-/// whose leaves are the per-chunk **Blob object ids** (built via the shared
+/// whose leaves commit each chunk's span and **Blob object id** (built via the shared
 /// `worktree::chunked_blob_from_bytes`), so it equals the id the native store
 /// keys the `ChunkedBlob` under. Each chunk's `hash_hex` is the **raw**
 /// BLAKE3 of the chunk payload — for UI colouring/dedup, distinct from the
@@ -502,8 +502,13 @@ mod tests {
 
         // Guard against regressing to a manifest of raw chunk-content hashes
         // (the prior bug): those leaves are not resolvable Blob ids.
-        let raw_chunks: Vec<[u8; 32]> = ChunkIterator::new(FastCdc::v1(), &data)
-            .map(|b| hash(&data[b.offset..b.offset + b.length]))
+        let raw_chunks: Vec<([u8; 32], u64)> = ChunkIterator::new(FastCdc::v1(), &data)
+            .map(|b| {
+                (
+                    hash(&data[b.offset..b.offset + b.length]),
+                    (b.offset + b.length) as u64,
+                )
+            })
             .collect();
         let raw_cb = kit_core::object::ChunkedBlob::new(data.len() as u64, 0, raw_chunks).unwrap();
         let raw_root = to_hex(&kit_core::merkle::compute_chunked_id(&raw_cb));

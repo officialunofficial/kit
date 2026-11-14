@@ -1219,7 +1219,7 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     window: usize,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
-    let mut chunks = Vec::new();
+    let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
     while let Some(chunk) = chunker.next_chunk_ref()? {
         let origin = ChunkOrigin {
@@ -1228,7 +1228,8 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
-        chunks.push(store_chunk_blob_at(sink, chunk, origin)?);
+        chunks.ids.push(store_chunk_blob_at(sink, chunk, origin)?);
+        chunks.ends.push(total_size);
         if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
         }
@@ -1236,14 +1237,43 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     store_chunk_manifest(sink, total_size, chunks)
 }
 
+/// The chunk ids and end offsets of a file being chunked, in two lists, so
+/// the manifest takes them over without a copy.
+#[derive(Default)]
+struct ChunkList {
+    ids: Vec<Hash>,
+    ends: Vec<u64>,
+}
+
+impl ChunkList {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Append one hashed batch, each hash with the end offset of its chunk.
+    fn extend(&mut self, hashes: Vec<Hash>, batch: &[Vec<u8>]) {
+        let mut end = self.ends.last().copied().unwrap_or(0);
+        for (hash, chunk) in hashes.into_iter().zip(batch) {
+            end += chunk.len() as u64;
+            self.ids.push(hash);
+            self.ends.push(end);
+        }
+    }
+}
+
 /// Both streaming strategies use the same canonical manifest encoding.
 fn store_chunk_manifest<S: ObjectSink + ?Sized>(
     sink: &S,
     total_size: u64,
-    chunks: Vec<Hash>,
+    chunks: ChunkList,
 ) -> WorktreeResult<Hash> {
     // 0 = content-defined (FastCDC) per SPEC-OBJECTS §7
-    let manifest = Object::ChunkedBlob(ChunkedBlob::new(total_size, 0, chunks)?);
+    let manifest = Object::ChunkedBlob(ChunkedBlob::from_parts(
+        total_size,
+        0,
+        chunks.ids,
+        chunks.ends,
+    )?);
     let manifest_bytes = serialize::serialize(&manifest)?;
     // Free the id list before the sink stores the bytes, so the typed list and
     // the serialized bytes are not held together with the sink's own copies.
@@ -1279,7 +1309,7 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// instead of requiring the whole file resident in memory first.
 /// Bounds ingest memory to one fixed `ChunkReader` window
 /// (1 MiB to 16 MiB, by cutter thread count), an owned batch of at most 64 chunks (16 MiB), and the
-/// growing chunk-hash list (32 bytes/chunk). The reader and batch stay
+/// growing lists of chunk ids and ends (40 bytes/chunk). The reader and batch stay
 /// bounded independently of total file size.
 ///
 /// `path` is used only to name the file in a [`WorktreeError::FileTooLarge`]
@@ -1355,7 +1385,7 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
     window: usize,
 ) -> WorktreeResult<Hash> {
     let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
-    let mut chunks = Vec::new();
+    let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
     while let Some(chunk) = chunker.next_chunk()? {
@@ -1363,7 +1393,8 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
         batch.push(chunk);
         if batch.len() == STREAM_HASH_BATCH {
             let before = chunks.len();
-            chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
+            let hashes = checked_hash_chunks(hash_chunks, sink, &batch)?;
+            chunks.extend(hashes, &batch);
             if checkpoint_due(before, chunks.len(), window) {
                 sink.checkpoint()?;
             }
@@ -1371,7 +1402,8 @@ fn store_large_file_streaming_batched<S: ObjectSink + ?Sized, R: Read>(
         }
     }
     if !batch.is_empty() {
-        chunks.extend(checked_hash_chunks(hash_chunks, sink, &batch)?);
+        let hashes = checked_hash_chunks(hash_chunks, sink, &batch)?;
+        chunks.extend(hashes, &batch);
     }
 
     store_chunk_manifest(sink, total_size, chunks)
@@ -1422,7 +1454,7 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
 
     let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
 
-    let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(Vec<Hash>, u64)> {
+    let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(ChunkList, u64)> {
         scope.spawn(move || {
             let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
             let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
@@ -1468,7 +1500,7 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
         // never come. Draining lets every future send succeed (or the
         // cutter hits its own error/EOF and exits on its own), so the
         // channel always disconnects and this loop always terminates.
-        let mut chunks = Vec::new();
+        let mut chunks = ChunkList::default();
         let mut total_size: u64 = 0;
         let mut first_err: Option<WorktreeError> = None;
         while let Ok(received) = rx.recv() {
@@ -1479,11 +1511,11 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 for chunk in &batch {
                     total_size += chunk.len() as u64;
                 }
-                checked_hash_chunks(hash_chunks, sink, &batch)
+                checked_hash_chunks(hash_chunks, sink, &batch).map(|hashes| (hashes, batch))
             }) {
-                Ok(hashes) => {
+                Ok((hashes, batch)) => {
                     let before = chunks.len();
-                    chunks.extend(hashes);
+                    chunks.extend(hashes, &batch);
                     if checkpoint_due(before, chunks.len(), window)
                         && let Err(e) = sink.checkpoint()
                     {
@@ -1546,10 +1578,12 @@ pub fn store_file_object_with<S: ObjectSink + ?Sized>(
     // below serialize::MAX_CHUNKED_TOTAL_SIZE, and its chunk count is far
     // below serialize::MAX_CHUNKS.
     let total_size = data.len() as u64;
-    let chunks: Vec<Hash> = chunk_slices(data, chunker)
+    let mut end = 0u64;
+    let chunks: Vec<(Hash, u64)> = chunk_slices(data, chunker)
         .map(|chunk| {
             let prologue = serialize::blob_prologue(chunk.len())?;
-            Ok::<_, WorktreeError>(sink.put_parts(&[&prologue, chunk])?)
+            end += chunk.len() as u64;
+            Ok::<_, WorktreeError>((sink.put_parts(&[&prologue, chunk])?, end))
         })
         .collect::<Result<_, _>>()?;
 
@@ -1599,7 +1633,8 @@ pub fn chunked_blob_from_bytes(data: &[u8]) -> WorktreeResult<ChunkedBlob> {
 /// [`WorktreeError::Object`] if a chunk length exceeds the wire-format cap,
 /// or the manifest breaks the header rules of SPEC-OBJECTS §7.
 pub fn chunked_blob_from_bytes_with(data: &[u8], chunker: Chunker) -> WorktreeResult<ChunkedBlob> {
-    let chunks: Vec<Hash> = chunk_slices(data, chunker)
+    let mut end = 0u64;
+    let chunks: Vec<(Hash, u64)> = chunk_slices(data, chunker)
         .map(|chunk| {
             // Blob object id = BLAKE3(blob_prologue ‖ chunk) — the id
             // store_file_object writes this chunk Blob under (the prologue ‖
@@ -1608,7 +1643,8 @@ pub fn chunked_blob_from_bytes_with(data: &[u8], chunker: Chunker) -> WorktreeRe
             let mut hasher = crate::hash::Hasher::new();
             hasher.update(&prologue);
             hasher.update(chunk);
-            Ok::<_, WorktreeError>(hasher.finalize())
+            end += chunk.len() as u64;
+            Ok::<_, WorktreeError>((hasher.finalize(), end))
         })
         .collect::<Result<_, _>>()?;
     Ok(ChunkedBlob::new(
@@ -2998,20 +3034,20 @@ mod tests {
         assert_eq!(read_blob(&store, &chunked_hash).unwrap(), big);
     }
 
-    /// SPEC-OBJECTS §7: "The concatenated length MUST equal `total_size`."
-    /// A manifest with valid chunks but a forged `total_size` (stored under
-    /// its real merkle id — the forgery changes the id, not its validity as
-    /// a store entry) must fail reassembly, not silently return
-    /// wrong-length content.
+    /// SPEC-OBJECTS §7: every chunk holds exactly its committed span, and the
+    /// spans end at `total_size`. A manifest whose chunk is shorter than its
+    /// span must fail reassembly, not silently return wrong-length content.
     #[test]
-    fn read_blob_rejects_chunked_total_size_mismatch() {
+    fn read_blob_rejects_a_chunk_that_is_not_its_span() {
         let (_sd, store) = fresh_store();
         let chunk = serialize::serialize(&Object::Blob(crate::object::Blob {
             data: b"twelve bytes".to_vec(),
         }))
         .unwrap();
         let chunk_hash = store.write(&chunk).unwrap();
-        let manifest = Object::ChunkedBlob(ChunkedBlob::new(999, 0, vec![chunk_hash]).unwrap());
+        let manifest = Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(999, 0, [(chunk_hash, 999)]).unwrap(),
+        );
         let h = store
             .write(&serialize::serialize(&manifest).unwrap())
             .unwrap();
@@ -3019,12 +3055,13 @@ mod tests {
         assert!(
             matches!(
                 err,
-                WorktreeError::Object(crate::object::KitError::ChunkedBlobSizeMismatch {
+                WorktreeError::Object(crate::object::KitError::ChunkLengthMismatch {
+                    index: 0,
                     expected: 999,
                     actual: 12,
                 })
             ),
-            "expected ChunkedBlobSizeMismatch, got {err:?}"
+            "expected ChunkLengthMismatch, got {err:?}"
         );
     }
 

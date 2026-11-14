@@ -82,7 +82,7 @@ pub const OBJECTS_DIR: &str = "objects";
 pub const FORMAT_FILE: &str = "format";
 /// The only supported object-addressing format value (see
 /// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
-pub const FORMAT_VALUE: &str = "bmt-v1";
+pub const FORMAT_VALUE: &str = "bmt-v2";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;
@@ -645,10 +645,49 @@ impl ObjectStore {
         if prologue[1..5] != crate::object::MAGIC {
             return Err(StoreError::Decode(KitError::InvalidMagic));
         }
-        if prologue[5] != crate::object::SCHEMA_VERSION {
+        let object_type =
+            crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)?;
+        if prologue[5] != object_type.schema_version() {
             return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
         }
-        crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)
+        Ok(object_type)
+    }
+
+    /// The object's type tag and, for a `Blob`, its content length, from the
+    /// first 10 bytes — without reading or hash-verifying the body. The
+    /// chunk check of [`crate::ops::graph::check_closure_present`] uses it:
+    /// a chunk is a `Blob` whose length is its manifest span.
+    ///
+    /// # Errors
+    /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
+    /// shorter than its 10-byte prologue.
+    pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        let path = self.path_for(h);
+        let file = File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
+            _ => StoreError::Io(e),
+        })?;
+        let mut head = Vec::with_capacity(10);
+        file.take(10).read_to_end(&mut head)?;
+        if head.len() < 6 {
+            return Err(StoreError::Decode(KitError::EmptyData));
+        }
+        if head[1..5] != crate::object::MAGIC {
+            return Err(StoreError::Decode(KitError::InvalidMagic));
+        }
+        let object_type =
+            crate::object::ObjectType::from_u8(head[0]).map_err(StoreError::Decode)?;
+        if head[5] != object_type.schema_version() {
+            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
+        }
+        if object_type != crate::object::ObjectType::Blob {
+            return Ok((object_type, None));
+        }
+        let len: [u8; 4] = head
+            .get(6..10)
+            .and_then(|b| b.try_into().ok())
+            .ok_or(StoreError::Decode(KitError::EmptyData))?;
+        Ok((object_type, Some(u64::from(u32::from_le_bytes(len)))))
     }
 
     /// Convenience: read raw bytes and decode into a typed [`Object`].
@@ -688,10 +727,12 @@ impl ObjectStore {
         if bytes[1..5] != crate::object::MAGIC {
             return Err(StoreError::Decode(KitError::InvalidMagic));
         }
-        if bytes[5] != crate::object::SCHEMA_VERSION {
+        let object_type =
+            crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)?;
+        if bytes[5] != object_type.schema_version() {
             return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
         }
-        crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)
+        Ok(object_type)
     }
 
     /// Enumerate every object hash currently in the store by walking
@@ -1245,6 +1286,14 @@ mod tests {
         assert!(matches!(
             ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
+        ));
+
+        // A repo of the format before chunk spans is refused, with no
+        // migration: every chunked id differs.
+        fs::write(&marker_path, b"bmt-v1\n").unwrap();
+        assert!(matches!(
+            ObjectStore::open(&layout),
+            Err(StoreError::IncompatibleRepoFormat { found: Some(ref found) }) if found == "bmt-v1"
         ));
     }
 

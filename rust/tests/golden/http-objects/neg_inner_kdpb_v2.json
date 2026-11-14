@@ -1,0 +1,31 @@
+{
+  "blake3": "cd43bc21ba96b67b783198464b3e1a11504df5adc2aa63d2ce298cdba6a42410",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
+  "expect": {
+    "accept": false,
+    "expand_to": null,
+    "reject_reason": "span_inner_invalid"
+  },
+  "name": "neg_inner_kdpb_v2",
+  "recipe": {
+    "segments": [
+      {
+        "length": 19338,
+        "offset": 0,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 33,
+        "offset": 4,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "length": 18624,
+        "offset": 19371,
+        "source": "span_two_chunks.bin"
+      }
+    ]
+  },
+  "schema_version": 1,
+  "size": 37995
+}

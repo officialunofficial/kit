@@ -1,12 +1,12 @@
 {
-  "blake3": "7ac46036f81124005ec548a8546ee06bb7981855cdd2ce7e621cc4cb31c5e185",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "6562cdac2866891a57b7ce1ac98c50731b1d84e5fb880edfef4ac26427383b81",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "expect": {
     "accept": true,
     "disclosed": {
       "bytes_blake3": "d865199280fb67f4dfe4486ce10668dd42e4c0121b34b757ff44d504f3400290",
       "bytes_len": 16,
-      "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+      "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
       "leaf": "99f646f5fd525d63009379188c165d10f1ac8c0614855d702136130a4a66d537",
       "path_hex": [
         "72616e67652e62696e"
@@ -22,5 +22,5 @@
   },
   "name": "blob_range",
   "schema_version": 1,
-  "size": 1616
+  "size": 1615
 }

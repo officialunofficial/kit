@@ -1,6 +1,6 @@
 ---
 spec: SPEC-MERKLE-OBJECTS
-version: 2
+version: 3
 status: stable-normative
 audience: implementers of compatible kit object stores
 ---
@@ -76,11 +76,16 @@ list finalizes `BLAKE3("")` with `N = 0`.
 
 The result equals §1.1 for every `N`. kit computes every object id this
 way (`kit_core::merkle::ChunkedIdFold` for a `ChunkedBlob`, which takes
-the header fields and then the chunk ids, one at a time or as the raw id
-bytes of a manifest). Tests compare the
+the header fields and then each chunk's id and end offset, one at a time or
+as the whole 40-byte entries of a manifest). The fold builds each chunk leaf
+of §3.1 and checks each entry with the entry check of SPEC-OBJECTS §7, so it
+refuses the entries that a manifest decoder refuses and at the same entry.
+Tests compare the
 fold with the level build for every `N` up to 1,024, around each power of
 two up to 2^14, and at 1,000,001 and 8,388,608 chunks; the two large
-ids are pinned in `merkle::tests`.
+ids are pinned in `merkle::tests`. Both pins use a fixed `chunk_size` of
+16384, the hash of chunk `i` as `le32(i)` padded with zeros to 32 bytes, and
+the span `[i * 16384, (i + 1) * 16384)`.
 
 ## 2. Identity
 
@@ -109,12 +114,13 @@ bytes.
 
 ### 3.1 ChunkedBlob
 
-`ChunkedBlob { total_size: u64, chunk_size: u32, chunks: [Hash; N] }`.
-Leaves, in order:
+`ChunkedBlob { total_size: u64, chunk_size: u32, chunks: [(Hash, u64); N] }`:
+each chunk has its id and its end offset (SPEC-OBJECTS §7). Leaves, in order:
 
 ```
-L[0]        = domain_digest(b"kit-cblob-meta-v1", le64(total_size) ‖ le32(chunk_size))
-L[1..=N]    = chunks[0], chunks[1], ..., chunks[N-1]   (raw 32-byte chunk ids)
+L[0]        = domain_digest(b"kit-cblob-meta-v2",  le64(total_size) ‖ le32(chunk_size))
+L[i + 1]    = domain_digest(b"kit-cblob-chunk-v1", le64(start_i) ‖ le64(end_i) ‖ chunk_id_i)
+start_0 = 0,  start_i = end_{i-1}
 ```
 
 - Chunk `i` is at BMT **position `i + 1`** &mdash; position 0 is the metadata
@@ -122,6 +128,15 @@ L[1..=N]    = chunks[0], chunks[1], ..., chunks[N-1]   (raw 32-byte chunk ids)
 - The metadata leaf binds `total_size` and `chunk_size`, neither of which
   is derivable from the chunk list; without it they could be forged (a
   second-preimage hole).
+- A chunk leaf binds the chunk's byte span with its id, so one proof of a
+  chunk gives its place in the file and its committed length. Both offsets
+  are in each leaf. The tree is a plain BMT; no node carries a sum.
+- Both domains are prefix-free (`domain_digest` prefixes the domain's
+  length) and each body is fixed-width, so no leaf can alias a leaf of
+  another kind. The meta domain is `-v2`, so every chunked id differs from an
+  id built over the earlier leaves, the zero-chunk manifest included.
+- The same chunk id at two indices gives two different leaves whenever the
+  spans differ.
 
 ### 3.2 Tree
 
@@ -144,7 +159,7 @@ L[i] = domain_digest(b"kit-tree-entry-v1", le32(len(name)) ‖ name ‖ u8(mode)
 The empty `Tree` (`entries = []`, common) has the fixed id
 `domain_digest(b"kit.tree\x00", BLAKE3(be32(0) ‖ BLAKE3("")))`. This
 constant is pinned from a real computation (`merkle::TREE_EMPTY_ID`),
-never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, a meta-only
+never transcribed by hand. The empty `ChunkedBlob` (`N = 0`, `total_size = 0`, a meta-only
 1-leaf tree) is well-defined but not produced in practice.
 
 ## 5. Inclusion proofs
@@ -295,7 +310,8 @@ for exactly this mistake.
 - **Tree**: position = the entry's index in the canonical order of §3.2,
   `0..M`.
 - **ChunkedBlob**: position = chunk index **+ 1** (§3.1's offset);
-  position 0 is the metadata leaf. It has a structurally valid BMT proof
+  position 0 is the metadata leaf. A chunk proof's leaf is the chunk leaf
+  of §3.1, built from the chunk's span and id. The metadata leaf has a structurally valid BMT proof
   like any other leaf, but chunk-proof verification MUST reject position
   0 specifically — it is never a valid proof that a *chunk* exists.
   `rust/tests/golden/proofs/chunked_blob_cs0_3chunks_metapos0_reject.*`
@@ -308,7 +324,10 @@ authoritative pinned bytes, each `<name>.bin` (the encoded `Proof`) paired
 with a `<name>.json` sidecar recording the object id to verify against,
 the proven position(s)/leaf data, the `max_items` decode bound, and the
 expected accept/reject outcome (with a reason for every reject).
-`MANIFEST.txt` pins every vector's BLAKE3 digest. The set covers: tree
+`MANIFEST.txt` pins every vector's BLAKE3 digest. A sidecar for a chunk
+proof lists `chunk_hashes_hex` and `chunk_spans`, one `[start, end]` pair for
+each chunk. The span values are decimal strings, because values near the
+`u64` maximum lose precision as JSON numbers. The set covers: tree
 entry proofs (single-leaf, including the odd-trailing-node case at
 several tree sizes; a range proof; a multi-leaf proof; and the real
 `tree_single_file` object from `rust/tests/golden/objects/`), chunk
@@ -342,7 +361,7 @@ repeated or not ascending (§5.4).
 
 | Mutation | Detected because |
 |---|---|
-| any chunk / entry field changed | the leaf digest changes |
+| any chunk / entry field changed, including a chunk's start or end offset | the leaf digest changes |
 | chunk / entry reorder | leaves are position-hashed |
 | chunk / entry count changed | the finalized root binds `leaf_count` |
 | ChunkedBlob `total_size`/`chunk_size` forged | the position-0 meta leaf changes |
@@ -362,6 +381,7 @@ fixed big- or little-endian as specified; no host-endian leakage).
 ## 7. Repository format marker
 
 The serialized **byte layout** of `Tree` and `ChunkedBlob` is given in
-SPEC-OBJECTS §4/§7. `schema_version` is `0x01`. A conformant store MUST
-refuse to open a repository whose on-disk format marker does not declare
-merkle addressing rather than silently mis-reading it (SPEC-OBJECTS §10).
+SPEC-OBJECTS §4/§7. `schema_version` is `0x01` for a `Tree` and `0x02` for a
+`ChunkedBlob`. A conformant store MUST refuse to open a repository whose
+on-disk format marker is not `bmt-v2`, the marker of the leaves in §3,
+rather than silently mis-reading it (SPEC-OBJECTS §10).

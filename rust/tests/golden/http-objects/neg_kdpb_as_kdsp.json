@@ -1,6 +1,6 @@
 {
-  "blake3": "6b2b7abd692fc6f061d8b371aa66bdff5c39f8d6ccb0ee50153233de26927510",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "10881ccec8c198dfab2a85a585c6f3d5f773bfae49a677901789074b7ed84acf",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "expect": {
     "accept": false,
     "expand_to": null,
@@ -10,20 +10,36 @@
   "recipe": {
     "segments": [
       {
-        "length": 723,
-        "offset": 55,
+        "length": 501,
+        "offset": 57,
         "source": "span_two_chunks.bin"
       },
       {
-        "hex": "200000000000000010"
+        "hex": "02"
       },
       {
-        "length": 2878,
-        "offset": 787,
+        "length": 65,
+        "offset": 558,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "d2f39d7303d349fdbd98cb32bb234fcede0975e4d7a811c9f64a496106f7e873"
+      },
+      {
+        "length": 133,
+        "offset": 623,
+        "source": "span_two_chunks.bin"
+      },
+      {
+        "hex": "00000000000000200000000000000010c80a8c480000000000009ed0e4c78a6aaa3210f10213db6b6df8726280ac85a34ca6a14634fc8cff7e141df9577f19c2ea5c45eb5f7e23ed127ebfd87ec3a12b4160546dde75d9b18352e0eb1b4f32d8edd2647606ff8c5c5b06009517c51d4e077df152ad6f0e927222a977f5fbbac2b51fd5dde84e9c0173dfb92796bf727f553921d786719c56be220e0ee15722fbf56d05e13b2279eceeecc8802ef112900fa601aa5f09b6b6d554782af8543d36f672be328681f3dc051f9dd7a6034cc895e40c1305f0e076370eca0ffb76b7664101c228dc2ebe00baf8eab752e93e9600a760cdaa4cfa175c59eff24932ac585fe673d85dcf556d0be969a380b361f0a7abb8a52671f02135fb4c68a3ab64d3281d62d79dbbdfd0a4ff0cfc72d1839afe61a02a54fcc5c68fde4c1b86994ecb489609d36d07d7d949d009ad6ff9bf227bc02c31e8e5ab4cce10"
+      },
+      {
+        "length": 1024,
+        "offset": 759,
         "source": "span_two_chunks.bin"
       }
     ]
   },
   "schema_version": 1,
-  "size": 3610
+  "size": 2102
 }

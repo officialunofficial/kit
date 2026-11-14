@@ -1,11 +1,11 @@
 {
-  "blake3": "67e9695b187a316240247d16a5a813116a545329a40f32e38e40068f324fc843",
-  "commit": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "7119f2c6feacec7e99aded72bd7dbafb666349ab0e06b7f93f6d0ec21b14594f",
+  "commit": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "expect": {
     "accept": true,
     "bytes_blake3": "b3bfe673b905c25deb21be14be687940cbc1c3e72d0e66e555f7a0f9ef4aa665",
     "bytes_len": 20,
-    "leaf": "712ef6d89e55a543488382d9bd8b1f5110f07263a5aba08f2f9d982c92c46bad",
+    "leaf": "569a33c77e04be8d479fe1290f77963660810e4f2a7ee1a878f7542145257df1",
     "offset": 29489,
     "path_hex": [
       "6368756e6b65642e62696e"
@@ -14,5 +14,5 @@
   },
   "name": "span_first_zero",
   "schema_version": 1,
-  "size": 51538
+  "size": 49513
 }

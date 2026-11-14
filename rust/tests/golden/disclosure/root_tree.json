@@ -1,21 +1,21 @@
 {
   "bin": "root_tree.bin",
-  "blake3": "ee28a066d94d0721bfd4727b64666006e972a0d7b553fa2c73ca103f25204ea7",
-  "commit_id_hex": "565ab3956eb46258529c966c12c1030e6aab602e83cee447803c57d20fe465ff",
+  "blake3": "0bf6e0c90de0d0c03e979fba55cd03703acad540c4b97294fc708f9be08a50e2",
+  "commit_id_hex": "a6e9644a8d967ce31a1794f93390c0e4240d411e83791ff9148d4b3a1336bb57",
   "description": "The commit's root tree, disclosed directly (empty path).",
   "disclosed": {
     "chunk_inner_root_hex": null,
-    "leaf_id_hex": "a7e483c901dfea906d9ff88336269ddd64fa6e04aa872b2228e9e79d14588b3b",
+    "leaf_id_hex": "434ffc6afa2cb34aca16f751265d109047bda1acda264220e92922131afa7cef",
     "path": [],
     "payload": {
-      "bytes_blake3": "d482efc1c8e1e507dfb246b5ff798b0aad72ecee66cf2e100bd6553f5876ffc5",
+      "bytes_blake3": "8684a6e096d8223afdb1297fb358f652c3d934deb23edf9af4a73779e5074712",
       "kind": "object",
       "len": 236
     },
     "signature_valid": true,
     "signer_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
     "step_inner_roots_hex": [],
-    "tree_hash_hex": "a7e483c901dfea906d9ff88336269ddd64fa6e04aa872b2228e9e79d14588b3b"
+    "tree_hash_hex": "434ffc6afa2cb34aca16f751265d109047bda1acda264220e92922131afa7cef"
   },
   "expect": "accept",
   "name": "root_tree",

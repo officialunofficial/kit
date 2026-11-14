@@ -1,6 +1,6 @@
 {
   "bin": "neg_chunk_names_non_blob.manifest.bin",
-  "blake3": "edb6dee61340fa9dc97e682543534e49ba92adf158379a562a2f814b9c1bf5d3",
+  "blake3": "7b1262a2cb38528602ff6178ffb725b6649ac563f100e6303bbd741ede93ef2e",
   "description": "A chunk id of a ChunkedBlob names a tree.",
   "expect": "incomplete",
   "ids": [],
@@ -8,10 +8,10 @@
   "n_packs": 1,
   "name": "neg_chunk_names_non_blob",
   "pack_hashes": [
-    "9840480b2f60e2a4de2d68e05e23451dc8c3ebcbbcdc50dbe69b169501f72782"
+    "adbdd8567e3334e522e118c71f5f45f8084710a9354a5f7a527e06260a1b0535"
   ],
   "reason": "corrupt",
-  "root_hex": "6475bd728ef25461a1c7e8299546a84486d62bede35bef43a5d1399912b7a5a2",
+  "root_hex": "a03fd37ce9ed4626b5a81dd6cc101f5543509b37e7aa31dfac176a5ce733325c",
   "size": 71,
   "unreferenced": [],
   "verified": 0
