@@ -481,6 +481,24 @@ where
     Ok((out, truncated))
 }
 
+/// The content length of chunk `index` of a manifest, from its first 10
+/// bytes. A chunk is a `Blob`; any other object is [`KitError::ChunkNotBlob`].
+/// The caller compares the length with the manifest's span
+/// ([`ChunkedBlob::check_chunk_length`]). The push plan and the closure
+/// presence check both read a chunk through this one function.
+///
+/// # Errors
+/// [`StoreError::ObjectNotFound`] and the errors of
+/// [`ObjectStore::object_head`], and [`KitError::ChunkNotBlob`].
+pub(crate) fn chunk_blob_len(
+    store: &ObjectStore,
+    chunk: &Hash,
+    index: u32,
+) -> Result<u64, StoreError> {
+    let (_, len) = store.object_head(chunk)?;
+    Ok(len.ok_or(KitError::ChunkNotBlob { index })?)
+}
+
 /// Check each chunk of `manifest` against its span: it is a `Blob` whose
 /// content length is `end - start`. Reads the first 10 bytes of a chunk not
 /// already in `checked`, and remembers at most `memory` chunks.
@@ -496,8 +514,7 @@ fn check_manifest_chunks(
         } else {
             #[cfg(test)]
             CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
-            let (_, len) = store.object_head(&chunk)?;
-            let len = len.ok_or(KitError::ChunkNotBlob { index })?;
+            let len = chunk_blob_len(store, &chunk, index)?;
             if checked.len() < memory {
                 checked.insert(chunk, len);
             }

@@ -34,7 +34,8 @@ use std::collections::{HashMap, HashSet};
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::list_decode::read_list;
-use crate::object::{KitError, Object, ObjectType};
+use crate::object::{Object, ObjectType};
+use crate::ops::graph::chunk_blob_len;
 use crate::pack::delta_fits_reader;
 use crate::store::{ObjectStore, StoreError};
 
@@ -755,14 +756,13 @@ fn plan_pack_capped(
     // Then the chunks of every kept manifest, which the walk never counted.
     // They follow the other blobs, in manifest order.
     let mut memory = ChunkMemory::new(limits.chunk_memory);
-    walk.for_each_chunk(store, &mut memory, |_, chunk| {
-        match store.object_type(&chunk)? {
-            ObjectType::Blob | ObjectType::Delta => {
-                blobs.push(chunk);
-                Ok(())
-            }
-            other => Err(StoreError::Decode(KitError::InvalidObjectType(other as u8))),
-        }
+    // Each chunk is checked as a fetch checks it: a `Blob` whose length is its
+    // span. A bad chunk fails the plan before anything is uploaded.
+    walk.for_each_chunk(store, &mut memory, |_, manifest, index, chunk| {
+        let len = chunk_blob_len(store, &chunk, index)?;
+        manifest.check_chunk_length(index, len)?;
+        blobs.push(chunk);
+        Ok(())
     })?;
 
     // Only blobs (small files and `FastCDC` chunks) are delta candidates, and
@@ -1126,9 +1126,9 @@ mod tests {
     // delta candidates still get a real, verified read.
     // =================================================================
 
-    /// Flip a byte well past the 6-byte type prologue so the object's
-    /// on-disk content no longer matches its BLAKE3 hash, while its type
-    /// tag stays intact and `object_type()` still reads it correctly.
+    /// Flip the last byte so the object's on-disk content no longer matches
+    /// its BLAKE3 hash, while its 10-byte prologue stays intact and
+    /// `object_head()` still reads it correctly.
     fn corrupt_payload_byte(s: &ObjectStore, h: &Hash) {
         use std::fs::OpenOptions;
         use std::io::{Read, Seek, SeekFrom, Write};
@@ -1138,10 +1138,11 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap();
-        f.seek(SeekFrom::Start(6)).unwrap();
+        // The last byte is content, so the 10-byte prologue stays valid.
+        f.seek(SeekFrom::End(-1)).unwrap();
         let mut byte = [0u8; 1];
         f.read_exact(&mut byte).unwrap();
-        f.seek(SeekFrom::Start(6)).unwrap();
+        f.seek(SeekFrom::End(-1)).unwrap();
         f.write_all(&[byte[0] ^ 0xFF]).unwrap();
         f.sync_all().unwrap();
     }

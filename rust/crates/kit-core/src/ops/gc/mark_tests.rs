@@ -366,17 +366,20 @@ fn a_manifest_used_as_a_chunk_and_reached_as_a_file_keeps_its_chunks() {
 }
 
 #[test]
-fn a_chunk_that_is_a_delta_is_accepted() {
+fn a_chunk_that_is_a_delta_aborts_gc() {
+    // A chunk is a `Blob`, as every reader of a chunk requires.
     let fx = Fx::new();
     let base = fx.blob("base");
     let delta = fx.delta(base);
     let plain = fx.blob("plain");
     fx.chunked_file_on_main(&[plain, delta]);
+    let orphan = fx.blob("orphan");
 
-    let live = fx.mark(MarkLimits::DEFAULT).unwrap();
-
-    assert!(live.chunks.contains(&delta) && live.chunks.contains(&plain));
-    assert!(!live.contains(&base), "a delta is a leaf");
+    assert_gc_refuses(
+        &fx,
+        &orphan,
+        |e| matches!(e, GcRootsError::ChunkNotBlob { chunk, .. } if *chunk == delta),
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -950,9 +953,7 @@ struct Graph {
 /// Write the objects of a spec. Objects that no root reaches stay in the
 /// store as orphans.
 fn build_objects(fx: &Fx, spec: &Spec) -> Graph {
-    let mut pool = fx.blobs("pool", spec.pool);
-    // A delta is a leaf and may be a chunk.
-    pool.push(fx.delta(pool[0]));
+    let pool = fx.blobs("pool", spec.pool);
     let mut manifests: Vec<Hash> = Vec::new();
     for selectors in &spec.manifests {
         // Chunks come from the shared pool. A weird manifest also lists
