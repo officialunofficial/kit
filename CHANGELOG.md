@@ -183,13 +183,18 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   field or a value below two means seven, and a value above 1,024 is cut to
   1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
   The `kit-client` crate reads it too, as described under Changed.
+  **Breaking:** the field is public on
+  `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and
+  `GetServerInfoResponseView`, so a struct literal that names every field no longer compiles.
+  Add the field, or end the literal with `..Default::default()`.
 
 ### Changed
 
 - **Breaking, format:** a chunked file's id commits the byte span of every
   chunk, so one log-size proof proves the chunk that holds any offset. Every
   chunked file id changes. A repository written before this change is
-  refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`), and
+  refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`, and
+  `kit_core::store::FORMAT_VALUE` is `"bmt-v2"`), and
   there is no migration. Trees, blobs, commits and tags keep their ids.
   - The manifest is schema `0x02` of type `0x05`, `22 + 40 * n` bytes: the
     22-byte header, then per chunk a 32-byte id and the `u64` offset one
@@ -206,7 +211,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `ChunkedBlobLength`, `ChunkEndNotIncreasing`, `ChunkEndAboveTotalSize`,
     `ChunkLengthAboveLimit`, `FixedChunkEnd`, `ChunkedBlobLastEnd`,
     `ChunkLengthMismatch`, `ChunkNotBlob` and `ChunkedBlobNoChunks` (a total
-    size with no chunks).
+    size with no chunks). `KitError` is not `#[non_exhaustive]`, so a `match`
+    with no wildcard arm has to name them.
   - Every place that reads a chunk checks it against its span: reassembly,
     restore, diff, blame, the closure walk and the fetch check. A chunk that
     is not a Blob, or whose length differs from its span, is a typed error.
@@ -232,7 +238,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
   `LastChunkEnd`, `ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan` and
   `RangePastSpan`. `FixedChunkLength` is a span that the fixed-size
-  layout does not give. The absolute offset of a
+  layout does not give. `VerifyError` is not `#[non_exhaustive]`, so a `match`
+  with no wildcard arm has to name the new variants. The absolute offset of a
   range is always known, and the proof of a byte has the same size at any
   chunk index. `build_range_proof_from` takes no boundary hints and reads
   only the chunks the range touches.
@@ -275,13 +282,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ChunkedBlob::new(total_size, chunk_size, chunks)` (the chunks are `(Hash, end)`
   pairs, see the first entry above), which returns
   `Result<ChunkedBlob, KitError>` and refuses what the decoder refuses:
-  `KitError::TooManyChunks` above `MAX_CHUNKS`, and
+  `KitError::TooManyChunks` above `MAX_CHUNKS`,
   `KitError::ChunkedBlobTotalSizeInvalid` for a `total_size` above
-  `MAX_CHUNKED_TOTAL_SIZE` or impossible for the layout. Read a manifest with
+  `MAX_CHUNKED_TOTAL_SIZE`, `KitError::ChunkEndNotIncreasing`,
+  `KitError::ChunkLengthAboveLimit`, `KitError::ChunkEndAboveTotalSize` and
+  `KitError::FixedChunkEnd` for an entry (each names the entry's index, and
+  they are checked in that order), `KitError::ChunkedBlobNoChunks` for a
+  non-zero `total_size` with no chunks, and `KitError::ChunkedBlobLastEnd` for
+  a last end that is not `total_size`. Read a manifest with
   `total_size()`, `chunk_size()` and `chunks()`, which returns `&[Hash]`, and
   take the chunk list by value with `into_chunks()`. Struct literals,
-  destructuring and field reads no longer compile. The bytes, ids, golden
-  vectors and error text do not change. The leaf layout of a manifest's tree
+  destructuring and field reads no longer compile. The leaf layout of a manifest's tree
   (the metadata leaf, then the chunks) is stated once, and the leaf count,
   the id fold, the proofs and the chunk positions derive from it.
 - **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
@@ -310,9 +321,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the applied-packs record, now appended as each pack lands; the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
   after a skipped pack now clears the record and retries once, as a missing
-  closure object already did. `SyncOptions::staging_dir` and
-  `SyncOptions::with_staging_dir` are removed. Remove the calls; a fetch needs
-  no replacement. The publish step no longer fails with `SyncError::RepoLock`
+  closure object already did. `SyncOptions::staging_dir`,
+  `SyncOptions::max_staged_bytes` and their builders
+  `SyncOptions::with_staging_dir` and `SyncOptions::with_max_staged_bytes` are
+  removed, so a field read or a call no longer compiles. Remove them; a fetch
+  stages nothing and needs no replacement. (`max_staged_bytes` and its builder
+  were never in a release: they came after 0.7.3.) The publish step no longer fails with `SyncError::RepoLock`
   when another process holds `worktree.lock`: it waits, unless `SyncOptions::lock_wait` bounds the wait. A caller
   with an observer that never cancels waits as long as the holder does, and a fetch
   that waits holds its prune guard, so gc prunes nothing meanwhile.
@@ -321,7 +335,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it grows, so memory stays near twice the 32 bytes of each distinct chunk
   id. gc refuses a repository of more than 134,217,728 distinct live chunks, as
   `GcRootsError::TooManyChunks`. It reads the type of each chunk before it
-  deletes anything, and refuses a chunk that is not a blob or a delta, as
+  deletes anything, and refuses a chunk that is not a blob, as
   `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one
   object directory at a time. The summary line shows the live chunk count.
   The gc mark returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
@@ -372,6 +386,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ticket allowance returns one step. `Plan::prepare` is unchanged for
   `max_tickets` of two or more.
 - **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
+  `ops::graph::ANCESTOR_LIMIT` (the limit name `"10,000-commit ancestor walk"`,
+  added after 0.7.3; nothing replaces it, because each capped history walk now
+  takes the cap and the limit name of its caller and reports it in
+  `AncestorError::Limit`),
   `collect_ancestor_set`,
   `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
   and `transfer::plan_pack` are gone. Only tests
@@ -485,7 +503,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proof names. A proof of a manifest of 8,388,608 chunks took about 770 MiB
   of memory above the manifest itself and now stays within the manifest's own
   size. The proof bytes, ids and signatures are the same.
-- A pack read charges 896 bytes of memory per entry, up from 704. The old
+- **Breaking:** `kit_core::pack::PACK_ENTRY_RESIDENT_COST` is 896, up from
+  704: a pack read charges that many bytes of memory per entry. The old
   figure was below the real cost of a pack read with a long store path. A
   client now refuses a pack of more than about 2.40 million entries (a small
   pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
@@ -644,7 +663,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   holds everything the chain held, so every transport and every head
   condition allows it. A node lists at most 4,096 packs
   (`ROLLOVER_MAX_PACKS`), 131,080 bytes: a chain that holds more keeps
-  appending. A reader accepts the node as before. A server that limits a node to 1,024 packs must accept 4,096
+  appending. **Breaking:** the public constant
+  `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS` is 4,096, up from 1,024
+  (the constant itself was added after 0.7.3), so code that derives a size or
+  a bound from it changes. A reader accepts
+  the node as before. A server that limits a node to 1,024 packs must accept 4,096
   before it is used with this client. A fresh clone downloads every pack of the branch.
   With the `fetch-grow` row of the multi-writer benchmark, the largest
   upload of one push among 1,000 pushes of a 1 KiB change went from 740,447
