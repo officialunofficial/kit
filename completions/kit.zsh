@@ -365,6 +365,8 @@ _kit() {
                         '-m[rename branch]:branch:' \
                         '(-u --set-upstream-to)'{-u,--set-upstream-to=}'[track a remote branch]:upstream:' \
                         '--unset-upstream[stop tracking a remote branch]' \
+                        '(-r --remotes -a --all)'{-r,--remotes}'[list remote-tracking branches]' \
+                        '(-r --remotes -a --all)'{-a,--all}'[list local and remote-tracking branches]' \
                         '--list[list branches (explicit selector)]' \
                         '--contains[only branches whose tip contains COMMIT]::commit:' \
                         '--no-contains[only branches whose tip does NOT contain COMMIT]::commit:' \

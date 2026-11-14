@@ -258,9 +258,8 @@ History / commits:
   a signed commit from the staging index. The index is built by `kit
   add` / `kit rm`; `commit` with an empty index is an error, except a first
   commit made with `--allow-empty`, which records an empty tree. A commit
-  that has a parent never needed the flag: it accepts a tree equal to its
-  parent's. Use `kit
-  add .` to snapshot the whole worktree before committing. `-m` supplies
+  that has a parent does not need the flag: it accepts a tree equal to its
+  parent's. Use `kit add .` to snapshot the whole worktree before committing. `-m` supplies
   the message inline; `-F`/`--file` reads it from `<file>` (like `git
   commit -F`), with `-` meaning standard input &mdash; `-m` and `-F` are
   mutually exclusive, and omitting both launches `$EDITOR`. `-a` / `--all`
@@ -820,9 +819,10 @@ Branches / refs:
 - `kit branch -m [<old>] <new>` &mdash; rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.
-- `kit branch -u <remote>/<branch> [<branch>]` (`--set-upstream-to`) &mdash;
+- `kit branch -u <upstream> [<branch>]` (`--set-upstream-to`) &mdash;
   record the upstream of a branch in the repo config: the branch named, or
-  the current one. The remote-tracking ref `<remote>/<branch>` must exist.
+  the current one. `<upstream>` is a `<remote>/<branch>` whose remote-tracking
+  ref must exist.
   `kit branch --unset-upstream [<branch>]` removes the upstream of the
   branch named, or of the current one. Neither contacts a remote.
 - `kit branch --show-current` &mdash; print the checked-out branch name (empty
@@ -870,8 +870,8 @@ Branches / refs:
   or with `--staged` unstage them (restore the index entry from `HEAD`). With
   both flags it restores the index and the worktree. `--source <rev>` takes the
   content from that revision's tree instead. A directory restores every tracked
-  entry at or below it. It refuses a file with unstaged edits unless `-f` is
-  given.
+  entry at or below it. The worktree restore refuses a file with unstaged
+  edits unless `-f` is given.
 - `kit checkout -b|-B <new> [<start>]` &mdash; create a branch at the
   start-point (default HEAD) and switch to it; `-b` refuses to clobber an
   existing branch, `-B` create-or-resets. Prints `Switched to a new branch

@@ -528,7 +528,7 @@ and is mutually exclusive with
 overrides the commit author Identity for this commit.
 .Fl Fl allow-empty
 accepts a first commit with nothing staged, which records an empty tree. A
-commit that has a parent never needed the flag: it accepts a tree equal to
+commit that has a parent does not need the flag: it accepts a tree equal to
 its parent's.
 .Pp
 After a
@@ -1050,7 +1050,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m | Fl Fl mainline Ar parent-number Oc
+.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m Ar parent-number Oc
 Create a new commit that undoes
 .Ar commit
 (the inverse of cherry-pick). A normal forward commit — it does not rewrite

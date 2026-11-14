@@ -83,8 +83,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
   none. It counts the objects and the bytes.
 - `kit worktree move [-f] <path> <new-path>`, `lock [--reason <text>] <path>`
-  (a reason of more than 1,024 bytes, or with a control character, is
-  refused), `unlock <path>` and `repair [<path>...]`. A locked tree is refused by
+  (it refuses a reason over 1,024 bytes or with a control character),
+  `unlock <path>` and `repair [<path>...]`. A locked tree is refused by
   `remove` and `move` unless `-f` is given twice, and `prune` keeps it.
   `worktree list` shows the lock. A locked tree has an optional `locked` file
   in its state directory. No existing file changes.
@@ -319,7 +319,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   around the tracking-ref write and the checkpoint. That wait has no
   deadline unless `SyncOptions::lock_wait` sets one, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
   interrupt. A failure part way leaves the applied packs in the store and in
-  the applied-packs record, now appended as each pack lands; the next fetch
+  the applied-packs record, now appended as each pack lands (a record that
+  cannot be written still warns once for the fetch, as before); the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
   after a skipped pack now clears the record and retries once, as a missing
   closure object already did. `SyncOptions::staging_dir`,
@@ -331,9 +332,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when another process holds `worktree.lock`: it waits, unless `SyncOptions::lock_wait` bounds the wait. A caller
   with an observer that never cancels waits as long as the holder does, and a fetch
   that waits holds its prune guard, so gc prunes nothing meanwhile.
-- A fetch that cannot write the applied-packs record prints the warning
-  `could not persist applied-packs record` once, not once for each pack and
-  again for the final rewrite.
 - **Breaking:** `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
   cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
   it grows, so memory stays near twice the 32 bytes of each distinct chunk
