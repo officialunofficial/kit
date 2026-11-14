@@ -416,24 +416,38 @@ fn bisect_skip_sets_aside_the_current_candidate_and_moves_on() {
     let bad = between.pop().unwrap();
     assert!(run_in(td.path(), &["bisect", "start"]).status.success());
     assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
-    assert!(run_in(td.path(), &["bisect", "bad", &bad]).status.success());
+    let started = run_in(td.path(), &["bisect", "bad", &bad]);
+    assert!(started.status.success(), "{started:?}");
     assert!(skipped_in_state(td.path()).is_empty());
+    // The candidate under test is the one `bisect bad` printed.
+    let candidate = String::from_utf8(started.stdout).unwrap().trim().to_owned();
+    assert!(!candidate.is_empty());
 
     let first = run_in(td.path(), &["bisect", "skip"]);
     assert!(first.status.success(), "bisect skip failed: {first:?}");
     let skipped = skipped_in_state(td.path());
     assert_eq!(skipped.len(), 1, "{skipped:?}");
     assert!(
-        between.contains(&skipped[0]),
-        "the skipped commit lies between the good and the bad one: {skipped:?}"
+        skipped[0].starts_with(&candidate) && between.contains(&skipped[0]),
+        "the skip set aside the candidate {candidate}: {skipped:?}"
+    );
+    // It moves on to another candidate.
+    let next = String::from_utf8(first.stdout).unwrap().trim().to_owned();
+    assert!(
+        !next.is_empty() && next != candidate,
+        "{next} after {candidate}"
     );
 
-    // The next skip sets aside a different candidate.
+    // The next skip sets aside that new candidate.
     let second = run_in(td.path(), &["bisect", "skip"]);
     assert!(second.status.success(), "bisect skip failed: {second:?}");
     let skipped = skipped_in_state(td.path());
     assert_eq!(skipped.len(), 2, "{skipped:?}");
-    assert_ne!(skipped[0], skipped[1]);
+    // The state file lists the skipped commits in no fixed order.
+    assert!(
+        skipped.iter().any(|hash| hash.starts_with(&next)),
+        "{skipped:?} after {next}"
+    );
     let _ = run_in(td.path(), &["bisect", "reset"]);
 }
 

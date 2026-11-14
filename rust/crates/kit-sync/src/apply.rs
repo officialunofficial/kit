@@ -357,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
     fn a_pack_above_the_body_limit_is_refused_before_it_is_hashed() {
         let len = body_limit() + 1;
         let error = download_zero_pack(len).unwrap_err();
@@ -375,10 +376,11 @@ mod tests {
     #[ignore = "reads a 4 GiB buffer"]
     fn a_pack_of_exactly_the_body_limit_is_checked_against_its_key() {
         let error = download_zero_pack(body_limit()).unwrap_err();
+        // The size is within the limit, so what refuses it is its digest.
         assert!(
-            !matches!(
+            matches!(
                 error,
-                SyncError::Source(crate::SourceError::PayloadTooLarge(_))
+                SyncError::Source(crate::SourceError::InvalidResponse)
             ),
             "{error:?}"
         );

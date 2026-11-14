@@ -1191,6 +1191,69 @@ mod tests {
         }
     }
 
+    /// A span whose container passes the 64 MiB cap by one byte is refused as
+    /// soon as the bundle that crosses it is added, before the next chunk is
+    /// read. At 128 bundles the count takes a second byte, which the early
+    /// check has to charge too.
+    #[test]
+    #[ignore = "builds proofs of 64 MiB"]
+    fn a_span_one_byte_over_the_cap_is_refused_before_the_next_chunk_is_read() {
+        const BASE: u64 = 523_264;
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(temp.path())).unwrap();
+        let file = |last_of_128: u64, name: &[u8]| {
+            let mut lens = vec![BASE; 129];
+            lens[127] = last_of_128;
+            let total_of_128: u64 = lens[..128].iter().sum();
+            let total: u64 = lens.iter().sum();
+            let (commit_id, chunk_ids) = commit_over_chunks(&store, name, 0, &lens);
+            (commit_id, chunk_ids, total_of_128, total)
+        };
+        let build = |commit_id: &Hash, name: &[u8], len: u64| {
+            build_range_proof_from(&store, commit_id, &[name], 0, len)
+        };
+        let span_len = |commit_id: &Hash, name: &[u8], len: u64| match build(commit_id, name, len) {
+            Ok(RangeProof::Kdsp(proof)) => proof.len(),
+            other => panic!("expected a span proof: {other:?}"),
+        };
+
+        // Resize the 128th chunk until the proof of the first 128 is exactly
+        // the cap. Names are as long as each other, which the proof carries.
+        let mut last = BASE;
+        let mut attempt = 0_u8;
+        let exact = loop {
+            let name = [b'e', b'0' + attempt];
+            let (commit_id, _, len_128, _) = file(last, &name);
+            let size = span_len(&commit_id, &name, len_128);
+            if size == MAX_BUNDLE_BYTES {
+                break last;
+            }
+            attempt += 1;
+            assert!(attempt < 6, "the proof size does not settle: {size}");
+            last = last
+                .checked_add_signed(
+                    i64::try_from(MAX_BUNDLE_BYTES).unwrap() - i64::try_from(size).unwrap(),
+                )
+                .unwrap();
+        };
+
+        let (over_id, chunk_ids, over_128, total) = file(exact + 1, b"eo");
+        assert!(matches!(
+            build(&over_id, b"eo", over_128),
+            Err(RangeProofError::ProofTooLarge)
+        ));
+        // With a chunk still to read after the 128th, the refusal comes first.
+        let source = CountingSource {
+            store: &store,
+            reads: RefCell::new(Vec::new()),
+        };
+        assert!(matches!(
+            build_range_proof_from(&source, &over_id, &[b"eo"], 0, total),
+            Err(RangeProofError::ProofTooLarge)
+        ));
+        assert!(!source.reads.borrow().contains(&chunk_ids[128]));
+    }
+
     /// A range outside the file, or with a zero or overflowing length, is a
     /// typed error before any chunk is read.
     #[test]

@@ -2121,6 +2121,8 @@ mod cut_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
+    /// Counts the probes of a cut. A probe polls `cancelled` once and nothing
+    /// else does inside a cut, so the polls are the probes.
     #[derive(Default)]
     struct Probes(AtomicUsize);
 

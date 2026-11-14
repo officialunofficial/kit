@@ -13,7 +13,7 @@ use kit_core::protocol::Transport as _;
 use kit_core::refs::RefWriteCondition;
 use kit_core::serialize;
 use kit_core::store::ObjectStore;
-use libkit::transfer::{push_branch, push_branch_with_depth};
+use libkit::transfer::{Error, push_branch, push_branch_with_depth};
 use libkit::transport::file::FileTransport;
 
 fn commit(store: &ObjectStore, parents: Vec<Hash>, message: &[u8]) -> Hash {
@@ -41,7 +41,7 @@ fn store() -> (tempfile::TempDir, ObjectStore) {
 }
 
 #[test]
-fn a_push_with_a_chain_depth_moves_the_remote_branch_and_a_stale_one_is_refused() {
+fn push_branch_with_depth_moves_the_branch_and_refuses_a_stale_condition() {
     let (_dir, store) = store();
     let first = commit(&store, vec![], b"first");
     let second = commit(&store, vec![first], b"second");
@@ -81,7 +81,10 @@ fn a_push_with_a_chain_depth_moves_the_remote_branch_and_a_stale_one_is_refused(
         RefWriteCondition::Match(first),
         2,
     );
-    assert!(stale.is_err(), "{stale:?}");
+    assert!(
+        matches!(&stale, Err(Error::NonFastForwardPush { branch }) if branch == "main"),
+        "{stale:?}"
+    );
     assert_eq!(remote.read_ref("refs/heads/main").unwrap(), Some(second));
 
     // The default depth pushes the same way.

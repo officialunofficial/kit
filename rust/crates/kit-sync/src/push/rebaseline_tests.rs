@@ -808,9 +808,12 @@ fn packs_per_advance(remote: &Remote<'_>, before: usize) -> Vec<usize> {
         sent.push(at - last);
         last = at;
     }
-    sent.push(remote.uploads.load(Ordering::SeqCst) - last);
-    // The upload after the last advance began belongs to no advance.
-    sent.truncate(sent.len() - 1);
+    // Nothing is uploaded once the last advance has begun.
+    assert_eq!(
+        remote.uploads.load(Ordering::SeqCst),
+        last,
+        "an upload came after the last advance began"
+    );
     sent
 }
 

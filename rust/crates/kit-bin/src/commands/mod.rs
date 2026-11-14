@@ -710,10 +710,6 @@ mod tests {
         );
     }
 
-    fn blob_id(store: &kit_core::store::ObjectStore, data: &[u8]) -> Hash {
-        core_worktree_blob(store, data)
-    }
-
     /// What the worktree holds at a path, as the index would record it.
     #[cfg(unix)]
     #[test]
@@ -743,13 +739,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(plain.0, EntryStatus::Blob);
-        assert_eq!(plain.1, blob_id(&store, b"plain\n"));
+        assert_eq!(plain.1, core_worktree_blob(&store, b"plain\n"));
         let tool = worktree_entry_state(&root, &sink, "tool").unwrap().unwrap();
         assert_eq!(tool.0, EntryStatus::Executable);
-        assert_eq!(tool.1, blob_id(&store, b"#!/bin/sh\n"));
+        assert_eq!(tool.1, core_worktree_blob(&store, b"#!/bin/sh\n"));
         let link = worktree_entry_state(&root, &sink, "link").unwrap().unwrap();
         assert_eq!(link.0, EntryStatus::Symlink);
-        assert_eq!(link.1, blob_id(&store, b"plain"));
+        assert_eq!(link.1, core_worktree_blob(&store, b"plain"));
         assert!(worktree_entry_state(&root, &sink, "dir").unwrap().is_none());
         assert!(
             worktree_entry_state(&root, &sink, "missing")
@@ -782,7 +778,7 @@ mod tests {
         ))
         .unwrap();
         let entry = |path: &str, status: EntryStatus, data: &[u8]| {
-            (path.to_owned(), status, blob_id(&store, data))
+            (path.to_owned(), status, core_worktree_blob(&store, data))
         };
         let check = |dropped: Vec<(String, EntryStatus, Hash)>| {
             locally_modified_dropped_path(&root, &store, &dropped).unwrap()
