@@ -1251,7 +1251,10 @@ mod tests {
             build_range_proof_from(&source, &over_id, &[b"eo"], 0, total),
             Err(RangeProofError::ProofTooLarge)
         ));
-        assert!(!source.reads.borrow().contains(&chunk_ids[128]));
+        assert!(
+            !source.reads.borrow().contains(&chunk_ids[128]),
+            "chunk 129 was read"
+        );
     }
 
     /// A range outside the file, or with a zero or overflowing length, is a
