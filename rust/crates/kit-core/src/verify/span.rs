@@ -557,6 +557,15 @@ fn varint_size(mut n: usize) -> usize {
     size
 }
 
+/// Whether a KDSP container of `count` bundles whose framed bundles take
+/// `container_size` bytes fits the 64 MiB cap: the magic, the version, the
+/// commit id, the offset and the length, the count, then the bundles.
+fn span_container_fits(count: usize, container_size: usize) -> bool {
+    (4 + 1 + 32 + 8 + 8 + varint_size(count))
+        .checked_add(container_size)
+        .is_some_and(|n| n <= MAX_BUNDLE_BYTES)
+}
+
 fn encoded_disclosure_size(
     commit_bytes: &[u8],
     steps: &[Step],
@@ -640,10 +649,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
             .checked_add(varint_size(bundle_size))
             .and_then(|n| n.checked_add(bundle_size))
             .ok_or(RangeProofError::ProofTooLarge)?;
-        if (4 + 1 + 32 + 8 + 8 + varint_size(chunks.len() + 1))
-            .checked_add(container_size)
-            .is_none_or(|n| n > MAX_BUNDLE_BYTES)
-        {
+        if !span_container_fits(chunks.len() + 1, container_size) {
             return Err(RangeProofError::ProofTooLarge);
         }
         chunks.push(encode_disclosure(
@@ -687,6 +693,63 @@ mod tests {
     use crate::sign::{KeyPair, sign_commit};
     use crate::store::{ObjectStore, StoreResult};
     use std::cell::RefCell;
+
+    /// The size the builder charges against the 64 MiB cap is the length of
+    /// the encoded bundle, for every payload kind.
+    #[test]
+    fn encoded_disclosure_size_is_the_encoded_length() {
+        use crate::merkle::Proof;
+        use crate::verify::ChunkHdr;
+        let id = [7u8; 32];
+        let commit_bytes = vec![1u8; 300];
+        let proof = Proof {
+            leaf_count: 5,
+            siblings: vec![[2u8; 32]; 3],
+        };
+        let payloads = [
+            PayloadWire::Object {
+                bytes: vec![3u8; 200],
+            },
+            PayloadWire::Chunk {
+                total_size: 100,
+                chunk_size: 0,
+                index: 1,
+                start: 10,
+                end: 20,
+                inner_root: [4u8; 32],
+                proof: proof.clone(),
+                bytes: vec![5u8; 150],
+            },
+            PayloadWire::Range {
+                chunk: None,
+                offset_in_blob: 3,
+                len: 4,
+                slice: vec![6u8; 90],
+            },
+            PayloadWire::Range {
+                chunk: Some(ChunkHdr {
+                    total_size: 100,
+                    chunk_size: 0,
+                    index: 1,
+                    start: 10,
+                    end: 20,
+                    inner_root: [4u8; 32],
+                    chunk_id: [8u8; 32],
+                    proof,
+                }),
+                offset_in_blob: 3,
+                len: 4,
+                slice: vec![6u8; 90],
+            },
+        ];
+        for payload in &payloads {
+            let encoded = crate::verify::encode_disclosure(&id, &commit_bytes, &[], payload);
+            assert_eq!(
+                encoded_disclosure_size(&commit_bytes, &[], payload).unwrap(),
+                encoded.len()
+            );
+        }
+    }
 
     const VALID: &[u8] =
         include_bytes!("../../../../tests/golden/http-objects/span_two_chunks.bin");
@@ -1035,12 +1098,21 @@ mod tests {
         let leaf_id = store
             .write(&crate::serialize::serialize(&Object::ChunkedBlob(manifest)).unwrap())
             .unwrap();
+        (commit_naming(store, &[name], leaf_id), chunk_ids)
+    }
+
+    /// A signed commit whose tree names `leaf_id` under every one of `names`,
+    /// which must be in order.
+    fn commit_naming(store: &ObjectStore, names: &[&[u8]], leaf_id: Hash) -> Hash {
         let tree = Tree {
-            entries: vec![TreeEntry {
-                name: name.to_vec(),
-                mode: EntryMode::Blob,
-                object_hash: leaf_id,
-            }],
+            entries: names
+                .iter()
+                .map(|name| TreeEntry {
+                    name: name.to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: leaf_id,
+                })
+                .collect(),
         };
         let tree_hash = store
             .write(&crate::serialize::serialize(&Object::Tree(tree)).unwrap())
@@ -1058,10 +1130,9 @@ mod tests {
             signature: [0; 64],
         };
         commit.signature = sign_commit(&commit, &kp).unwrap().0;
-        let commit_id = store
+        store
             .write(&crate::serialize::serialize(&Object::Commit(commit)).unwrap())
-            .unwrap();
-        (commit_id, chunk_ids)
+            .unwrap()
     }
 
     /// The builder finds the chunk that holds the offset from the manifest's
@@ -1134,6 +1205,53 @@ mod tests {
         assert!(matches!(build(29, 2), Err(RangeProofError::OutOfBounds)));
         assert!(matches!(build(29, 1), Ok(RangeProof::Kdpb(_))));
         assert!(matches!(build(9, 2), Ok(RangeProof::Kdsp(_))));
+    }
+
+    /// The size check of a container is exact: the header it charges is the
+    /// header `encode_span` writes, and the cap itself is allowed.
+    #[test]
+    fn container_size_check_has_exact_bounds() {
+        let bundle = [0u8; 5];
+        for count in [2usize, 127, 128, 16_384] {
+            let bundles = vec![&bundle[..]; count];
+            let encoded = encode_span([1; 32], 2, 3, &bundles);
+            let framed: usize = bundles.iter().map(|b| varint_size(b.len()) + b.len()).sum();
+            // The cap is the encoded length: it fits there and not one byte less.
+            assert_eq!(encoded.len(), 53 + varint_size(count) + framed);
+            let header = encoded.len() - framed;
+            assert!(span_container_fits(count, MAX_BUNDLE_BYTES - header));
+            assert!(!span_container_fits(count, MAX_BUNDLE_BYTES - header + 1));
+        }
+        assert!(!span_container_fits(2, usize::MAX));
+    }
+
+    /// Two bundles of one file named under two paths do not make a range:
+    /// the same leaf under another path is another file.
+    #[test]
+    fn a_span_of_two_paths_for_one_leaf_is_refused() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(temp.path())).unwrap();
+        let (_, chunk_ids) = commit_over_chunks(&store, b"a", 2048, &[2048; 2]);
+        let manifest =
+            crate::object::testing::sized(2048, chunk_ids.into_iter().zip([2048, 2048]).collect())
+                .unwrap();
+        let leaf = store
+            .write(&crate::serialize::serialize(&Object::ChunkedBlob(manifest)).unwrap())
+            .unwrap();
+        let commit_id = commit_naming(&store, &[b"a", b"b"], leaf);
+        let bundle = |path: &[u8], index| {
+            crate::verify::build_disclosure(&store, &commit_id, &[path], Selector::Chunk(index))
+                .unwrap()
+        };
+        let same = encode_span(commit_id, 2000, 100, &[&bundle(b"a", 0), &bundle(b"a", 1)]);
+        assert!(verify_disclosure_span(&commit_id, &same).is_ok());
+        let two = encode_span(commit_id, 2000, 100, &[&bundle(b"a", 0), &bundle(b"b", 1)]);
+        assert_eq!(
+            verify_disclosure_span(&commit_id, &two)
+                .unwrap_err()
+                .reason(),
+            "span_leaf_context"
+        );
     }
 
     /// A chunk blob whose length is not its span is refused by the builder

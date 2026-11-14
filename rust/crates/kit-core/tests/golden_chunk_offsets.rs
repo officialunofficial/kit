@@ -278,6 +278,44 @@ fn every_negative_disclosure_is_refused_for_the_named_reason() {
     }
 }
 
+/// The refusal of a chunk of the wrong length names the span's length and
+/// the Blob's, at a chunk that does not start at 0.
+#[test]
+fn a_chunk_of_the_wrong_length_names_both_lengths() {
+    let file = expected();
+    let find = |name: &str| {
+        file["negative_disclosures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == name)
+            .unwrap_or_else(|| panic!("no vector {name}"))
+    };
+    // (vector, index, expected span length, actual blob length)
+    for (name, want_index, want_expected, want_actual) in [
+        ("blob_length_differs_from_span", 1, 10, 9),
+        ("chunk_longer_than_span", 1, 5, 12),
+    ] {
+        let case = find(name);
+        let error =
+            verify::verify_disclosure(&id(&case["commit_id_hex"]), &bytes(&case["bundle_hex"]))
+                .unwrap_err();
+        let VerifyError::ChunkLengthDiffersFromSpan {
+            index,
+            expected,
+            actual,
+        } = error
+        else {
+            panic!("{name}: {error:?}");
+        };
+        assert_eq!(
+            (index, expected, actual),
+            (want_index, want_expected, want_actual),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn every_negative_span_is_refused_for_the_named_reason() {
     for case in expected()["negative_spans"].as_array().unwrap() {

@@ -1747,6 +1747,37 @@ mod tests {
         store.write(&bytes).unwrap()
     }
 
+    /// A range of a chunk that does not start the file may reach the end of
+    /// that chunk and not one byte past it.
+    #[test]
+    fn range_disclosure_ends_at_the_end_of_its_chunk() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("store init");
+        let chunks = (1..=3u8)
+            .map(|b| (write_blob(&store, b, 1000), 1000))
+            .collect();
+        let manifest = Object::ChunkedBlob(crate::object::testing::sized(0, chunks).unwrap());
+        let leaf = store
+            .write(&crate::serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        // Chunk 1 holds bytes 1000..2000.
+        for (offset, len) in [(1500, 500), (1999, 1), (1000, 1000)] {
+            assert!(
+                build_payload(&store, &leaf, Selector::Range { offset, len }).is_ok(),
+                "{offset}+{len}"
+            );
+        }
+        for (offset, len) in [(1500, 501), (1500, 600), (1999, 2), (1000, 1001)] {
+            assert!(
+                matches!(
+                    build_payload(&store, &leaf, Selector::Range { offset, len }),
+                    Err(VerifyError::RangeCrossesChunkBoundary)
+                ),
+                "{offset}+{len}"
+            );
+        }
+    }
+
     /// A byte-range disclosure reads only the chunk that holds the offset,
     /// so a file above the in-memory limit is disclosed without reading
     /// its other chunks. The second chunk here does not exist.
@@ -2550,6 +2581,129 @@ mod tests {
                 end: 8
             })
         ));
+    }
+
+    /// The position of chunk `index` is `index + 1` while it is inside the
+    /// proof's leaves, and a proof past the chunk cap is refused.
+    #[test]
+    fn chunk_position_has_exact_bounds() {
+        use crate::serialize::MAX_CHUNKS;
+        assert_eq!(chunk_position(0, 2).unwrap(), 1);
+        assert_eq!(chunk_position(1, 3).unwrap(), 2);
+        // The last chunk of a manifest of `leaf_count - 1` chunks.
+        assert!(matches!(
+            chunk_position(2, 3),
+            Err(VerifyError::ChunkIndexOutOfRange {
+                index: 2,
+                leaf_count: 3
+            })
+        ));
+        assert!(matches!(
+            chunk_position(0, 1),
+            Err(VerifyError::ChunkIndexOutOfRange { .. })
+        ));
+        assert!(matches!(
+            chunk_position(0, 0),
+            Err(VerifyError::ChunkIndexOutOfRange { .. })
+        ));
+        // The most chunks a manifest can have, and one more.
+        assert_eq!(
+            chunk_position(MAX_CHUNKS - 1, MAX_CHUNKS + 1).unwrap(),
+            MAX_CHUNKS
+        );
+        assert!(matches!(
+            chunk_position(0, MAX_CHUNKS + 2),
+            Err(VerifyError::TooManyChunks)
+        ));
+        assert!(matches!(
+            chunk_position(u32::MAX, u32::MAX),
+            Err(VerifyError::TooManyChunks)
+        ));
+    }
+
+    /// A chunk's bytes are one Blob: each field of the 10-byte prologue
+    /// matters alone, and so does a trailing byte.
+    #[test]
+    fn blob_content_len_checks_every_field_of_the_prologue() {
+        let blob =
+            crate::serialize::serialize(&Object::Blob(crate::object::Blob { data: vec![9; 20] }))
+                .unwrap();
+        assert_eq!(blob_content_len(&blob), Some(20));
+        for at in [0usize, 1, 5] {
+            let mut bad = blob.clone();
+            bad[at] ^= 1;
+            assert_eq!(blob_content_len(&bad), None, "byte {at}");
+        }
+        let mut long = blob.clone();
+        long.push(0);
+        assert_eq!(blob_content_len(&long), None);
+        assert_eq!(blob_content_len(&blob[..blob.len() - 1]), None);
+        assert_eq!(blob_content_len(&blob[..9]), None);
+    }
+
+    /// The span rules of a chunk, at their boundaries: a span may be as long
+    /// as one Blob can be and no longer, wherever it sits in the file.
+    #[test]
+    fn chunk_span_rules_have_exact_bounds() {
+        use crate::serialize::MAX_CHUNK_LEN;
+        let root = [0u8; 32];
+        let proof = Proof {
+            leaf_count: 0,
+            siblings: Vec::new(),
+        };
+        let check = |total_size: u64, index: u32, start: u64, end: u64, leaf_count: u32| {
+            check_chunk_span(
+                &ChunkClaim {
+                    total_size,
+                    chunk_size: 0,
+                    index,
+                    chunk: merkle::SpannedChunk {
+                        id: [1u8; 32],
+                        start,
+                        end,
+                    },
+                    inner_root: &root,
+                    proof: &proof,
+                },
+                leaf_count,
+            )
+        };
+        // The only chunk of a file, as long as a chunk can be, and one byte more.
+        assert!(check(MAX_CHUNK_LEN, 0, 0, MAX_CHUNK_LEN, 2).is_ok());
+        assert!(matches!(
+            check(MAX_CHUNK_LEN + 1, 0, 0, MAX_CHUNK_LEN + 1, 2),
+            Err(VerifyError::SpanAboveObjectLimit { .. })
+        ));
+        // A short span far into a big file: start and end above the length
+        // limit together do not matter, only the length does.
+        let total = 3 * MAX_CHUNK_LEN;
+        assert!(check(total, 1, MAX_CHUNK_LEN, MAX_CHUNK_LEN + 10, 4).is_ok());
+        assert!(check(total, 3, 2 * MAX_CHUNK_LEN, total, 5).is_ok());
+        // An empty span, and one that ends at the end of the file.
+        assert!(matches!(
+            check(100, 1, 50, 50, 4),
+            Err(VerifyError::SpanOutsideFile { .. })
+        ));
+        assert!(check(100, 1, 50, 100, 3).is_ok());
+        assert!(matches!(
+            check(100, 1, 50, 101, 3),
+            Err(VerifyError::SpanOutsideFile { .. })
+        ));
+    }
+
+    /// The commit bytes of a bundle may be up to `MAX_COMMIT_BYTES` and no
+    /// longer.
+    #[test]
+    fn commit_bytes_of_a_bundle_are_capped() {
+        let id = [7u8; 32];
+        let payload = PayloadWire::Object { bytes: Vec::new() };
+        for len in [0usize, 1, 5000, MAX_COMMIT_BYTES] {
+            let bundle = encode_disclosure(&id, &vec![1u8; len], &[], &payload);
+            let (_, commit_bytes, ..) = decode_disclosure(&bundle).unwrap();
+            assert_eq!(commit_bytes.len(), len);
+        }
+        let bundle = encode_disclosure(&id, &vec![1u8; MAX_COMMIT_BYTES + 1], &[], &payload);
+        assert!(decode_disclosure(&bundle).is_err());
     }
 
     /// A chunk whose Blob holds a different number of bytes than its span

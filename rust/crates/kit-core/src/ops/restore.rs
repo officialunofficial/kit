@@ -2646,6 +2646,55 @@ mod tests {
         }
     }
 
+    /// A wrong chunk in a later batch is named by its index in the manifest,
+    /// not by its place in the batch.
+    #[test]
+    fn worktree_restore_names_the_index_of_a_wrong_chunk_in_a_later_batch() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let good = put_blob(&store, b"x");
+        let bad = put_blob(&store, &[7u8; 64]);
+        let count = 2 * RESTORE_CHUNK_BATCH + 1;
+        let wrong = RESTORE_CHUNK_BATCH + 2;
+        let cb = Object::ChunkedBlob(
+            object::ChunkedBlob::new(
+                count as u64,
+                0,
+                (0..count).map(|i| (if i == wrong { bad } else { good }, i as u64 + 1)),
+            )
+            .unwrap(),
+        );
+        let cb_h = store.write(&serialize::serialize(&cb).unwrap()).unwrap();
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"out.bin".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: cb_h,
+            }],
+        );
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RestoreError::Object(object::KitError::ChunkLengthMismatch {
+                    index,
+                    expected: 1,
+                    actual: 64,
+                }) if index as usize == wrong
+            ),
+            "got {err:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn restore_with_symlink() {
