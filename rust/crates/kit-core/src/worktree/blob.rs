@@ -1131,6 +1131,32 @@ mod equality_tests {
         assert!(!super::chunked_content_eq(&store, &ma, &mb).unwrap());
     }
 
+    /// A zero-length trailing chunk on one side is no content. The sides
+    /// are equal, whichever one holds it, and a side that has run out of
+    /// chunks is never indexed past its end.
+    #[test]
+    fn chunked_a_zero_length_trailing_chunk_on_one_side_is_no_content() {
+        let (_dir, store) = fresh_store();
+        let x = chunk(&store, b"shared");
+        let empty = chunk(&store, b"");
+        let plain = crate::object::testing::sized(0, vec![(x, 6)]).unwrap();
+        // The manifest ends equal for a zero-length chunk, which `new` refuses,
+        // so build it directly.
+        let trailing = ChunkedBlob::new_unchecked(6, 0, vec![x, empty], vec![6, 6]);
+        assert!(super::chunked_content_eq(&store, &trailing, &plain).unwrap());
+        assert!(super::chunked_content_eq(&store, &plain, &trailing).unwrap());
+        assert!(super::chunked_content_eq(&store, &trailing, &trailing.clone()).unwrap());
+
+        // The longer side still has a chunk after the empty one. It is read,
+        // not skipped, so a missing chunk there is an error and not a panic.
+        let missing = [0xee; 32];
+        let longer = ChunkedBlob::new_unchecked(6, 0, vec![x, empty, missing], vec![6, 6, 6]);
+        assert!(matches!(
+            super::chunked_content_eq(&store, &longer, &plain),
+            Err(crate::store::StoreError::ObjectNotFound(_))
+        ));
+    }
+
     #[test]
     fn chunked_empty_manifests_are_equal() {
         let (_dir, store) = fresh_store();

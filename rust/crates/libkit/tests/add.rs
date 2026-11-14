@@ -414,6 +414,42 @@ fn patch_stages_only_the_chosen_hunks() {
     );
 }
 
+/// A path staged for removal that is back in the tree is a new file for a
+/// patch: its base is empty, so the whole file is one hunk. A removal entry
+/// names no object, so reading it as a base would fail.
+#[test]
+fn patch_treats_a_path_staged_for_removal_as_a_new_file() {
+    let f = Fixture::new(&[], &[("a.txt", &numbered(&[2, 29]))]);
+    let mut idx = index::read_index(&f.layout).unwrap();
+    idx.upsert_entry(IndexEntry {
+        path: "a.txt".to_owned(),
+        status: EntryStatus::Removed,
+        object_hash: kit_core::hash::ZERO,
+        mtime_ns: 0,
+        size: 0,
+        ino: 0,
+        ctime_ns: 0,
+    });
+    index::write_index(&f.layout, &idx).unwrap();
+    let paths = ["a.txt".to_owned()];
+    let mut picks = Picks {
+        selected: vec![0],
+        offered: Vec::new(),
+    };
+    f.run_with(
+        &Request {
+            patch: true,
+            paths: &paths,
+            ..BULK
+        },
+        &mut picks,
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(picks.offered, vec![1]);
+    assert_eq!(f.staged("a.txt").unwrap(), numbered(&[2, 29]));
+}
+
 #[test]
 fn patch_reports_a_file_with_no_change_and_asks_nothing() {
     let f = Fixture::new(&[("a.txt", "same\n")], &[]);

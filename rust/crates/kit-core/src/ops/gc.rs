@@ -1295,6 +1295,89 @@ mod tests {
     }
 
     #[test]
+    fn run_gc_keeps_the_result_tree_of_an_unfinished_cherry_pick_and_revert() {
+        for operation in ["cherry-pick", "revert"] {
+            let (d, s) = repo();
+            let md = layout(&d);
+            let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+            write_ref(&md, "refs/heads/main", &kept);
+            let (result, result_blob) = commit_one(&s, b"result", b"result", vec![]);
+            let result_tree = tree_of(&s, &result);
+            let head_file = if operation == "cherry-pick" {
+                md.cherry_pick_head_file()
+            } else {
+                md.revert_head_file()
+            };
+            fs::write(&head_file, format!("{}\n", hash::to_hex(&kept))).unwrap();
+            fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&kept))).unwrap();
+            conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
+
+            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            assert!(
+                s.contains(&result_tree) && s.contains(&result_blob),
+                "{operation}: the result tree was pruned"
+            );
+
+            // With the operation gone nothing keeps the tree.
+            fs::remove_file(&head_file).unwrap();
+            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            assert!(
+                !s.contains(&result_tree) && !s.contains(&result_blob),
+                "{operation}: the result tree was kept"
+            );
+        }
+    }
+
+    #[test]
+    fn run_gc_keeps_an_object_that_vanishes_before_its_age_is_read() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (kept, _) = commit_one(&s, b"k", b"k", vec![]);
+        write_ref(&md, "refs/heads/main", &kept);
+        // Two unreachable blobs of one shard. The sweep lists a shard before
+        // it visits its objects, so when it prunes the first, the other one
+        // has been removed by someone else and its age cannot be read.
+        let mut first_of_shard: std::collections::HashMap<u8, Hash> =
+            std::collections::HashMap::new();
+        let pair = (0_u32..)
+            .find_map(|seed| {
+                let blob = write_blob(&s, &seed.to_le_bytes());
+                first_of_shard
+                    .insert(blob[0], blob)
+                    .map(|earlier| [earlier, blob])
+            })
+            .unwrap();
+        let object_file = |h: &Hash| s.path_for(h);
+        let report = run_gc_with_hook(
+            &s,
+            &md,
+            u64::MAX,
+            0,
+            false,
+            MarkLimits::DEFAULT,
+            |pruning| {
+                // Only the pair's own prune takes the other one away. Another
+                // orphan pruned earlier must leave the pair on disk.
+                if pair.contains(pruning) {
+                    for other in pair.iter().filter(|other| *other != pruning) {
+                        fs::remove_file(object_file(other)).unwrap();
+                    }
+                }
+            },
+        )
+        .unwrap();
+        // Exactly one object, the vanished one of the pair, is kept for its
+        // unreadable age. Every other orphan is pruned.
+        assert_eq!(report.kept_recent, 1, "{report:?}");
+        assert_eq!(
+            report.pruned + report.kept_recent + report.live,
+            report.scanned,
+            "{report:?}"
+        );
+        assert!(s.contains(&kept));
+    }
+
+    #[test]
     fn run_gc_skips_an_operation_root_whose_object_is_gone_and_names_the_file() {
         let (d, s) = repo();
         let md = layout(&d);

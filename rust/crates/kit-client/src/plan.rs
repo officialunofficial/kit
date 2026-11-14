@@ -629,4 +629,50 @@ mod tests {
             "buffered every entry before rejecting the plan"
         );
     }
+
+    /// `Plan::prepare` bounds the staged input before it takes an entry, so a
+    /// sealed pack never passes the staged limit there. The check in `seal`
+    /// still has to stand alone: it refuses a pack that takes the staged total
+    /// one byte past the limit, and allows a total that lands on it.
+    #[test]
+    fn seal_refuses_a_pack_that_takes_staged_input_one_byte_past_its_limit() {
+        let seal_one = |staged_before: u64, max_staged_bytes: u64| {
+            let Entry::Raw { id, bytes } = tiny_pack_entry(7) else {
+                unreachable!("a raw entry");
+            };
+            let mut writer = PackWriter::new();
+            writer.push_raw(id, &bytes).unwrap();
+            let mut pending = Pending::new();
+            pending.ids.push(id);
+            let mut packs = Vec::new();
+            let mut staged = staged_before;
+            let limits = Limits {
+                max_staged_bytes,
+                max_pack_bytes: 1024,
+                ..Limits::default()
+            };
+            let result = seal(
+                &mut writer,
+                &mut pending,
+                &mut packs,
+                &mut std::collections::HashSet::new(),
+                &mut staged,
+                limits,
+            );
+            (result, packs.first().map(|pack| pack.bytes.len() as u64))
+        };
+        let (sealed, len) = seal_one(0, u64::MAX);
+        sealed.unwrap();
+        let len = len.unwrap();
+        // The staged total lands on the limit.
+        let (landing, _) = seal_one(100, 100 + len);
+        landing.unwrap();
+        // One byte more is over it, with the pack itself well inside its limit.
+        let (over, kept) = seal_one(101, 100 + len);
+        assert!(
+            matches!(over, Err(Error::Limit("sealed input limit"))),
+            "{over:?}"
+        );
+        assert_eq!(kept, None);
+    }
 }

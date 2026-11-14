@@ -249,3 +249,159 @@ impl From<Refusal> for BridgeError {
         Self::Refused(r)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OBJECT: Hash = [0xab; 32];
+
+    /// Every refusal names the object or ref it refuses and the detail that
+    /// tells the user what to change.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one case per refusal; flat by design
+    fn every_refusal_names_what_it_refuses_and_why() {
+        let object = to_hex(&OBJECT);
+        let cases = [
+            (Refusal::Remix { object: OBJECT }, vec!["remix", "§8"]),
+            (
+                Refusal::FixedSizeChunking {
+                    object: OBJECT,
+                    chunk_size: 4096,
+                },
+                vec!["fixed-size chunking (4096)"],
+            ),
+            (
+                Refusal::NonCanonicalChunking {
+                    object: OBJECT,
+                    detail: "bad boundary",
+                },
+                vec!["(bad boundary)"],
+            ),
+            (
+                Refusal::TimestampOverflow {
+                    object: OBJECT,
+                    timestamp: u64::MAX,
+                },
+                vec!["18446744073709551615"],
+            ),
+            (Refusal::TagName { object: OBJECT }, vec!["ref grammar"]),
+            (
+                Refusal::RefName {
+                    name: "a..b".into(),
+                    reason: "double dot",
+                },
+                vec!["\"a..b\"", "(double dot)"],
+            ),
+            (
+                Refusal::SchemaVersion { object: OBJECT },
+                vec!["schema_version"],
+            ),
+            (
+                Refusal::Gitlink {
+                    object: OBJECT,
+                    path: "vendor/lib".into(),
+                },
+                vec!["\"vendor/lib\"", "gitlink"],
+            ),
+            (
+                Refusal::TreeEntryName {
+                    object: OBJECT,
+                    name: "bad\u{1}name".into(),
+                },
+                vec!["storable kit name"],
+            ),
+            (
+                Refusal::UnknownTreeMode {
+                    object: OBJECT,
+                    mode: "160000x".into(),
+                },
+                vec!["mode 160000x"],
+            ),
+            (
+                Refusal::NormalizedModeInFork {
+                    object: OBJECT,
+                    mode: "100664".into(),
+                },
+                vec!["mode 100664", "fork-mode"],
+            ),
+            (
+                Refusal::NegativeTimestamp {
+                    object: OBJECT,
+                    timestamp: -5,
+                },
+                vec!["timestamp -5"],
+            ),
+            (
+                Refusal::Unparsable {
+                    object: OBJECT,
+                    detail: "short header".into(),
+                },
+                vec!["(short header)"],
+            ),
+            (
+                Refusal::BlobTooLarge {
+                    object: OBJECT,
+                    size: 1 << 31,
+                },
+                vec!["2147483648 bytes"],
+            ),
+            (
+                Refusal::TooManyTreeEntries {
+                    object: OBJECT,
+                    count: 99,
+                },
+                vec!["99 entries"],
+            ),
+            (
+                Refusal::TreeEntryKind {
+                    object: OBJECT,
+                    name: "odd".into(),
+                },
+                vec!["\"odd\""],
+            ),
+            (
+                Refusal::Unrepresentable {
+                    object: OBJECT,
+                    detail: "too big".into(),
+                },
+                vec!["(too big)"],
+            ),
+            (
+                Refusal::TooManyParents { object: OBJECT },
+                vec!["1000 parents"],
+            ),
+            (
+                Refusal::AuthorPayload { object: OBJECT },
+                vec!["4096 bytes"],
+            ),
+            (Refusal::TagChain { object: OBJECT }, vec!["deeper than 16"]),
+            (
+                Refusal::DuplicateTreeEntry { object: OBJECT },
+                vec!["collide"],
+            ),
+            (Refusal::TreeTooDeep { object: OBJECT }, vec!["128 levels"]),
+        ];
+        for (refusal, details) in cases {
+            let message = refusal.to_string();
+            if !matches!(refusal, Refusal::RefName { .. }) {
+                assert!(
+                    message.contains(&object[..40]),
+                    "{refusal:?} does not name its object: {message}"
+                );
+            }
+            for detail in details {
+                assert!(
+                    message.contains(detail),
+                    "{refusal:?} does not say {detail:?}: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bridge_error_prefixes_the_refusal_it_carries() {
+        let error = BridgeError::from(Refusal::Remix { object: OBJECT });
+        assert!(error.to_string().starts_with("refused: remix object "));
+    }
+}

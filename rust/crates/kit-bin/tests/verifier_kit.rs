@@ -292,6 +292,70 @@ fn prove_and_verify_json_keys() {
     }
 }
 
+/// The JSON of `verify-proof` describes the payload it disclosed: its kind,
+/// its length and the BLAKE3 of exactly the bytes `--payload-out` writes,
+/// then the fields that place it in the file.
+#[test]
+fn verify_proof_json_describes_each_kind_of_payload() {
+    let repo = fixture_repo();
+    let mut big = vec![0u8; 3 * 1024 * 1024];
+    let mut x = 0u8;
+    for b in &mut big {
+        *b = x;
+        x = x.wrapping_add(1);
+    }
+    repo.write("big.bin", &big);
+    repo.ok(&["add", "big.bin"]);
+    repo.ok(&["commit", "-m", "chunked"]);
+    let commit = head(&repo);
+
+    let cases: [(&str, &[&str], &str, &[&str]); 3] = [
+        ("object", &[], "a.txt", &[]),
+        (
+            "chunk",
+            &["--chunk", "0"],
+            "big.bin",
+            &["\"index\":0", "\"total_size\":3145728", "\"start\":0"],
+        ),
+        (
+            "range",
+            &["--range", "0:100"],
+            "big.bin",
+            &["\"offset_in_blob\":", "\"absolute_offset\":0"],
+        ),
+    ];
+    for (kind, selector, path, fields) in cases {
+        let proof = format!("{kind}.kdpb");
+        let payload = format!("{kind}.payload");
+        let mut prove = vec!["prove", "HEAD", path];
+        prove.extend_from_slice(selector);
+        prove.extend(["-o", proof.as_str()]);
+        repo.ok(&prove);
+        let out = repo.ok(&[
+            "verify-proof",
+            &commit,
+            &proof,
+            "--payload-out",
+            &payload,
+            "--format=json",
+        ]);
+        let js = stdout(&out);
+        let bytes = fs::read(repo.path().join(&payload)).unwrap();
+        let expected = format!(
+            "\"payload\":{{\"kind\":\"{kind}\",\"bytes_len\":{},\"bytes_blake3\":\"{}\"",
+            bytes.len(),
+            kit_core::hash::to_hex(&kit_core::hash::hash(&bytes)),
+        );
+        assert!(
+            js.contains(&expected),
+            "{kind}: expected {expected} in {js}"
+        );
+        for field in fields {
+            assert!(js.contains(field), "{kind}: missing {field} in {js}");
+        }
+    }
+}
+
 #[test]
 fn closure_export_verify_roundtrip() {
     let repo = fixture_repo();

@@ -327,3 +327,95 @@ fn a_file_above_the_scan_limit_holds_no_marker_and_is_not_read() {
         None
     );
 }
+
+mod marker_scan {
+    use super::*;
+    use kit_core::ops::merge::ConflictKind;
+    use std::fs;
+    use std::io::Write as _;
+
+    const BLOCK: &str = "<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n";
+
+    fn record(path: &str) -> ConflictRecord {
+        ConflictRecord {
+            path: path.to_owned(),
+            kind: ConflictKind::ModifyModify,
+            base_hash: None,
+            ours_hash: None,
+            theirs_hash: None,
+        }
+    }
+
+    /// A file of `len` bytes that starts with `head` and has a hole after it,
+    /// so it takes no disk space.
+    fn sparse_file(path: &std::path::Path, head: &[u8], len: u64) {
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(head).unwrap();
+        file.set_len(len).unwrap();
+    }
+
+    /// The marker block of a file that is a few megabytes long is found, so
+    /// the limit of the scan is far above the size of an ordinary file.
+    #[test]
+    fn a_marker_block_in_a_file_of_several_megabytes_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut text = "filler line of text\n".repeat(150_000);
+        assert!(text.len() > 2 * 1024 * 1024);
+        text.push_str(BLOCK);
+        fs::write(dir.path().join("big.txt"), &text).unwrap();
+        assert_eq!(
+            conflict::first_unresolved_marker(dir.path(), &[record("big.txt")]).unwrap(),
+            Some("big.txt".to_owned())
+        );
+    }
+
+    /// A path under a file is not "missing": the read fails and says so.
+    #[test]
+    fn a_path_below_a_file_is_a_read_error_not_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "plain\n").unwrap();
+        let error =
+            conflict::first_unresolved_marker(dir.path(), &[record("a.txt/inner")]).unwrap_err();
+        assert!(
+            matches!(&error, Error::ReadFile { path, .. } if path.ends_with("a.txt/inner")),
+            "{error:?}"
+        );
+        // A path that is simply absent is skipped.
+        assert_eq!(
+            conflict::first_unresolved_marker(dir.path(), &[record("absent.txt")]).unwrap(),
+            None
+        );
+    }
+
+    /// The scan reads a file of exactly 1 GiB and leaves a larger one alone.
+    #[test]
+    #[ignore = "reads a 1 GiB file"]
+    fn the_scan_covers_a_file_of_one_gibibyte_and_not_one_byte_more() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        sparse_file(&dir.path().join("exact.txt"), BLOCK.as_bytes(), GIB);
+        sparse_file(&dir.path().join("over.txt"), BLOCK.as_bytes(), GIB + 1);
+        assert_eq!(
+            conflict::first_unresolved_marker(dir.path(), &[record("exact.txt")]).unwrap(),
+            Some("exact.txt".to_owned())
+        );
+        assert_eq!(
+            conflict::first_unresolved_marker(dir.path(), &[record("over.txt")]).unwrap(),
+            None
+        );
+    }
+
+    /// A file that reports no size but yields more than the limit is
+    /// skipped, as a file that grew after the size check is.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "reads a 1 GiB stream"]
+    fn a_file_that_grows_past_the_limit_is_skipped_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.path().join("endless")).unwrap();
+        assert_eq!(
+            conflict::first_unresolved_marker(dir.path(), &[record("endless")]).unwrap(),
+            None
+        );
+    }
+}

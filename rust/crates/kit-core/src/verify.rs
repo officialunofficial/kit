@@ -2686,6 +2686,17 @@ mod tests {
         assert!(decode_disclosure(&bundle).is_err());
     }
 
+    /// The cap is four mebibytes, whatever the constant is written as.
+    #[test]
+    fn the_commit_bytes_cap_is_four_mebibytes() {
+        let id = [7u8; 32];
+        let payload = PayloadWire::Object { bytes: Vec::new() };
+        let at = encode_disclosure(&id, &vec![1u8; 4_194_304], &[], &payload);
+        assert!(decode_disclosure(&at).is_ok());
+        let over = encode_disclosure(&id, &vec![1u8; 4_194_305], &[], &payload);
+        assert!(decode_disclosure(&over).is_err());
+    }
+
     /// A chunk whose Blob holds a different number of bytes than its span
     /// is refused by the builder, and so is one that is not a Blob.
     #[test]

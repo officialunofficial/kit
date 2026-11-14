@@ -1321,6 +1321,43 @@ mod tests {
     }
 
     #[test]
+    fn open_reports_a_marker_it_cannot_read_as_an_io_error() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let marker_path = dir.path().join(KIT_DIR).join(FORMAT_FILE);
+        // A directory in place of the marker cannot be read. That is a failure
+        // of the disk, not a format this kit does not know.
+        fs::remove_file(&marker_path).unwrap();
+        fs::create_dir(&marker_path).unwrap();
+        assert!(matches!(ObjectStore::open(&layout), Err(StoreError::Io(_))));
+    }
+
+    #[test]
+    fn object_head_reads_an_object_that_ends_at_its_prologue() {
+        use crate::object::{MAGIC, ObjectType};
+        let (_dir, store) = fresh_store();
+        let id = [0x42; 32];
+        let path = store.path_for(&id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut prologue = vec![ObjectType::Tree as u8];
+        prologue.extend_from_slice(&MAGIC);
+        prologue.push(ObjectType::Tree.schema_version());
+        assert_eq!(prologue.len(), 6);
+
+        // The six bytes of the prologue name a tree, which has no length.
+        fs::write(&path, &prologue).unwrap();
+        assert_eq!(store.object_head(&id).unwrap(), (ObjectType::Tree, None));
+
+        // One byte fewer holds no complete prologue.
+        fs::write(&path, &prologue[..5]).unwrap();
+        assert!(matches!(
+            store.object_head(&id),
+            Err(StoreError::Decode(KitError::EmptyData))
+        ));
+    }
+
+    #[test]
     fn is_repo_root_predicate() {
         let dir = TempDir::new().unwrap();
         assert!(!ObjectStore::is_repo_root(dir.path()));

@@ -2042,6 +2042,20 @@ mod tests {
         assert!(!t.pack_exists(&key).unwrap());
     }
 
+    /// A pack of exactly the limit is one `download_pack` accepts, so the
+    /// upload takes it. It writes 4 GiB.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    #[ignore = "writes a 4 GiB pack"]
+    fn upload_pack_takes_a_pack_of_exactly_the_body_limit() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x57u8; 32]);
+        let exact = vec![0_u8; PACK_BODY_LIMIT_USIZE];
+        t.upload_pack(&exact, &key).unwrap();
+        assert!(t.pack_exists(&key).unwrap());
+    }
+
     #[test]
     #[ignore = "reads back a pack of 1.2 million entries; minutes in a debug build"]
     fn a_pack_of_the_most_entries_a_writer_seals_is_stored_and_read_back() {

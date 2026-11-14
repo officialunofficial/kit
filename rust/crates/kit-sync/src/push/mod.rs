@@ -1381,6 +1381,21 @@ mod tests {
     }
 
     #[test]
+    fn the_pack_estimate_of_an_empty_plan_is_no_packs() {
+        let (_dir, store) = store();
+        let plan = transfer::PackPlan {
+            raw: Vec::new(),
+            deltas: Vec::new(),
+            self_contained: true,
+        };
+        assert!(
+            estimate_pack_sizes(&store, &plan, u64::MAX, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn the_pack_estimate_splits_at_the_entry_bound() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 5);

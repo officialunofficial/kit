@@ -161,3 +161,72 @@ impl Default for SyncOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn each_setter_changes_only_its_own_field() {
+        let fields = |o: &SyncOptions| {
+            (
+                o.prune,
+                o.verify_signatures,
+                o.target_branch.clone(),
+                o.lock_wait,
+                o.sync_policy,
+            )
+        };
+        let default = fields(&SyncOptions::default());
+        let set = Duration::from_secs(3);
+        assert_eq!(
+            fields(&SyncOptions::default().with_prune(true)),
+            (true, default.1, default.2.clone(), default.3, default.4)
+        );
+        assert_eq!(
+            fields(&SyncOptions::default().with_verify_signatures(false)),
+            (default.0, false, default.2.clone(), default.3, default.4)
+        );
+        assert_eq!(
+            fields(&SyncOptions::default().with_target_branch(Some("topic".to_owned()))),
+            (
+                default.0,
+                default.1,
+                Some("topic".to_owned()),
+                default.3,
+                default.4
+            )
+        );
+        assert_eq!(
+            fields(&SyncOptions::default().with_lock_wait(Some(set))),
+            (
+                default.0,
+                default.1,
+                default.2.clone(),
+                Some(set),
+                default.4
+            )
+        );
+        assert_eq!(
+            fields(&SyncOptions::default().with_sync_policy(SyncPolicy::PerObject)),
+            (
+                default.0,
+                default.1,
+                default.2,
+                default.3,
+                SyncPolicy::PerObject
+            )
+        );
+    }
+
+    #[test]
+    fn defaults_verify_signatures_and_batch_writes() {
+        let options = SyncOptions::default();
+        assert!(options.verify_signatures);
+        assert!(!options.prune);
+        assert_eq!(options.target_branch, None);
+        assert_eq!(options.lock_wait, None);
+        assert_eq!(options.sync_policy, SyncPolicy::Batch);
+    }
+}
