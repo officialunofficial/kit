@@ -553,8 +553,8 @@ untracked file survives a sweep that should have refused.
 ## Multi-leaf proof positions are strictly ascending
 
 **Always:** `merkle::BmtTree::multi_proof`, `proof_encoded_size` and every
-multi-leaf verifier (`verify_tree_entries_multi`, `verify_chunks_multi`)
-read the positions once, in input order. A chunk verifier first rejects
+multi-leaf verifier (`verify_tree_entries_multi`)
+read the positions once, in input order. `verify_chunk` first rejects
 position 0, the metadata leaf. Each then rejects the first position that
 is out of range (`PositionOutOfRange`), equals the position before it
 (`DuplicatePosition`) or is lower than the position before it
@@ -602,7 +602,7 @@ still be genuine content from *somewhere* in the repository, just not at
 the claimed location.
 
 **Enforced by:** `kit_core::verify::tests` (`verify_path_rejects_*`,
-`verify_chunk_with_meta_bounds`, `commit_id_mismatch_is_rejected`) and
+`a_chunk_payload_with_a_forged_header_field_is_refused`, `commit_id_mismatch_is_rejected`) and
 `rust/tests/golden/disclosure/`'s negative vectors (swapped steps, a
 wrong-position proof, a forged `ChunkedBlob` meta pair) — SPEC-DISCLOSURE
 §4 states this as a numbered MUST at every dispatch point.

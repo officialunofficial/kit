@@ -151,8 +151,8 @@ directly (they *are* the chunk's canonical bytes). For the `Range`
 payload kind on a `ChunkedBlob` leaf, only a byte range is disclosed &mdash;
 the verifier never sees the chunk's full bytes to hash &mdash; so the
 containing chunk's id MUST travel on the wire as its own field.
-`ChunkHdr.chunk_id` is exactly the value [`verify_chunk_with_meta`](../../rust/crates/kit-core/src/verify.rs)'s
-multi-proof authenticates against the leaf's `ChunkedBlob` id, so a
+`ChunkHdr.chunk_id` is exactly the value the multi-proof of
+[`verify_disclosure`](../../rust/crates/kit-core/src/verify.rs) authenticates against the leaf's `ChunkedBlob` id, so a
 forged `chunk_id` simply fails to fold to that id (§4.3) &mdash; carrying it
 explicitly costs nothing security-wise and closes an otherwise-unprovable
 gap.
