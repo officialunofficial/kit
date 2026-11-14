@@ -433,8 +433,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wildcard has to name it.
 - **Breaking:** the closure walk fetches each chunked-file manifest a second
   time, to check its chunk lengths after the walk. An `ObjectSource` has to
-  serve a manifest again; a source that serves each id once reports the
-  manifest as absent when its chunks were checked.
+  serve a manifest again; with a source that serves each id only once, the walk
+  reports the manifest corrupt ("manifest absent when its chunks were checked").
 - **Breaking:** the text of `KitError::TooManyChunks` reads
   `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
   matches the message text updates the number. The variant is the same.
