@@ -92,6 +92,12 @@ _kit() {
             ;;
         args)
             case $words[1] in
+                init)
+                    _arguments \
+                        '(-q --quiet)'{-q,--quiet}'[print nothing on success]' \
+                        '--help[show help]' \
+                        '1:directory:_files -/'
+                    ;;
                 add)
                     _arguments \
                         '(-A --all)'{-A,--all}'[stage all changes incl. deletions]' \
@@ -261,6 +267,7 @@ _kit() {
                 commit)
                     _arguments \
                         '(-a --all)'{-a,--all}'[stage tracked changes before committing]' \
+                        '--allow-empty[accept a first commit with nothing staged]' \
                         '--amend[replace HEAD instead of adding a new commit]' \
                         '(-m --message)-m[commit message]:message:' \
                         '(-F --file)'{-F,--file}'[read the commit message from a file (- for stdin)]:file:_files' \
@@ -314,6 +321,27 @@ _kit() {
                         '--help[show help]' \
                         '1:ref:'
                     ;;
+                pull)
+                    _arguments \
+                        '--all[pull from every configured remote]' \
+                        '(--rebase --no-ff)--rebase[replay the current branch onto the fetched branch]' \
+                        '(--rebase --no-ff)--no-ff[always create a merge commit]' \
+                        '--no-verify-signatures[skip signature verification of fetched objects]' \
+                        '--format[output format]:format:(default json)' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
+                        '--help[show help]' \
+                        '1:remote:'
+                    ;;
+                fetch)
+                    _arguments \
+                        '--all[fetch from every configured remote]' \
+                        '(-p --prune)'{-p,--prune}'[delete remote-tracking refs gone from the remote]' \
+                        '--no-verify-signatures[skip signature verification of fetched objects]' \
+                        '--format[output format]:format:(default json)' \
+                        '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
+                        '--help[show help]' \
+                        '1:remote:'
+                    ;;
                 push)
                     _arguments \
                         '--all[mirror every local branch]' \
@@ -335,6 +363,8 @@ _kit() {
                         '-d[delete branch (safe)]:branch:' \
                         '-D[force-delete branch]:branch:' \
                         '-m[rename branch]:branch:' \
+                        '(-u --set-upstream-to)'{-u,--set-upstream-to=}'[track a remote branch]:upstream:' \
+                        '--unset-upstream[stop tracking a remote branch]' \
                         '--list[list branches (explicit selector)]' \
                         '--contains[only branches whose tip contains COMMIT]::commit:' \
                         '--no-contains[only branches whose tip does NOT contain COMMIT]::commit:' \
@@ -368,6 +398,8 @@ _kit() {
                         '--continue[continue after conflict resolution]' \
                         '--abort[abort revert]' \
                         '(-n --no-commit)'{-n,--no-commit}'[stage the reverted tree without creating a commit]' \
+                        '(-m --mainline)'{-m,--mainline}'[select the mainline parent of a merge commit]:parent-number:' \
+                        '--format[output format]:format:(default json)' \
                         '--help[show help]'
                     ;;
                 merge)
@@ -428,15 +460,35 @@ _kit() {
                         '--help[show help]'
                     ;;
                 worktree)
-                    _values 'worktree subcommand' \
-                        'add[create a linked working tree]' \
-                        'list[list working trees]' \
-                        'remove[remove a linked working tree]' \
-                        'prune[delete dead registry entries]' \
-                        'move[move a linked working tree]' \
-                        'lock[lock a linked working tree]' \
-                        'unlock[unlock a linked working tree]' \
-                        'repair[repair worktree links]'
+                    if (( CURRENT == 2 )); then
+                        _values 'worktree subcommand' \
+                            'add[create a linked working tree]' \
+                            'list[list working trees]' \
+                            'remove[remove a linked working tree]' \
+                            'prune[delete dead registry entries]' \
+                            'move[move a linked working tree]' \
+                            'lock[lock a linked working tree]' \
+                            'unlock[unlock a linked working tree]' \
+                            'repair[repair worktree links]'
+                    else
+                        case $words[2] in
+                            list)
+                                _arguments '--porcelain[stable, script-friendly output]' '--help[show help]'
+                                ;;
+                            remove|move)
+                                _arguments '*'{-f,--force}'[override the safety check (twice for a locked tree)]' '--help[show help]' '*:path:_files -/'
+                                ;;
+                            prune)
+                                _arguments '--dry-run[report what would be pruned]' '--help[show help]'
+                                ;;
+                            lock)
+                                _arguments '--reason[why the tree is locked]:reason:' '--help[show help]' '*:path:_files -/'
+                                ;;
+                            *)
+                                _arguments '--help[show help]' '*:path:_files -/'
+                                ;;
+                        esac
+                    fi
                     ;;
                 stash)
                     _values 'stash subcommand' \

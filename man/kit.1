@@ -317,6 +317,14 @@ Display objects, like
 .Xr git 1 Cm show ,
 defaulting to
 .Cm HEAD .
+An
+.Ar object
+may also be
+.Ar rev Ns : Ns Ar path ,
+the blob or tree at
+.Ar path
+in the tree of
+.Ar rev .
 A commit or remix prints a header
 .Pq Cm commit Ar hash , Cm Author , Cm Date , indented message
 followed by the unified diff against its first parent (byte-identical to
@@ -408,7 +416,7 @@ tests whether
 .Ar a
 is an ancestor of
 .Ar b ,
-exiting 0 or 1 with no output.
+exiting 0 or 1 with no output; a history that cannot be read exits 65.
 .It Cm show-ref Oo Fl Fl heads Oc Oo Fl Fl tags Oc Op Ar pattern ...
 List refs as
 .Ql <hash> <refname> ,
@@ -485,7 +493,7 @@ must be a fully-qualified ref
 .Pq Pa refs/heads/<b> , refs/tags/<t> , refs/remotes/<r>/<b>
 or the literal
 .Cm HEAD .
-.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
+.It Cm commit Oo Fl a | Fl Fl all Oc Oo Fl Fl allow-empty Oc Oo Fl Fl amend Oc Oo Fl m Ar message | Fl F Ar file Oc Op Fl Fl author Ar spec
 Create a signed commit. With
 .Fl a
 or
@@ -518,6 +526,10 @@ and is mutually exclusive with
 .Fl m .
 .Fl Fl author Ar spec
 overrides the commit author Identity for this commit.
+.Fl Fl allow-empty
+accepts a first commit with nothing staged, which records an empty tree. A
+commit that has a parent never needed the flag: it accepts a tree equal to
+its parent's.
 .Pp
 After a
 .Cm merge Fl Fl no-commit
@@ -756,7 +768,7 @@ and
 for untracked. Header lines
 .Pq Fl Fl branch
 are not emitted.
-.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl d | Fl D | Fl m Oc Oo Fl Fl list Oc Oo Fl Fl contains Ar commit Oc Oo Fl Fl no-contains Ar commit Oc Oo Fl Fl merged Op Ar commit Oc Oo Fl Fl no-merged Op Ar commit Oc Op Ar name ...
+.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl r | Fl a Oc Oo Fl d | Fl D | Fl m | Fl u Ar upstream | Fl Fl unset-upstream Oc Oo Fl Fl list Oc Oo Fl Fl contains Ar commit Oc Oo Fl Fl no-contains Ar commit Oc Oo Fl Fl merged Op Ar commit Oc Oo Fl Fl no-merged Op Ar commit Oc Op Ar name ...
 List, create, rename, or delete branches. With no arguments, lists
 branches as
 .Ql <marker> <name>
@@ -780,6 +792,21 @@ and both still refuse the current branch.
 renames a branch \(em the current branch when
 .Ar old
 is omitted \(em and moves HEAD if the renamed branch is checked out.
+.Fl u Ar remote Ns / Ns Ar branch Op Ar name
+.Pq Fl Fl set-upstream-to
+records the upstream of the branch
+.Ar name ,
+or of the current branch, in the repository config; the remote-tracking ref
+must exist.
+.Fl Fl unset-upstream Op Ar name
+removes it. Neither contacts a remote.
+.Fl r
+lists the remote-tracking branches as
+.Ql <remote>/<branch> ,
+and
+.Fl a
+lists the local branches and then the remote-tracking branches as
+.Ql remotes/<remote>/<branch> .
 .Pp
 The listing accepts ancestry filters (like
 .Xr git 1 Cm branch ) :
@@ -807,10 +834,23 @@ Prints
 or
 .Sy Already on Ar n
 for a no-op switch.
-.It Cm checkout Oo Fl f Oc Fl Fl Ar path ...
+.It Cm checkout Oo Fl f Oc Li -- Ar path ...
 Restore the paths from the index. This runs
 .Cm restore
 .Op Fl f
+.Ar path ... ,
+so it refuses a file with unstaged edits unless
+.Fl f
+is given.
+.It Cm checkout Oo Fl f Oc Ar rev Li -- Ar path ...
+Restore the paths from
+.Ar rev
+into the index and the worktree. This runs
+.Cm restore
+.Op Fl f
+.Fl Fl source Ar rev
+.Fl Fl staged
+.Fl Fl worktree
 .Ar path ... ,
 so it refuses a file with unstaged edits unless
 .Fl f
@@ -926,14 +966,40 @@ Accepts
 and
 .Fl Fl abort
 after a conflict.
-.It Cm push Op Fl Fl dry-run
-Push HEAD's commit chain to the configured remote.
-.It Cm pull , Cm fetch
+.It Cm push Oo Fl Fl dry-run Oc Op Ar remote Op Ar src Ns : Ns Ar dst
+Push HEAD's commit chain to the configured remote. With
+.Ar remote
+and
+.Ar src Ns : Ns Ar dst
+it pushes the local branch
+.Ar src
+to the remote branch
+.Ar dst .
+Wildcards, a leading
+.Ql + ,
+an empty
+.Ar src
+and refs outside
+.Pa refs/heads/
+are errors.
+.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Op Ar remote
+.It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Op Ar remote
 Download or download-and-merge from the remote.
 .Cm pull Fl Fl rebase
 replays the current branch onto the fetched branch, as
 .Cm rebase
 does, instead of fast-forwarding.
+.Cm pull Fl Fl no-ff
+merges the fetched branch and always writes a merge commit, even when a
+fast-forward is possible; a conflict leaves the state of
+.Cm merge .
+It does not combine with
+.Fl Fl all
+or
+.Fl Fl rebase .
+.Cm fetch Fl Fl prune
+then deletes the remote-tracking refs whose branch is gone from the remote;
+it deletes no local branch and no tag.
 .It Cm clone Op Fl Fl sparse ... Ar url
 Clone a remote into a new working directory.
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
@@ -984,7 +1050,7 @@ the paths, then
 or
 .Fl Fl abort
 to restore HEAD.
-.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc
+.It Cm revert Ar commit | Fl Fl continue | Fl Fl abort Oo Fl n | Fl Fl no-commit Oc Oo Fl m | Fl Fl mainline Ar parent-number Oc
 Create a new commit that undoes
 .Ar commit
 (the inverse of cherry-pick). A normal forward commit — it does not rewrite
@@ -998,8 +1064,15 @@ resolutions, or
 to restore HEAD.
 .Fl n
 .Pq Fl Fl no-commit
-stages the reverted tree without committing. Reverting a merge commit is
-refused (mainline selection is not yet supported).
+stages the reverted tree without committing.
+Reverting a merge commit needs
+.Fl m
+or
+.Fl Fl mainline Ar parent-number ,
+which undoes the merge relative to that parent, counted from 1; a number out
+of range, and
+.Fl m
+on a commit that is not a merge, are errors.
 .It Cm bisect Cm start | Cm good | Cm bad | Cm reset
 Binary-search for the commit that introduced a regression.
 .It Cm gc Oo Fl n | Fl Fl dry-run Oc Oo Fl Fl grace-secs Ar secs Oc

@@ -252,11 +252,14 @@ Working-tree commands:
 
 History / commits:
 
-- `kit commit [-a|--all] [--amend] [--author <spec>] [-m <msg> | -F <file>]
+- `kit commit [-a|--all] [--allow-empty] [--amend] [--author <spec>] [-m <msg> | -F <file>]
   [--format=json]`
   &mdash; create
   a signed commit from the staging index. The index is built by `kit
-  add` / `kit rm`; `commit` with an empty index is an error. Use `kit
+  add` / `kit rm`; `commit` with an empty index is an error, except a first
+  commit made with `--allow-empty`, which records an empty tree. A commit
+  that has a parent never needed the flag: it accepts a tree equal to its
+  parent's. Use `kit
   add .` to snapshot the whole worktree before committing. `-m` supplies
   the message inline; `-F`/`--file` reads it from `<file>` (like `git
   commit -F`), with `-` meaning standard input &mdash; `-m` and `-F` are
@@ -817,6 +820,11 @@ Branches / refs:
 - `kit branch -m [<old>] <new>` &mdash; rename a branch (the current branch
   when `<old>` is omitted). CAS-guarded: refuses to clobber an existing
   `<new>`, and moves HEAD when the renamed branch is checked out.
+- `kit branch -u <remote>/<branch> [<branch>]` (`--set-upstream-to`) &mdash;
+  record the upstream of a branch in the repo config: the branch named, or
+  the current one. The remote-tracking ref `<remote>/<branch>` must exist.
+  `kit branch --unset-upstream [<branch>]` removes the upstream of the
+  branch named, or of the current one. Neither contacts a remote.
 - `kit branch --show-current` &mdash; print the checked-out branch name (empty
   output on a detached HEAD), like `git branch --show-current`.
 - `kit branch [-r|-a] [--list] [--contains [<c>]] [--no-contains [<c>]] [--merged [<c>]] [--no-merged [<c>]] [<pattern>...]`
@@ -851,8 +859,19 @@ Branches / refs:
   no-op switch (which still runs the dirty-worktree guard).
 - `kit checkout [-f] -- <path>...` &mdash; restore the paths from the index. It
   runs `kit restore [-f] <path>...`, so it refuses a file with unstaged edits
-  unless `-f` is given. Any other argument before the `--`, a revision
-  included, is a usage error.
+  unless `-f` is given.
+- `kit checkout [-f] <rev> -- <path>...` &mdash; restore the paths from `<rev>`
+  into the index and the working tree. It runs `kit restore [-f] --source
+  <rev> --staged --worktree <path>...`, so it refuses a file with unstaged
+  edits unless `-f` is given. Any other argument before the `--` is a usage
+  error.
+- `kit restore [-S|--staged] [-W|--worktree] [--source <rev>] [-f] <path>...`
+  &mdash; discard worktree changes of the paths (restore them from the index),
+  or with `--staged` unstage them (restore the index entry from `HEAD`). With
+  both flags it restores the index and the worktree. `--source <rev>` takes the
+  content from that revision's tree instead. A directory restores every tracked
+  entry at or below it. It refuses a file with unstaged edits unless `-f` is
+  given.
 - `kit checkout -b|-B <new> [<start>]` &mdash; create a branch at the
   start-point (default HEAD) and switch to it; `-b` refuses to clobber an
   existing branch, `-B` create-or-resets. Prints `Switched to a new branch
@@ -937,7 +956,7 @@ Branches / refs:
   `--format=json` emits one JSON object to stdout, same shape as `merge`
   (`"kind":"commit"|"no-commit"|"aborted"` on success, `"kind":"conflict"`
   with a `conflicts` array on a pause).
-- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [--format=json]` &mdash;
+- `kit revert <commit> | --continue | --abort` `[-n|--no-commit] [-m|--mainline <parent-number>] [--format=json]` &mdash;
   create a new commit that undoes `<commit>` (the inverse of cherry-pick:
   it applies the reverse of the target's diff). The commit message is
   `Revert "<subject>"` with a `This reverts commit <hash>.` trailer.
@@ -946,9 +965,12 @@ Branches / refs:
   safety guards and resumable conflict workflow as cherry-pick.
   `-n`/`--no-commit` stages the reverted tree (index plus worktree) without
   committing, so you can revert several commits and commit once.
-  **Reverting a merge commit is refused** &mdash; the inverse depends on which
-  parent is the mainline, and `-m`/mainline selection is not yet
-  supported. `--format=json` emits the same outcome-object shape as
+  **Reverting a merge commit needs `-m`** &mdash; the inverse depends on which
+  parent is the mainline. `-m`/`--mainline <parent-number>` undoes the merge
+  relative to that parent, counted from 1, as `cherry-pick -m` picks one. A
+  merge without `-m`, a number out of range and `-m` on a commit that is not
+  a merge are errors, and `-m` does not combine with `--continue` or
+  `--abort`. `--format=json` emits the same outcome-object shape as
   `merge`/`cherry-pick`.
 - `kit rebase [-i|--interactive] [--format=json] [--onto <newbase>] <revspec> [<branch>] | --continue | --abort | --skip`
   &mdash; replay commits onto a different base. The target is resolved through
@@ -1162,12 +1184,12 @@ Remote / sync:
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
   "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
   success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--rebase] [--no-verify-signatures]
+- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--no-verify-signatures]
   [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
   branch from `refs/remotes/<remote>/<branch>`. The fast-forward writes only
   the files the new tip changed; the others keep their inode and mtime.
   Divergent histories are
-  refused; use `--rebase` or an explicit merge after resolving the
+  refused; use `--rebase`, `--no-ff` or an explicit merge after resolving the
   divergence. `--rebase` fetches with the same signature checks, then replays
   the commits of the current branch that the fetched branch lacks onto the
   fetched branch, as `kit rebase` does. It prints nothing but `Current branch
@@ -1175,7 +1197,11 @@ Remote / sync:
   pauses the rebase with the state and the instructions of `kit rebase`;
   finish it with `kit rebase --continue`, `--skip` or `--abort`. `--rebase`
   needs a branch `HEAD` with a commit and does not combine with `--all`.
-  With `--format=json` it prints the object of `kit rebase`. The
+  With `--format=json` it prints the object of `kit rebase`. `--no-ff` fetches,
+  then merges the fetched branch into the current branch and always writes a
+  merge commit, even when a fast-forward is possible. A conflict pauses the
+  merge with the state of `kit merge`; finish it with `kit merge --continue`
+  or `--abort`. `--no-ff` does not combine with `--all` or `--rebase`. The
   fast-forward check reads every commit it walks; a commit that is missing,
   corrupt or not a commit fails the pull with an error that names it. Fresh repos
   with no local branch tip initialize the current branch/worktree from
