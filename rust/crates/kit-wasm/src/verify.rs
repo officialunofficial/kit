@@ -502,6 +502,9 @@ pub fn verify_tree_entry(
     ))
 }
 
+/// Checks the fold only, not the span rules of the disclosure format: for a
+/// disclosure check use `verify_disclosure`.
+///
 /// Verify a single chunk inclusion proof against a `ChunkedBlob` id.
 ///
 /// The chunk's leaf commits its span `[start, end)` with its id, so both

@@ -241,7 +241,7 @@ fn weigh_one(
     walk.for_each_chunk(
         store,
         &mut ChunkMemory::new(limits.chunk_memory),
-        |_, chunk| add(&chunk),
+        |_, _, _, chunk| add(&chunk),
     )
     .map_err(walk_error)?;
     Ok(total)

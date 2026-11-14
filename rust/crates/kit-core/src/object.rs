@@ -478,9 +478,7 @@ impl ChunkedBlobBuilder {
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
     /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
     pub(crate) fn new(total_size: u64, chunk_size: u32, capacity: usize) -> Result<Self, KitError> {
-        if total_size > crate::serialize::MAX_CHUNKED_TOTAL_SIZE {
-            return Err(KitError::ChunkedBlobTotalSizeInvalid);
-        }
+        crate::serialize::check_total_size_cap(total_size)?;
         let capacity = capacity.min(crate::serialize::MAX_CHUNKS as usize);
         Ok(Self {
             total_size,
@@ -497,9 +495,7 @@ impl ChunkedBlobBuilder {
     /// of [`crate::serialize::check_chunk_entry`].
     pub(crate) fn push(&mut self, chunk: Hash, end: u64) -> Result<(), KitError> {
         let index = u32::try_from(self.chunks.len()).map_err(|_| KitError::TooManyChunks)?;
-        if index >= crate::serialize::MAX_CHUNKS {
-            return Err(KitError::TooManyChunks);
-        }
+        crate::serialize::check_chunk_count(index.checked_add(1).ok_or(KitError::TooManyChunks)?)?;
         let prev_end = self.ends.last().copied().unwrap_or(0);
         crate::serialize::check_chunk_entry(
             index,
@@ -680,13 +676,11 @@ impl ChunkedBlob {
         chunk_size: u32,
         entries: impl IntoIterator<Item = (Hash, u64)>,
     ) -> impl Iterator<Item = Hash> {
-        let mut start = 0u64;
+        let mut cursor = crate::merkle::ChunkLeaves::new();
         core::iter::once(crate::merkle::chunked_meta_leaf_raw(total_size, chunk_size)).chain(
-            entries.into_iter().map(move |(chunk, end)| {
-                let leaf = crate::merkle::chunked_chunk_leaf_raw(start, end, &chunk);
-                start = end;
-                leaf
-            }),
+            entries
+                .into_iter()
+                .map(move |(chunk, end)| cursor.next_leaf(&chunk, end)),
         )
     }
 

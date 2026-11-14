@@ -714,9 +714,28 @@ fn verify_vector(name: &str, want_digest: &str) {
             }
         }
         ("chunk", "range") => {
+            // kit-core keeps no range verifier for chunks. The unit test
+            // `the_chunk_range_vector_folds_to_its_object_id` folds this
+            // proof, and here the builder must write the committed bytes.
+            assert!(
+                expect_accept,
+                "{name}: only an accepting chunk range exists"
+            );
             let start = u32::try_from(sidecar["start"].as_u64().unwrap()).unwrap();
             let chunks = spanned_chunks(&sidecar);
-            merkle::verify_chunks_range(&object_id, start, &chunks, &proof)
+            let last = start + u32::try_from(chunks.len()).unwrap() - 1;
+            let chunk_size = u32::try_from(sidecar["chunk_size"].as_u64().unwrap()).unwrap();
+            let total_size = chunks.last().map_or(0, |c| c.end);
+            let entries = chunks.iter().map(|c| (c.id, c.end));
+            let manifest =
+                kit_core::object::ChunkedBlob::new(total_size, chunk_size, entries).unwrap();
+            assert_eq!(
+                merkle::build_chunks_range_proof(&manifest, start, last)
+                    .unwrap()
+                    .encode(),
+                bin
+            );
+            Ok(())
         }
         (k, p) => panic!("{name}: unknown (kind, proof_kind) = ({k}, {p})"),
     };

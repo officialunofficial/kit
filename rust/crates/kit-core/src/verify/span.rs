@@ -526,8 +526,11 @@ pub fn plan_range_proof(
     })
 }
 
+/// The `Chunk` payload of chunk `index`. `inner_root` is the manifest's
+/// inner root, which the caller computes once for every chunk of a span.
 fn chunk_payload(
     cb: &crate::object::ChunkedBlob,
+    inner_root: Hash,
     index: u32,
     bytes: Vec<u8>,
 ) -> Result<PayloadWire, RangeProofError> {
@@ -542,7 +545,7 @@ fn chunk_payload(
         index,
         start,
         end,
-        inner_root: merkle::chunked_inner_root(cb),
+        inner_root,
         proof: merkle::build_chunks_multi_proof(cb, [0, position]).map_err(VerifyError::from)?,
         bytes,
     })
@@ -639,11 +642,12 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
     // is refused before more chunks are read.
     let mut container_size = 0usize;
     let mut chunks = Vec::new();
+    let inner_root = merkle::chunked_inner_root(&cb);
     for index in first..=last {
         let id = cb.chunks()[index as usize];
         let (chunk_bytes, content_len) = checked_blob_source(source, &id, index as usize)?;
         cb.check_chunk_length(index, content_len)?;
-        let payload = chunk_payload(&cb, index, chunk_bytes)?;
+        let payload = chunk_payload(&cb, inner_root, index, chunk_bytes)?;
         let bundle_size = encoded_disclosure_size(&commit_bytes, &steps, &payload)?;
         container_size = container_size
             .checked_add(varint_size(bundle_size))

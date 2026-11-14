@@ -296,7 +296,9 @@ pub(crate) struct Walk {
 ///   or a different derived id → `corrupt` (not descended);
 /// - a root must be a commit/remix/tag (`root_rule`);
 /// - `visit` sees each verified object, then its children are queued and
-///   its bytes dropped.
+///   its bytes dropped;
+/// - after the walk, each manifest is fetched a second time, one at a time,
+///   and checked for its chunk lengths.
 ///
 /// `known` is the caller's frontier contract: it may hold only for ids
 /// whose whole closure in `mode` was already verified *in the same
@@ -320,7 +322,8 @@ pub(crate) fn walk(
     let mut out = Walk::default();
     let mut queue: VecDeque<Hash> = VecDeque::new();
     // Chunked blobs whose chunk lengths are checked once every chunk is read.
-    let mut manifests: Vec<(Hash, crate::object::ChunkedBlob)> = Vec::new();
+    // Only their ids are kept: each manifest is read again, one at a time.
+    let mut manifests: Vec<Hash> = Vec::new();
     for root in roots {
         reach(&mut out, &mut queue, *root, ChildKind::Any)?;
     }
@@ -332,7 +335,13 @@ pub(crate) fn walk(
                 out.skipped_known += 1;
                 if let Some(reach) = out.visited.get_mut(&id) {
                     match answer {
-                        Known::Blob(len) => reach.blob_len = Some(len),
+                        // A known blob is held to the edges into it as a
+                        // blob the walk reads is.
+                        Known::Blob(len) => {
+                            if admit_type(reach, &mut out.corrupt, id, ObjectType::Blob) {
+                                reach.blob_len = Some(len);
+                            }
+                        }
                         _ => reach.frontier = true,
                     }
                 }
@@ -344,25 +353,13 @@ pub(crate) fn walk(
             out.missing.push(id);
             continue;
         };
-        let object = match crate::serialize::deserialize(bytes.as_ref()) {
+        let object = match decode_checked(&id, bytes.as_ref()) {
             Ok(object) => object,
-            Err(error) => {
-                out.corrupt.push((id, error.to_string()));
+            Err(reason) => {
+                out.corrupt.push((id, reason));
                 continue;
             }
         };
-        let derived = crate::object::id_from_object(&object, bytes.as_ref());
-        if derived != id {
-            out.corrupt.push((
-                id,
-                format!(
-                    "object bytes hash to {}, expected {}",
-                    crate::hash::to_hex(&derived),
-                    crate::hash::to_hex(&id)
-                ),
-            ));
-            continue;
-        }
         if root_set.contains(&id) {
             match &object {
                 Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => {}
@@ -374,33 +371,20 @@ pub(crate) fn walk(
                 },
             }
         }
-        let bit = type_bit(object.object_type());
         let Some(reach_entry) = out.visited.get_mut(&id) else {
             continue;
         };
-        if reach_entry.allowed & bit == 0 {
-            // A zero set was reported when the edges first disagreed.
-            if reach_entry.allowed != 0 {
-                out.corrupt.push((
-                    id,
-                    format!(
-                        "{:?} object where the referencing entry requires another type",
-                        object.object_type()
-                    ),
-                ));
-                reach_entry.allowed = 0;
-            }
+        if !admit_type(reach_entry, &mut out.corrupt, id, object.object_type()) {
             continue;
         }
-        reach_entry.allowed &= bit;
         if let Object::Blob(blob) = &object {
             reach_entry.blob_len = Some(blob.data.len() as u64);
         }
         visit(&id, &object)?;
 
         let child_ids = typed_children(&object, mode);
-        if let Object::ChunkedBlob(manifest) = &object {
-            manifests.push((id, manifest.clone()));
+        if matches!(object, Object::ChunkedBlob(_)) {
+            manifests.push(id);
         }
         out.verified += 1;
         drop(object);
@@ -410,13 +394,53 @@ pub(crate) fn walk(
         }
     }
 
-    check_chunk_lengths(&mut out, manifests);
+    check_chunk_lengths(&mut out, &manifests, source)?;
 
     out.missing.sort_unstable();
     out.missing.dedup();
     out.corrupt.sort_by_key(|(id, _)| *id);
     out.bad_roots.sort_by_key(|(id, _)| *id);
     Ok(out)
+}
+
+/// Decode `bytes` and check that they hash to `id`. The error is the reason
+/// the walk reports under `id`.
+fn decode_checked(id: &Hash, bytes: &[u8]) -> Result<Object, String> {
+    let object = crate::serialize::deserialize(bytes).map_err(|error| error.to_string())?;
+    let derived = crate::object::id_from_object(&object, bytes);
+    if derived != *id {
+        return Err(format!(
+            "object bytes hash to {}, expected {}",
+            crate::hash::to_hex(&derived),
+            crate::hash::to_hex(id)
+        ));
+    }
+    Ok(object)
+}
+
+/// Hold an id of object type `ty` to the types its edges allow. Returns
+/// whether `ty` is allowed, and narrows the allowed set to it. A refusal is
+/// reported once, as corrupt, and empties the set; a set an earlier
+/// disagreement emptied was reported then.
+fn admit_type(
+    reach: &mut Reach,
+    corrupt: &mut Vec<(Hash, String)>,
+    id: Hash,
+    ty: ObjectType,
+) -> bool {
+    let bit = type_bit(ty);
+    if reach.allowed & bit == 0 {
+        if reach.allowed != 0 {
+            corrupt.push((
+                id,
+                format!("{ty:?} object where the referencing entry requires another type"),
+            ));
+            reach.allowed = 0;
+        }
+        return false;
+    }
+    reach.allowed &= bit;
+    true
 }
 
 /// Mark `id` reached through an edge that allows `kind`. An id joins
@@ -467,8 +491,37 @@ fn reach(
 /// a blob is not measured: it is already missing or corrupt. A chunk the
 /// frontier stopped at without a length ([`Known::Yes`]) cannot be checked, so
 /// its manifest is reported corrupt.
-fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, crate::object::ChunkedBlob)>) {
-    for (id, manifest) in manifests {
+///
+/// The walk keeps only the ids of its manifests. Each is fetched again here
+/// and held alone while it is checked, so the walk holds one manifest at a
+/// time, not every manifest of the closure.
+fn check_chunk_lengths(
+    out: &mut Walk,
+    manifests: &[Hash],
+    source: &mut impl ObjectSource,
+) -> Result<(), VerifyError> {
+    for id in manifests {
+        let id = *id;
+        let Some(bytes) = source.fetch(&id)? else {
+            out.corrupt
+                .push((id, "manifest absent when its chunks were checked".into()));
+            continue;
+        };
+        let manifest = match decode_checked(&id, bytes.as_ref()) {
+            Ok(Object::ChunkedBlob(manifest)) => manifest,
+            Ok(_) => {
+                out.corrupt.push((
+                    id,
+                    "manifest changed type when its chunks were checked".into(),
+                ));
+                continue;
+            }
+            Err(reason) => {
+                out.corrupt.push((id, reason));
+                continue;
+            }
+        };
+        drop(bytes);
         let mut wrong = None;
         let mut unconfirmed = None;
         for (index, (chunk, end)) in (0u32..).zip(manifest.entries()) {
@@ -498,6 +551,7 @@ fn check_chunk_lengths(out: &mut Walk, manifests: Vec<(Hash, crate::object::Chun
             ));
         }
     }
+    Ok(())
 }
 
 /// Single-root closure walk: [`walk`] with no frontier, no visitor and a
@@ -1355,6 +1409,39 @@ mod tests {
                 assert_eq!(corrupt_ids(&report), vec![big.0]);
             }
         }
+    }
+
+    #[test]
+    fn every_manifest_of_a_closure_is_checked_for_its_chunk_lengths() {
+        let one = blob(b"12345");
+        let two = blob(b"1234567");
+        let three = blob(b"123");
+        let manifest = |chunks: [(Hash, u64); 2]| {
+            object(&Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(chunks[1].1, 0, chunks).unwrap(),
+            ))
+        };
+        // Each of two manifests has a chunk that is not its span long, and a
+        // third manifest is right.
+        let bad_one = manifest([(one.0, 6), (two.0, 13)]);
+        let bad_two = manifest([(three.0, 4), (two.0, 11)]);
+        let good = manifest([(one.0, 5), (two.0, 12)]);
+        let root_tree = tree(&[
+            (b"a", EntryMode::Blob, bad_one.0),
+            (b"b", EntryMode::Blob, bad_two.0),
+            (b"c", EntryMode::Blob, good.0),
+        ]);
+        let root = commit_over(root_tree.0, vec![]);
+        let report = closure_of(
+            root.0,
+            &[
+                &root, &root_tree, &bad_one, &bad_two, &good, &one, &two, &three,
+            ],
+        );
+        let mut expected = vec![bad_one.0, bad_two.0];
+        expected.sort_unstable();
+        assert_eq!(corrupt_ids(&report), expected, "{report:?}");
+        assert_eq!(report.verified, 8, "{report:?}");
     }
 
     #[test]

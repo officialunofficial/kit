@@ -10,7 +10,9 @@ use super::tests::{
 };
 use super::walk::{ChunkMemory, HeldCommits, PushWalk, take_counted};
 use super::*;
-use crate::object::{Commit, EntryMode, Identity, Remix, RemixSource, Tag, Tree, TreeEntry};
+use crate::object::{
+    Commit, EntryMode, Identity, KitError, Remix, RemixSource, Tag, Tree, TreeEntry,
+};
 use crate::ops::graph::{check_closure_present, reachable_objects};
 use crate::pack::{PackReader, PackWriter};
 
@@ -119,6 +121,34 @@ fn sequential(
         .iter()
         .map(|&c| encode_delta_candidate(s, c))
         .collect()
+}
+
+/// A manifest whose chunk holds another number of bytes than its span is
+/// refused by every fetch, so the plan refuses the chunks it sends in the
+/// same way, before anything is uploaded.
+#[test]
+fn a_push_does_not_plan_a_chunk_that_every_fetch_refuses() {
+    let (_d, s) = store();
+    let short = put_blob(&s, chunk_content(1, 300));
+    let whole = put_blob(&s, chunk_content(2, 400));
+    // The spans say 400 and 400 bytes. The first chunk holds 300.
+    let manifest = put(
+        &s,
+        &Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(800, 0, [(short, 400), (whole, 800)]).unwrap(),
+        ),
+    );
+    let c = commit(&s, tree_of(&s, &[("f", manifest)]), &[], "wrong span");
+    assert!(
+        check_closure_present(&s, [&c]).is_err(),
+        "a fetch of this closure is refused"
+    );
+    let plan = plan_pack(&s, c, None);
+    assert!(
+        plan.is_err(),
+        "the push planned {} objects of a closure that every fetch refuses",
+        plan.map_or(0, |p| p.object_count())
+    );
 }
 
 #[test]
@@ -989,7 +1019,7 @@ fn a_manifest_is_paired_with_the_manifest_at_its_path_in_a_parent() {
 
     // The chunks the old manifest lists are not listed again.
     let mut sent = Vec::new();
-    walk.for_each_chunk(&s, &mut ChunkMemory::new(100), |_, chunk| {
+    walk.for_each_chunk(&s, &mut ChunkMemory::new(100), |_, _, _, chunk| {
         sent.push(chunk);
         Ok(())
     })
@@ -1097,7 +1127,7 @@ fn a_manifest_that_lists_a_non_blob_is_a_typed_error() {
     let c = commit(&s, tree_of(&s, &[("f", m)]), &[], "bad");
     assert!(matches!(
         plan_pack(&s, c, None),
-        Err(StoreError::Decode(KitError::InvalidObjectType(0x02)))
+        Err(StoreError::Decode(KitError::ChunkNotBlob { index: 0 }))
     ));
 }
 

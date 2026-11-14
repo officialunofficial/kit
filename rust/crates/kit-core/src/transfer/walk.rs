@@ -26,7 +26,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
-use crate::object::{EntryMode, Object, ObjectType, Tree, TreeEntry};
+use crate::object::{ChunkedBlob, EntryMode, Object, ObjectType, Tree, TreeEntry};
 use crate::ops::graph::{ClosureMode, children};
 use crate::store::{ObjectStore, StoreError};
 
@@ -304,7 +304,8 @@ impl PushWalk {
     ///
     /// A chunk is skipped when the manifest it replaces lists it, when the
     /// walk keeps it as an object, or when `memory` has seen it. The callback
-    /// gets the commit that brought the manifest and the chunk.
+    /// gets the commit that brought the manifest, the manifest, the index of
+    /// the chunk in it and the chunk.
     ///
     /// # Errors
     ///
@@ -315,7 +316,7 @@ impl PushWalk {
         &self,
         store: &ObjectStore,
         memory: &mut ChunkMemory,
-        mut f: impl FnMut(&Hash, Hash) -> Result<(), StoreError>,
+        mut f: impl FnMut(&Hash, &ChunkedBlob, u32, Hash) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         for manifest in &self.manifests {
             let Object::ChunkedBlob(blob) = store.read_object(&manifest.id)? else {
@@ -326,14 +327,14 @@ impl PushWalk {
                 Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => HashSet::new(),
                 Some(Err(error)) => return Err(error),
             };
-            for chunk in blob.into_chunks() {
+            for (index, chunk) in (0u32..).zip(blob.chunks().iter().copied()) {
                 if replaced.contains(&chunk)
                     || self.objects.contains(&chunk)
                     || !memory.first_sight(&chunk)
                 {
                     continue;
                 }
-                f(&manifest.commit, chunk)?;
+                f(&manifest.commit, &blob, index, chunk)?;
             }
         }
         Ok(())

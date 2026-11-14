@@ -335,6 +335,13 @@ impl ObjectStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(StoreError::IncompatibleRepoFormat { found: None });
             }
+            // A marker longer than the cap or not UTF-8 is not a format this
+            // kit reads.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                return Err(StoreError::IncompatibleRepoFormat {
+                    found: Some("unreadable".to_owned()),
+                });
+            }
             Err(e) => return Err(StoreError::Io(e)),
         }
         Ok(Self {
@@ -1295,6 +1302,22 @@ mod tests {
             ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: Some(ref found) }) if found == "bmt-v1"
         ));
+    }
+
+    #[test]
+    fn open_rejects_a_marker_that_is_too_long_or_not_utf8() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let marker_path = dir.path().join(KIT_DIR).join(FORMAT_FILE);
+        let too_long = vec![b'a'; usize::try_from(FORMAT_MAX_BYTES).unwrap() + 1];
+        for bytes in [too_long, vec![0xff, 0xfe, b'\n']] {
+            fs::write(&marker_path, &bytes).unwrap();
+            assert!(matches!(
+                ObjectStore::open(&layout),
+                Err(StoreError::IncompatibleRepoFormat { found: Some(_) })
+            ));
+        }
     }
 
     #[test]

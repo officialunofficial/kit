@@ -536,10 +536,7 @@ fn mark_live(
     let mut chunks = ids.ids;
     chunks.retain(|c| !objects.contains(c));
     for chunk in &chunks {
-        if !matches!(
-            store.object_type(chunk)?,
-            ObjectType::Blob | ObjectType::Delta
-        ) {
+        if store.object_type(chunk)? != ObjectType::Blob {
             return Err(GcRootsError::ChunkNotBlob {
                 manifest: manifest_listing(store, &objects, chunk)?,
                 chunk: *chunk,

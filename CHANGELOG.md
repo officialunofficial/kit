@@ -183,9 +183,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     takes the total size and the chunk count, and checks no layout.
     `MerkleError::PartialChunkId` is gone: a partial entry is
     `KitError::ChunkedBlobLength`. `merkle::SpannedChunk`
-    pairs a chunk id with its span. `verify_chunk`, `verify_chunks_range`,
-    `verify_chunks_multi`, `verify_chunk_with_meta_leaf` and
-    `verify::verify_chunk_with_meta` take the span with the chunk id.
+    pairs a chunk id with its span. `verify_chunk` takes the span with the chunk id.
 - **Breaking, format:** the disclosure bundle is version 3. A chunk payload
   and a chunk range header carry `start` and `end`, and a bundle of version 2
   is refused with `UnsupportedBundleVersion`. The length proofs are gone:
@@ -542,9 +540,33 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   older writer sealed above the 1 GiB budget (it could decode up to 16 GiB)
   is refused, whatever limits the caller decodes with, and an unchanged pack
   is still returned as it is. `ReadLimit` is `#[non_exhaustive]`.
+- **Breaking:** `verify::verify_chunk_with_meta`, `merkle::verify_chunks_range`
+  and `merkle::verify_chunks_multi` are removed. They checked the fold only and
+  had no caller. `verify::verify_disclosure` verifies a chunk with the span
+  rules, and `merkle::verify_chunk` says in its first line that it checks the
+  fold only.
+- **Breaking:** `SyncError` has a new variant, `RemoteObject`, and so does
+  `libkit::transfer::Error`. A fetch whose remote sent a chunk of another
+  length than its span, or a chunk that is not a blob, fails with it. It was
+  `SyncError::Store`. It is not a trigger to rebuild the applied-pack record.
+  A caller that matches `SyncError` with no wildcard has to name it.
 
 ### Fixed
 
+- A push checks each chunk it sends: the plan reads the head of the chunk,
+  requires a blob and compares its length with the span of the manifest, as a
+  fetch does, and fails before anything is uploaded. `kit gc` takes a blob
+  only as a chunk, as every other reader does.
+- The closure walk holds a known blob to the types that the edge into it
+  allows. A directory entry, the tree of a commit or the target of a tag whose
+  type is not a blob, when it names an id answered `Known::Blob`, is reported
+  corrupt, as it is for a blob the walk reads.
+- The closure walk keeps only the ids of the manifests it reads and checks each
+  manifest's chunk lengths in turn after the walk, so a history with many
+  versions of a large file no longer holds all their manifests at once.
+- `kit prove --range` with an offset and length that overflow exits 65, like
+  every other bad range. A `.kit/format` longer than 64 bytes or not UTF-8 is
+  an incompatible repository format.
 - Two fetches of one clone no longer leave a record that makes every later
   fetch report the remote unchanged. A fetch that listed the remote earlier
   can publish an older tip after a later fetch published the new one. A fetch

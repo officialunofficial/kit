@@ -264,9 +264,30 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
 /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
 /// [`MAX_CHUNKED_TOTAL_SIZE`].
 pub fn check_chunked_header(total_size: u64, chunk_count: u32) -> Result<(), KitError> {
+    check_chunk_count(chunk_count)?;
+    check_total_size_cap(total_size)
+}
+
+/// Decode check 1 of SPEC-OBJECTS §7: the chunk count is at most
+/// [`MAX_CHUNKS`]. The manifest decoder runs it alone, before the exact-size
+/// check; [`check_chunked_header`] runs it first.
+///
+/// # Errors
+/// [`KitError::TooManyChunks`] above [`MAX_CHUNKS`].
+pub(crate) fn check_chunk_count(chunk_count: u32) -> Result<(), KitError> {
     if chunk_count > MAX_CHUNKS {
         return Err(KitError::TooManyChunks);
     }
+    Ok(())
+}
+
+/// Decode check 3 of SPEC-OBJECTS §7: `total_size` is at most
+/// [`MAX_CHUNKED_TOTAL_SIZE`]. The manifest decoder runs it after the
+/// exact-size check; [`check_chunked_header`] runs it second.
+///
+/// # Errors
+/// [`KitError::ChunkedBlobTotalSizeInvalid`] above the cap.
+pub(crate) fn check_total_size_cap(total_size: u64) -> Result<(), KitError> {
     if total_size > MAX_CHUNKED_TOTAL_SIZE {
         return Err(KitError::ChunkedBlobTotalSizeInvalid);
     }
@@ -711,9 +732,7 @@ fn read_chunked_blob(r: &mut Reader<'_>) -> Result<ChunkedBlob, KitError> {
     let chunk_count = r.read_u32()?;
     // Decode check 1, then check 2 before any allocation: the entries are
     // exactly what remains.
-    if chunk_count > MAX_CHUNKS {
-        return Err(KitError::TooManyChunks);
-    }
+    check_chunk_count(chunk_count)?;
     if (chunk_count as usize).saturating_mul(CHUNKED_ENTRY_LEN) != r.remaining() {
         return Err(KitError::ChunkedBlobLength);
     }

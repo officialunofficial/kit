@@ -17,6 +17,7 @@
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
+use kit_core::object::KitError;
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -271,6 +272,9 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
             kit_core::ops::graph::MAX_REACHABLE,
         )),
         Err(StoreError::ObjectNotFound(hex)) => Err(SyncError::RemoteMissingObject(hex)),
+        Err(StoreError::Decode(
+            e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
+        )) => Err(SyncError::RemoteObject(e)),
         Err(e) => Err(e.into()),
     }
 }
@@ -508,8 +512,8 @@ fn fetch_objects_inner(
 
             // Step 3: publish under a repo lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
-            // has no deadline: the work above is done, and an interrupt
-            // ends it. The fetch holds only the shared lock of the prune
+            // has a deadline only when `lock_wait` sets one: the work above
+            // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune
             // guard, and no process blocks on the exclusive one, so this
             // wait cannot deadlock.
             let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
@@ -636,4 +640,104 @@ fn remote_unchanged(
     Ok(tracked
         .iter()
         .all(|r| r.hash.is_some_and(|tip| store.contains(&tip))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kit_core::object::{
+        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
+    };
+    use kit_core::sign::{self, KeyPair};
+
+    fn put(store: &ObjectStore, object: &Object) -> Hash {
+        store
+            .write(&kit_core::serialize::serialize(object).unwrap())
+            .unwrap()
+    }
+
+    /// A signed commit over a tree whose file `big` is `manifest`.
+    fn commit_over_file(store: &ObjectStore, manifest: Hash) -> Hash {
+        let tree = put(
+            store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"big".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: manifest,
+                }],
+            }),
+        );
+        let kp = KeyPair::from_seed([0x31; 32]);
+        let mut commit = Commit {
+            tree_hash: tree,
+            parents: vec![],
+            author: Identity::ed25519(kp.public.0),
+            signer: kp.public.0,
+            message: b"chunked".to_vec(),
+            timestamp: 1,
+            message_hash: [0; 32],
+            content_digest: [0; 32],
+            signature: [0; 64],
+        };
+        commit.signature = sign::sign_commit(&commit, &kp).unwrap().0;
+        put(store, &Object::Commit(commit))
+    }
+
+    fn store() -> (tempfile::TempDir, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn a_chunk_of_another_length_than_its_span_is_a_remote_object_error() {
+        let (_dir, store) = store();
+        let one = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"12345".to_vec(),
+            }),
+        );
+        let two = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"1234567".to_vec(),
+            }),
+        );
+        let file = |first_end: u64| {
+            let manifest =
+                ChunkedBlob::new(first_end + 7, 0, [(one, first_end), (two, first_end + 7)])
+                    .unwrap();
+            put(&store, &Object::ChunkedBlob(manifest))
+        };
+        let good = commit_over_file(&store, file(5));
+        verify_closure_present(&store, &good).unwrap();
+
+        // The first chunk holds 5 bytes, and its span says 6.
+        let bad = commit_over_file(&store, file(6));
+        assert!(matches!(
+            verify_closure_present(&store, &bad),
+            Err(SyncError::RemoteObject(KitError::ChunkLengthMismatch {
+                index: 0,
+                expected: 6,
+                actual: 5
+            }))
+        ));
+    }
+
+    #[test]
+    fn a_chunk_that_is_not_a_blob_is_a_remote_object_error() {
+        let (_dir, store) = store();
+        let tree = put(&store, &Object::Tree(Tree { entries: vec![] }));
+        let manifest = put(
+            &store,
+            &Object::ChunkedBlob(ChunkedBlob::new(4, 0, [(tree, 4)]).unwrap()),
+        );
+        let tip = commit_over_file(&store, manifest);
+        assert!(matches!(
+            verify_closure_present(&store, &tip),
+            Err(SyncError::RemoteObject(KitError::ChunkNotBlob { index: 0 }))
+        ));
+    }
 }

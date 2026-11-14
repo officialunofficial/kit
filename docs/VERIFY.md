@@ -317,8 +317,8 @@ map, not the territory.
   that id &mdash; together with the `ChunkedBlob`'s `total_size`/`chunk_size`,
   which the verifier **recomputes itself**, never accepts as input &mdash;
   is proven with one multi-proof over BMT positions `{0, index + 1}`
-  (position 0 is the metadata leaf; SPEC-MERKLE-OBJECTS §3.1). This is
-  `verify_chunk_with_meta` in `kit_core::verify`.
+  (position 0 is the metadata leaf; SPEC-MERKLE-OBJECTS §3.1). This is the
+  chunked-leaf check of `verify_disclosure` in `kit_core::verify`.
 - **`Range`** discloses a byte range, over a plain `Blob` leaf directly, or
   over one chunk of a `ChunkedBlob` leaf (`chunk: Some(hdr)`, same
   `{0, index + 1}` multi-proof as `Chunk` first, then the range within
@@ -524,10 +524,12 @@ with no inner root available from anywhere, needs the same fold-up
 upstream's `verify_element_inclusion` performs internally before it can
 even begin &mdash; precisely the algorithm SPEC-MERKLE-OBJECTS §5.4 specifies
 in prose. `kit_core::merkle`'s own id-based verifiers (`verify_tree_entry`,
-`verify_chunk`, and their range/multi counterparts) already do exactly
-that fold-then-wrap-then-compare, tested and golden-vector-pinned; reach
-for those directly (`merkle::wrap_id` applies the
-same wrap step) rather than hand-rolling the fold loop.
+`verify_tree_entries_range`, `verify_tree_entries_multi` and `verify_chunk`)
+already do exactly that fold-then-wrap-then-compare, tested and
+golden-vector-pinned; reach for those directly (`merkle::wrap_id` applies the
+same wrap step) rather than hand-rolling the fold loop. They check the fold
+only, not the span rules of SPEC-DISCLOSURE §4; for a disclosure use
+`verify_disclosure`.
 
 ### Multi-leaf proofs: ascending positions
 
@@ -709,7 +711,6 @@ own test harness should take.
 | **kit-core (`kit_core::verify`, `kit_core::merkle`)** | | |
 | `verify_object_id(bytes, expected) -> Object` | check one object's content-address | SPEC-OBJECTS §10 |
 | `verify_path(commit_id, commit_bytes, steps) -> PathVerified` | walk and verify a tree-entry step chain | SPEC-DISCLOSURE §4 steps 6&ndash;9 |
-| `verify_chunk_with_meta(chunked_id, total_size, chunk_size, chunk, index, proof)` (`chunk` is a `SpannedChunk`: id, start, end) | verify one chunk + its manifest metadata | SPEC-MERKLE-OBJECTS §3.1 |
 | `verify_blob_slice(blob_id, content_offset, len, slice) -> bytes` | verify a Bao range slice | SPEC-DISCLOSURE §4 (Range) |
 | `verify_disclosure(commit_id, bundle) -> Disclosed` | decode + fully verify a bundle | SPEC-DISCLOSURE §3&ndash;§4 |
 | `build_disclosure(store, commit_id, path, selector) -> Vec<u8>` (native) | producer side of a bundle | SPEC-DISCLOSURE §3 |
@@ -720,7 +721,7 @@ own test harness should take.
 | `verify_closure_manifest(expected_root, manifest, packs) -> ClosureReport` | closure check + manifest-root binding | SPEC-DISCLOSURE §7.3/§7.4 |
 | `export_closure(store, root, mode) -> ClosureExport` (native) | producer side of a closure | SPEC-DISCLOSURE §7.2/§7.3 |
 | `merkle::wrap_id(kind, inner_root) -> Hash` | apply the outer type-domain wrap (§5's step 1); a v3 `Step.inner_root` is wrap-checked with this before upstream BMT verify | SPEC-MERKLE-OBJECTS §2 |
-| `merkle::verify_tree_entry` / `verify_chunk` (+ `*_range` / `*_multi`) | single/range/multi-leaf BMT inclusion proofs, against the object id | SPEC-MERKLE-OBJECTS §5.4 |
+| `merkle::verify_tree_entry` / `verify_tree_entries_range` / `verify_tree_entries_multi` / `verify_chunk` | single, range and multi-leaf BMT inclusion proofs, against the object id; the fold only, not the span rules (use `verify_disclosure`) | SPEC-MERKLE-OBJECTS §5.4 |
 | **MCP tools** (`kit mcp`) | | |
 | `kit_prove` / `kit_verify_proof` / `kit_closure_verify` | agent-facing equivalents of the CLI commands above | &mdash; |
 

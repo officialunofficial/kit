@@ -75,8 +75,8 @@
 //! this claim; `rust/tests/golden/proofs/` carries fixed vectors.
 //!
 //! Verification in this crate is always stated against the **object id**
-//! (`verify_tree_entry`, `verify_chunk`, and their range/multi
-//! counterparts), never the bare inner root — passing a caller the inner
+//! (`verify_tree_entry`, `verify_tree_entries_range`,
+//! `verify_tree_entries_multi` and `verify_chunk`), never the bare inner root — passing a caller the inner
 //! root invited skipping the type-domain wrap and accepting, say, a
 //! `Tree` proof against a `ChunkedBlob` id (SPEC-DISCLOSURE). The
 //! inner-root-comparing primitives (`Proof::verify_element_inclusion` and
@@ -364,8 +364,8 @@ pub struct ChunkedIdFold {
     chunk_count: u32,
     /// Entries pushed so far.
     pushed: u32,
-    /// The end of the last entry pushed, `0` before the first.
-    prev_end: u64,
+    /// The chunk leaves, which keep the end of the last entry pushed.
+    leaves: ChunkLeaves,
 }
 
 impl ChunkedIdFold {
@@ -390,7 +390,7 @@ impl ChunkedIdFold {
             chunk_size,
             chunk_count,
             pushed: 0,
-            prev_end: 0,
+            leaves: ChunkLeaves::new(),
         })
     }
 
@@ -409,14 +409,13 @@ impl ChunkedIdFold {
             self.pushed,
             self.chunk_size,
             self.total_size,
-            self.prev_end,
+            self.leaves.prev_end(),
             end,
         )?;
         self.fold
-            .push(&chunked_chunk_leaf_raw(self.prev_end, end, chunk))
+            .push(&self.leaves.next_leaf(chunk, end))
             .map_err(|_| KitError::TooManyChunks)?;
         self.pushed += 1;
-        self.prev_end = end;
         Ok(())
     }
 
@@ -453,7 +452,11 @@ impl ChunkedIdFold {
         if self.pushed != self.chunk_count {
             return Err(KitError::ChunkedBlobLength);
         }
-        crate::serialize::check_last_end(self.total_size, self.pushed as usize, self.prev_end)?;
+        crate::serialize::check_last_end(
+            self.total_size,
+            self.pushed as usize,
+            self.leaves.prev_end(),
+        )?;
         Ok(wrap_id(ObjectKind::ChunkedBlob, &self.fold.root()))
     }
 }
@@ -1059,9 +1062,8 @@ impl Proof {
 /// `total_size`/`chunk_size`, without requiring a materialized
 /// [`ChunkedBlob`] value. It binds both fields, since neither is derivable
 /// from the chunk list and without it they could be forged (a
-/// second-preimage hole). [`ChunkedBlob::leaf_sequence`] places it, and
-/// [`verify_chunk_with_meta_leaf`] (which, by design, never has a manifest;
-/// see that function's docs) computes it itself.
+/// second-preimage hole). [`ChunkedBlob::leaf_sequence`] places it, and the
+/// disclosure verifier computes it itself, since it never has a manifest.
 pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
     let mut body = [0u8; 12];
     body[..8].copy_from_slice(&total_size.to_le_bytes());
@@ -1073,13 +1075,42 @@ pub(crate) fn chunked_meta_leaf_raw(total_size: u64, chunk_size: u32) -> Hash {
 /// `[start, end)` and its id. It binds both offsets, so one proof of the
 /// leaf gives a chunk's place in the file and its committed length. The
 /// fixed-width body keeps the leaf from aliasing any other kind of leaf.
-/// [`ChunkedBlob::leaf_sequence`] places it.
+/// [`ChunkLeaves`] places it.
 pub(crate) fn chunked_chunk_leaf_raw(start: u64, end: u64, chunk_id: &Hash) -> Hash {
     let mut body = [0u8; 16 + HASH_LEN];
     body[..8].copy_from_slice(&start.to_le_bytes());
     body[8..16].copy_from_slice(&end.to_le_bytes());
     body[16..].copy_from_slice(chunk_id);
     domain_digest(CBLOB_CHUNK_DOMAIN, &body)
+}
+
+/// The chunk leaves of a manifest, one entry at a time. Each leaf takes the
+/// start of its span from the end of the entry before it, `0` for the first,
+/// and this is the one place that end is tracked: [`ChunkedBlob::leaf_sequence`]
+/// and [`ChunkedIdFold`] both build their chunk leaves here.
+#[derive(Debug)]
+pub(crate) struct ChunkLeaves {
+    prev_end: u64,
+}
+
+impl ChunkLeaves {
+    pub(crate) const fn new() -> Self {
+        Self { prev_end: 0 }
+    }
+
+    /// The end of the last entry given to [`Self::next_leaf`], `0` before the
+    /// first.
+    pub(crate) const fn prev_end(&self) -> u64 {
+        self.prev_end
+    }
+
+    /// The leaf of the next entry, whose span runs from [`Self::prev_end`] to
+    /// `end`.
+    pub(crate) fn next_leaf(&mut self, chunk_id: &Hash, end: u64) -> Hash {
+        let leaf = chunked_chunk_leaf_raw(self.prev_end, end, chunk_id);
+        self.prev_end = end;
+        leaf
+    }
 }
 
 /// The leaf digest for one `Tree` entry. The `name_len` u32-LE prefix is
@@ -1317,6 +1348,9 @@ impl SpannedChunk {
     }
 }
 
+/// Checks the fold only, not the span rules of SPEC-DISCLOSURE §4: for a
+/// disclosure check use [`crate::verify::verify_disclosure`].
+///
 /// Verify that `chunk` at `position` belongs to the `ChunkedBlob` whose id
 /// is `chunked_id`. Rejects `position == 0`: that position is the
 /// metadata leaf, not a chunk, so a valid BMT proof of it must never be
@@ -1331,72 +1365,6 @@ pub fn verify_chunk(
         return Err(MerkleError::PositionOutOfRange(0));
     }
     let root = proof.reconstruct_element_root(&chunk.leaf(), position)?;
-    check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
-}
-
-/// Verify that `chunks` (in chunk order, starting at BMT position `start`)
-/// belong to the `ChunkedBlob` whose id is `chunked_id`. Rejects a range
-/// whose `start` is 0 (the metadata leaf).
-pub fn verify_chunks_range(
-    chunked_id: &Hash,
-    start: u32,
-    chunks: &[SpannedChunk],
-    proof: &Proof,
-) -> Result<(), MerkleError> {
-    if start == 0 {
-        return Err(MerkleError::PositionOutOfRange(0));
-    }
-    let leaves: Vec<Hash> = chunks.iter().map(SpannedChunk::leaf).collect();
-    let root = proof.reconstruct_range_root(start, &leaves)?;
-    check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
-}
-
-/// Verify that `chunks` (each with its own position) belong to the
-/// `ChunkedBlob` whose id is `chunked_id`. The positions must be strictly
-/// ascending. Rejects any position `== 0` (the metadata leaf).
-pub fn verify_chunks_multi(
-    chunked_id: &Hash,
-    chunks: &[(SpannedChunk, u32)],
-    proof: &Proof,
-) -> Result<(), MerkleError> {
-    if chunks.iter().any(|(_, pos)| *pos == 0) {
-        return Err(MerkleError::PositionOutOfRange(0));
-    }
-    let elements: Vec<(Hash, u32)> = chunks.iter().map(|(c, pos)| (c.leaf(), *pos)).collect();
-    let root = proof.reconstruct_multi_root(&elements)?;
-    check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
-}
-
-/// Verify, in one multi-proof, that (a) a `ChunkedBlob`'s metadata leaf —
-/// computed HERE from the caller's *claimed* `total_size`/`chunk_size`,
-/// never accepted as an externally supplied leaf digest — and (b) the
-/// leaf of `chunk` (its id and span) at `chunk_position` (= chunk index
-/// + 1) both belong to the `ChunkedBlob` whose id is `chunked_id`.
-///
-/// This is the one sanctioned way a proof over position 0 is ever
-/// accepted from outside this module: the verifier derives the meta leaf
-/// itself from the very values it is simultaneously authenticating,
-/// rather than trusting a caller-supplied leaf digest at that position.
-/// [`verify_chunk`]'s "reject a caller-supplied position 0" rule is
-/// unaffected — that guards a different, single-leaf proof shape; this
-/// one always proves exactly `{0, chunk_position}` together. Used by
-/// `crate::verify` (SPEC-DISCLOSURE) to
-/// authenticate a disclosed chunk's `total_size`/`chunk_size`
-/// announcement alongside its content id and span, in a single proof.
-pub(crate) fn verify_chunk_with_meta_leaf(
-    chunked_id: &Hash,
-    total_size: u64,
-    chunk_size: u32,
-    chunk: &SpannedChunk,
-    chunk_position: u32,
-    proof: &Proof,
-) -> Result<(), MerkleError> {
-    if chunk_position == 0 {
-        return Err(MerkleError::PositionOutOfRange(0));
-    }
-    let meta_leaf = chunked_meta_leaf_raw(total_size, chunk_size);
-    let elements = [(meta_leaf, 0u32), (chunk.leaf(), chunk_position)];
-    let root = proof.reconstruct_multi_root(&elements)?;
     check_wrapped(ObjectKind::ChunkedBlob, &root, chunked_id)
 }
 
@@ -1421,6 +1389,46 @@ mod tests {
     fn cb(total: u64, chunk_size: u32, chunks: &[u8]) -> ChunkedBlob {
         crate::object::testing::spread(total, chunk_size, chunks.iter().map(|b| [*b; 32]).collect())
             .unwrap()
+    }
+
+    /// The committed range-proof vector of a chunk run folds to its object
+    /// id, and a moved span does not. The golden vector test of
+    /// `tests/golden_proofs.rs` checks that the builder writes these bytes.
+    #[test]
+    fn the_chunk_range_vector_folds_to_its_object_id() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/proofs");
+        let name = "chunked_blob_cs0_3chunks_range1to3";
+        let sidecar: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(format!("{name}.json"))).unwrap())
+                .unwrap();
+        let max_items = usize::try_from(sidecar["max_items"].as_u64().unwrap()).unwrap();
+        let proof = Proof::decode(
+            &std::fs::read(dir.join(format!("{name}.bin"))).unwrap(),
+            max_items,
+        )
+        .unwrap();
+        let object_id = crate::hash::from_hex(sidecar["object_id_hex"].as_str().unwrap()).unwrap();
+        let start = u32::try_from(sidecar["start"].as_u64().unwrap()).unwrap();
+        let decimal = |v: &serde_json::Value| v.as_str().unwrap().parse::<u64>().unwrap();
+        let leaves = |shift: u64| -> Vec<Hash> {
+            let ids = sidecar["chunk_hashes_hex"].as_array().unwrap();
+            let spans = sidecar["chunk_spans"].as_array().unwrap();
+            ids.iter()
+                .zip(spans)
+                .map(|(id, span)| {
+                    let id = crate::hash::from_hex(id.as_str().unwrap()).unwrap();
+                    chunked_chunk_leaf_raw(decimal(&span[0]), decimal(&span[1]) + shift, &id)
+                })
+                .collect()
+        };
+        let folds_to_id = |leaves: &[Hash]| {
+            proof
+                .reconstruct_range_root(start, leaves)
+                .is_ok_and(|root| wrap_id(ObjectKind::ChunkedBlob, &root) == object_id)
+        };
+        assert!(folds_to_id(&leaves(0)));
+        assert!(!folds_to_id(&leaves(1)));
     }
 
     /// The leaf digests of `chunk_offsets_expected.json`, which a reference
@@ -1648,40 +1656,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_chunk_with_meta_leaf_round_trips_and_rejects_forgery() {
-        let c = cb(100, 0, &[10, 20, 30]);
-        let id = compute_chunked_id(&c);
-        let pos = chunk_position(&c, &[20; 32]).unwrap(); // index 1 -> position 2
-        let proof = build_chunks_multi_proof(&c, [0, pos]).unwrap();
-
-        let chunk = sc(&c, 1);
-        verify_chunk_with_meta_leaf(&id, 100, 0, &chunk, pos, &proof).unwrap();
-
-        // Forged total_size must be rejected — the meta leaf the verifier
-        // computes no longer folds to the real root.
-        assert!(verify_chunk_with_meta_leaf(&id, 101, 0, &chunk, pos, &proof).is_err());
-        // Forged chunk_size, likewise.
-        assert!(verify_chunk_with_meta_leaf(&id, 100, 64, &chunk, pos, &proof).is_err());
-        // Wrong chunk hash, or a moved span, at the right position.
-        let other = SpannedChunk {
-            id: [0xFF; 32],
-            ..chunk
-        };
-        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &other, pos, &proof).is_err());
-        let moved = SpannedChunk {
-            end: chunk.end - 1,
-            ..chunk
-        };
-        assert!(verify_chunk_with_meta_leaf(&id, 100, 0, &moved, pos, &proof).is_err());
-        // Position 0 is never accepted as `chunk_position`, even though
-        // it is a structurally valid multi-proof position.
-        assert_eq!(
-            verify_chunk_with_meta_leaf(&id, 100, 0, &sc(&c, 0), 0, &proof),
-            Err(MerkleError::PositionOutOfRange(0))
-        );
-    }
-
-    #[test]
     fn tree_inclusion_proof_round_trips() {
         let t = tree(vec![
             entry(b"a", EntryMode::Blob, 1),
@@ -1785,13 +1759,6 @@ mod tests {
         );
 
         let c = cb(100, 0, &[1, 2, 3, 4]);
-        let chunked_id = compute_chunked_id(&c);
-        let chunk_proof = build_chunks_multi_proof(&c, [1, 3]).unwrap();
-        verify_chunks_multi(&chunked_id, &[(sc(&c, 0), 1), (sc(&c, 2), 3)], &chunk_proof).unwrap();
-        assert_eq!(
-            verify_chunks_multi(&chunked_id, &[(sc(&c, 2), 3), (sc(&c, 0), 1)], &chunk_proof),
-            Err(MerkleError::UnsortedPosition(1))
-        );
         assert_eq!(
             build_chunks_multi_proof(&c, [3, 1]),
             Err(MerkleError::UnsortedPosition(1))
@@ -1800,22 +1767,6 @@ mod tests {
         assert_eq!(
             proof_encoded_size(9, [8, 4, 0]),
             Err(MerkleError::UnsortedPosition(4))
-        );
-    }
-
-    #[test]
-    fn chunk_range_and_multi_proofs_reject_position_zero() {
-        let c = cb(100, 0, &[1, 2, 3]);
-        let id = compute_chunked_id(&c);
-        let proof = build_chunks_range_proof(&c, 0, 1).unwrap();
-        assert_eq!(
-            verify_chunks_range(&id, 0, &[sc(&c, 0), sc(&c, 1)], &proof),
-            Err(MerkleError::PositionOutOfRange(0))
-        );
-        let multi = build_chunks_multi_proof(&c, [0, 2]).unwrap();
-        assert_eq!(
-            verify_chunks_multi(&id, &[(sc(&c, 0), 0), (sc(&c, 1), 2)], &multi),
-            Err(MerkleError::PositionOutOfRange(0))
         );
     }
 

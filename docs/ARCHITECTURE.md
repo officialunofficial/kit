@@ -235,9 +235,10 @@ therefore verifies every tree, entry, and chunk reachable from it.
 marker with the value `bmt-v2`; `open` requires that same value and
 rejects the repository with `IncompatibleRepoFormat` when the marker
 is missing or different, rather than misreading objects under the
-wrong addressing rule. The marker governs object identity only: the
-serialized wire format and the `schema_version` field are independent
-of it.
+wrong addressing rule. The marker governs object identity. A change
+to the identity of an object type moves the marker and that type's
+`schema_version` together: the span-committed chunked blob is `bmt-v2`
+and `schema_version` `0x02`.
 
 **Verification.** The BMT inclusion proofs this section's identity
 scheme makes possible are exposed as a first-class capability, not just

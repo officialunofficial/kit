@@ -54,7 +54,8 @@ impl PushReport {
 ///
 /// Breadth-first from every id in `new_tips` over
 /// [`crate::ops::graph::children`]`(obj, mode)`, fetching each id at
-/// most once from `source`. Every fetched object is deserialized and its
+/// most once from `source`, apart from a manifest, which is fetched a second
+/// time to check its chunk lengths. Every fetched object is deserialized and its
 /// id re-derived; each commit, remix and tag has its signature checked.
 /// Remix `sources` and `Delta.base_hash` are never followed. Everything
 /// wrong is collected into the [`PushReport`] rather than stopping at the
@@ -300,6 +301,64 @@ mod tests {
         let tree = src.tree(&[(b"big", big)]);
         let commit = src.commit(tree, vec![], b"chunked");
         (commit, big, [one, two])
+    }
+
+    /// A known id answered `Known::Blob` is a blob. An edge that allows no
+    /// blob (a directory entry, the tree of a commit) cannot name it, as it
+    /// cannot name a blob the walk reads.
+    #[test]
+    fn a_known_blob_cannot_stand_where_a_tree_is_required() {
+        let mut src = Source::default();
+        let known_blob = src.blob(b"12345");
+        // Read by the walk: refused.
+        let dir = src.put(&Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"dir".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: known_blob,
+            }],
+        }));
+        let commit = src.commit(dir, vec![], b"a directory entry names a blob");
+        let read = verify_push(&[commit], ClosureMode::History, &mut src, |_| Known::No).unwrap();
+        assert!(!read.is_accepted(), "read by the walk: {read:?}");
+        // Answered `Known::Blob`: the walk has the type and must refuse too.
+        let known = verify_push(&[commit], ClosureMode::History, &mut src, |id| {
+            if *id == known_blob {
+                Known::Blob(5)
+            } else {
+                Known::No
+            }
+        })
+        .unwrap();
+        assert!(
+            !known.is_accepted(),
+            "a directory entry that names a known blob was accepted: {known:?}"
+        );
+    }
+
+    #[test]
+    fn a_known_blob_cannot_be_the_tree_of_a_commit() {
+        let mut src = Source::default();
+        let known_blob = src.blob(b"12345");
+        let commit = src.commit(known_blob, vec![], b"the tree is a blob");
+        let answer = |id: &Hash| {
+            if *id == known_blob {
+                Known::Blob(5)
+            } else {
+                Known::No
+            }
+        };
+        let report = verify_push(&[commit], ClosureMode::History, &mut src, answer).unwrap();
+        assert!(!report.is_accepted(), "{report:?}");
+        assert_eq!(report.corrupt.len(), 1, "reported once: {report:?}");
+        assert_eq!(report.corrupt[0].0, known_blob);
+
+        // Where a blob is allowed, a known blob is accepted: a file entry.
+        let tree = src.tree(&[(b"f", known_blob)]);
+        let ok = src.commit(tree, vec![], b"a file");
+        let report = verify_push(&[ok], ClosureMode::History, &mut src, answer).unwrap();
+        assert!(report.is_accepted(), "{report:?}");
+        assert_eq!(report.skipped_known, 1);
     }
 
     #[test]

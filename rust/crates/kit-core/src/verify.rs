@@ -27,8 +27,7 @@
 //!
 //! ## Layering
 //!
-//! [`verify_object_id`], [`verify_path`], [`verify_chunk_with_meta`],
-//! and [`verify_blob_slice`] are the small,
+//! [`verify_object_id`], [`verify_path`] and [`verify_blob_slice`] are the small,
 //! independently-useful primitives (each corresponds to one hop of the
 //! authentication chain: commit → tree steps → leaf → chunk/slice).
 //! [`verify_disclosure`] decodes a self-contained wire bundle (§ below)
@@ -91,9 +90,9 @@
 //! against before folding it into the enclosing `ChunkedBlob`'s multi-proof
 //! (Bao's `SliceDecoder` always requires the expected root up front — it
 //! cannot recover an unknown one from the slice, by construction). Adding
-//! this field closes that gap; it is exactly the value
-//! [`verify_chunk_with_meta`]'s multi-proof authenticates, so a forged
-//! `chunk_id` fails to fold to the enclosing `ChunkedBlob`'s id.
+//! this field closes that gap; it is exactly the value the multi-proof of
+//! [`verify_disclosure`] authenticates, so a forged `chunk_id` fails to fold to
+//! the enclosing `ChunkedBlob`'s id.
 
 use std::io::Read as _;
 
@@ -766,35 +765,6 @@ fn chunk_position(index: u32, leaf_count: u32) -> Result<u32, VerifyError> {
         .checked_add(1)
         .filter(|&p| p < leaf_count)
         .ok_or(out_of_range)
-}
-
-/// Verify that a `ChunkedBlob`'s claimed `total_size`/`chunk_size` and
-/// the chunk `chunk` (its id and its span) at `index` both belong to the
-/// `ChunkedBlob` whose id is `chunked_id`, via one multi-proof over BMT
-/// positions `{0, index + 1}`.
-///
-/// The metadata leaf (position 0) is computed here from `total_size`/
-/// `chunk_size` — never accepted as an externally supplied leaf digest —
-/// and the chunk's leaf from its span and id, so a forged value fails to
-/// fold to `chunked_id`. Only the fold is checked: the span rules of
-/// SPEC-DISCLOSURE §4 apply to a whole bundle, not to this primitive.
-///
-/// # Errors
-///
-/// [`VerifyError::ChunkIndexOutOfRange`]/[`VerifyError::TooManyChunks`]
-/// for an out-of-bound `index` or an implausible `proof.leaf_count`;
-/// otherwise [`VerifyError::Merkle`] if the multi-proof does not verify.
-pub fn verify_chunk_with_meta(
-    chunked_id: &Hash,
-    total_size: u64,
-    chunk_size: u32,
-    chunk: &merkle::SpannedChunk,
-    index: u32,
-    proof: &Proof,
-) -> Result<(), VerifyError> {
-    let position = chunk_position(index, proof.leaf_count)?;
-    merkle::verify_chunk_with_meta_leaf(chunked_id, total_size, chunk_size, chunk, position, proof)
-        .map_err(VerifyError::from)
 }
 
 /// The header fields and proof a chunked-leaf check starts from: what a
@@ -2234,8 +2204,11 @@ mod tests {
         ));
     }
 
+    /// A `Chunk` payload whose header field is forged is refused, whichever
+    /// field it is: the verifier computes the metadata leaf and the chunk leaf
+    /// itself, so each field has to fold to the id.
     #[test]
-    fn verify_chunk_with_meta_bounds() {
+    fn a_chunk_payload_with_a_forged_header_field_is_refused() {
         let f = build_fixture();
         let bundle = build_disclosure(
             &f.store,
@@ -2244,60 +2217,67 @@ mod tests {
             Selector::Chunk(1),
         )
         .unwrap();
-        let (_id, _commit_bytes, steps, payload) = decode_disclosure(&bundle).unwrap();
-        let leaf_id = steps[0].child_id;
-        let PayloadWire::Chunk {
-            total_size,
-            chunk_size,
-            index,
-            start,
-            end,
-            proof,
-            bytes,
-            ..
-        } = payload
-        else {
-            panic!("expected Chunk payload");
-        };
-        let chunk = merkle::SpannedChunk {
-            id: hash(&bytes),
-            start,
-            end,
-        };
-
-        verify_chunk_with_meta(&leaf_id, total_size, chunk_size, &chunk, index, &proof)
-            .expect("freshly built chunk proof must verify");
-        // Forged total_size.
-        assert!(matches!(
-            verify_chunk_with_meta(&leaf_id, total_size + 1, chunk_size, &chunk, index, &proof),
-            Err(VerifyError::Merkle(_))
-        ));
-        // A moved span: either end breaks the proof.
-        for moved in [
-            merkle::SpannedChunk {
-                start: start + 1,
-                ..chunk
-            },
-            merkle::SpannedChunk {
-                end: end + 1,
-                ..chunk
-            },
-        ] {
-            assert!(matches!(
-                verify_chunk_with_meta(&leaf_id, total_size, chunk_size, &moved, index, &proof),
-                Err(VerifyError::Merkle(_))
-            ));
-        }
-        // Out-of-range index (one past the last valid position).
-        assert!(matches!(
-            verify_chunk_with_meta(
-                &leaf_id,
+        verify_disclosure(&f.commit_id, &bundle).expect("a built bundle verifies");
+        let forged = |change: &dyn Fn(&mut u64, &mut u32, &mut u64, &mut u64, &mut u32)| {
+            let (id, commit_bytes, steps, payload) = decode_disclosure(&bundle).unwrap();
+            let PayloadWire::Chunk {
+                mut total_size,
+                mut chunk_size,
+                mut index,
+                mut start,
+                mut end,
+                inner_root,
+                proof,
+                bytes,
+            } = payload
+            else {
+                panic!("expected Chunk payload");
+            };
+            change(
+                &mut total_size,
+                &mut chunk_size,
+                &mut start,
+                &mut end,
+                &mut index,
+            );
+            let payload = PayloadWire::Chunk {
                 total_size,
                 chunk_size,
-                &chunk,
-                proof.leaf_count,
-                &proof
+                index,
+                start,
+                end,
+                inner_root,
+                proof,
+                bytes,
+            };
+            verify_disclosure(
+                &f.commit_id,
+                &encode_disclosure(&id, &commit_bytes, &steps, &payload),
+            )
+        };
+        assert!(
+            forged(&|total, _, _, _, _| *total += 1).is_err(),
+            "total_size"
+        );
+        assert!(
+            matches!(
+                forged(&|_, chunk_size, _, _, _| *chunk_size += 1),
+                Err(VerifyError::InnerRootFoldMismatch | VerifyError::Merkle(_))
             ),
+            "chunk_size"
+        );
+        assert!(forged(&|_, _, start, _, _| *start += 1).is_err(), "start");
+        assert!(forged(&|_, _, _, end, _| *end += 1).is_err(), "end");
+        // The index one past the last valid position is out of range.
+        let past = {
+            let (_, _, _, payload) = decode_disclosure(&bundle).unwrap();
+            let PayloadWire::Chunk { proof, .. } = payload else {
+                panic!("expected Chunk payload");
+            };
+            proof.leaf_count
+        };
+        assert!(matches!(
+            forged(&|_, _, _, _, index| *index = past),
             Err(VerifyError::ChunkIndexOutOfRange { .. })
         ));
     }
