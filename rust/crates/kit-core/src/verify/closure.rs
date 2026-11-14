@@ -2128,4 +2128,45 @@ mod tests {
             "the corrupt entry must not be indexed"
         );
     }
+
+    #[test]
+    fn pack_entry_parallel_index_matches_sequential_with_an_undecodable_entry() {
+        // Drive the pack-backed parallel indexer directly (the live
+        // dispatch only fans out for thousands of entries): objects are
+        // spread over two packs, one entry is not an object, and the
+        // thread count does not divide the entry count, so every chunk
+        // boundary and the undecodable bookkeeping are exercised.
+        let (_d, store, _commit_id, total) = large_fixture();
+        let mut objects: Vec<Vec<u8>> = store
+            .iter_object_hashes()
+            .unwrap()
+            .into_iter()
+            .map(|id| store.read(&id).unwrap())
+            .collect();
+        let bad = total / 3;
+        objects[bad] = b"not an object".to_vec();
+        let expected_undecodable = hash(&objects[bad]);
+
+        let mut packs_owned: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
+        let mut refs: Vec<(usize, Range<usize>)> = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            let pack = i % 2;
+            let start = packs_owned[pack].len();
+            packs_owned[pack].extend_from_slice(object);
+            refs.push((pack, start..packs_owned[pack].len()));
+        }
+        let packs: Vec<&[u8]> = packs_owned.iter().map(Vec::as_slice).collect();
+
+        let (seq_index, seq_undecodable) = index_pack_entries_sequential(&packs, &refs);
+        assert_eq!(seq_undecodable, vec![expected_undecodable]);
+        assert_eq!(seq_index.len(), total - 1);
+
+        for threads in [2, 3, 7] {
+            let (par_index, mut par_undecodable) =
+                index_pack_entries_parallel(&packs, &refs, threads);
+            par_undecodable.sort_unstable();
+            assert_eq!(par_index, seq_index, "threads = {threads}");
+            assert_eq!(par_undecodable, seq_undecodable, "threads = {threads}");
+        }
+    }
 }

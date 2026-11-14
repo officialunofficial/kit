@@ -2108,3 +2108,344 @@ mod step_fit_tests {
         ));
     }
 }
+
+/// The search that ends a step: where it looks first, how it widens, and which
+/// positions it probes.
+#[cfg(test)]
+mod cut_tests {
+    use super::*;
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Remix, Tree, TreeEntry};
+    use kit_core::ops::graph::reachable_objects;
+    use kit_core::serialize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct Probes(AtomicUsize);
+
+    impl crate::Observer<crate::SyncEvent> for Probes {
+        fn cancelled(&self) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+
+    fn store() -> (TempDir, ObjectStore) {
+        let dir = TempDir::new().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        (dir, store)
+    }
+
+    fn put(store: &ObjectStore, obj: &Object) -> Hash {
+        store.write(&serialize::serialize(obj).unwrap()).unwrap()
+    }
+
+    /// Incompressible bytes, different for every seed.
+    fn blob(store: &ObjectStore, seed: u64, len: usize) -> Hash {
+        let mut data = vec![0; len];
+        let mut state = seed.wrapping_mul(2).wrapping_add(1);
+        for chunk in data.chunks_mut(8) {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+        }
+        put(store, &Object::Blob(Blob { data }))
+    }
+
+    /// A linear history of `n` commits, each adding one file of `len` bytes
+    /// next to every file before it.
+    fn line(store: &ObjectStore, n: usize, len: usize) -> Vec<Hash> {
+        let mut entries: Vec<TreeEntry> = Vec::new();
+        let mut commits: Vec<Hash> = Vec::new();
+        for i in 0..n {
+            entries.push(TreeEntry {
+                name: format!("f{i:04}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: blob(store, i as u64 + 1, len),
+            });
+            let tree = put(
+                store,
+                &Object::Tree(Tree {
+                    entries: entries.clone(),
+                }),
+            );
+            let parents = commits.last().copied().into_iter().collect();
+            commits.push(put(
+                store,
+                &Object::Commit(Commit::new_unannotated(
+                    tree,
+                    parents,
+                    Identity::ed25519([7; 32]),
+                    [0; 32],
+                    vec![u8::try_from(i).unwrap()],
+                    i as u64,
+                    [0; 64],
+                )),
+            ));
+        }
+        commits
+    }
+
+    /// What the weights of `len` positions say: the position the first look
+    /// takes (`natural`: the weights hold half the budget there), the ceiling
+    /// (they hold all of it), and `far` (twice that).
+    fn shaped_weights(
+        len: usize,
+        budget: usize,
+        natural: usize,
+        ceiling: usize,
+        far: usize,
+    ) -> Vec<u64> {
+        let full = 4096 * budget as u64;
+        let half = 4096 * (budget / 2) as u64;
+        (0..len)
+            .map(|i| match i {
+                0 => 0,
+                i if i <= natural => i as u64,
+                i if i <= ceiling => half + i as u64,
+                i if i <= far => full + i as u64,
+                i => 2 * full + i as u64,
+            })
+            .collect()
+    }
+
+    fn ticketed(budget: usize) -> UploadLimits {
+        UploadLimits {
+            max_pack_bytes: None,
+            data_packs_per_advance: Some(budget),
+            ticket_threshold_bytes: Some(0),
+        }
+    }
+
+    /// The end of the first step over `weights`, and how many plans the search
+    /// probed to find it.
+    fn first_step(
+        store: &ObjectStore,
+        chain: &Chain,
+        weights: &[u64],
+        budget: usize,
+    ) -> (usize, usize) {
+        let probes = Probes::default();
+        let cutter = Cutter {
+            observer: &probes,
+            store,
+            chain,
+            weights,
+            remote_tip: None,
+            limits: ticketed(budget),
+            cap: 4096,
+            budget,
+            must_reach: 0,
+        };
+        let Cut::To(to) = cutter.cut(0).unwrap() else {
+            panic!("the step does not fit");
+        };
+        (to, probes.0.load(Ordering::Relaxed))
+    }
+
+    /// The data packs the estimate counts for a step that starts at the
+    /// remote's empty history and ends at chain position `to`.
+    fn packs_to(store: &ObjectStore, chain: &Chain, to: usize) -> usize {
+        let cutter = Cutter {
+            observer: &crate::NoopObserver,
+            store,
+            chain,
+            weights: &[],
+            remote_tip: None,
+            limits: ticketed(6),
+            cap: 4096,
+            budget: 6,
+            must_reach: 0,
+        };
+        cutter.probe(0, to).unwrap().1
+    }
+
+    /// Forty commits that each add a file of 3000 bytes, which a 4 KiB pack
+    /// holds one of: a step of `k` commits takes `k` packs and a few more for
+    /// the trees and commits. The packs of a step that ends at position 1, 2,
+    /// 3, ... are 1, 2, 4, 5, 6, 7, ...
+    fn forty() -> (TempDir, ObjectStore, Chain) {
+        let (dir, store) = store();
+        let commits = line(&store, 40, 3000);
+        let chain = walk_chain(&store, commits[39], None, &PushControl::default()).unwrap();
+        for (to, packs) in [(1, 1), (2, 2), (3, 4), (4, 5), (5, 6), (6, 7)] {
+            assert_eq!(packs_to(&store, &chain, to), packs, "position {to}");
+        }
+        (dir, store, chain)
+    }
+
+    #[test]
+    fn a_step_ends_at_the_furthest_position_whose_plan_fits() {
+        let (_dir, store, chain) = forty();
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
+        let budget = 6;
+        let cutter = Cutter {
+            observer: &crate::NoopObserver,
+            store: &store,
+            chain: &chain,
+            weights: &weights,
+            remote_tip: None,
+            limits: ticketed(budget),
+            cap: 4096,
+            budget,
+            must_reach: 0,
+        };
+        let mut from = 0;
+        let mut steps = 0;
+        while from < chain.commits.len() {
+            let Cut::To(to) = cutter.cut(from).unwrap() else {
+                panic!("a step from {from} does not fit");
+            };
+            assert!(to > from, "the step from {from} ends at {to}");
+            assert!(
+                cutter.probe(from, to).unwrap().1 <= budget,
+                "{from} to {to}"
+            );
+            if to < chain.commits.len() {
+                assert!(
+                    cutter.probe(from, to + 1).unwrap().1 > budget,
+                    "the step from {from} could reach {}",
+                    to + 1
+                );
+            }
+            from = to;
+            steps += 1;
+        }
+        assert!(steps > 1, "{steps}");
+    }
+
+    #[test]
+    fn the_first_look_is_where_the_weights_say_half_the_budget_is_full() {
+        let (_dir, store, chain) = forty();
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
+        // The weights say three commits fill three packs of six. Three commits
+        // fit, then the search looks between three and the ceiling, seven:
+        // positions five (fits) and six (does not).
+        assert_eq!(first_step(&store, &chain, &weights, 6), (5, 3));
+        // Two packs of an advance: the weights say two commits fill one, and
+        // five fill both. Two fit; of the positions between two and five,
+        // four and three do not.
+        let weights = shaped_weights(41, 2, 2, 5, 6);
+        assert_eq!(first_step(&store, &chain, &weights, 2), (2, 3));
+        // The weights say three commits fill one pack, but three need four:
+        // the step is cut back to the two that fit.
+        let weights = shaped_weights(41, 2, 3, 6, 6);
+        assert_eq!(first_step(&store, &chain, &weights, 2), (2, 2));
+    }
+
+    #[test]
+    fn plans_that_still_fit_past_the_ceiling_of_the_weights_widen_the_step() {
+        let (_dir, store, chain) = forty();
+        // Weights that overstate the plans (a directory that moved weighs all
+        // it holds and sends none of it) put the ceiling at three, where the
+        // plan takes four of six packs. The search goes on while plans fit and
+        // leave a pack to spare: four (five packs) fits, six (seven) does not,
+        // five (six) fits. It probes two, three, four, six and five.
+        let weights = shaped_weights(41, 6, 1, 3, 3);
+        assert_eq!(first_step(&store, &chain, &weights, 6), (5, 5));
+    }
+
+    #[test]
+    fn a_step_that_takes_every_pack_is_not_widened_or_sealed() {
+        let (_dir, store, chain) = forty();
+        // One commit takes the one pack there is: it is the step, after one
+        // look. Nothing is probed past it, and the exact seal is not run for
+        // an estimate within the budget.
+        let weights = shaped_weights(41, 1, 1, 1, 1);
+        assert_eq!(first_step(&store, &chain, &weights, 1), (1, 1));
+    }
+
+    #[test]
+    fn a_delta_weighs_its_base_id_its_stream_and_its_frame() {
+        let (_dir, store) = store();
+        let raw = blob(&store, 1, 20);
+        let delta = |len: usize| transfer::PlannedDelta {
+            target: [1; HASH_LEN],
+            base: [2; HASH_LEN],
+            stream: vec![0; len],
+        };
+        let plan = PackPlan {
+            raw: vec![raw],
+            deltas: vec![delta(10), delta(100)],
+            self_contained: false,
+        };
+        let frame = pack::ENTRY_FRAME_LEN as u64;
+        let hash = HASH_LEN as u64;
+        let raw_weight = weight_of(&store, &raw).unwrap();
+        assert!(raw_weight < hash + 100 + frame, "{raw_weight}");
+        let weight = plan_weight(&store, &plan).unwrap();
+        assert_eq!(
+            weight.total,
+            raw_weight + (hash + 10 + frame) + (hash + 100 + frame)
+        );
+        assert_eq!(weight.largest, hash + 100 + frame);
+    }
+
+    #[test]
+    fn a_remix_brings_the_commits_of_all_its_parents_to_the_weights() {
+        let (_dir, store) = store();
+        let base = line(&store, 1, 100)[0];
+        let file_tree = |name: &str, seed: u64| {
+            put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: vec![TreeEntry {
+                        name: name.as_bytes().to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: blob(&store, seed, 2000),
+                    }],
+                }),
+            )
+        };
+        // A side commit the chain does not walk, with a file of its own.
+        let side = put(
+            &store,
+            &Object::Commit(Commit::new_unannotated(
+                file_tree("side", 500),
+                Vec::new(),
+                Identity::ed25519([7; 32]),
+                [0; 32],
+                vec![9],
+                9,
+                [0; 64],
+            )),
+        );
+        let remix = put(
+            &store,
+            &Object::Remix(Remix {
+                tree_hash: file_tree("remix", 600),
+                parents: vec![base, side],
+                sources: Vec::new(),
+                author: Identity::ed25519([7; 32]),
+                signer: [0; 32],
+                message: vec![8],
+                timestamp: 8,
+                signature: [0; 64],
+            }),
+        );
+        let chain = walk_chain(&store, remix, None, &PushControl::default()).unwrap();
+        assert_eq!(chain.commits, [base, remix]);
+        let weights = cumulative_weights(&store, &chain, &PushControl::default())
+            .unwrap()
+            .cumulative;
+        let expected: u64 = reachable_objects(&store, &remix)
+            .unwrap()
+            .iter()
+            .map(|hash| weight_of(&store, hash).unwrap())
+            .sum();
+        assert_eq!(weights[2], expected);
+        // The side commit is weighed, though the chain never walks it.
+        let side_only: u64 = reachable_objects(&store, &side)
+            .unwrap()
+            .iter()
+            .map(|hash| weight_of(&store, hash).unwrap())
+            .sum();
+        assert!(weights[2] - weights[1] > side_only, "{weights:?}");
+    }
+}

@@ -161,3 +161,35 @@ impl Default for SyncOptions {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn each_setter_changes_only_its_own_field() {
+        let options = SyncOptions::default()
+            .with_prune(true)
+            .with_verify_signatures(false)
+            .with_target_branch(Some("topic".to_owned()))
+            .with_lock_wait(Some(Duration::from_secs(3)))
+            .with_sync_policy(SyncPolicy::PerObject);
+
+        assert!(options.prune);
+        assert!(!options.verify_signatures);
+        assert_eq!(options.target_branch.as_deref(), Some("topic"));
+        assert_eq!(options.lock_wait, Some(Duration::from_secs(3)));
+        assert_eq!(options.sync_policy, SyncPolicy::PerObject);
+    }
+
+    #[test]
+    fn defaults_verify_signatures_and_batch_writes() {
+        let options = SyncOptions::default();
+        assert!(options.verify_signatures);
+        assert!(!options.prune);
+        assert_eq!(options.target_branch, None);
+        assert_eq!(options.lock_wait, None);
+        assert_eq!(options.sync_policy, SyncPolicy::Batch);
+    }
+}

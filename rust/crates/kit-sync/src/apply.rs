@@ -314,4 +314,117 @@ mod tests {
         assert!(reloaded.contains(&PackKey::from_hash(b)));
         assert!(!reloaded.contains(&PackKey::from_hash(missing)));
     }
+
+    /// A source whose every pack is `len` zero bytes.
+    struct ZeroPacks {
+        len: usize,
+    }
+
+    impl RemoteSource for ZeroPacks {
+        fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, crate::SourceError> {
+            Ok(Vec::new())
+        }
+        fn read_ref(&self, _: &str) -> Result<Option<Hash>, crate::SourceError> {
+            Ok(None)
+        }
+        fn download_blob_via_ref(
+            &self,
+            _: &PackKey,
+            _: &str,
+        ) -> Result<Vec<u8>, crate::SourceError> {
+            Err(crate::SourceError::ProtocolError)
+        }
+        fn download_pack_via_ref(
+            &self,
+            _: &PackKey,
+            _: &str,
+        ) -> Result<Vec<u8>, crate::SourceError> {
+            Ok(vec![0; self.len])
+        }
+    }
+
+    fn download_zero_pack(len: usize) -> Result<Vec<u8>, SyncError> {
+        download_checked_pack(
+            &ZeroPacks { len },
+            "main",
+            "refs/heads/main",
+            &PackKey::from_hash(h("zero pack")),
+        )
+    }
+
+    fn body_limit() -> usize {
+        kit_core::protocol::PACK_BODY_LIMIT_USIZE
+    }
+
+    #[test]
+    fn a_pack_above_the_body_limit_is_refused_before_it_is_hashed() {
+        let len = body_limit() + 1;
+        let error = download_zero_pack(len).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SyncError::Source(crate::SourceError::PayloadTooLarge(n)) if n == len
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// A pack of exactly the limit is within it, so only its digest, not its
+    /// size, can refuse it. Hashing it reads 4 GiB.
+    #[test]
+    #[ignore = "reads a 4 GiB buffer"]
+    fn a_pack_of_exactly_the_body_limit_is_checked_against_its_key() {
+        let error = download_zero_pack(body_limit()).unwrap_err();
+        assert!(
+            !matches!(
+                error,
+                SyncError::Source(crate::SourceError::PayloadTooLarge(_))
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// Records the events of a fetch.
+    #[derive(Default)]
+    struct Events(std::sync::Mutex<Vec<SyncEvent>>);
+
+    impl Observer<SyncEvent> for Events {
+        fn event(&self, event: &SyncEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[test]
+    fn an_empty_pack_reports_no_unpacked_objects_and_a_full_one_reports_its_count() {
+        let (_td, _layout, store, mut applied) = store_and_record();
+        for (blobs, expected) in [(Vec::new(), None), (vec![&b"one"[..], b"two"], Some(2))] {
+            let mut writer = pack::PackWriter::new();
+            for data in &blobs {
+                let blob = blob(data);
+                writer
+                    .push_raw(
+                        blob.id().unwrap(),
+                        &kit_core::serialize::serialize(&blob).unwrap(),
+                    )
+                    .unwrap();
+            }
+            let bytes = writer.finish().unwrap();
+            let key = PackKey::from_hash(pack::pack_key(&bytes));
+            let events = Events::default();
+            let unpacked =
+                apply_pack(&store, &events, "origin", &key, &bytes, &mut applied, false).unwrap();
+            assert_eq!(unpacked, expected.unwrap_or(0));
+            let counts: Vec<usize> = events
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|event| match event {
+                    SyncEvent::ObjectsUnpacked { count } => Some(*count),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(counts, expected.into_iter().collect::<Vec<_>>());
+        }
+    }
 }

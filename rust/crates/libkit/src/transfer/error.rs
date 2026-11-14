@@ -475,6 +475,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sync_mapping_keeps_each_variant_and_what_it_carries() {
+        use kit_sync::SyncError as S;
+
+        assert!(matches!(Error::from(S::Interrupted), Error::Interrupted));
+        assert!(matches!(Error::from(S::DetachedHead), Error::DetachedHead));
+        assert!(matches!(Error::from(S::NotCommit), Error::NotCommit));
+        assert!(matches!(
+            Error::from(S::UploadInterrupted("resume with --continue".into())),
+            Error::UploadInterrupted(message) if message == "resume with --continue"
+        ));
+        assert!(matches!(
+            Error::from(S::RemoteBranchMissing("topic".into())),
+            Error::RemoteBranchMissing(branch) if branch == "topic"
+        ));
+        assert!(matches!(
+            Error::from(S::NonFastForwardPull { branch: "main".into() }),
+            Error::NonFastForwardPull { branch } if branch == "main"
+        ));
+        assert!(matches!(
+            Error::from(S::InvalidRemoteName("bad name".into())),
+            Error::InvalidRemoteName(name) if name == "bad name"
+        ));
+        assert!(matches!(
+            Error::from(S::RemoteMissingObject("ab".into())),
+            Error::RemoteMissingObject(hash) if hash == "ab"
+        ));
+        assert!(matches!(
+            Error::from(S::ClosureTooLarge(7)),
+            Error::ClosureTooLarge(7)
+        ));
+        assert!(matches!(
+            Error::from(S::PackmapMissing("main".into())),
+            Error::PackmapMissing(branch) if branch == "main"
+        ));
+    }
+
+    #[test]
     fn push_mapping_preserves_transport_scheduling_outcomes() {
         use kit_core::protocol::TransportError;
         for transport in [

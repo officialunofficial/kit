@@ -709,4 +709,123 @@ mod tests {
             "restore_head_ref must not write refs/heads/main when HEAD is unreadable"
         );
     }
+
+    fn blob_id(store: &kit_core::store::ObjectStore, data: &[u8]) -> Hash {
+        core_worktree_blob(store, data)
+    }
+
+    /// What the worktree holds at a path, as the index would record it.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_entry_state_reads_a_file_a_symlink_and_nothing() {
+        use super::worktree_entry_state;
+        use kit_core::index::EntryStatus;
+        use std::os::unix::fs::PermissionsExt;
+
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(
+            store_dir.path(),
+        ))
+        .unwrap();
+        let sink = kit_core::store::EphemeralSink::new(&store);
+
+        std::fs::write(root.join("plain"), b"plain\n").unwrap();
+        std::fs::write(root.join("tool"), b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(root.join("tool"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::os::unix::fs::symlink("plain", root.join("link")).unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+
+        let plain = worktree_entry_state(&root, &sink, "plain")
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.0, EntryStatus::Blob);
+        assert_eq!(plain.1, blob_id(&store, b"plain\n"));
+        let tool = worktree_entry_state(&root, &sink, "tool").unwrap().unwrap();
+        assert_eq!(tool.0, EntryStatus::Executable);
+        assert_eq!(tool.1, blob_id(&store, b"#!/bin/sh\n"));
+        let link = worktree_entry_state(&root, &sink, "link").unwrap().unwrap();
+        assert_eq!(link.0, EntryStatus::Symlink);
+        assert_eq!(link.1, blob_id(&store, b"plain"));
+        assert!(worktree_entry_state(&root, &sink, "dir").unwrap().is_none());
+        assert!(
+            worktree_entry_state(&root, &sink, "missing")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            worktree_entry_state(&root, &sink, "plain/below")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A dropped path is reported when its worktree entry differs from the
+    /// index in content, in the exec bit or in the symlink target, and not
+    /// when it is the same, missing or a directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_path_with_a_local_edit_is_reported() {
+        use super::locally_modified_dropped_path;
+        use kit_core::index::EntryStatus;
+        use std::os::unix::fs::PermissionsExt;
+
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path().join("work");
+        std::fs::create_dir(&root).unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(
+            store_dir.path(),
+        ))
+        .unwrap();
+        let entry = |path: &str, status: EntryStatus, data: &[u8]| {
+            (path.to_owned(), status, blob_id(&store, data))
+        };
+        let check = |dropped: Vec<(String, EntryStatus, Hash)>| {
+            locally_modified_dropped_path(&root, &store, &dropped).unwrap()
+        };
+
+        std::fs::write(root.join("same"), b"one\n").unwrap();
+        std::fs::write(root.join("edited"), b"two, edited\n").unwrap();
+        std::fs::write(root.join("chmod"), b"three\n").unwrap();
+        std::fs::set_permissions(root.join("chmod"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::os::unix::fs::symlink("elsewhere", root.join("link")).unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+
+        assert_eq!(
+            check(vec![entry("same", EntryStatus::Blob, b"one\n")]),
+            None
+        );
+        assert_eq!(
+            check(vec![entry("edited", EntryStatus::Blob, b"two\n")]),
+            Some("edited".to_owned())
+        );
+        assert_eq!(
+            check(vec![entry("chmod", EntryStatus::Blob, b"three\n")]),
+            Some("chmod".to_owned())
+        );
+        assert_eq!(
+            check(vec![entry("link", EntryStatus::Symlink, b"original")]),
+            Some("link".to_owned())
+        );
+        assert_eq!(
+            check(vec![entry("link", EntryStatus::Symlink, b"elsewhere")]),
+            None
+        );
+        assert_eq!(check(vec![entry("gone", EntryStatus::Blob, b"x")]), None);
+        assert_eq!(check(vec![entry("dir", EntryStatus::Blob, b"x")]), None);
+        // The first modified path of several is the one reported.
+        assert_eq!(
+            check(vec![
+                entry("same", EntryStatus::Blob, b"one\n"),
+                entry("edited", EntryStatus::Blob, b"two\n"),
+                entry("chmod", EntryStatus::Blob, b"three\n"),
+            ]),
+            Some("edited".to_owned())
+        );
+    }
 }

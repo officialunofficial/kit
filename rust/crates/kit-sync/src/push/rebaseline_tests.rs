@@ -7,7 +7,7 @@
 //! between the writes, and a crash between them, pairs the new packmap with
 //! the old head; the tests check that pair too.
 
-use super::{PushControl, PushError, push_branch_steps};
+use super::{PushControl, PushError, RetryReason, push_branch_steps};
 use crate::TransportSource;
 use crate::packmap::packmap_ref;
 use kit_core::hash::Hash;
@@ -16,7 +16,8 @@ use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntr
 use kit_core::ops::graph::reachable_objects;
 use kit_core::pack::{self, PackReader};
 use kit_core::protocol::{
-    AdvanceOutcome, PackKey, Transport, TransportError, TransportResult, UploadLimits,
+    AdvanceOutcome, CommitOutcome, PackKey, Transport, TransportError, TransportResult,
+    UploadLimits,
 };
 use kit_core::refs::{Ref, RefWriteCondition};
 use kit_core::store::ObjectStore;
@@ -42,8 +43,12 @@ struct Remote<'a> {
     atomic: bool,
     serialized: bool,
     tickets: bool,
+    /// Answer the next advance as a server that lost a delta base does.
+    lose_delta_base: AtomicBool,
     /// The packs uploaded so far.
     uploads: AtomicUsize,
+    /// The packs uploaded when each advance began, in order.
+    uploads_at_advance: Mutex<Vec<usize>>,
     /// Stop the next advance after its packmap write, as a crash would.
     crash: AtomicBool,
     /// Run once at the start of the next advance, before its checks.
@@ -60,7 +65,9 @@ impl<'a> Remote<'a> {
             atomic: false,
             serialized: true,
             tickets: false,
+            lose_delta_base: AtomicBool::new(false),
             uploads: AtomicUsize::new(0),
+            uploads_at_advance: Mutex::new(Vec::new()),
             crash: AtomicBool::new(false),
             before_advance: Mutex::new(None),
             head_conditions: Mutex::new(Vec::new()),
@@ -119,6 +126,10 @@ impl Transport for Remote<'_> {
             hook(self);
         }
         self.head_conditions.lock().unwrap().push(head_condition);
+        self.uploads_at_advance
+            .lock()
+            .unwrap()
+            .push(self.uploads.load(Ordering::SeqCst));
         let _guard = self.lock.lock().unwrap();
         if !holds(packmap_condition, self.inner.read_ref(packmap_ref)?) {
             return Ok(AdvanceOutcome::PackmapConflict);
@@ -134,6 +145,34 @@ impl Transport for Remote<'_> {
         self.inner
             .update_ref(head_ref, head_condition, head_value)?;
         Ok(AdvanceOutcome::Committed)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn advance_refs_committing(
+        &self,
+        head_ref: &str,
+        head_condition: RefWriteCondition,
+        head_value: &Hash,
+        packmap_ref: &str,
+        packmap_condition: RefWriteCondition,
+        packmap_value: &Hash,
+        _commit: &[PackKey],
+    ) -> TransportResult<CommitOutcome> {
+        if self.lose_delta_base.swap(false, Ordering::SeqCst) {
+            self.uploads_at_advance
+                .lock()
+                .unwrap()
+                .push(self.uploads.load(Ordering::SeqCst));
+            return Ok(CommitOutcome::DeltaBaseUnavailable);
+        }
+        self.advance_refs(
+            head_ref,
+            head_condition,
+            head_value,
+            packmap_ref,
+            packmap_condition,
+            packmap_value,
+        )
+        .map(CommitOutcome::Advanced)
     }
     fn supports_atomic_advance(&self) -> bool {
         self.atomic
@@ -703,5 +742,265 @@ fn every_pushed_branch_can_be_cloned() {
             // Every earlier branch still clones.
             assert!(branch_rebuilds(&remote, "feature", feature), "{case}");
         }
+    }
+}
+
+/// Text that does not compress, so each one fills a pack of its own.
+fn bulky(salt: usize) -> String {
+    let mut state = salt as u64 + 1;
+    (0..6000)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(33 + ((state >> 33) % 94) as u8)
+        })
+        .collect()
+}
+
+/// A line of `count` commits, each with a file of its own that fills a pack.
+fn bulky_line(store: &ObjectStore, count: usize) -> Vec<Hash> {
+    let mut line: Vec<Hash> = Vec::new();
+    for i in 0..count {
+        let name = format!("file-{i}");
+        let tip = commit(
+            store,
+            &[(name.as_str(), bulky(i).as_str())],
+            line.last().map_or(&[][..], std::slice::from_ref),
+            u8::try_from(i).unwrap(),
+        );
+        line.push(tip);
+    }
+    line
+}
+
+/// The pack payload cap that puts each bulky file in a pack of its own.
+const BULKY_CAP: u64 = 4096;
+/// The data packs per advance of a remote that sets `tickets`.
+const TICKET_BUDGET: usize = 6;
+
+fn push_bulky(
+    remote: &Remote<'_>,
+    store: &ObjectStore,
+    tip: Hash,
+    condition: RefWriteCondition,
+    control: &PushControl<'_>,
+) -> Result<usize, PushError> {
+    push_branch_steps(
+        &TransportSource::new(remote),
+        store,
+        "main",
+        tip,
+        condition,
+        DEPTH,
+        BULKY_CAP,
+        control,
+        &mut |_| Ok(()),
+    )
+}
+
+/// The data packs each advance carried, from the uploads seen at its start.
+fn packs_per_advance(remote: &Remote<'_>, before: usize) -> Vec<usize> {
+    let seen = remote.uploads_at_advance.lock().unwrap().clone();
+    let mut sent = Vec::new();
+    let mut last = before;
+    for at in seen {
+        sent.push(at - last);
+        last = at;
+    }
+    sent.push(remote.uploads.load(Ordering::SeqCst) - last);
+    // The upload after the last advance began belongs to no advance.
+    sent.truncate(sent.len() - 1);
+    sent
+}
+
+/// A push that needs more data packs than one advance permits lands in
+/// several advances, each within the permit, whether the branch is new or
+/// the remote already holds an earlier tip.
+#[test]
+fn a_push_over_the_ticket_budget_splits_into_advances_within_it() {
+    for first in [false, true] {
+        let (_dir, store) = store();
+        let remote = Remote {
+            atomic: true,
+            tickets: true,
+            ..Remote::new()
+        };
+        let line = bulky_line(&store, 14);
+        let (condition, before) = if first {
+            push_bulky(
+                &remote,
+                &store,
+                line[1],
+                RefWriteCondition::Missing,
+                &PushControl::default(),
+            )
+            .unwrap();
+            (
+                RefWriteCondition::Match(line[1]),
+                remote.uploads.load(Ordering::SeqCst),
+            )
+        } else {
+            (RefWriteCondition::Missing, 0)
+        };
+        remote.uploads_at_advance.lock().unwrap().clear();
+        let tip = *line.last().unwrap();
+        let steps = push_bulky(&remote, &store, tip, condition, &PushControl::default()).unwrap();
+
+        assert!(steps > 1, "remote holds a tip: {first}, steps: {steps}");
+        assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+        assert!(rebuilds(&remote, tip), "remote holds a tip: {first}");
+        let sent = packs_per_advance(&remote, before);
+        assert_eq!(sent.len(), steps, "remote holds a tip: {first}");
+        // Each advance also carries the packmap node, which this remote
+        // counts as an upload like any other.
+        assert!(
+            sent.iter()
+                .all(|packs| (2..=TICKET_BUDGET + 1).contains(packs)),
+            "remote holds a tip: {first}, uploads per advance: {sent:?}"
+        );
+    }
+}
+
+/// A push within the ticket budget stays one advance.
+#[test]
+fn a_push_within_the_ticket_budget_is_one_advance() {
+    let (_dir, store) = store();
+    let remote = Remote {
+        atomic: true,
+        tickets: true,
+        ..Remote::new()
+    };
+    let line = bulky_line(&store, 4);
+    let tip = *line.last().unwrap();
+    let steps = push_bulky(
+        &remote,
+        &store,
+        tip,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    )
+    .unwrap();
+    assert_eq!(steps, 1);
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+    assert!(rebuilds(&remote, tip));
+}
+
+/// Whether a push ended because it was asked to stop, before or after some
+/// of its advances were published.
+fn interrupted(error: &PushError) -> bool {
+    match error {
+        PushError::Sync(crate::SyncError::Interrupted) => true,
+        PushError::SplitInterrupted { cause, .. } => interrupted(cause),
+        _ => false,
+    }
+}
+
+/// An observer that asks to stop at one poll only.
+struct StopAtPoll {
+    stop_at: usize,
+    polls: AtomicUsize,
+}
+
+impl kit_core::observer::Observer<crate::SyncEvent> for StopAtPoll {
+    fn cancelled(&self) -> bool {
+        self.polls.fetch_add(1, Ordering::SeqCst) + 1 == self.stop_at
+    }
+}
+
+/// A stop request that arrives at any checkpoint of a split push, the
+/// pre-flight dry run of the seal included, ends the push as interrupted.
+#[test]
+fn a_stop_request_at_any_checkpoint_of_a_split_push_interrupts_it() {
+    let (_dir, store) = store();
+    let line = bulky_line(&store, 9);
+    let tip = *line.last().unwrap();
+    let mut stopped = 0;
+    for stop_at in 1.. {
+        let remote = Remote {
+            atomic: true,
+            tickets: true,
+            ..Remote::new()
+        };
+        let observer = StopAtPoll {
+            stop_at,
+            polls: AtomicUsize::new(0),
+        };
+        let control = PushControl {
+            observer: &observer,
+            ..PushControl::default()
+        };
+        let result = push_bulky(&remote, &store, tip, RefWriteCondition::Missing, &control);
+        if observer.polls.load(Ordering::SeqCst) < stop_at {
+            // The push finished before this many checkpoints.
+            assert!(result.is_ok(), "{result:?}");
+            break;
+        }
+        assert!(
+            result.as_ref().is_err_and(interrupted),
+            "stop at checkpoint {stop_at}: {result:?}"
+        );
+        stopped += 1;
+    }
+    assert!(stopped > 3, "{stopped}");
+}
+
+/// A push that is re-sent in full after the server lost a delta base, and
+/// would then need more data packs than one advance permits, fails before it
+/// uploads any of the re-sent packs. It does so for a lease push and for a
+/// force push.
+#[test]
+fn a_retry_that_would_exceed_the_ticket_budget_uploads_nothing() {
+    for force in [false, true] {
+        let (_dir, store) = store();
+        let remote = Remote {
+            atomic: true,
+            tickets: true,
+            ..Remote::new()
+        };
+        let line = bulky_line(&store, 10);
+        // The remote holds the first eight commits, so the first plan of a
+        // push of the tenth is two commits; the full closure is all ten.
+        let held = line[7];
+        let tip = line[9];
+        push_bulky(
+            &remote,
+            &store,
+            held,
+            RefWriteCondition::Missing,
+            &PushControl::default(),
+        )
+        .unwrap();
+        let condition = if force {
+            RefWriteCondition::Any
+        } else {
+            RefWriteCondition::Match(held)
+        };
+        let before = remote.uploads.load(Ordering::SeqCst);
+        remote.uploads_at_advance.lock().unwrap().clear();
+        remote.lose_delta_base.store(true, Ordering::SeqCst);
+
+        let result = push_bulky(&remote, &store, tip, condition, &PushControl::default());
+
+        let Err(PushError::RetryTooLarge {
+            reason,
+            packs,
+            limit,
+        }) = result
+        else {
+            panic!("force: {force}: {result:?}");
+        };
+        assert_eq!(reason, RetryReason::LostDeltaBase, "force: {force}");
+        assert_eq!(limit, TICKET_BUDGET, "force: {force}");
+        assert!(packs > TICKET_BUDGET, "force: {force}: {packs}");
+        // The first attempt uploaded its packs; the retry uploaded none.
+        let lost_at = *remote.uploads_at_advance.lock().unwrap().last().unwrap();
+        assert!(lost_at > before, "force: {force}");
+        assert_eq!(
+            remote.uploads.load(Ordering::SeqCst),
+            lost_at,
+            "force: {force}"
+        );
+        assert_eq!(remote.read_ref(HEAD).unwrap(), Some(held), "force: {force}");
     }
 }

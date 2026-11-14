@@ -152,6 +152,42 @@ fn cat_reassembles_chunked_blob() {
     );
 }
 
+/// `cat-file -s` on a chunked file reports its content length, as it does
+/// for a plain blob, not the length of the manifest that lists its chunks.
+#[test]
+fn cat_file_size_of_a_chunked_blob_is_its_content_length() {
+    let td = tempfile::tempdir().unwrap();
+    let p = td.path();
+    assert!(run_in(p, &["init"]).status.success());
+    assert!(run_in(p, &["keygen"]).status.success());
+    let payload = big_payload();
+    fs::write(p.join("big.bin"), &payload).unwrap();
+    assert!(run_in(p, &["add", "big.bin"]).status.success());
+    assert!(run_in(p, &["commit", "-m", "big"]).status.success());
+
+    let log = run_in(p, &["log", "--format=json"]);
+    let log_out = String::from_utf8(log.stdout).unwrap();
+    let first = log_out.lines().next().expect("at least one commit");
+    let needle = "\"tree\":\"";
+    let start = first.find(needle).expect("json has a tree field") + needle.len();
+    let tree_dump = String::from_utf8(cat(p, &first[start..start + 64])).unwrap();
+    let entry_hex = tree_dump
+        .lines()
+        .find(|l| l.ends_with(" big.bin"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .expect("tree has a big.bin entry")
+        .to_owned();
+
+    let size = run_in(p, &["cat-file", "-s", &entry_hex]);
+    assert!(size.status.success(), "cat-file -s failed: {size:?}");
+    assert_eq!(
+        String::from_utf8(size.stdout).unwrap().trim(),
+        payload.len().to_string()
+    );
+    let kind = run_in(p, &["cat-file", "-t", &entry_hex]);
+    assert_eq!(String::from_utf8(kind.stdout).unwrap().trim(), "blob");
+}
+
 #[test]
 fn rm_dirty_guard_does_not_false_positive_clean_large_file() {
     let td = tempfile::tempdir().unwrap();

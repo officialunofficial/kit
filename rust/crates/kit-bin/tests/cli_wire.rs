@@ -392,6 +392,109 @@ fn bisect_run_survives_test_command_dirtying_a_tracked_file() {
     let _ = run_in(td.path(), &["bisect", "reset"]);
 }
 
+/// The commits an in-progress bisect has skipped, from its state file.
+fn skipped_in_state(td: &Path) -> Vec<String> {
+    fs::read_to_string(td.join(".kit/bisect"))
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("skip:"))
+        .map(|hash| hash.trim().to_owned())
+        .collect()
+}
+
+#[test]
+fn bisect_skip_sets_aside_the_current_candidate_and_moves_on() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    let mut between = Vec::new();
+    for c in ["c2", "c3", "c4", "c5", "c6"] {
+        make_commit(td.path(), "marker.txt", c.as_bytes(), c);
+        between.push(head_hash(td.path()));
+    }
+    let bad = between.pop().unwrap();
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &bad]).status.success());
+    assert!(skipped_in_state(td.path()).is_empty());
+
+    let first = run_in(td.path(), &["bisect", "skip"]);
+    assert!(first.status.success(), "bisect skip failed: {first:?}");
+    let skipped = skipped_in_state(td.path());
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(
+        between.contains(&skipped[0]),
+        "the skipped commit lies between the good and the bad one: {skipped:?}"
+    );
+
+    // The next skip sets aside a different candidate.
+    let second = run_in(td.path(), &["bisect", "skip"]);
+    assert!(second.status.success(), "bisect skip failed: {second:?}");
+    let skipped = skipped_in_state(td.path());
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_ne!(skipped[0], skipped[1]);
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
+#[test]
+fn bisect_skip_without_a_bisect_in_progress_is_refused() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let out = run_in(td.path(), &["bisect", "skip"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("no bisect in progress")
+    );
+}
+
+#[test]
+fn bisect_run_writes_each_verdict_to_the_state_before_testing_the_next_candidate() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    make_commit(td.path(), "marker.txt", b"ok\n", "c1");
+    let c1 = head_hash(td.path());
+    for (marker, name) in [(&b"ok\n"[..], "c2"), (b"BAD\n", "c3"), (b"BAD\n", "c4")] {
+        make_commit(td.path(), "marker.txt", marker, name);
+    }
+    make_commit(td.path(), "marker.txt", b"BAD\n", "c5");
+    let c5 = head_hash(td.path());
+    assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+    assert!(run_in(td.path(), &["bisect", "good", &c1]).status.success());
+    assert!(run_in(td.path(), &["bisect", "bad", &c5]).status.success());
+
+    // Every test of a candidate copies the state it finds into a log
+    // outside the worktree, under the commit it is testing.
+    let log_dir = tempfile::tempdir().unwrap();
+    let log = log_dir.path().join("states.log");
+    let script = format!(
+        "{{ echo \"commit $KIT_BISECT_COMMIT\"; cat .kit/bisect; }} >> '{}'; ! grep -q BAD marker.txt",
+        log.display()
+    );
+    let out = run_in(td.path(), &["bisect", "run", "sh", "-c", &script]);
+    assert!(out.status.success(), "bisect run failed: {out:?}");
+
+    let log = fs::read_to_string(&log).unwrap();
+    let tests: Vec<(&str, &str)> = log
+        .split("commit ")
+        .filter(|entry| !entry.trim().is_empty())
+        .map(|entry| entry.split_once('\n').unwrap())
+        .collect();
+    assert!(tests.len() >= 2, "{log}");
+    for pair in tests.windows(2) {
+        let (tested, _) = pair[0];
+        let (_, state_seen_next) = pair[1];
+        assert!(
+            state_seen_next.contains(tested),
+            "the verdict on {tested} was not in the state when the next candidate ran:\n{state_seen_next}"
+        );
+    }
+    let _ = run_in(td.path(), &["bisect", "reset"]);
+}
+
 #[test]
 fn bisect_run_reports_ambiguity_when_all_candidates_skipped() {
     // When every remaining candidate is skipped, the run must NOT

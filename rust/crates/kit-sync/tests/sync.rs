@@ -3070,3 +3070,142 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
     }
     assert!(refused > 0, "no round was refused");
 }
+
+/// A pack that leaves out an object its tree names is the remote's fault.
+/// With no pack skipped on the first attempt there is no stale record to
+/// blame, so that attempt fails without clearing anything. The fetch then
+/// tries once more with the fresh head; the pack is recorded by then, so that
+/// attempt skips it, finds the same object missing and heals once. One
+/// download per attempt and one heal, not a heal after each attempt.
+#[test]
+fn a_missing_object_with_no_pack_skipped_is_healed_once_not_per_attempt() {
+    let remote = Remote::new();
+    let (objects, tip) = remote.build(None, &[("a", b"one\n")], true);
+    // The blob is the first object; the pack carries the tree and commit.
+    remote.publish_objects(&objects[1..], tip, true);
+    let source = remote.source();
+    let counted = CountingSource::new(&source);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let recorder = Recorder::default();
+
+    let error = fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &recorder,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, SyncError::RemoteMissingObject(_)),
+        "{error:?}"
+    );
+    let heals = recorder
+        .events
+        .borrow()
+        .iter()
+        .filter(|event| matches!(event, SyncEvent::AppliedPacksStale { .. }))
+        .count();
+    assert_eq!(heals, 1);
+    let calls = counted.take();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("Pack "))
+            .count(),
+        2,
+        "{calls:?}"
+    );
+}
+
+/// A store wiped under a record that names its only pack: the fetch clears
+/// the record and downloads the pack. The chain is walked once, because no
+/// checkpoint skipped a prefix of it.
+#[test]
+fn a_stale_record_heals_with_one_walk_of_the_chain_and_one_download() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    std::fs::remove_dir_all(layout.objects_dir()).unwrap();
+    std::fs::create_dir_all(layout.objects_dir()).unwrap();
+    let source = remote.source();
+    let counted = CountingSource::new(&source);
+
+    fetch(
+        &target,
+        &counted,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    let calls = counted.take();
+    let nodes = calls
+        .iter()
+        .filter(|call| call.starts_with("Node "))
+        .count();
+    let packs = calls
+        .iter()
+        .filter(|call| call.starts_with("Pack "))
+        .count();
+    assert_eq!((nodes, packs), (1, 1), "{calls:?}");
+}
+
+/// Cancels the moment the fetch reports that it found its record stale.
+#[derive(Default)]
+struct StopOnStale(Cell<bool>);
+
+impl Observer<SyncEvent> for StopOnStale {
+    fn event(&self, event: &SyncEvent) {
+        if matches!(event, SyncEvent::AppliedPacksStale { .. }) {
+            self.0.set(true);
+        }
+    }
+    fn cancelled(&self) -> bool {
+        self.0.get()
+    }
+}
+
+/// The record a fetch found stale is gone from disk before the retry starts,
+/// so a retry that dies does not leave the stale entries for the next fetch.
+#[test]
+fn a_stale_record_is_cleared_on_disk_before_the_retry_runs() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let record = layout.applied_packs_dir().join("default");
+    assert!(
+        !std::fs::read_to_string(&record).unwrap().trim().is_empty(),
+        "the clone records its pack"
+    );
+    std::fs::remove_dir_all(layout.objects_dir()).unwrap();
+    std::fs::create_dir_all(layout.objects_dir()).unwrap();
+
+    let error = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopOnStale::default(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, kit_sync::SyncError::Interrupted),
+        "{error:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&record).map_or(true, |text| text.trim().is_empty()),
+        "the stale entries are still on disk"
+    );
+}

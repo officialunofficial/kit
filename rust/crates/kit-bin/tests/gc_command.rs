@@ -80,6 +80,44 @@ fn gc_prunes_unreachable_blob_with_zero_grace() {
 }
 
 #[test]
+fn gc_names_the_temp_files_it_prunes_and_only_then() {
+    let td = init_repo();
+    let root = td.path();
+    commit(root, "a.txt", b"live\n", "live");
+
+    let clean = run_in(root, &["gc", "--grace-secs", "0"]);
+    assert!(clean.status.success(), "gc: {clean:?}");
+    let clean_text = String::from_utf8_lossy(&clean.stderr).into_owned();
+    assert!(
+        clean_text.contains("pruned 0 object(s), "),
+        "no temp files: {clean_text}"
+    );
+    assert!(!clean_text.contains("temp file"), "{clean_text}");
+
+    // A dead writer's temp file: a dot name with `.tmp.` in it, in a shard.
+    let shard = root.join(".kit/objects/ab");
+    fs::create_dir_all(&shard).unwrap();
+    let stray = shard.join(".stray.tmp.1");
+    fs::write(&stray, b"half a write").unwrap();
+
+    let dry = run_in(root, &["gc", "--dry-run", "--grace-secs", "0"]);
+    let dry_text = String::from_utf8_lossy(&dry.stderr).into_owned();
+    assert!(
+        dry_text.contains("would prune 0 object(s) and 1 temp file(s), "),
+        "{dry_text}"
+    );
+    assert!(stray.exists(), "a dry run keeps the file");
+
+    let out = run_in(root, &["gc", "--grace-secs", "0"]);
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        text.contains("pruned 0 object(s) and 1 temp file(s), "),
+        "{text}"
+    );
+    assert!(!stray.exists(), "gc removes the file");
+}
+
+#[test]
 fn gc_dry_run_keeps_everything() {
     let td = init_repo();
     let root = td.path();
