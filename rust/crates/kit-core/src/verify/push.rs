@@ -54,7 +54,8 @@ impl PushReport {
 ///
 /// Breadth-first from every id in `new_tips` over
 /// [`crate::ops::graph::children`]`(obj, mode)`, fetching each id at
-/// most once from `source`. Every fetched object is deserialized and its
+/// most once from `source`, apart from a manifest, which is fetched a second
+/// time to check its chunk lengths. Every fetched object is deserialized and its
 /// id re-derived; each commit, remix and tag has its signature checked.
 /// Remix `sources` and `Delta.base_hash` are never followed. Everything
 /// wrong is collected into the [`PushReport`] rather than stopping at the
