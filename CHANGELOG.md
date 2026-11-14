@@ -82,7 +82,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against a repository. `kit-sync` and `libkit` both use it.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
   none. It counts the objects and the bytes.
-- `kit worktree move [-f] <path> <new-path>`, `lock [--reason <text>] <path>`,
+- `kit worktree move [-f] <path> <new-path>`, `lock [--reason <text>] <path>`
+  (it refuses a reason over 1,024 bytes or with a control character),
   `unlock <path>` and `repair [<path>...]`. A locked tree is refused by
   `remove` and `move` unless `-f` is given twice, and `prune` keeps it.
   `worktree list` shows the lock. A locked tree has an optional `locked` file
@@ -318,7 +319,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   around the tracking-ref write and the checkpoint. That wait has no
   deadline unless `SyncOptions::lock_wait` sets one, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
   interrupt. A failure part way leaves the applied packs in the store and in
-  the applied-packs record, now appended as each pack lands; the next fetch
+  the applied-packs record, now appended as each pack lands (a record that
+  cannot be written still warns once for the fetch, as before); the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
   after a skipped pack now clears the record and retries once, as a missing
   closure object already did. `SyncOptions::staging_dir`,
@@ -696,6 +698,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An ignore check of one path, such as `kit add <path>` and the restore
   safety check, slices each ancestor directory out of the path instead of
   building a new string for it.
+- An ignore list with 32 or more literal-basename and `*.ext` patterns indexes
+  them, so a check looks a path's name and last extension up instead of
+  testing every pattern. Patterns with more than one dot stay in the scan. The
+  last match still wins and the result does not change. A smaller list takes
+  the plain scan.
 - The S3 transport reads the refs of a listing with at most 16 requests in
   flight, not one after another. Against a local server that delays each
   read by 5 ms, a listing of 1,000 refs went from about 6.4 s to about

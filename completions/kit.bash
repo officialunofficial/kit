@@ -32,6 +32,9 @@ _kit_complete() {
     # surface the --help / --version / well-documented flags so shell
     # users get tab-completion for the common fast-path.
     case "${words[1]}" in
+        init)
+            COMPREPLY=( $(compgen -W "-q --quiet --help" -- "$cur") )
+            ;;
         add)
             COMPREPLY=( $(compgen -W "-A --all -u --update -f --force -n --dry-run -p --patch --help" -- "$cur") )
             ;;
@@ -84,7 +87,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--porcelain -s --short -z --help" -- "$cur") )
             ;;
         commit)
-            COMPREPLY=( $(compgen -W "-a --all --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-a --all --allow-empty --amend -m --message -F --file --author -q --quiet --help" -- "$cur") )
             ;;
         blame)
             COMPREPLY=( $(compgen -W "--format -L --lines -w --ignore-whitespace -M --find-moves -C --find-copies --ignore-rev --ignore-revs-file --ignore-rev-precise --first-parent --reverse --help" -- "$cur") )
@@ -95,6 +98,12 @@ _kit_complete() {
         reflog)
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
             ;;
+        pull)
+            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            ;;
+        fetch)
+            COMPREPLY=( $(compgen -W "--all -p --prune --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            ;;
         push)
             COMPREPLY=( $(compgen -W "--all -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
             ;;
@@ -102,7 +111,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
             ;;
         branch)
-            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -u --set-upstream-to --unset-upstream -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )
             ;;
         show)
             COMPREPLY=( $(compgen -W "--stat --help" -- "$cur") )
@@ -120,7 +129,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-i --interactive --onto --continue --skip --abort --help" -- "$cur") )
             ;;
         revert)
-            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--continue --abort -n --no-commit -m --mainline --format --help" -- "$cur") )
             ;;
         bisect)
             COMPREPLY=( $(compgen -W "start good bad reset" -- "$cur") )
@@ -136,8 +145,27 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-n --dry-run --grace-secs --help" -- "$cur") )
             ;;
         worktree)
-            COMPREPLY=( $(compgen -W "add list remove prune move lock unlock repair --help" -- "$cur") )
-            return
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "add list remove prune move lock unlock repair --help" -- "$cur") )
+            else
+                case "${words[2]}" in
+                    list)
+                        COMPREPLY=( $(compgen -W "--porcelain --help" -- "$cur") )
+                        ;;
+                    remove|move)
+                        COMPREPLY=( $(compgen -W "-f --force --help" -- "$cur") )
+                        ;;
+                    prune)
+                        COMPREPLY=( $(compgen -W "--dry-run --help" -- "$cur") )
+                        ;;
+                    lock)
+                        COMPREPLY=( $(compgen -W "--reason --help" -- "$cur") )
+                        ;;
+                    *)
+                        COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+                        ;;
+                esac
+            fi
             ;;
         stash)
             COMPREPLY=( $(compgen -W "save push list pop apply drop clear show" -- "$cur") )

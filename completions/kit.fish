@@ -488,3 +488,29 @@ complete -c kit -n "__fish_seen_subcommand_from remote" -a "get-url set-url" -d 
 complete -c kit -n "__fish_seen_subcommand_from diff" -l color -d "Colorize patch (always|auto|never)" -xa "always auto never"
 complete -c kit -n "__fish_seen_subcommand_from diff" -l no-color -d "Disable colorized output"
 complete -c kit -n "__fish_seen_subcommand_from reset" -s q -l quiet -d "Suppress the HEAD-is-now-at summary"
+
+# Flags added in 0.8.0.
+complete -c kit -n "__fish_seen_subcommand_from init" -s q -l quiet -d "Print nothing on success"
+complete -c kit -n "__fish_seen_subcommand_from init" -F
+complete -c kit -n "__fish_seen_subcommand_from commit" -l allow-empty -d "Accept a first commit with nothing staged"
+complete -c kit -n "__fish_seen_subcommand_from branch" -s u -l set-upstream-to -d "Track a remote branch" -r
+complete -c kit -n "__fish_seen_subcommand_from branch" -l unset-upstream -d "Stop tracking a remote branch"
+complete -c kit -n "__fish_seen_subcommand_from branch" -s r -l remotes -d "List remote-tracking branches"
+complete -c kit -n "__fish_seen_subcommand_from branch" -s a -l all -d "List local and remote-tracking branches"
+complete -c kit -n "__fish_seen_subcommand_from revert" -l mainline -s m -d "Select the mainline parent (1-based) of a merge commit" -r
+complete -c kit -n "__fish_seen_subcommand_from revert" -l format -d "Output format" -xa "default json"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l all -d "Pull from every configured remote"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l rebase -d "Replay the current branch onto the fetched branch"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-ff -d "Always create a merge commit"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l all -d "Fetch from every configured remote"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s p -l prune -d "Delete remote-tracking refs gone from the remote"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"
+complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from list" -l porcelain -d "Stable, script-friendly output"
+complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from remove move" -s f -l force -d "Override the safety check (twice for a locked tree)"
+complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from prune" -l dry-run -d "Report what would be pruned"
+complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from lock" -l reason -d "Why the tree is locked" -r
