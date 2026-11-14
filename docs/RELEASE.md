@@ -104,7 +104,10 @@ Run top to bottom. Do not skip steps.
       **not already published** (crates.io versions are immutable &mdash; a re-publish
       of an existing version fails the whole `cargo publish` run).
 - [ ] `CHANGELOG.md` has an entry for this version; move items from
-      `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`.
+      `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`. If a dated section
+      for this version already exists, fold the `Unreleased` items into it
+      and set its date to the release date, so the file holds one section
+      for the version.
 - [ ] Version bumped wherever it is hard-coded: README install snippets,
       `docs/INSTALL.md` (four sites: two `VERSION=` snippets, the expected
       `kit version` output, and the pinned `kit self update` example),
@@ -115,7 +118,8 @@ Run top to bottom. Do not skip steps.
       [Reproducibility](#reproducibility) still accurate for this release.
 - [ ] `bash scripts/wasm-package.sh <empty dir>` builds the npm package, and
       `npm pack --dry-run` in that directory lists the files you expect.
-      CI runs the same build.
+      CI runs the same build. npm publishing needs npm 11.5.1 or newer, and
+      the `publish-npm` job stops on an older npm.
 - [ ] The trusted publisher of `@officialunofficial/kit-wasm` on npm names
       `release.yml` and the environment `npm` (see
       [Publishing to npm](#publishing-to-npm)).
@@ -219,6 +223,9 @@ disagree, fix the script:
    `[workspace.package].version` in `rust/Cargo.toml` (to a version not yet
    on crates.io) and update `CHANGELOG.md` (move `Unreleased` items into
    `[X.Y.Z] - YYYY-MM-DD`, leaving a fresh `[Unreleased]` heading above it).
+   If a dated section for that version already exists, fold the `Unreleased`
+   items into it, merge the entries by kind, and set its date to the release
+   date, so the file holds one section for the version.
 3. Review the release PR and merge it.
 4. Tag the merge commit on `main`:
    ```sh
@@ -238,7 +245,7 @@ disagree, fix the script:
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
    `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
-   `release`.
+   `release` → `publish-npm`.
 6. Run the [smoke test](#smoke-test).
 
 ### The release PR
@@ -284,8 +291,10 @@ larger than 5 MB. crates.io rejects an archive larger than 10 MB. The
 [`cloudbuild/supply.yaml`](../cloudbuild/supply.yaml) runs the script on each
 pull request that changes a manifest, the lockfile or the script.
 
-The dry run prints one warning for each test file that a crate does not
-ship. The warning is expected.
+The dry run prints one warning for each test file and each example that a
+crate does not ship, such as the kit-core example
+`generate_refs_index_goldens`, the kit-sync example `gen_zstd_fixture` and
+the libkit example `open_repo`. The warnings are expected.
 
 ### Semver check
 
@@ -329,11 +338,12 @@ Review the file list of a crate with `cargo package --list -p <crate>`.
 
 | Publishes to crates.io | Stays off crates.io (`publish = false`) |
 |---|---|
-| The library crates (`libkit`, `kit-core`, `kit-rpc`, `kit-client`, `kit-sync`, `kit-attest`, `kit-keystore`, `kit-git-bridge`, `kit-serve`, `kit-transport-{file,memory,s3,ssh,connect}`) plus `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`, and `kit-wasm`, which `release.yml` publishes to npm. |
+| In publish (dependency) order: `kit-core`, `kit-rpc`, `kit-attest`, `kit-keystore`, `kit-transport-file`, `kit-serve`, `kit-client`, `kit-sync`, `kit-transport-memory`, `kit-transport-connect`, `kit-transport-s3`, `kit-transport-ssh`, `kit-git-bridge`, `libkit`, and `kit-bin` (so `cargo install kit-bin` works) | `kit-sign-file`, `kit-test-util`, `kit-formal-conformance`, `fuzz`, `benches`, and `kit-wasm`, which `release.yml` publishes to npm. |
 
 The published crates depend only on each other, forming a closed,
-dependency-ordered set; `cargo publish --workspace` computes that order and
-skips any `publish = false` member.
+dependency-ordered set. The table lists them in that order.
+`cargo publish --workspace` works the order out itself and skips any
+`publish = false` member, so no crate is published by hand one at a time.
 
 Notes on the published set:
 

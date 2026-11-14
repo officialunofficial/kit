@@ -7,8 +7,55 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-14
+
 ### Added
 
+- `find_merge_base_strict` and `is_ancestor_strict` in kit-core read every
+  commit they walk. On a healthy store they give the answers of
+  `find_merge_base` and `is_ancestor`; where a commit is missing, corrupt
+  or not a commit they fail with an `AncestorError` that names it, and a
+  walk that would read more than 1,000,000 commits on either side fails
+  with an error that names the limit. `find_merge_base` and `is_ancestor`
+  keep ending a path at a missing object, for push and its shallow
+  boundaries.
+- `Transport::supports_serialized_advance` and
+  `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
+  serialized for writers. Both default to the atomic-advance capability.
+- Transports can offer a repository cursor, an opaque value that changes
+  whenever a ref changes (SPEC-TRANSPORT §1.2). A fetch whose remote cursor
+  equals the one its last complete fetch saw, with its remote-tracking refs
+  and their tip objects as that fetch left them, makes no other request.
+  `FetchReport::remote_unchanged` reports it. The memory transport offers a
+  cursor. The file transport offers one on Linux: it keeps a write count in
+  each stripe lock file and also reads the times of the ref directories, so
+  that a write by kit 0.7.3 or earlier, which keeps no count, changes the
+  cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
+  modified in the last 2 s. On one ext4 disk, a fetch of an unchanged
+  `kit+file://` remote with 10,000 branches takes one request and about
+  23 ms; it took 20,001 requests before. The SSH transport offers the cursor
+  of the repository that `kit serve` serves, through a new `ReadRepoCursor`
+  request (SPEC-TRANSPORT §4.2.2). A fetch of an unchanged `kit+ssh://`
+  remote takes that one request, and the 4,999-branch limit of a session does
+  not apply to it. A client that talks to an older server, and an older client
+  that talks to this server, work as before. The Connect transport
+  offers no cursor, and neither does the file transport, or `kit serve` over
+  it, on other systems: a fetch there works as before.
+- The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
+  digest of the key, `ETag` and `LastModified` of every object under `refs/`,
+  read from the listing alone, so it needs no new object and no change to a
+  writer. A fetch of an unchanged `kit+s3://` remote takes one request for up
+  to 1,000 refs, and one more for each further 1,000. It took one listing and
+  one read per ref, and a packmap read per branch, before. A store that
+  returns no `ETag` or `LastModified` offers no cursor, and the fetch works as
+  before.
+- FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
+  level 2 over the v1 gear table and sizes. A v2 manifest carries
+  `chunk_size = 0x8000_0002`. kit-core exposes it through
+  `Chunker::FastCdcV2`, `store_file_object_with` and
+  `chunked_blob_from_bytes_with`. No writer uses it by default, so
+  existing repositories read and write byte-identically. The git bridge
+  refuses v2 manifests.
 - `kit_core::store::ObjectStore::prune_guard` returns a `PruneGuard`. While
   one is alive, `kit gc` deletes no object of the store at any grace period.
   It holds a shared lock on the `format` file, which a process that dies
@@ -16,7 +63,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SyncEvent::WaitingForRepoLock`, sent once for each time a fetch waits for
   the repository lock to publish a branch's ref. `kit` prints a line for it.
 - `AppliedPacks::record_applied` records a pack and appends its digest to the
-  on-disk record at once. It replaces `AppliedPacks::insert`.
+  on-disk record at once.
 - `kit gc` removes the temp files that a dead writer left in the object
   directories (`.<name>.tmp.*` and `.kit.tmp.*`) once they are older than the
   grace window. It deletes each one under the same exclusive lock as an
@@ -35,14 +82,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against a repository. `kit-sync` and `libkit` both use it.
 - `kit_core::store::HashOnlySink` hashes the objects put into it and keeps
   none. It counts the objects and the bytes.
-- The S3 transport offers a repository cursor (SPEC-TRANSPORT §6.8). It is a
-  digest of the key, `ETag` and `LastModified` of every object under `refs/`,
-  read from the listing alone, so it needs no new object and no change to a
-  writer. A fetch of an unchanged `kit+s3://` remote takes one request for up
-  to 1,000 refs, and one more for each further 1,000. It took one listing and
-  one read per ref, and a packmap read per branch, before. A store that
-  returns no `ETag` or `LastModified` offers no cursor, and the fetch works as
-  before.
 - `kit worktree move [-f] <path> <new-path>`, `lock [--reason <text>] <path>`,
   `unlock <path>` and `repair [<path>...]`. A locked tree is refused by
   `remove` and `move` unless `-f` is given twice, and `prune` keeps it.
@@ -101,7 +140,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `add -n` (`--dry-run`) prints `add '<path>'` for each file that a real add
   would stage or update, and `remove '<path>'` for each deletion that `-A`
   would record. It writes no index and no object. It excludes `-p` and `-u`.
-  `libkit::add::Request` has a `dry_run` field.
+  `libkit::add::Request` has a `dry_run` field. It hashes without keeping any
+  object, so a file of many new chunks costs no memory per chunk.
 - `kit revert -m <parent-number> <merge>` reverts a merge commit relative to
   the chosen parent. `kit-core` takes the parent as the `mainline`
   argument of `ops::revert::revert`. A merge without `-m`, a number out of
@@ -175,32 +215,31 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     named under two lengths is caught.
   - `ChunkedBlob::new(total_size, chunk_size, chunks)` takes `(Hash, end)`
     pairs. It has the new readers `ends()`, `span(index)`, `chunk_at(offset)`
-    and `entries()`. `ChunkedBlob::fixed_chunk_len` is gone, and
-    `check_chunk_length` replaces it.
+    and `entries()`. `check_chunk_length` checks a chunk's length against its span.
   - `merkle::ChunkedIdFold::new` takes the chunk count and returns a `Result`,
-    `push` takes the chunk and its end, `push_ids` is `push_entries`, and
-    `inner_root` and `id` are replaced by `finish`. `serialize::check_chunked_header`
+    `push` takes the chunk and its end, `push_entries` takes raw entry bytes,
+    and `finish` returns the id. `serialize::check_chunked_header`
     takes the total size and the chunk count, and checks no layout.
-    `MerkleError::PartialChunkId` is gone: a partial entry is
-    `KitError::ChunkedBlobLength`. `merkle::SpannedChunk`
+    A partial entry is `KitError::ChunkedBlobLength`. `merkle::SpannedChunk`
     pairs a chunk id with its span. `verify_chunk` takes the span with the chunk id.
 - **Breaking, format:** the disclosure bundle is version 3. A chunk payload
   and a chunk range header carry `start` and `end`, and a bundle of version 2
   is refused with `UnsupportedBundleVersion`. The length proofs are gone:
   `chunk_len_proofs`, `verify_blob_len_proof`, `LenProof`, `kit prove
   --with-offsets` and the `with_offsets` argument of the MCP `prove` tool are
-  removed. `VerifyError::IncompleteLengthProofSet` and
-  `UnexpectedLengthProofs` are gone, and the span rules take their place:
+  removed. `VerifyError::IncompleteLengthProofSet`,
+  `UnexpectedLengthProofs` and `InvalidBlobPrologue` are gone, and the span rules take their place:
   `SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
   `LastChunkEnd`, `ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan` and
-  `RangePastSpan`. `FixedChunkLength` now means a span that the fixed-size
+  `RangePastSpan`. `FixedChunkLength` is a span that the fixed-size
   layout does not give. The absolute offset of a
   range is always known, and the proof of a byte has the same size at any
   chunk index. `build_range_proof_from` takes no boundary hints and reads
   only the chunks the range touches.
 - **Breaking, format:** the span container is KDSP version 2 and the proof
   bundle KDPB version 3. A span has no anchor: each chunk carries its span
-  and the container checks that the spans chain. The new refusal reason is
+  and the container checks that the spans chain.
+  `verify::span::encode_span` takes no `anchor` argument. The new refusal reason is
   `span_chunk_chain`; the `span_anchor_*` reasons are gone. The import
   attestation `specVersion` is 2 (`IMPORT_SPEC_VERSION`), so an attestation
   of version 1 no longer verifies.
@@ -234,7 +273,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** the fields of `kit_core::object::ChunkedBlob` are private, so
   every value is one that `deserialize` accepts. Build one with
   `ChunkedBlob::new(total_size, chunk_size, chunks)` (the chunks are `(Hash, end)`
-  pairs, see below), which returns
+  pairs, see the first entry above), which returns
   `Result<ChunkedBlob, KitError>` and refuses what the decoder refuses:
   `KitError::TooManyChunks` above `MAX_CHUNKS`, and
   `KitError::ChunkedBlobTotalSizeInvalid` for a `total_size` above
@@ -245,26 +284,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   vectors and error text do not change. The leaf layout of a manifest's tree
   (the metadata leaf, then the chunks) is stated once, and the leaf count,
   the id fold, the proofs and the chunk positions derive from it.
-- A push plans from what changed. It reads the history of the remote head and
-  walks only the commits the remote lacks, and for each one it keeps the tree
-  entries that differ from the trees of its parents. It no longer walks two
-  whole closures. A chunk of a large file counts toward no cap, so a repository
-  of many large files pushes. The walk's cap is 10,000,000 held commits, new
-  commits and kept objects, and it fails with `OperationLimitExceeded`
-  (`10,000,000-object push walk`). A
-  file that returns at a path the remote head's snapshot does not hold, a file
-  reverted to an older version, a directory restored after the remote head
-  deleted it, and a chunk shared with a file the remote lacks are sent again,
-  up to a whole file or directory. In a push cut into steps, each step
-  counts as the remote head for the next, so a directory deleted in one step
-  and restored in a later one is sent again too. A history the remote holds and
-  this store lacks no longer makes the push send everything. A pack seals at 10,000,000
-  entries.
-- Building a proof no longer holds the leaves or the levels of the tree. One
-  pass over the leaves keeps one pending node per level and the siblings the
-  proof names. A proof of a manifest of 8,388,608 chunks took about 770 MiB
-  of memory above the manifest itself and now stays within the manifest's own
-  size. The proof bytes, ids and signatures are the same.
 - **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
   tickets one advance may name, the packlist node's included.
   `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven
@@ -281,26 +300,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that holds none. Code that builds
   a `Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. No trait or signature of the crate changes.
-- A pack read charges 896 bytes of memory per entry, up from 704. The old
-  figure was below the real cost of a pack read with a long store path. A
-  client now refuses a pack of more than about 2.40 million entries (a small
-  pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
-  about 3.05 million and 6.10 million. A push seals a pack before it holds
-  more than `pack::MAX_WRITE_ENTRIES` entries (1,198,372), half the
-  small-pack figure, where it sealed at the format's 10,000,000. The other
-  half of the reader's memory floor stays free for the objects of the pack.
-- `rebase` walks up to 1,000,000 ancestors of its base, and `bisect` walks
-  up to 1,000,000 ancestors of a good commit and 1,000,000 candidates of a
-  range, as `merge` and `log` do. A longer walk fails with an error that
-  names the 1,000,000-commit limit. The limit was 10,000. A rebase still
-  replays at most 10,000 commits, and a bisect keeps at most 10,000 skipped
-  commits; one more fails with an error.
 - **Breaking:** a fetch holds no repository lock while it downloads and
   applies packs. It downloads, checks, applies and records each pack as it
   arrives, in chain order, and stages nothing on disk, so `add`, `commit` and
   `checkout` run during a clone of any size. It takes `worktree.lock` only
   around the tracking-ref write and the checkpoint. That wait has no
-  deadline, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
+  deadline unless `SyncOptions::lock_wait` sets one, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
   interrupt. A failure part way leaves the applied packs in the store and in
   the applied-packs record, now appended as each pack lands; the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
@@ -308,16 +313,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   closure object already did. `SyncOptions::staging_dir` and
   `SyncOptions::with_staging_dir` are removed. Remove the calls; a fetch needs
   no replacement. The publish step no longer fails with `SyncError::RepoLock`
-  when another process holds `worktree.lock`: it waits. A caller with an
-  observer that never cancels waits as long as the holder does, and a fetch
+  when another process holds `worktree.lock`: it waits, unless `SyncOptions::lock_wait` bounds the wait. A caller
+  with an observer that never cancels waits as long as the holder does, and a fetch
   that waits holds its prune guard, so gc prunes nothing meanwhile.
-- A fetch keeps gc from deleting its objects with a prune guard, so
-  `kit gc --grace-secs 0` run during a fetch prunes nothing the fetch wrote or
-  reused. gc reports those objects as kept.
-- The closure check before a fetch publishes a ref reads each chunk's type
-  and no longer counts chunks toward its 10,000,000-object cap. A repository
-  of many large files can be fetched.
-- `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
+- **Breaking:** `kit gc` counts no chunk of a chunked file toward its 10,000,000-object
   cap. It keeps the chunk ids apart in a sorted list that it deduplicates as
   it grows, so memory stays near twice the 32 bytes of each distinct chunk
   id. gc refuses a repository of more than 134,217,728 distinct live chunks, as
@@ -326,53 +325,24 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `GcRootsError::ChunkNotBlob`, which names the manifest. Its sweep lists one
   object directory at a time. The summary line shows the live chunk count.
   The gc mark returns a `LiveSet`, and `GcReport` has a `live_chunks` field.
-- `kit add` makes the chunks of a large file durable in windows of 4,096
-  chunks, and no longer stages every chunk of the file until the command
-  ends. The staged set of one file stays bounded whatever the file's size. The
-  chunks become visible before the index names them. A command that fails
-  leaves them unreferenced, and `gc` collects them. `ObjectSink::checkpoint`
-  and `WriteBatch::checkpoint` make the objects stored so far durable and
-  visible while the batch stays open.
-- `kit status` keeps no copy of the new chunks of a changed file. The snapshot
-  holds the file path, the offset and the length of each chunk, about 64 bytes
-  per chunk, and reads a chunk back from the file when a comparison needs it.
-  The read checks the chunk's id, so a file that changed under the snapshot
-  fails the read. `ObjectSink::put_chunk_parts` and `ChunkOrigin` carry the
-  origin to a sink.
-- `kit cat`, `kit cat-file -p` and `kit show` write a chunked blob one chunk
-  at a time, and `kit rm` and `kit restore` compare a worktree file with a
-  chunked blob one chunk at a time. Memory is one chunk, whatever the file's
-  size. A closed output still ends `kit cat` and `kit show` without an error.
-  `worktree::write_blob`, `worktree::content_eq_reader` and
-  `worktree::file_content_eq` stream.
-- A `ChunkedBlob` holds up to 128 GiB and 8,388,608 chunks (SPEC-OBJECTS §7).
-  It held 1 GiB and 1,000,000 chunks before, and an earlier reader refuses a
-  larger manifest. Writers now refuse any manifest a reader refuses. Readers
-  that hold a whole file in memory (`read_blob`, blame, byte-range
-  disclosure and the git export) refuse content above 1 GiB with a typed
-  error before they read a chunk.
 - `kit add`, `status` and `stash` take a worktree file up to 128 GiB, the
   bound of a `ChunkedBlob`, and so does `diff --stat` for binary content.
   Memory is one window of chunks plus a few copies of the list of chunk ids
   and end offsets, 40 bytes for each chunk, while the manifest is stored. The
-  line diff of text content above 1 GiB still fails with
-  `WorktreeError::ContentTooLarge`. The hasher refused a file
+  line diff of text content above 1 GiB fails with the
+  new `WorktreeError::ContentTooLarge`. The hasher refused a file
   above 1 GiB before it read a byte. A file of 1 MiB or less that grows past 1
   MiB while it is read is stored chunked. It was stored as one oversized blob.
   A file above 128 GiB still fails with
   `WorktreeError::FileTooLarge`, which now carries the limit that applied
   (`FileTooLarge { path, limit }`), and nothing is written.
   `worktree::MAX_FILE_BYTES` keeps its value and its meaning, the limit of a
-  reader that holds a whole file. Breaking: `WorktreeError::FileTooLarge`
+  reader that holds a whole file. **Breaking:** `WorktreeError::FileTooLarge`
   changes from a tuple to a struct variant.
-- A pull no longer removes an empty untracked directory inside a subtree the
-  new tip did not change.
 - **Breaking:** `ChunkedBlob::check_reassembled_size` takes a `u64`, so a
   restore of a file above 4 GiB passes the check on a 32-bit target.
   `kit-sync` no longer exports `warn_if_served`, `WORKTREE_LOCK` and
   `SERVE_LOCK`; `kit_core::repo_lock` has the lock names and `is_served`.
-  `SyncEvent::AppliedPacksPersistFailed` is sent once for each fetch, not once
-  for each pack and again for the final rewrite.
 - A fast-forward pull rewrites only the files the new tip changed. It wrote
   every tracked file again, and read each chunk of a large file again. An
   unchanged file keeps its inode, its mtime and its stat cache. The safety
@@ -381,63 +351,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while the check reads it hashes differently from the index, so the pull
   refuses with the usual message and does not fail the check. A resumed pull still writes
   every file.
-  `restore_tree_to_worktree_with` and `restore_tree_to_worktree_observed` skip
-  entries equal to `base_tree` when `clean` is set too. They skipped only when
-  it was not. A caller that passes both must have proved that the worktree
+  **Breaking:** `restore_tree_to_worktree_with` skips
+  entries equal to `base_tree` when `clean` is set too, and so does
+  `restore_tree_to_worktree_observed`. It skipped only when it was not. A caller that passes both must have proved that the worktree
   holds no untracked path outside the ignore rules.
-  `kit_sync::worktree::restore_worktree_and_index_from` takes the base tree.
+  The new `kit_sync::worktree::restore_worktree_and_index_from` takes the
+  base tree.
 - `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
   `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from its header fields
   and its entries, one at a time or as the raw entry bytes of a manifest, so a
   caller need not decode the manifest. `serialize::check_chunked_header` checks
-  the header first, with the decoder's rules. Breaking: `MerkleError` gains
+  the header first, with the decoder's rules. **Breaking:** `MerkleError` gains
   `TooManyLeaves`.
-- A rollover node of the packmap chain lists up to 4,096 packs, up from 1,024
-  (`ROLLOVER_MAX_PACKS`). A chain of up to 4,096 packs rolls into one node,
-  which is 131,080 bytes. A reader accepts the node as before. A server that
-  limits a node to 1,024 packs must accept 4,096 before it is used with this
-  client.
-- A push prefers packs of at most 256 MiB (`DEFAULT_PACK_PAYLOAD_CAP`), down
-  from 4 GiB, so a push holds one pack of that size and one prepared batch in
-  memory. `PushOptions::pack_payload_cap` is the preferred size and still takes
-  any value up to the format limit of 4 GiB. One object larger than the cap
-  still goes into a pack of its own. A push uses larger packs only when a
-  single commit cannot fit one advance's data packs otherwise: it raises the
-  size for that push, once, to what that commit needs, never past the format
-  limit, the body limit every fetch applies (4 GiB, header and trailer
-  included) or the largest pack the remote accepts. Against a server that does not
-  advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
-  of objects, where it carries about 1.5 GiB at the preferred size. A commit
-  that does not fit even then is refused before any upload, with
-  `PushSplitLimit` when its weight passes what the largest packs hold and
-  with `PushTooLarge` when packing leaves it just over. A push that raises
-  the size holds up to two packs of that size in memory (one pack and one
-  prepared batch). The `kit` command has no flag to raise the cap.
-
-- A push seals only packs that every reader accepts. A pack stays within the
-  fetch body limit of 4 GiB even when the remote advertises no pack limit (a
-  `kit+file://`, `kit+ssh://` or `kit+s3://` remote). It stays within the
-  bytes a pack read decodes, so objects that compress well no longer make a
-  pack a read refuses (see the next entry for the bound). It holds at most
-  `pack::MAX_WRITE_ENTRIES` entries.
-  A push that sealed such a pack succeeded, and a clone then failed. One rule
-  decides every seal, `pack::PackFill::seals_before`, with
-  `pack::serialized_limit` and `pack::serialized_bound`. The push, the
-  planning of its split, `kit_client::Plan::prepare` and the closure export
-  all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
-  a writer would not seal (above the fetch body limit, the decoded-byte
-  budget or `MAX_WRITE_ENTRIES` entries) with `PackError::OverReadLimit`. When the remote issues
-  upload tickets, a single commit that adds more than the data-pack budget
-  (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
-  about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
-  its packs need tickets, because a writer seals no more entries than that per pack. `Plan::prepare`
-  also cuts the server's `max_pack_bytes` to the fetch body limit.
-  `PackWriter` reports `total_decoded` and `serialized_len`, and
-  `PreparedRaw` and `PreparedDelta` report `decoded_len`. `pack::delta_decoded_len`
-  and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
-  refuses to store a pack above the fetch body limit, as the S3 transport
-  does.
 - **Breaking:** `kit_core::protocol::UploadLimits::tickets_per_advance` is
   now `data_packs_per_advance`, the data packs one advance may carry: one
   fewer than the ticket allowance. `kit_client::data_pack_budget` holds the
@@ -446,16 +372,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ticket allowance returns one step. `Plan::prepare` is unchanged for
   `max_tickets` of two or more.
 - **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
-  `ops::graph::ANCESTOR_LIMIT`, `collect_ancestor_set`,
+  `collect_ancestor_set`,
   `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
-  and `transfer::plan_pack` and `LiveSet::chunks_len` are gone. Only tests
+  and `transfer::plan_pack` are gone. Only tests
   used them. Use `reachable_objects`, `reachable_snapshot`, `plan_pack_with`
-  and the walks the commands run. `transfer::walk::Manifest` is renamed
-  `ChunkList`.
-- Planning a push no longer pairs the chunks of a file with more than 65,536
-  chunks (about 4 GiB) by content when an edit changes its chunk count. It
-  read every chunk of both versions for that. Its changed chunks are sent
-  raw.
+  and the walks the commands run.
 - `kit gc` keeps the result tree of an unfinished merge, cherry-pick, revert
   or rebase, and the commits of an unfinished bisect. A gc after the grace
   period could prune them while the operation was waiting to resume. The
@@ -470,67 +391,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing object that a ref or any other root reaches still fails gc. The
   objects of a skipped root's closure that the store still holds are not kept
   for that root, so a gc prunes them like any other unreachable object.
-- A closure of exactly the walk cap is complete. The walk reported it cut when
-  an object it had already seen was still queued, so a repository of exactly
-  10,000,000 objects failed a fetch with `ClosureTooLarge`.
-- The restore safety check hashes a file that grows past 1 MiB while it is
-  read, as 0.7.3 did. Three inputs that ended in a check error (`check working
-  tree changes: ...` or `working tree: ...`) now pass it: an untracked file
-  that grows and is not in the way, a tracked file outside the sparse scope
-  that grows, and a removed entry whose file grows. None of them is a path the
-  restore writes. The eight restore-safety messages are unchanged.
-- A file above 1 MiB at stat time that is at most 1 MiB when it is read is
-  stored as one blob, as the same bytes are in a file of that length. The
-  stored form depends only on the bytes read, whether the file grew or shrank
-  in between. Before, it was stored chunked, and the next `status` reported a
-  change that was not there.
-- `kit gc` prints ` and N temp file(s)` after the object count when it removed
-  temp files.
-- `kit bisect reset` exits non-zero with `remove state: ...` when it cannot
-  remove the state file. It ignored the failure.
-- Every `kit bisect` command that writes the state file takes the worktree
-  lock that `kit gc` holds across its mark and sweep. `bisect run` takes it
-  around each state write, because its checkout of a candidate takes the lock
-  too.
-
-- A pack a kit writer seals decodes under `DecodeLimits::default()`, the
-  1 GiB budget of the smallest reader (`kit_client::unpack`,
-  `rewrite_excluding` and the window reader), where it was bounded by the
-  cap of `PackReader::read` (2 to 16 GiB). `PackFill::seals_before` counts
-  the bytes a pack decodes and the longest delta base a reader holds at once
-  against that budget, and a push and `Plan::prepare` use it. The closure
-  export writes raw entries only, and `rewrite_excluding` checks its output
-  against the same budget. `DecodeLimits::default()`, the cap of
-  `PackReader::read`, `PACK_ENTRY_RESIDENT_COST` and `MAX_WRITE_ENTRIES`
-  (1,198,372) are unchanged. A push that sealed one pack of compressible
-  content of up to 16 GiB decoded now seals one pack for each 1 GiB.
-  - The deltas that share an external base are written next to each other,
-    so a reader holds one such base at a time. The plan lists deltas ordered
-    by base and then target, and a writer that is given a delta whose base
-    other deltas have followed counts that base as held across them, so the
-    count holds for any order. `rewrite_excluding` counts the bases from where
-    the deltas of its output lie. A history of many large bases refused on
-    read before.
-  - A compressed entry keeps its frame only when the bytes it decodes to plus
-    its whole wire payload fit that budget. The window reader charges both
-    for an entry that straddles windows, so a 1 GiB object that compresses to
-    64 MiB was refused by it. Such an entry is stored plain now.
-  - The largest commit a 7-ticket remote takes, six data packs, is still
-    6 × 1,198,372 = 7,190,232 objects. By bytes, content that compresses is
-    now limited to 6 GiB decoded (it was 6 × 16 GiB), and content that does
-    not compress is limited by the 4 GiB body limit of each pack, about
-    24 GiB, as before.
-  - A delta whose result, stream and base pass that budget on their own is
-    sent raw by the planner, and `Plan::prepare` refuses one a caller
-    supplies with `Error::Limit`. No reader of the budget takes such a delta.
-  - **Breaking:** `PackFill::seals_before` takes an `Incoming` (made with
-    `Incoming::raw` or `Incoming::delta`) where it took the sizes of the
-    entry, and `PreparedRaw::incoming` and `PreparedDelta::incoming` build
-    one. `pack::decoded_bytes_cap` is private. New: `pack::delta_base_len`,
-    `pack::delta_fits_reader`, `PackWriter::newly_held`,
-    `PackWriter::peak_resident_bases`, `PackFill::{with, entries,
-    serialized_bound}` and `Default` for `PackFill`. `PushWalk::manifests` is
-    removed from the public API: only tests used it.
 - **Breaking:** `PackError::PackfileTooLarge` reads `pack exceeds a size
   limit: ...` and names both causes, the payload sum and the decoded-byte
   budget. `PackError` has a new variant, `OverReadLimit(ReadLimit)`, which
@@ -550,131 +410,36 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length than its span, or a chunk that is not a blob, fails with it. It was
   `SyncError::Store`. It is not a trigger to rebuild the applied-pack record.
   A caller that matches `SyncError` with no wildcard has to name it.
-
-### Fixed
-
-- A push checks each chunk it sends: the plan reads the head of the chunk,
-  requires a blob and compares its length with the span of the manifest, as a
-  fetch does, and fails before anything is uploaded. `kit gc` takes a blob
-  only as a chunk, as every other reader does.
-- The closure walk holds a known blob to the types that the edge into it
-  allows. A directory entry, the tree of a commit or the target of a tag whose
-  type is not a blob, when it names an id answered `Known::Blob`, is reported
-  corrupt, as it is for a blob the walk reads.
-- The closure walk keeps only the ids of the manifests it reads and checks each
-  manifest's chunk lengths in turn after the walk, so a history with many
-  versions of a large file no longer holds all their manifests at once.
-- `kit prove --range` with an offset and length that overflow exits 65, like
-  every other bad range. A `.kit/format` longer than 64 bytes or not UTF-8 is
-  an incompatible repository format.
-- Two fetches of one clone no longer leave a record that makes every later
-  fetch report the remote unchanged. A fetch that listed the remote earlier
-  can publish an older tip after a later fetch published the new one. A fetch
-  now writes its record only when each ref it published still holds its tip.
-- `kit diff`, `kit show` and `kit format-patch` print `Binary files differ`
+- **Breaking:** the text of `KitError::TooManyChunks` reads
+  `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
+  matches the message text updates the number. The variant is the same.
+- **Breaking, CLI:** `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
+  signature does not verify, with or without trust roots. It used to print
+  `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
+  It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
+  The report still shows what the bundle disclosed.
+- **Breaking, CLI:** `kit diff`, `kit show` and `kit format-patch` print `Binary files differ`
   for a binary pair of stored blobs after a read of the first bytes of each
   side. They read both sides whole before. A stored text blob or a worktree
   file above the in-memory limit now fails `kit diff`, `kit show` and
   `kit status` with exit `66` (`NOINPUT`), as `kit add` does, where they
   exited `1`. `kit diff` prints no header line for a file whose patch it
   cannot read.
-- `kit add -p` skips a binary file after a read of its first bytes, and
-  refuses a text file above the in-memory limit, or a staged blob above it,
-  with exit `66`. It read the whole file and the whole staged blob first.
-- `kit add --dry-run` hashes without keeping any object, so a file of many new
-  chunks costs no memory per chunk.
-- `kit merge --continue` and `kit rebase --continue` hash a resolved file one
-  chunk at a time, and no longer read it whole to hash it. The scan for
-  conflict markers skips a file above 1 GiB, where it failed on one.
-- The `kit+file://` transport opens its repository lock and stripe lock files
-  without following a link. A link planted at a lock path fails the write and
-  leaves its target as it was. The files were opened through a link before.
-- Push planning fails when its closure walk reaches the 10,000,000-object
-  cap. `reachable_objects` and `reachable_snapshot`
-  return `OperationLimitExceeded` there instead of a cut set, so a push no
-  longer sends a pack without the objects past the cut and then moves the
-  branch. A cut in the walk of the remote's tip is no error: the push treats
-  the remote as holding only what the walk reached and sends the rest.
-- **Breaking:** the text of `KitError::TooManyChunks` reads
-  `chunked_blob.chunk_count > 8_388_608`. It read `> 1_000_000`. Code that
-  matches the message text updates the number. The variant is the same.
-- `kit verify-proof` exits `65` (`DATAERR`) when the commit's embedded
-  signature does not verify, with or without trust roots. It used to print
-  `ok: ... (INVALID signature)` and exit `0` unless trust roots were loaded.
-  It now prints `bad:` instead of `ok:`, and writes no `--payload-out` file.
-  The report still shows what the bundle disclosed.
-- The closure verifier now checks that the objects fit together as a
-  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
-  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
-  chunk must name a blob. The chunk lengths of a chunked blob must add up to
-  its `total_size`, and in a fixed-size layout each chunk must hold the
-  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
-  was complete. Bytes that decode to no object are now `unreferenced`
-  instead of `corrupt`, so an extra object that does not decode no longer
-  makes a map-based or pack-based verdict incomplete.
-- Disclosure verification now checks that an `Object` payload has the type
-  that the mode of the final step names: a tree for mode `Tree`, a blob or a
-  chunked blob for every other mode. Before, a step of mode `Blob` could name
-  a tree and return that tree's bytes under a path that reports a blob.
-  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
-- The closure verifier now also checks the type of the tree of a commit or a
-  remix, which must be a tree, and of the target of a tag, which must have the
-  type that the tag records. A mismatch is `corrupt`.
-- Disclosure verification now rejects a `Chunk` or `Range` payload when the
-  final step has mode `Tree`, or when there is no step. Both payloads are blob
-  data, so the final step must name a blob, an executable or a symlink.
-- `kit stash` removed ignored files from the working tree and did not save
-  them, so `stash pop` could not bring them back. A stash now removes only
-  the paths it saved. It refuses, before it changes anything, when HEAD needs
-  a path that an ignored file holds. The clean sweep of a restore keeps
-  ignored files below a directory that the target lacks, and keeps that
-  directory. The restore safety check no longer refuses an untracked
-  directory that only holds a target path or only holds ignored files.
-
-## [0.8.0] - 2026-11-10
-
-### Added
-
-- `find_merge_base_strict` and `is_ancestor_strict` in kit-core read every
-  commit they walk. On a healthy store they give the answers of
-  `find_merge_base` and `is_ancestor`; where a commit is missing, corrupt
-  or not a commit they fail with an `AncestorError` that names it, and a
-  walk that would read more than 1,000,000 commits on either side fails
-  with an error that names the limit. `find_merge_base` and `is_ancestor`
-  keep ending a path at a missing object, for push and its shallow
-  boundaries.
-- `Transport::supports_serialized_advance` and
-  `RemoteSource::supports_serialized_advance`: whether a two-ref advance is
-  serialized for writers. Both default to the atomic-advance capability.
-- Transports can offer a repository cursor, an opaque value that changes
-  whenever a ref changes (SPEC-TRANSPORT §1.2). A fetch whose remote cursor
-  equals the one its last complete fetch saw, with its remote-tracking refs
-  and their tip objects as that fetch left them, makes no other request.
-  `FetchReport::remote_unchanged` reports it. The memory transport offers a
-  cursor. The file transport offers one on Linux: it keeps a write count in
-  each stripe lock file and also reads the times of the ref directories, so
-  that a write by kit 0.7.3 or earlier, which keeps no count, changes the
-  cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
-  modified in the last 2 s. On one ext4 disk, a fetch of an unchanged
-  `kit+file://` remote with 10,000 branches takes one request and about
-  23 ms; it took 20,001 requests before. The SSH transport offers the cursor
-  of the repository that `kit serve` serves, through a new `ReadRepoCursor`
-  request (SPEC-TRANSPORT §4.2.2). A fetch of an unchanged `kit+ssh://`
-  remote takes that one request, and the 4,999-branch limit of a session does
-  not apply to it. A client that talks to an older server, and an older client
-  that talks to this server, work as before. The S3 and Connect transports
-  offer no cursor, and neither does the file transport, or `kit serve` over
-  it, on other systems: a fetch there works as before.
-- FastCDC v2 (SPEC-FASTCDC §11, draft): spread masks at normalization
-  level 2 over the v1 gear table and sizes. A v2 manifest carries
-  `chunk_size = 0x8000_0002`. kit-core exposes it through
-  `Chunker::FastCdcV2`, `store_file_object_with` and
-  `chunked_blob_from_bytes_with`. No writer uses it by default, so
-  existing repositories read and write byte-identically. The git bridge
-  refuses v2 manifests.
-
-### Changed
-
+- **Breaking:** `AppliedPacks::insert` is removed. `AppliedPacks::record_applied`
+  replaces it.
+- **Breaking:** exhaustive types gain members and two functions gain an
+  argument; a struct literal, a `match` or a call adds them.
+  `ops::revert::revert` takes a `mainline` argument, and
+  `RevertError` gains `MainlineForNonMerge` and `BadMainline`. `StashError`
+  gains `IgnoredPathInTheWay`. `transfer::packmap::ChainState` gains
+  `Rollover`. `GcReport` gains `temp_files_pruned`. `VerifyError` gains
+  `PayloadTypeMismatch`. `WorktreeError` gains `ContentTooLarge`. In libkit,
+  `transfer::fetch_with_source` takes a `prune` argument, `linked::remove`
+  takes `force_locked`, and these structs gain fields: `add::Request`
+  (`dry_run`), `commit::Request` (`allow_empty`), `merge::Request` (`no_ff`),
+  `rebase::Request` (`upstream`, `branch`), `log::Query` (`all`),
+  `branch::Query` (`scope`), `branch::Branch` (`remote`) and `linked::Entry`
+  (`locked`).
 - **Breaking:** `kit_transport_file::temp_path` is private. `create_temp`
   replaces it: it creates the temporary file next to a destination with
   `create_new`, takes the next name when one is taken, and returns the path
@@ -701,6 +466,144 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `WalkMergeBase` variants. No walk returned them: a commit that cannot be
   read gives `ReadCommit`, and an object that is not a commit gives
   `NotACommit`.
+- A push plans from what changed. It reads the history of the remote head and
+  walks only the commits the remote lacks, and for each one it keeps the tree
+  entries that differ from the trees of its parents. It no longer walks two
+  whole closures. A chunk of a large file counts toward no cap, so a repository
+  of many large files pushes. The walk's cap is 10,000,000 held commits, new
+  commits and kept objects, and it fails with `OperationLimitExceeded`
+  (`10,000,000-object push walk`). A
+  file that returns at a path the remote head's snapshot does not hold, a file
+  reverted to an older version, a directory restored after the remote head
+  deleted it, and a chunk shared with a file the remote lacks are sent again,
+  up to a whole file or directory. In a push cut into steps, each step
+  counts as the remote head for the next, so a directory deleted in one step
+  and restored in a later one is sent again too. A history the remote holds and
+  this store lacks no longer makes the push send everything.
+- Building a proof no longer holds the leaves or the levels of the tree. One
+  pass over the leaves keeps one pending node per level and the siblings the
+  proof names. A proof of a manifest of 8,388,608 chunks took about 770 MiB
+  of memory above the manifest itself and now stays within the manifest's own
+  size. The proof bytes, ids and signatures are the same.
+- A pack read charges 896 bytes of memory per entry, up from 704. The old
+  figure was below the real cost of a pack read with a long store path. A
+  client now refuses a pack of more than about 2.40 million entries (a small
+  pack) or 4.79 million entries (a 256 MiB pack), where it refused more than
+  about 3.05 million and 6.10 million. A push seals a pack before it holds
+  more than `pack::MAX_WRITE_ENTRIES` entries (1,198,372), half the
+  small-pack figure, where it sealed at the format's 10,000,000. The other
+  half of the reader's memory floor stays free for the objects of the pack.
+- A fetch keeps gc from deleting its objects with a prune guard, so
+  `kit gc --grace-secs 0` run during a fetch prunes nothing the fetch wrote or
+  reused. gc reports those objects as kept.
+- The closure check before a fetch publishes a ref reads each chunk's type
+  and no longer counts chunks toward its 10,000,000-object cap. A repository
+  of many large files can be fetched.
+- `kit add` makes the chunks of a large file durable in windows of 4,096
+  chunks, and no longer stages every chunk of the file until the command
+  ends. The staged set of one file stays bounded whatever the file's size. The
+  chunks become visible before the index names them. A command that fails
+  leaves them unreferenced, and `gc` collects them. `ObjectSink::checkpoint`
+  and `WriteBatch::checkpoint` make the objects stored so far durable and
+  visible while the batch stays open.
+- `kit status` keeps no copy of the new chunks of a changed file. The snapshot
+  holds the file path, the offset and the length of each chunk, about 64 bytes
+  per chunk, and reads a chunk back from the file when a comparison needs it.
+  The read checks the chunk's id, so a file that changed under the snapshot
+  fails the read. `ObjectSink::put_chunk_parts` and `ChunkOrigin` carry the
+  origin to a sink.
+- `kit cat`, `kit cat-file -p` and `kit show` write a chunked blob one chunk
+  at a time, and `kit rm` and `kit restore` compare a worktree file with a
+  chunked blob one chunk at a time. Memory is one chunk, whatever the file's
+  size. A closed output still ends `kit cat` and `kit show` without an error.
+  `worktree::write_blob`, `worktree::content_eq_reader` and
+  `worktree::file_content_eq` stream.
+- A `ChunkedBlob` holds up to 128 GiB and 8,388,608 chunks (SPEC-OBJECTS §7).
+  It held 1 GiB and 1,000,000 chunks before, and an earlier reader refuses a
+  larger manifest. Writers now refuse any manifest a reader refuses. Readers
+  that hold a whole file in memory (`read_blob`, blame, byte-range
+  disclosure and the git export) refuse content above 1 GiB with a typed
+  error before they read a chunk.
+- A push prefers packs of at most 256 MiB (`DEFAULT_PACK_PAYLOAD_CAP`), down
+  from 4 GiB, so a push holds one pack of that size and one prepared batch in
+  memory. `PushOptions::pack_payload_cap` is the preferred size and still takes
+  any value up to the format limit of 4 GiB. One object larger than the cap
+  still goes into a pack of its own. A push uses larger packs only when a
+  single commit cannot fit one advance's data packs otherwise: it raises the
+  size for that push, once, to what that commit needs, never past the format
+  limit, the body limit every fetch applies (4 GiB, header and trailer
+  included) or the largest pack the remote accepts. Against a server that does not
+  advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
+  of objects, where it carries about 1.5 GiB at the preferred size. A commit
+  that does not fit even then is refused before any upload, with
+  `PushSplitLimit` when its weight passes what the largest packs hold and
+  with `PushTooLarge` when packing leaves it just over. A push that raises
+  the size holds up to two packs of that size in memory (one pack and one
+  prepared batch). The `kit` command has no flag to raise the cap.
+- A push seals only packs that every reader accepts. A pack stays within the
+  fetch body limit of 4 GiB even when the remote advertises no pack limit (a
+  `kit+file://`, `kit+ssh://` or `kit+s3://` remote). It stays within the
+  bytes a pack read decodes, so objects that compress well no longer make a
+  pack a read refuses (see the decoded-byte budget entry below). It holds at most
+  `pack::MAX_WRITE_ENTRIES` entries.
+  A push that sealed such a pack succeeded, and a clone then failed. One rule
+  decides every seal, `pack::PackFill::seals_before`, with
+  `pack::serialized_limit` and `pack::serialized_bound`. The push, the
+  planning of its split, `kit_client::Plan::prepare` and the closure export
+  all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
+  a writer would not seal (above the fetch body limit, the decoded-byte
+  budget or `MAX_WRITE_ENTRIES` entries) with `PackError::OverReadLimit`. When the remote issues
+  upload tickets, a single commit that adds more than the data-pack budget
+  (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
+  about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
+  its packs need tickets, because a writer seals no more entries than that per pack. `Plan::prepare`
+  also cuts the server's `max_pack_bytes` to the fetch body limit.
+  `PackWriter` reports `total_decoded` and `serialized_len`, and
+  `PreparedRaw` and `PreparedDelta` report `decoded_len`. `pack::delta_decoded_len`
+  and `pack::MIN_TOTAL_DECODED` are public. `kit+file://`
+  refuses to store a pack above the fetch body limit, as the S3 transport
+  does.
+- Planning a push no longer pairs the chunks of a file with more than 65,536
+  chunks (about 4 GiB) by content when an edit changes its chunk count. It
+  read every chunk of both versions for that. Its changed chunks are sent
+  raw.
+- `kit gc` prints ` and N temp file(s)` after the object count when it removed
+  temp files.
+- A pack a kit writer seals decodes under `DecodeLimits::default()`, the
+  1 GiB budget of the smallest reader (`kit_client::unpack`,
+  `rewrite_excluding` and the window reader), where it was bounded by the
+  cap of `PackReader::read` (2 to 16 GiB). `PackFill::seals_before` counts
+  the bytes a pack decodes and the longest delta base a reader holds at once
+  against that budget, and a push and `Plan::prepare` use it. The closure
+  export writes raw entries only, and `rewrite_excluding` checks its output
+  against the same budget. `DecodeLimits::default()` and the cap of
+  `PackReader::read` are unchanged. A push that sealed one pack of compressible
+  content of up to 16 GiB decoded now seals one pack for each 1 GiB.
+  - The deltas that share an external base are written next to each other,
+    so a reader holds one such base at a time. The plan lists deltas ordered
+    by base and then target, and a writer that is given a delta whose base
+    other deltas have followed counts that base as held across them, so the
+    count holds for any order. `rewrite_excluding` counts the bases from where
+    the deltas of its output lie. A history of many large bases refused on
+    read before.
+  - A compressed entry keeps its frame only when the bytes it decodes to plus
+    its whole wire payload fit that budget. The window reader charges both
+    for an entry that straddles windows, so a 1 GiB object that compresses to
+    64 MiB was refused by it. Such an entry is stored plain now.
+  - The largest commit a 7-ticket remote takes, six data packs, is still
+    6 × 1,198,372 = 7,190,232 objects. By bytes, content that compresses is
+    now limited to 6 GiB decoded (it was 6 × 16 GiB), and content that does
+    not compress is limited by the 4 GiB body limit of each pack, about
+    24 GiB, as before.
+  - A delta whose result, stream and base pass that budget on their own is
+    sent raw by the planner, and `Plan::prepare` refuses one a caller
+    supplies with `Error::Limit`. No reader of the budget takes such a delta.
+  - `PackFill::seals_before` takes an `Incoming` (made with
+    `Incoming::raw` or `Incoming::delta`), and `PreparedRaw::incoming` and
+    `PreparedDelta::incoming` build one. Also public: `pack::delta_base_len`,
+    `pack::delta_fits_reader`, `PackWriter::newly_held`,
+    `PackWriter::peak_resident_bases`, `PackFill::{with, entries,
+    serialized_bound}` and `Default` for `PackFill`.
 - `kit log -n N` from one revision streams the history while each commit
   has at most one followed parent, and stops after N commits. On one ext4
   disk with 1,000,000 linear commits, `kit log -n 20` went from about 8 s
@@ -739,8 +642,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full closure of the tip again and every clone downloaded it again, and a
   chain on any other transport grew by one node with each push. The node
   holds everything the chain held, so every transport and every head
-  condition allows it. A node lists at most 1,024 packs: a chain that holds
-  more keeps appending. A fresh clone downloads every pack of the branch.
+  condition allows it. A node lists at most 4,096 packs
+  (`ROLLOVER_MAX_PACKS`), 131,080 bytes: a chain that holds more keeps
+  appending. A reader accepts the node as before. A server that limits a node to 1,024 packs must accept 4,096
+  before it is used with this client. A fresh clone downloads every pack of the branch.
   With the `fetch-grow` row of the multi-writer benchmark, the largest
   upload of one push among 1,000 pushes of a 1 KiB change went from 740,447
   bytes to 32,120 bytes, and a clone after them from 41 packs and 84 requests
@@ -770,6 +675,86 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A push checks each chunk it sends: the plan reads the head of the chunk,
+  requires a blob and compares its length with the span of the manifest, as a
+  fetch does, and fails before anything is uploaded. `kit gc` takes a blob
+  only as a chunk, as every other reader does.
+- The closure walk holds a known blob to the types that the edge into it
+  allows. A directory entry, the tree of a commit or the target of a tag whose
+  type is not a blob, when it names an id answered `Known::Blob`, is reported
+  corrupt, as it is for a blob the walk reads.
+- The closure walk keeps only the ids of the manifests it reads and checks each
+  manifest's chunk lengths in turn after the walk, so a history with many
+  versions of a large file no longer holds all their manifests at once.
+- `kit prove --range` with an offset and length that overflow exits 65, like
+  every other bad range. A `.kit/format` longer than 64 bytes or not UTF-8 is
+  an incompatible repository format.
+- Two fetches of one clone no longer leave a record that makes every later
+  fetch report the remote unchanged. A fetch that listed the remote earlier
+  can publish an older tip after a later fetch published the new one. A fetch
+  now writes its record only when each ref it published still holds its tip.
+- `kit add -p` skips a binary file after a read of its first bytes, and
+  refuses a text file above the in-memory limit, or a staged blob above it,
+  with exit `66`. It read the whole file and the whole staged blob first.
+- `kit merge --continue` and `kit rebase --continue` hash a resolved file one
+  chunk at a time, and no longer read it whole to hash it. The scan for
+  conflict markers skips a file above 1 GiB, where it failed on one.
+- The `kit+file://` transport opens its repository lock and stripe lock files
+  without following a link. A link planted at a lock path fails the write and
+  leaves its target as it was. The files were opened through a link before.
+- `reachable_objects` and `reachable_snapshot` return
+  `OperationLimitExceeded` at the 10,000,000-object cap instead of a cut set.
+  A push no longer sends a pack without the objects past a cut and then moves
+  the branch: its walk fails at its own cap.
+- The closure verifier now checks that the objects fit together as a
+  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
+  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
+  chunk must name a blob. The chunk lengths of a chunked blob must add up to
+  its `total_size`, and in a fixed-size layout each chunk must hold the
+  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
+  was complete. Bytes that decode to no object are now `unreferenced`
+  instead of `corrupt`, so an extra object that does not decode no longer
+  makes a map-based or pack-based verdict incomplete.
+- Disclosure verification now checks that an `Object` payload has the type
+  that the mode of the final step names: a tree for mode `Tree`, a blob or a
+  chunked blob for every other mode. Before, a step of mode `Blob` could name
+  a tree and return that tree's bytes under a path that reports a blob.
+  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
+- The closure verifier now also checks the type of the tree of a commit or a
+  remix, which must be a tree, and of the target of a tag, which must have the
+  type that the tag records. A mismatch is `corrupt`.
+- Disclosure verification now rejects a `Chunk` or `Range` payload when the
+  final step has mode `Tree`, or when there is no step. Both payloads are blob
+  data, so the final step must name a blob, an executable or a symlink.
+- `kit stash` removed ignored files from the working tree and did not save
+  them, so `stash pop` could not bring them back. A stash now removes only
+  the paths it saved. It refuses, before it changes anything, when HEAD needs
+  a path that an ignored file holds. The clean sweep of a restore keeps
+  ignored files below a directory that the target lacks, and keeps that
+  directory. The restore safety check no longer refuses an untracked
+  directory that only holds a target path or only holds ignored files.
+- A pull no longer removes an empty untracked directory inside a subtree the
+  new tip did not change.
+- A closure of exactly the walk cap is complete. The walk reported it cut when
+  an object it had already seen was still queued, so a repository of exactly
+  10,000,000 objects failed a fetch with `ClosureTooLarge`.
+- The restore safety check hashes a file that grows past 1 MiB while it is
+  read, as 0.7.3 did. Three inputs that ended in a check error (`check working
+  tree changes: ...` or `working tree: ...`) now pass it: an untracked file
+  that grows and is not in the way, a tracked file outside the sparse scope
+  that grows, and a removed entry whose file grows. None of them is a path the
+  restore writes. The eight restore-safety messages are unchanged.
+- A file above 1 MiB at stat time that is at most 1 MiB when it is read is
+  stored as one blob, as the same bytes are in a file of that length. The
+  stored form depends only on the bytes read, whether the file grew or shrank
+  in between. Before, it was stored chunked, and the next `status` reported a
+  change that was not there.
+- `kit bisect reset` exits non-zero with `remove state: ...` when it cannot
+  remove the state file. It ignored the failure.
+- Every `kit bisect` command that writes the state file takes the worktree
+  lock that `kit gc` holds across its mark and sweep. `bisect run` takes it
+  around each state write, because its checkout of a candidate takes the lock
+  too.
 - Branch and remote names up to the file system limit work for create, fetch
   and clone. Ref, index and file-transport writes name their temporary file
   `.kit.tmp.<pid>.<seq>`, which does not contain the name of the file it
@@ -799,12 +784,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   print the newest commits as if they were the whole history. The excluded
   side of a range (`A..B`, `A...B`) shares that limit; it used to stop
   silently at 10,000 commits, which let excluded commits through.
-- `collect_ancestor_set`, `kit rebase` and `kit bisect` fail with an error
-  that names the limit when an ancestor walk reaches 10,000 commits, and
-  a rebase fails when the branch has more than 10,000 commits to replay.
-  They used to stop there silently: a rebase could replay only the newest
-  commits of a long branch, or replay commits its base already holds, and
-  bisect could offer commits that are known good.
+- `kit rebase` and `kit bisect` walk up to 1,000,000 ancestors of the base of
+  a rebase and of a good commit, as `merge` and `log` do. A longer walk fails
+  with an error that names the 1,000,000-commit limit. A rebase still replays
+  at most 10,000 commits, and a bisect keeps at most 10,000 skipped commits;
+  one more fails with an error. They used to stop at 10,000 ancestors
+  silently: a rebase could replay only the newest commits of a long branch,
+  or replay commits its base already holds, and bisect could offer commits
+  that are known good.
 - `kit rebase` fails before it changes anything when a commit to replay
   or an ancestor of the base is missing, corrupt or not a commit. It used
   to end the walk there. It then dropped a missing commit of the branch
@@ -835,11 +822,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `libkit::merge::Error::History`, `libkit::diff::Error::History` and
   `libkit::branch::Error::History` carry the error. Push keeps the lenient
   walks.
-- The two sides of a `kit log` range share one budget of 1,000,000
-  commits, as the documentation says. Each side used to have its own, so
-  a range could read up to twice the limit.
 - `kit bisect` fails with an error that names the limit when a range has
-  more than 10,000 candidates. Its candidate walk used to have no limit.
+  more than 1,000,000 candidates. Its candidate walk used to have no limit.
 - `kit git format-patch` fails before it writes a patch when the two sides
   of its range would read more than 1,000,000 commits together, with an
   error that names the limit. Both walks used to have no limit.
