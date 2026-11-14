@@ -244,7 +244,7 @@ pub(crate) struct Reach {
     frontier: bool,
 }
 
-/// The caller's answer for one id at the frontier of [`verify_push`] and the
+/// The caller's answer for one id at the frontier of [`crate::verify::verify_push`] and the
 /// other closure walks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

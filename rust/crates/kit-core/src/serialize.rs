@@ -256,7 +256,7 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
 /// decode checks 1 and 3 of SPEC-OBJECTS §7. This is the header step of the
 /// manifest decoder and of [`crate::merkle::ChunkedIdFold`]; the entries
 /// carry the rest of the checks. The whole header check, which needs the
-/// chunk size too, is [`check_chunked_total_size`], run by a disclosure
+/// chunk size too, is `check_chunked_total_size`, run by a disclosure
 /// verifier that holds no entries.
 ///
 /// # Errors
