@@ -396,8 +396,8 @@ impl BmtFold {
 /// function, and [`Self::finish`] checks the entry count and the last end. So
 /// the fold refuses the manifests a decoder refuses, at the same entry. The
 /// caller still reads the prologue and checks that the object is
-/// [`crate::serialize::CHUNKED_HEADER_LEN`] `+`
-/// [`crate::serialize::CHUNKED_ENTRY_LEN`] `* chunk_count` bytes long, which is the
+/// [`crate::serialize::CHUNKED_HEADER_LEN`] plus
+/// [`crate::serialize::CHUNKED_ENTRY_LEN`] bytes per entry, which is the
 /// decoder's checks 1 and 2.
 #[derive(Debug)]
 pub struct ChunkedIdFold {
@@ -2167,7 +2167,6 @@ mod tests {
         let bytes =
             crate::serialize::serialize(&crate::object::Object::ChunkedBlob(manifest.clone()))
                 .unwrap();
-        // Prologue 6, total_size 8, chunk_size 4, chunk_count 4.
         let entries = &bytes[crate::serialize::CHUNKED_HEADER_LEN..];
         let mut fold =
             ChunkedIdFold::new(manifest.total_size(), manifest.chunk_size(), 1000).unwrap();
