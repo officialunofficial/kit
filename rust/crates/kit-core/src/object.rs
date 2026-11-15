@@ -987,8 +987,12 @@ pub enum KitError {
     /// §7, decode check 5).
     #[error("chunked blob has a total_size but no chunks")]
     ChunkedBlobNoChunks,
-    /// A chunked blob manifest is not `22 + 40 * chunk_count` bytes long
-    /// (SPEC-OBJECTS §7, decode check 2).
+    /// A chunked blob manifest is not [`CHUNKED_HEADER_LEN`] `+`
+    /// [`CHUNKED_ENTRY_LEN`] `* chunk_count` bytes long (SPEC-OBJECTS §7,
+    /// decode check 2).
+    ///
+    /// [`CHUNKED_HEADER_LEN`]: crate::serialize::CHUNKED_HEADER_LEN
+    /// [`CHUNKED_ENTRY_LEN`]: crate::serialize::CHUNKED_ENTRY_LEN
     #[error("chunked blob is not 22 + 40 * chunk_count bytes long")]
     ChunkedBlobLength,
     /// A chunk's end offset is not above the end before it (the first
