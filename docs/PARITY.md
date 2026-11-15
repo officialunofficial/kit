@@ -44,7 +44,7 @@ These divergences stay while kit uses BLAKE3.
 
 - Submodules and subtrees.
 - Hooks, including `core.hooksPath`.
-- The full refspec grammar. `push` takes `<src>:<dst>` for branches and
+- The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches and
   nothing else: no wildcard, no leading `+` and no ref outside `refs/heads/`.
   `push` does not take `--tags` or `--delete`. A remote delete and a tag
   transfer need a transport verb that kit does not have.
@@ -327,7 +327,8 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   reads `--max-count=-1` as no limit. `rev-list HEAD` in a repository
   without a commit is an error, as in Git.
 - **`push` refspec.** `push <remote> <src>:<dst>` pushes the local branch
-  `<src>` to the remote branch `<dst>`. Both sides must be branches, as a
+  `<src>` to the remote branch `<dst>`, and `push <remote> <branch>` pushes
+  `<branch>` under its own name, the current branch or not. Both sides must be branches, as a
   name or as `refs/heads/<name>`. A refspec push records no upstream unless
   `-u` is set. Git also takes a tag, a wildcard, a leading `+` and an empty
   `<src>`; kit rejects each of them.

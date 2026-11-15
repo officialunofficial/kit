@@ -117,7 +117,7 @@ pub enum StoreError {
     #[error(".kit already exists in this directory")]
     AlreadyInitialized,
     #[error(
-        "repository object-addressing format is {found:?}, expected \"{}\". This kit cannot read the repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.",
+        "repository object-addressing format is {found:?}, expected \"{}\". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.",
         FORMAT_VALUE
     )]
     IncompatibleRepoFormat { found: Option<String> },
@@ -1302,6 +1302,13 @@ mod tests {
             ObjectStore::open(&layout),
             Err(StoreError::IncompatibleRepoFormat { found: Some(ref found) }) if found == "bmt-v1"
         ));
+        // The error says how to move the repository.
+        let message = ObjectStore::open(&layout).err().unwrap().to_string();
+        assert!(
+            message.contains("`kit git export` with kit 0.7.3"),
+            "{message}"
+        );
+        assert!(message.contains("`kit git import`"), "{message}");
     }
 
     #[test]

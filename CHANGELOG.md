@@ -7,6 +7,37 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `kit push <remote> <branch>` pushes the local branch `<branch>` under its
+  own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
+  be the current one. Like any refspec push, it records an upstream only with
+  `-u`. `libkit::push::parse_refspec` accepts a lone branch the same way; it
+  returned an error for it before.
+
+### Changed
+
+- The error for a repository in the `bmt-v1` format, and for any other
+  unreadable `.kit/format`, now says how to move a 0.7.3 repository: run
+  `kit git export` with kit 0.7.3, then `kit git import` with this kit, or
+  commit a checkout into a new `kit init` repository.
+- The top-level `kit help`, `docs/CLI.md`, `man/kit.1` and the shell
+  completions list flags that `--help` already showed: `checkout -f`, the
+  `kit branch` options, `init -q`, `add -n`, the `log` display flags,
+  `rev-list -n` and ranges, `show-ref <pattern>`, `commit --allow-empty`,
+  `pull --rebase` and `--no-ff`, `fetch --prune`, `push <remote> <src>:<dst>`,
+  `rebase --onto` and `--skip`, `stash push` and `rev-parse --verify`.
+- The `gc` error for a manifest chunk that is not a blob now reads `chunk
+  <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
+  delta`, but gc refuses a delta there too.
+
+### Fixed
+
+- A push plan checks each chunk of a new manifest against the span that the
+  manifest gives it, also when the plan sent the chunk for another manifest
+  or the manifest it replaces already lists it. A manifest that every fetch
+  refuses is no longer pushed to a remote that checks nothing.
+
 ## [0.8.0] - 2026-11-14
 
 kit 0.8.0 changes the repository format. A chunked file's id now commits the

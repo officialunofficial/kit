@@ -224,7 +224,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "-c -C --help" -- "$cur") )
             ;;
         checkout)
-            COMPREPLY=( $(compgen -W "-b -B --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-b -B -f --force --help" -- "$cur") )
             ;;
         merge-base)
             COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )

@@ -41,7 +41,9 @@ struct PushOpts {
     /// else the configured default remote).
     remote: Option<String>,
     /// Push the local branch `<src>` to the remote branch `<dst>` as
-    /// `<src>:<dst>`. Each side is a branch name or a `refs/heads/` ref.
+    /// `<src>:<dst>`, or a branch as `<branch>` for `<branch>:<branch>`.
+    /// The branch need not be the current one. Each side is a branch name or
+    /// a `refs/heads/` ref.
     /// Wildcards, a leading `+`, an empty `<src>` (a delete) and refs outside
     /// `refs/heads/` are errors. Needs a `<remote>`.
     #[arg(requires = "remote", conflicts_with = "all")]

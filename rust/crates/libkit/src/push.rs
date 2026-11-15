@@ -60,8 +60,8 @@ pub enum Error {
     NoSuchBranch(String),
 }
 
-/// A push refspec `<src>:<dst>`: the local branch `src` goes to the remote
-/// branch `dst`. Both are branch names without a prefix.
+/// A push refspec: the local branch `src` goes to the remote branch `dst`.
+/// Both are branch names without a prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refspec {
     /// The local branch.
@@ -70,14 +70,15 @@ pub struct Refspec {
     pub dst: String,
 }
 
-/// Parse a refspec `<src>:<dst>`. Each side is a branch name or a full
-/// `refs/heads/<name>` ref. The grammar of a ref name leaves no room for a
+/// Parse a refspec `<src>:<dst>`, or a lone `<branch>`, which stands for
+/// `<branch>:<branch>` as in `git push <remote> <branch>`. Each side is a
+/// branch name or a full `refs/heads/<name>` ref. The grammar of a ref name leaves no room for a
 /// wildcard, a leading `+` or a second `:`, and each side obeys the length
 /// bound of a pushed branch.
 ///
 /// # Errors
-/// [`Error::Refspec`] when the text is over the length bound, has no `:`,
-/// has an empty or deleting side, has a wildcard or a leading `+`, names a
+/// [`Error::Refspec`] when the text is over the length bound, has an empty
+/// or deleting side, has a wildcard or a leading `+`, names a
 /// ref outside `refs/heads/`, or names a branch that cannot be pushed.
 pub fn parse_refspec(spec: &str) -> Result<Refspec, Error> {
     if spec.len() > 2 * refs::MAX_REF_NAME_BYTES + 1 {
@@ -90,8 +91,10 @@ pub fn parse_refspec(spec: &str) -> Result<Refspec, Error> {
     if spec.contains(['*', '?', '[']) {
         return bad("wildcards are not supported");
     }
-    let Some((src, dst)) = spec.split_once(':') else {
-        return bad("expected <src>:<dst>");
+    let (src, dst) = match spec.split_once(':') {
+        Some(sides) => sides,
+        None if spec.is_empty() => return bad("expected <branch> or <src>:<dst>"),
+        None => (spec, spec),
     };
     if src.is_empty() {
         return bad("deleting a remote ref is not supported");
