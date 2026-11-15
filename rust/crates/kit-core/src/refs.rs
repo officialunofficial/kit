@@ -179,6 +179,9 @@ pub const BRANCH_REF_PREFIX: &str = "refs/heads/";
 pub const PACKMAP_REF_PREFIX: &str = "refs/kit/packmap/";
 /// The wire name prefix of a tag.
 pub const TAG_REF_PREFIX: &str = "refs/tags/";
+/// The wire name prefix of a tag's transfer chain ref, valued like a packmap
+/// (`refs/kit/tagmap/<tag>`, SPEC-REFS §2).
+pub const TAGMAP_REF_PREFIX: &str = "refs/kit/tagmap/";
 /// The ref that carries published bridge attestations on a git mirror
 /// (SPEC-GIT-BRIDGE §11).
 pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";
@@ -187,11 +190,13 @@ pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";
 /// `refs/heads/<branch>` and `refs/kit/packmap/<branch>`, and each must
 /// fit [`MAX_REF_NAME_BYTES`], so the longer prefix sets the bound (495).
 pub const MAX_BRANCH_NAME_BYTES: usize = MAX_REF_NAME_BYTES - PACKMAP_REF_PREFIX.len();
-/// Longest new tag name, in bytes: `refs/tags/<tag>` must fit
-/// [`MAX_REF_NAME_BYTES`] (502).
-pub const MAX_TAG_NAME_BYTES: usize = MAX_REF_NAME_BYTES - TAG_REF_PREFIX.len();
+/// Longest new tag name, in bytes: a tag travels as `refs/tags/<tag>` and
+/// `refs/kit/tagmap/<tag>`, and each must fit [`MAX_REF_NAME_BYTES`], so the
+/// longer prefix sets the bound (496).
+pub const MAX_TAG_NAME_BYTES: usize = MAX_REF_NAME_BYTES - TAGMAP_REF_PREFIX.len();
 
 const _: () = assert!(PACKMAP_REF_PREFIX.len() >= BRANCH_REF_PREFIX.len());
+const _: () = assert!(TAGMAP_REF_PREFIX.len() >= TAG_REF_PREFIX.len());
 
 /// Which name bound a [`RefError::RefNameTooLong`] broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,7 +238,10 @@ impl RefNameKind {
                 ", because refs/heads/<name> and refs/kit/packmap/<name> must \
                  each fit the 512-byte ref-name limit"
             }
-            Self::Tag => ", because refs/tags/<name> must fit the 512-byte ref-name limit",
+            Self::Tag => {
+                ", because refs/tags/<name> and refs/kit/tagmap/<name> must \
+                 each fit the 512-byte ref-name limit"
+            }
         }
     }
 }
@@ -308,6 +316,33 @@ pub fn check_pushable_branch(branch: &str) -> RefResult<()> {
     check_new_name(&format!("{BRANCH_REF_PREFIX}{branch}"), RefNameKind::Ref)
 }
 
+/// Check the wire names a transfer of tag `tag` uses, `refs/tags/<tag>` and
+/// `refs/kit/tagmap/<tag>`: each must be a valid ref name, so the tag has at
+/// most [`MAX_TAG_NAME_BYTES`] bytes and at most [`MAX_REF_SEGMENTS`] less
+/// three segments. A local tag made before this bound stays readable and
+/// deletable, but is neither pushed nor fetched.
+///
+/// # Errors
+/// [`RefError::RefNameTooLong`] for a tag over [`MAX_TAG_NAME_BYTES`], and
+/// [`RefError::InvalidRefName`] naming `tag` for any other failure.
+pub fn check_pushable_tag(tag: &str) -> RefResult<()> {
+    check_new_name(tag, RefNameKind::Tag)?;
+    if validate_ref_name_grammar(&format!("{TAGMAP_REF_PREFIX}{tag}")) {
+        Ok(())
+    } else {
+        Err(RefError::InvalidRefName(tag.to_owned()))
+    }
+}
+
+/// Check a new name of `kind` for a local write: [`check_new_name`], and for a
+/// tag, [`check_pushable_tag`].
+fn check_new_local_name(name: &str, kind: RefNameKind) -> RefResult<()> {
+    match kind {
+        RefNameKind::Tag => check_pushable_tag(name),
+        RefNameKind::Ref | RefNameKind::Branch => check_new_name(name, kind),
+    }
+}
+
 /// Check a local branch or tag name about to be written under `sub_dir`.
 /// A name within `kind`'s bound always passes. A longer one passes only
 /// while the ref already exists and fits [`MAX_REF_NAME_BYTES`]: a ref
@@ -324,7 +359,7 @@ fn check_local_write(
     let stored_before_bounds = name.len() <= MAX_REF_NAME_BYTES
         && name_grammar_ok(name, usize::MAX)
         && ref_path(common_dir, sub_dir, name).is_file();
-    match check_new_name(name, kind) {
+    match check_new_local_name(name, kind) {
         Err(RefError::RefNameTooLong { .. } | RefError::InvalidRefName(_))
             if stored_before_bounds =>
         {
@@ -1618,12 +1653,12 @@ mod tests {
 
     /// A new branch name must leave `refs/heads/<b>` and
     /// `refs/kit/packmap/<b>` within 512 bytes (495), a new tag
-    /// `refs/tags/<t>` (502); a branch created before that bound stays
-    /// writable locally but cannot be pushed.
+    /// `refs/tags/<t>` and `refs/kit/tagmap/<t>` (496); a branch or tag
+    /// created before that bound stays writable locally but cannot be pushed.
     #[test]
     fn branch_and_tag_bounds_derive_from_their_wire_names() {
         assert_eq!(MAX_BRANCH_NAME_BYTES, 495);
-        assert_eq!(MAX_TAG_NAME_BYTES, 502);
+        assert_eq!(MAX_TAG_NAME_BYTES, 496);
         let (_dir, layout) = fresh_repo();
         let id = h("c");
         update_ref(&layout, &long_name(495), RefWriteCondition::Missing, &id).unwrap();
@@ -1648,13 +1683,39 @@ mod tests {
             write_head_branch(&layout, &long_name(496)),
             Err(RefError::RefNameTooLong { .. })
         ));
-        write_tag(&layout, &long_name(502), &id).unwrap();
-        let err = write_tag(&layout, &long_name(503), &id).unwrap_err();
+        write_tag(&layout, &long_name(496), &id).unwrap();
+        check_pushable_tag(&long_name(496)).unwrap();
+        let err = write_tag(&layout, &long_name(497), &id).unwrap_err();
         assert!(
             err.to_string()
-                .contains("tag name too long (503 bytes; at most 502"),
+                .contains("tag name too long (497 bytes; at most 496")
+                && err.to_string().contains("refs/kit/tagmap/<name>"),
             "{err}"
         );
+        // 29 segments fit `refs/kit/tagmap/<t>`; 30 do not, though the short
+        // name alone is within the 32-segment bound.
+        let deep = |n: usize| vec!["s"; n].join("/");
+        write_tag(&layout, &deep(29), &id).unwrap();
+        check_pushable_tag(&deep(29)).unwrap();
+        assert!(matches!(
+            write_tag(&layout, &deep(30), &id),
+            Err(RefError::InvalidRefName(name)) if name == deep(30)
+        ));
+        assert!(matches!(
+            check_pushable_tag(&deep(30)),
+            Err(RefError::InvalidRefName(name)) if name == deep(30)
+        ));
+
+        // A 500-byte tag made before the bound: readable, writable,
+        // deletable, not pushable.
+        let old_tag = long_name(500);
+        let path = ref_path(layout.common_dir(), TAGS_DIR, &old_tag);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, encode_ref_wire(&id)).unwrap();
+        assert_eq!(read_tag(&layout, &old_tag).unwrap(), Some(id));
+        write_tag(&layout, &old_tag, &h("next")).unwrap();
+        assert!(check_pushable_tag(&old_tag).is_err());
+        delete_tag(&layout, &old_tag).unwrap();
 
         // A 500-byte branch made before the bound: writable, not pushable.
         let old = long_name(500);

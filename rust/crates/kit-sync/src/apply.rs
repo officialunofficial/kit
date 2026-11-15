@@ -16,7 +16,7 @@ use kit_core::store::ObjectStore;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
-use crate::packmap::branch_ref_hint;
+use crate::packmap::chain_label;
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
 
@@ -34,15 +34,14 @@ pub(crate) struct ChainApplied {
 /// Download one pack and check its size and its bytes against `key`.
 fn download_checked_pack(
     source: &dyn RemoteSource,
-    branch: &str,
-    ref_name: &str,
+    head_ref: &str,
     key: &PackKey,
 ) -> Result<Vec<u8>, SyncError> {
-    let pack = match source.download_pack_via_ref(key, ref_name) {
+    let pack = match source.download_pack_via_ref(key, head_ref) {
         Ok(b) => b,
         Err(error) if error.is_not_found() => {
             return Err(SyncError::AdvertisedPackMissing {
-                branch: branch.to_owned(),
+                branch: chain_label(head_ref).to_owned(),
                 pack: key.to_hex(),
                 source: error,
             });
@@ -56,7 +55,8 @@ fn download_checked_pack(
     Ok(pack)
 }
 
-/// Download and apply every pack of `chain`, oldest first, into `store`,
+/// Download and apply every pack of `chain`, the chain of `head_ref`, oldest
+/// first, into `store`,
 /// recording each in `applied` as soon as its objects are committed and its
 /// signatures checked. A pack already recorded is skipped. `done` counts the
 /// work as it goes, including on failure.
@@ -75,13 +75,12 @@ pub(crate) fn apply_pack_chain(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
-    branch: &str,
+    head_ref: &str,
     chain: &[Hash],
     applied: &mut AppliedPacks,
     require_signed: bool,
     done: &mut ChainApplied,
 ) -> Result<(), SyncError> {
-    let ref_name = branch_ref_hint(branch);
     for &pk in chain {
         if observer.cancelled() {
             return Err(SyncError::Interrupted);
@@ -91,7 +90,7 @@ pub(crate) fn apply_pack_chain(
             done.skipped += 1;
             continue;
         }
-        let pack = download_checked_pack(source, branch, &ref_name, &key)?;
+        let pack = download_checked_pack(source, head_ref, &key)?;
         done.objects += apply_pack(
             store,
             observer,
@@ -198,7 +197,7 @@ mod tests {
             source,
             &NoopObserver,
             "origin",
-            "main",
+            "refs/heads/main",
             chain,
             applied,
             false,
@@ -324,6 +323,9 @@ mod tests {
         fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, crate::SourceError> {
             Ok(Vec::new())
         }
+        fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, crate::SourceError> {
+            Ok(Vec::new())
+        }
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, crate::SourceError> {
             Ok(None)
         }
@@ -346,7 +348,6 @@ mod tests {
     fn download_zero_pack(len: usize) -> Result<Vec<u8>, SyncError> {
         download_checked_pack(
             &ZeroPacks { len },
-            "main",
             "refs/heads/main",
             &PackKey::from_hash(h("zero pack")),
         )

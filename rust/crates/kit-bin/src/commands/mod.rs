@@ -23,6 +23,7 @@ pub mod conflict;
 pub mod diff;
 pub mod epoch;
 pub mod fetch;
+mod fetched_tags;
 pub mod for_each_ref;
 pub mod gc;
 #[cfg(feature = "git-bridge")]

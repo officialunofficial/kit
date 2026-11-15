@@ -222,6 +222,10 @@ complete -c kit -n "__fish_seen_subcommand_from push" \
     -l dry-run -d "Show what would be pushed"
 complete -c kit -n "__fish_seen_subcommand_from clone" \
     -l sparse -d "Sparse checkout"
+complete -c kit -n "__fish_seen_subcommand_from clone" \
+    -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from clone" \
+    -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from branch" \
     -s v -l verbose -d "Show abbreviated id + subject"
 complete -c kit -n "__fish_seen_subcommand_from branch" \
@@ -503,11 +507,15 @@ complete -c kit -n "__fish_seen_subcommand_from revert" -l format -d "Output for
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l all -d "Pull from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l rebase -d "Replay the current branch onto the fetched branch"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-ff -d "Always create a merge commit"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from pull; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l all -d "Fetch from every configured remote"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s p -l prune -d "Delete remote-tracking refs gone from the remote"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l tags -d "Fetch every remote tag (the default)"
+complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l no-tags -d "Fetch no tags"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l no-verify-signatures -d "Skip signature verification of fetched objects"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from fetch; and not __fish_seen_subcommand_from git" -s q -l quiet -d "Suppress transfer progress output"

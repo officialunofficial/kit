@@ -322,7 +322,9 @@ fn multi_branch_fetch_persists_the_union_of_every_branchs_pack_digests() {
 
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    let n = fetch_all(bob.path(), &tx, "default").expect("single fetch across all branches");
+    let n = fetch_all(bob.path(), &tx, "default")
+        .expect("single fetch across all branches")
+        .branches_fetched;
     assert_eq!(n, 3, "fetch must report all three branches");
 
     let record_path = bob.path().join(".kit/applied-packs/default");
@@ -657,7 +659,9 @@ fn stale_listing_skips_a_branch_whose_head_and_packmap_are_gone() {
     let (alice, tx) = stale_remote(false);
     let bob = tempfile::tempdir().unwrap();
     init_repo(bob.path());
-    let fetched = fetch_all(bob.path(), &tx, "default").expect("stale entry is skipped");
+    let fetched = fetch_all(bob.path(), &tx, "default")
+        .expect("stale entry is skipped")
+        .branches_fetched;
     assert_eq!(fetched, 1, "only the live branch counts");
     let bob_layout = RepoLayout::single(bob.path());
     let alice_tip = refs::read_ref(&RepoLayout::single(alice.path()), "main")

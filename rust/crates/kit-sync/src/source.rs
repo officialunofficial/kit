@@ -17,6 +17,11 @@ use crate::error::SyncError;
 pub trait RemoteSource {
     /// Every branch (`refs/heads/*`) with its tip, named without the prefix.
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError>;
+    /// Every ref under `prefix` (`refs/tags/`, `refs/kit/tagmap/`) with its
+    /// value, named without the prefix and sorted by name, as
+    /// [`Transport::list_refs`] returns them. Required, so that no source can
+    /// silently fetch no tags.
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError>;
     /// A strong read of one ref by its full name (`refs/heads/main`,
     /// `refs/kit/packmap/main`).
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError>;
@@ -263,6 +268,10 @@ impl RemoteSource for TransportSource<'_> {
         self.transport
             .list_refs("refs/heads/")
             .map_err(SourceError::from)
+    }
+
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        self.transport.list_refs(prefix).map_err(SourceError::from)
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
@@ -526,6 +535,9 @@ mod tests {
         fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
+        fn list_refs(&self, _: &str) -> Result<Vec<Ref>, SourceError> {
+            Err(SourceError::Remote(Box::new(self.0.clone())))
+        }
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
             Err(SourceError::Remote(Box::new(self.0.clone())))
         }
@@ -544,6 +556,9 @@ mod tests {
     struct Advance(bool);
     impl RemoteSource for Advance {
         fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
+            Ok(Vec::new())
+        }
+        fn list_refs(&self, _: &str) -> Result<Vec<Ref>, SourceError> {
             Ok(Vec::new())
         }
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
@@ -586,9 +601,13 @@ mod tests {
         else {
             panic!("wrong repository error")
         };
-        let chain_error =
-            crate::packmap::walk_pack_chain(&source, &crate::NoopObserver, "main", [0; 32])
-                .unwrap_err();
+        let chain_error = crate::packmap::walk_pack_chain(
+            &source,
+            &crate::NoopObserver,
+            "refs/heads/main",
+            [0; 32],
+        )
+        .unwrap_err();
         let SyncError::PackChainInvalid {
             source: Some(chain_cause),
             ..
@@ -607,7 +626,7 @@ mod tests {
             &source,
             &crate::NoopObserver,
             "origin",
-            "main",
+            "refs/heads/main",
             &[[0; 32]],
             &mut applied,
             false,

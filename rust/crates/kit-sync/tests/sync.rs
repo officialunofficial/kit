@@ -263,6 +263,9 @@ impl RemoteSource for StaleListing<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         Ok(self.listing.clone())
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
     }
@@ -790,6 +793,9 @@ struct FailingPack<'a> {
 impl RemoteSource for FailingPack<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
@@ -1889,7 +1895,8 @@ fn an_unchanged_fetch_from_an_unnamed_source_walks_each_pack_list() {
         [
             "ListRefs".to_owned(),
             "ReadRef refs/kit/packmap/main".to_owned(),
-            node(head)
+            node(head),
+            "ListRefs refs/tags/".to_owned(),
         ]
     );
 
@@ -1912,12 +1919,13 @@ fn an_unchanged_fetch_from_an_unnamed_source_walks_each_pack_list() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert_eq!(calls[..2], ["ListRefs", "ReadRef refs/kit/packmap/main"]);
     assert!(
-        calls[2..].iter().all(|c| c.starts_with("Node ")),
+        calls[2..4].iter().all(|c| c.starts_with("Node ")),
         "{calls:?}"
     );
+    assert_eq!(calls[4], "ListRefs refs/tags/");
 }
 
 #[test]
@@ -1938,7 +1946,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 6); // listing, packmap, two nodes, two packs
+    assert_eq!(calls.len(), 7); // listing, packmap, two nodes, two packs, tag listing
     let report = pull(
         &target,
         &counted,
@@ -1949,7 +1957,11 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
     assert_eq!(report.fetch.objects_unpacked, 0);
     assert_eq!(report.fetch.packs_already_applied, 2);
@@ -1965,7 +1977,11 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
 
     let third = remote.publish(Some(second), &[("a", b"3")], true);
@@ -1979,7 +1995,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
     )
     .unwrap();
     let calls = counted.take();
-    assert_eq!(calls.len(), 4);
+    assert_eq!(calls.len(), 5);
     assert_eq!(calls[2], format!("Node {}", hash::to_hex(&new_head)));
     assert!(calls[3].starts_with("Pack "));
     assert_eq!(report.fetch.packs_downloaded, 1);
@@ -1996,7 +2012,7 @@ fn incremental_pull_counts_and_rebaseline_fallback() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 6); // unrelated two-node chain, walked to root
+    assert_eq!(counted.take().len(), 7); // unrelated two-node chain walked to root, tag listing
     assert_eq!(report.packs_downloaded, 2);
     assert_eq!(
         refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
@@ -2037,7 +2053,7 @@ fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
             &NoopObserver,
         )
         .unwrap();
-        assert_eq!(counted.take().len(), 4);
+        assert_eq!(counted.take().len(), 5);
     }
     for address in [
         ("repository", "https://other.invalid"),
@@ -2052,7 +2068,7 @@ fn checkpoint_corruption_absence_and_identity_changes_walk_the_full_chain() {
             &NoopObserver,
         )
         .unwrap();
-        assert_eq!(counted.take().len(), 4);
+        assert_eq!(counted.take().len(), 5);
     }
 }
 
@@ -2189,7 +2205,7 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
         "the fetch heals once"
     );
     assert_eq!(report.packs_downloaded, 2);
-    assert_eq!(counted.take().len(), 8); // suffix attempt, then one full walk
+    assert_eq!(counted.take().len(), 9); // suffix attempt, one full walk, tag listing
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(second)
@@ -2205,7 +2221,11 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
     .unwrap();
     assert_eq!(
         counted.take(),
-        ["ListRefs", "ReadRef refs/kit/packmap/main"]
+        [
+            "ListRefs",
+            "ReadRef refs/kit/packmap/main",
+            "ListRefs refs/tags/"
+        ]
     );
 }
 
@@ -2264,7 +2284,7 @@ fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 4); // missed suffix plus the not-yet-recorded new pack
+    assert_eq!(counted.take().len(), 5); // missed suffix, the not-yet-recorded new pack, tag listing
     assert_eq!(report.packs_downloaded, 1);
     fetch(
         &target,
@@ -2274,7 +2294,7 @@ fn crash_between_tracking_publication_and_checkpoint_rewalks_safely() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3);
 }
 
 #[test]
@@ -2335,7 +2355,7 @@ fn concurrent_pulls_publish_consistent_checkpoints_under_the_lock() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3); // branch listing, packmap read, tag listing
 }
 
 #[test]
@@ -2382,7 +2402,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(stale_counted.take().len(), 2); // no-op conditions hold despite the different recorded tip
+    assert_eq!(stale_counted.take().len(), 3); // no-op conditions hold despite the different recorded tip
 
     remote
         .tx
@@ -2417,7 +2437,7 @@ fn checkpoints_are_per_branch_and_unchanged_heads_still_publish_listed_tips() {
         &NoopObserver,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 3); // one listing, two packmap reads
+    assert_eq!(counted.take().len(), 4); // one listing, two packmap reads, tag listing
     assert_eq!(report.branches_fetched, 2);
     assert_eq!(report.objects_unpacked, 0);
 }
@@ -2454,7 +2474,7 @@ fn checkpoint_directory_does_not_collide_with_a_remote_named_heads() {
         &observer,
     )
     .unwrap();
-    assert_eq!(counted.take().len(), 2);
+    assert_eq!(counted.take().len(), 3); // branch listing, packmap read, tag listing
     assert!(
         !observer
             .events
@@ -2931,6 +2951,10 @@ impl RemoteSource for CountingCursor<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
         self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.calls.set(self.calls.get() + 1);
+        self.inner.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);

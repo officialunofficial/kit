@@ -6,7 +6,7 @@ use super::{
     packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error,
 };
 use crate::SyncError;
-use crate::packmap::{flatten_oldest_first, packmap_ref, walk_pack_chain};
+use crate::packmap::{branch_head_ref, flatten_oldest_first, packmap_ref, walk_pack_chain};
 use kit_core::{
     hash::Hash,
     protocol::{AdvanceOutcome, CommitOutcome, PackKey, UploadLimits},
@@ -376,7 +376,7 @@ fn chain_state(
             None
         });
     };
-    let nodes = match walk_pack_chain(tx.source, tx.observer, branch, head) {
+    let nodes = match walk_pack_chain(tx.source, tx.observer, &branch_head_ref(branch), head) {
         Ok(nodes) => nodes,
         Err(SyncError::PackChainInvalid { .. }) if self_contained => {
             return Ok(Some(ChainState::Reset { prior }));

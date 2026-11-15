@@ -124,9 +124,10 @@ correct.
 
 **Reference-client behavior.** A fetch reads the cursor before it lists the
 refs and records it after a complete fetch. A later fetch returns without
-another request when the cursor, the remote-tracking refs and the signature
-policy are as that fetch recorded them, and the object of every tracked tip is
-in the local store. It checks the tips and not the closure below them. An
+another request when the cursor, the remote-tracking refs, the signature
+policy, the tag setting and the local tags are as that fetch recorded them,
+and the object of every tracked tip and every local tag is in the local store.
+A fetch that refused a tag or could not list the tags (§1.4) records nothing. It checks the tips and not the closure below them. An
 object below a tip that the local store lost stays missing through such a
 fetch. The next fetch that does its full work, because the cursor changed or
 no record matches it, checks the closure and fetches the chain again.
@@ -159,6 +160,75 @@ no ref of another remote.
 
 Pruning is local. It uses `list_refs` and `read_ref` and sends no write, so no
 transport verb or wire format changes.
+
+### 1.4 Fetching tags
+
+A fetch takes every remote tag after it has published the branches, unless the
+caller turns tags off (`--no-tags`). A tag is published to `refs/tags/<t>`
+only whole and proved. A tag that fails is refused alone: it never fails a
+branch or another tag.
+
+- **Transfer chain.** The objects of remote tag `refs/tags/<t>` travel in the
+  pack list chain that `refs/kit/tagmap/<t>` names (SPEC-REFS §2), shaped like
+  a packmap chain. Its first node may graft on a node of a branch chain.
+- **Listing.** The fetch lists `refs/tags/` once. It lists
+  `refs/kit/tagmap/` once, and only when some tag cannot be proved from local
+  objects. A tag that this listing lacks is read again with `read_ref` of both
+  refs. A tag that is gone is skipped, and a tag with no tag map is refused.
+- **Names.** A remote tag whose name cannot be pushed (SPEC-REFS §3) is
+  skipped with a warning and no read. It is not a refusal.
+- **Local tags.** A local tag with the same value is up to date. A local tag
+  with another value is refused ("would clobber existing tag"): no fetch moves
+  a tag. A remote tag whose name is a directory of a local tag's name, or the
+  reverse, as `v1` and `v1/rc` are, is refused too ("conflicts with existing
+  tag"). Of two such remote tags, the later in listing order is refused when
+  the earlier one proved. A file system that folds case can report the clash
+  only when the tag is read or written, as for `V1/rc` beside `v1`, and that
+  tag is refused the same way. No fetch deletes a tag, with or without
+  `--prune`.
+- **Proof.** A tag is proved when all of these hold:
+  - its peel reaches a commit, remix, tree or blob through at most 16 tags;
+  - the name of its outermost tag object equals `<t>`;
+  - with signature checking on, every commit, remix and tag object in its
+    history passes its signature check, down to history already verified;
+  - every object of its closure is in the local store.
+
+  History already verified means the tips recorded as verified, as for a
+  branch, plus every history walk of this fetch. Tags and branches share the
+  record and the walk. A tip that a local ref reaches counts as present for the
+  closure check. It counts as verified only when a signed fetch recorded it. A
+  proof that would visit more than 10,000,000 objects refuses only that tag.
+  A failed proof proves nothing, and a later tag over the same failed object is
+  refused without another walk. A proof that finds an object missing records
+  the walk path to it, so a later tag over the same incomplete history stops
+  there without another walk, until a pack brings the object.
+- **Download.** A tag that is not proved from local objects downloads its tag
+  map chain. The walk stops at a node that this fetch already applied for a
+  branch or a tag, or at a checkpoint head. So a grafted tag downloads only its
+  own nodes and packs. This stop set holds at most 100,000 nodes. The packs
+  apply as for a branch (Pack-chain fetch), and the tag is proved again.
+- **Retry and self-heal.** When the proof finds an object missing, the fetch
+  reads both refs again with `read_ref` and tries once more. If a run skipped a
+  pack that the applied-pack record lists, or stopped at a node of the stop
+  set, the fetch clears the record and applies the whole chain again. The tag
+  phase of one fetch does this at most once, whatever the number of tags. A
+  pack that this fetch refused for one tag refuses every later tag whose chain
+  holds it, with no second download.
+- **Failure scope.** A refusal names the tag and its reason. The fetch reports
+  it and goes on. A failed tag listing stops the tag phase with "tag listing
+  failed (possibly too many tags): `<error>`", and the branches stay
+  published. An interrupt, a transport failure other than a bad reply to a
+  node or pack download, or a local I/O error, including one while a tag's
+  pack is written, fails the fetch, as for a branch. The tags proved before
+  such a failure still publish, unless the fetch was interrupted.
+- **Publish.** The tags publish under the worktree lock, each with a create
+  that fails when the tag exists. A tag that appears locally during the fetch
+  with the same value is up to date, and one with another value is refused
+  as one that would clobber.
+
+The CLI prints `! [rejected] <t> -> <t> (<reason>)` for each refused tag. It
+exits 1 after everything else is published. `clone` and `pull` do the same.
+A refused tag is tried and reported again by the next fetch.
 
 ## 2. Error taxonomy
 
@@ -443,9 +513,14 @@ session (SPEC-TRANSPORT 4.4)`.
 frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
 the packmap and a `DownloadPack` of each node of its packmap chain, even when no
 branch changed: the SSH transport names no repository, so a fetch keeps no
-per-branch checkpoint for it and walks each packmap chain again. With one node
-per packmap chain that is one frame plus two per branch, so one session fetches
-at most 4,999 branches; a fetch of more fails closed with the reply above.
+per-branch checkpoint for it and walks each packmap chain again. The tag phase
+(§1.4) adds one `ListRefs` of `refs/tags/`, and one of `refs/kit/tagmap/` only
+when some tag is not yet proved from local objects. With one node per packmap
+chain and no new tag that is two frames plus two per branch, so one session
+fetches at most 4,999 branches; a fetch of more fails closed with the reply
+above. A new annotated tag pushed alone adds one node and one pack download,
+so a clone of a remote with about 5,000 such tags fails the same way; tags
+pushed together share their node and pack.
 When the served repository offers a cursor (§4.2.2), a fetch that finds the
 cursor it recorded after its last complete fetch costs one frame, the
 `ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A
@@ -986,6 +1061,12 @@ of a chunked blob without queueing it, so its 10,000,000-object cap counts
 commits, trees, blobs and chunked-blob manifests only. It remembers at most
 2,097,152 checked chunk IDs; past that, a chunk is checked again for each
 manifest that names it.
+
+A tag map chain (§1.4) applies the same way. Its walk stops at the nodes of
+the chains this fetch applied and at checkpoint heads, so a chain that grafts
+on a branch chain downloads only its own nodes and packs. The tag phase
+self-heals at most once per fetch, so a remote whose every tag lacks an object
+costs one full walk, not one per tag.
 
 Unpack working memory remains bounded by one pack, rather than total
 chain payload size. This is not a chunk-streaming pack parser and does not

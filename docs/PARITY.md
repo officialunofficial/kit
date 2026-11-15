@@ -46,8 +46,8 @@ These divergences stay while kit uses BLAKE3.
 - Hooks, including `core.hooksPath`.
 - The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches and
   nothing else: no wildcard, no leading `+` and no ref outside `refs/heads/`.
-  `push` does not take `--tags` or `--delete`. A remote delete and a tag
-  transfer need a transport verb that kit does not have.
+  `push` does not take `--tags` or `--delete`. `push` sends no tag, and a
+  remote delete needs a transport verb that kit does not have.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
 - Shallow clone. `clone --depth` is a usage error. A clone holds the full
@@ -336,7 +336,16 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   remote whose branch the remote lost. It deletes a ref only after a complete
   fetch, and only when a fresh read of the remote branch finds nothing. It
   prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
-  tags that a refspec maps; kit has no tag transfer and prunes no tag.
+  tags that a refspec maps; kit prunes no tag.
+- **Tags on `fetch`, `pull` and `clone`.** kit takes every remote tag by
+  default, as Git's `--tags` does; Git follows only the tags that point into
+  the fetched history. `--tags` is accepted and means the same, and
+  `--no-tags` skips them. A tag publishes only once kit proves its closure,
+  its tag object's name and, with signature checks on, its history. A remote
+  tag with another value than the local one is refused with `would clobber
+  existing tag`, as in Git, and kit has no `--force` for it. A refused tag
+  prints ` ! [rejected]        <t> -> <t> (<reason>)` and the command exits 1
+  after the branches and the other tags are published.
 - **`branch -r` / `-a`.** `branch -r` lists the `refs/remotes/<remote>/*`
   refs of every remote as `<remote>/<branch>`. `branch -a` lists the local
   branches, then the tracking refs as `remotes/<remote>/<branch>`. The `*`
@@ -443,10 +452,6 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
 kit does not implement these flags. A command with a missing flag is
 `divergent` on the matrix.
 
-- `fetch --tags` &mdash; kit rejects the flag. A fetch does not transfer
-  tags. `push` sends none, and the pack chain of a branch carries only the
-  objects that the branch reaches, so a remote tag object has no transfer
-  path. Tags need a listing and a transfer step in the transport first.
 - `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
   file of a paused rebase holds a closed list of keywords, and a new keyword
   would change that state format.

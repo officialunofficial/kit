@@ -2532,6 +2532,7 @@ dependencies = [
  "kit-core",
  "kit-test-util",
  "kit-transport-connect",
+ "kit-transport-file",
  "kit-transport-memory",
  "proptest",
  "rayon",

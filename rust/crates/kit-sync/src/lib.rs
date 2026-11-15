@@ -54,6 +54,7 @@ mod apply;
 pub mod restore_fanout;
 mod source;
 mod source_error;
+mod tags;
 mod verify;
 pub mod worktree;
 
@@ -78,6 +79,7 @@ pub use observer::{NoopObserver, Observer, SyncEvent};
 pub use pull::{PullOutcome, PullReport, fetch, pull};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};
 pub use source_error::{FailureClass, RemoteDetail, RemoteFailure, SourceError};
+pub use tags::{TAG_SELF_HEALS_PER_FETCH, TagRejectReason, TagRejection, TagWarning};
 
 use kit_core::store::SyncPolicy;
 
@@ -112,9 +114,22 @@ pub struct SyncOptions {
     /// more. What it applied stays in the store, and the next call resumes
     /// from it.
     pub lock_wait: Option<std::time::Duration>,
+    /// Fetch the remote's tags after its branches (SPEC-TRANSPORT §1.4).
+    /// `true` by default; `false` skips the tag phase (`--no-tags`). A tag
+    /// publishes only once its closure and signatures are checked, and a
+    /// local tag is never moved: a remote tag of the same name with another
+    /// value is refused.
+    pub tags: bool,
 }
 
 impl SyncOptions {
+    /// Set [`tags`](Self::tags).
+    #[must_use]
+    pub fn with_tags(mut self, tags: bool) -> Self {
+        self.tags = tags;
+        self
+    }
+
     /// Set [`prune`](Self::prune).
     #[must_use]
     pub fn with_prune(mut self, prune: bool) -> Self {
@@ -159,6 +174,7 @@ impl Default for SyncOptions {
             sync_policy: SyncPolicy::Batch,
             prune: false,
             lock_wait: None,
+            tags: true,
         }
     }
 }
@@ -177,17 +193,43 @@ mod tests {
                 o.target_branch.clone(),
                 o.lock_wait,
                 o.sync_policy,
+                o.tags,
             )
         };
         let default = fields(&SyncOptions::default());
         let set = Duration::from_secs(3);
         assert_eq!(
             fields(&SyncOptions::default().with_prune(true)),
-            (true, default.1, default.2.clone(), default.3, default.4)
+            (
+                true,
+                default.1,
+                default.2.clone(),
+                default.3,
+                default.4,
+                default.5
+            )
         );
         assert_eq!(
             fields(&SyncOptions::default().with_verify_signatures(false)),
-            (default.0, false, default.2.clone(), default.3, default.4)
+            (
+                default.0,
+                false,
+                default.2.clone(),
+                default.3,
+                default.4,
+                default.5
+            )
+        );
+        assert_eq!(
+            fields(&SyncOptions::default().with_tags(false)),
+            (
+                default.0,
+                default.1,
+                default.2.clone(),
+                default.3,
+                default.4,
+                false
+            )
         );
         assert_eq!(
             fields(&SyncOptions::default().with_target_branch(Some("topic".to_owned()))),
@@ -196,7 +238,8 @@ mod tests {
                 default.1,
                 Some("topic".to_owned()),
                 default.3,
-                default.4
+                default.4,
+                default.5
             )
         );
         assert_eq!(
@@ -206,7 +249,8 @@ mod tests {
                 default.1,
                 default.2.clone(),
                 Some(set),
-                default.4
+                default.4,
+                default.5
             )
         );
         assert_eq!(
@@ -216,7 +260,8 @@ mod tests {
                 default.1,
                 default.2,
                 default.3,
-                SyncPolicy::PerObject
+                SyncPolicy::PerObject,
+                default.5
             )
         );
     }
@@ -229,5 +274,6 @@ mod tests {
         assert_eq!(options.target_branch, None);
         assert_eq!(options.lock_wait, None);
         assert_eq!(options.sync_policy, SyncPolicy::Batch);
+        assert!(options.tags);
     }
 }

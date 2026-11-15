@@ -3098,6 +3098,8 @@ mod tests {
             cursor: kit_core::protocol::RepoCursor::new(&[7u8; 16]).unwrap(),
             tracking: [3u8; 32],
             signed: false,
+            tags: true,
+            tag_digest: [5u8; 32],
         }
         .persist(&path)
         .unwrap();

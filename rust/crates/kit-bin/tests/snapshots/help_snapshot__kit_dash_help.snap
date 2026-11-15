@@ -196,17 +196,19 @@ commands:
                     and the branch need not be the current one; wildcards,
                     a leading `+`, a delete and non-branch refs are errors;
                     --format=json emits a JSON outcome object)
-  pull [<remote>] [--all] [--rebase|--no-ff] [--format=json]  Pull changes from remote (fast-forward;
+  pull [<remote>] [--all] [--rebase|--no-ff] [--tags|--no-tags] [--format=json]  Pull changes from remote (fast-forward;
                     prints `Updating <a>..<b>`/`Fast-forward`/diffstat, or
                     `Already up to date.`); --all pulls every configured remote;
                     --rebase replays the current branch onto the fetched one;
                     --no-ff always writes a merge commit;
                     --format=json emits a JSON outcome object
-  fetch [<remote>] [--all] [-p|--prune] [--format=json]  Download from remote without merging
+  fetch [<remote>] [--all] [-p|--prune] [--tags|--no-tags] [--format=json]  Download from remote without merging
                     (prints `From <url>` + per-ref summary; silent when nothing
                     changed); --all fetches every configured remote; --prune
                     deletes the remote-tracking refs of branches the remote
-                    lost; --format=json emits a JSON outcome object
+                    lost; every remote tag is fetched unless --no-tags, and a
+                    refused tag prints `! [rejected]` and exits 1;
+                    --format=json emits a JSON outcome object
   worktree add <path> [<commit-ish>]  Create a linked working tree (shares the
                     object store and refs; own HEAD/index/stash). With no
                     commit-ish, creates a branch named after the path
@@ -228,7 +230,7 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
-  clone [--sparse ...] [-b <branch>] [-o <name>] <url>  Clone a repository
+  clone [--sparse ...] [-b <branch>] [-o <name>] [--tags|--no-tags] <url>  Clone a repository
                     (-b checks out <branch> instead of the remote default;
                     -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds

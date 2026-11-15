@@ -99,16 +99,16 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--format -n --help" -- "$cur") )
             ;;
         pull)
-            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all --rebase --no-ff --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         fetch)
-            COMPREPLY=( $(compgen -W "--all -p --prune --no-verify-signatures --format -q --quiet --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all -p --prune --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         push)
             COMPREPLY=( $(compgen -W "--all -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
             ;;
         clone)
-            COMPREPLY=( $(compgen -W "--sparse --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--sparse --tags --no-tags --help" -- "$cur") )
             ;;
         branch)
             COMPREPLY=( $(compgen -W "-v --verbose -d -D -m -u --set-upstream-to --unset-upstream -r --remotes -a --all --list --contains --no-contains --merged --no-merged --show-current --format --help" -- "$cur") )

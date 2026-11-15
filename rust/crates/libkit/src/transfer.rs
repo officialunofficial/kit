@@ -173,58 +173,66 @@ pub fn push_branch_tracked_with_source(
 }
 
 /// Fetch the refs of `remote`, then fast-forward the current branch from its
-/// tracking ref. Returns the number of branches fetched.
+/// tracking ref.
 ///
 /// `require_signed` checks the signature of every new commit, remix and tag,
 /// and fails closed. Only an explicit opt-out of the caller turns it off.
+/// With `tags`, the fetch takes the remote's tags too. A refused tag is no
+/// error: the report's `fetch.tags_rejected` names it, and
+/// `fetch.tags_incomplete()` is then true.
 ///
 /// # Errors
 /// The fetch or the fast-forward fails.
+#[allow(clippy::too_many_arguments)] // one value for each fetch setting
 pub fn pull_with_source(
     cwd: &Path,
     source: &dyn RemoteSource,
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
+    tags: bool,
     sync_policy: SyncPolicy,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<usize, Error> {
-    let options = sync_options(target_branch, require_signed, sync_policy);
-    let report = kit_sync::pull(cwd, source, remote, &options, observer)?;
-    Ok(report.fetch.branches_fetched)
+) -> Result<kit_sync::PullReport, Error> {
+    let options = sync_options(target_branch, require_signed, tags, sync_policy);
+    Ok(kit_sync::pull(cwd, source, remote, &options, observer)?)
 }
 
 /// [`pull_with_source`] without the move of `HEAD`. It downloads every object
 /// that each remote ref reaches, and writes the ref to
-/// `refs/remotes/<remote>/<branch>`. Returns the number of branches fetched.
+/// `refs/remotes/<remote>/<branch>`.
 ///
 /// With `prune`, the fetch then deletes the tracking refs whose branch the
-/// remote no longer has.
+/// remote no longer has. With `tags`, it takes the remote's tags too, and the
+/// report names each tag published or refused.
 ///
 /// # Errors
 /// The fetch fails.
+#[allow(clippy::too_many_arguments)] // one value for each fetch setting
 pub fn fetch_with_source(
     cwd: &Path,
     source: &dyn RemoteSource,
     remote: &str,
     require_signed: bool,
     prune: bool,
+    tags: bool,
     sync_policy: SyncPolicy,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<usize, Error> {
-    let options = sync_options(None, require_signed, sync_policy).with_prune(prune);
-    let report = kit_sync::fetch(cwd, source, remote, &options, observer)?;
-    Ok(report.branches_fetched)
+) -> Result<kit_sync::FetchReport, Error> {
+    let options = sync_options(None, require_signed, tags, sync_policy).with_prune(prune);
+    Ok(kit_sync::fetch(cwd, source, remote, &options, observer)?)
 }
 
 fn sync_options(
     target_branch: Option<&str>,
     require_signed: bool,
+    tags: bool,
     sync_policy: SyncPolicy,
 ) -> SyncOptions {
     SyncOptions::default()
         .with_verify_signatures(require_signed)
         .with_target_branch(target_branch.map(str::to_owned))
+        .with_tags(tags)
         .with_sync_policy(sync_policy)
 }
 
@@ -411,7 +419,7 @@ pub fn plan_push_steps(
 }
 
 /// [`pull_with_source`] over `transport` with the default settings. It checks
-/// signatures and reports no progress.
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
 /// As [`pull_with_source`].
@@ -420,7 +428,7 @@ pub fn pull_all(
     transport: &dyn Transport,
     remote: &str,
     target_branch: Option<&str>,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     pull_all_with(cwd, transport, remote, target_branch, true)
 }
 
@@ -434,30 +442,36 @@ pub fn pull_all_with(
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     pull_with_source(
         cwd,
         &source(transport),
         remote,
         target_branch,
         require_signed,
+        true,
         SyncPolicy::Batch,
         &NoopObserver,
     )
 }
 
 /// [`fetch_with_source`] over `transport` with the default settings. It checks
-/// signatures and reports no progress.
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
 /// As [`fetch_with_source`].
-pub fn fetch_all(cwd: &Path, transport: &dyn Transport, remote: &str) -> Result<usize, Error> {
+pub fn fetch_all(
+    cwd: &Path,
+    transport: &dyn Transport,
+    remote: &str,
+) -> Result<kit_sync::FetchReport, Error> {
     fetch_with_source(
         cwd,
         &source(transport),
         remote,
         true,
         false,
+        true,
         SyncPolicy::Batch,
         &NoopObserver,
     )

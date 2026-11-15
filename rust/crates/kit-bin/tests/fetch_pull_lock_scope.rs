@@ -257,7 +257,7 @@ fn fetch_all_does_not_hold_repo_lock_during_pack_download() {
          flight; a probe acquire timed out, meaning the lock is still held \
          across the network transfer"
     );
-    let n = fetch_result.expect("fetch must succeed");
+    let n = fetch_result.expect("fetch must succeed").branches_fetched;
     assert_eq!(n, 1, "expected exactly one branch fetched");
 
     let remote_tip = refs::read_remote_ref(&bob_layout, "default", "main")
@@ -310,7 +310,10 @@ fn pull_all_does_not_hold_repo_lock_during_pack_download() {
          flight; a probe acquire timed out, meaning the lock is still held \
          across the network transfer"
     );
-    let n = pull_result.expect("pull must succeed");
+    let n = pull_result
+        .expect("pull must succeed")
+        .fetch
+        .branches_fetched;
     assert_eq!(n, 1, "expected exactly one branch fetched");
 
     // Fast-forward landed: bob's local `main` now matches alice's tip.
@@ -413,7 +416,7 @@ fn fetch_objects_survive_a_grace_zero_gc_run_during_the_unlocked_download_phase(
         "a concurrent gc during the unlocked download phase must succeed cleanly: {}",
         String::from_utf8_lossy(&gc_out.stderr)
     );
-    let n = fetch_result.expect("fetch must succeed");
+    let n = fetch_result.expect("fetch must succeed").branches_fetched;
     assert_eq!(n, 1);
 
     let remote_tip = refs::read_remote_ref(&bob_layout, "default", "main")
@@ -488,7 +491,10 @@ fn gc_between_two_packs_keeps_the_objects_of_the_first() {
         stderr.contains("pruned 0 object(s)"),
         "gc must delete nothing while a fetch runs: {stderr}"
     );
-    assert_eq!(fetch_result.expect("fetch must succeed"), 1);
+    assert_eq!(
+        fetch_result.expect("fetch must succeed").branches_fetched,
+        1
+    );
     let tip = refs::read_remote_ref(&bob_layout, "default", "main")
         .unwrap()
         .expect("remote-tracking ref must be published");
@@ -531,7 +537,10 @@ fn add_and_commit_run_while_a_fetch_is_paused_between_packs() {
             "{name} took {took:?} during a paused fetch"
         );
     }
-    assert_eq!(fetch_result.expect("fetch must succeed"), 1);
+    assert_eq!(
+        fetch_result.expect("fetch must succeed").branches_fetched,
+        1
+    );
 }
 
 // ---------------------------------------------------------------------------

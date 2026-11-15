@@ -1,5 +1,5 @@
 use super::{PushContext, PushError};
-use crate::packmap::{flatten_oldest_first, packmap_ref, walk_pack_chain};
+use crate::packmap::{branch_head_ref, flatten_oldest_first, packmap_ref, walk_pack_chain};
 use crate::{SourceError, SyncError};
 use kit_core::{
     hash::Hash,
@@ -16,7 +16,7 @@ pub(crate) fn probe_chain(
     branch: &str,
     head_key: Hash,
 ) -> Result<(usize, Vec<Hash>), PushError> {
-    let nodes = walk_pack_chain(tx.source, tx.observer, branch, head_key)?;
+    let nodes = walk_pack_chain(tx.source, tx.observer, &branch_head_ref(branch), head_key)?;
     Ok((nodes.len(), flatten_oldest_first(nodes)))
 }
 

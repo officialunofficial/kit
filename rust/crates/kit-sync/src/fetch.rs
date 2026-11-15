@@ -30,10 +30,11 @@ use crate::error::SyncError;
 use crate::lock::{LockWait, wait_for_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{
-    MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, packmap_ref, resolve_pack_chain,
-    walk_pack_chain_until,
+    MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, chain_label, flatten_oldest_first, packmap_ref,
+    resolve_pack_chain, walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
+use crate::tags::{StopSet, TagPhase, TagRejection, TagWarning};
 use crate::verify::{VerifiedHistory, verify_history_signatures};
 
 /// What a fetch did.
@@ -57,9 +58,30 @@ pub struct FetchReport {
     /// Objects written to the object store.
     pub objects_unpacked: usize,
     /// The remote's cursor equalled the one the last complete fetch saw,
-    /// and the remote-tracking refs were as that fetch left them, so the
-    /// fetch made no other request (SPEC-TRANSPORT §1.2).
+    /// and the remote-tracking refs and local tags were as that fetch left
+    /// them, so the fetch made no other request (SPEC-TRANSPORT §1.2).
     pub remote_unchanged: bool,
+    /// Remote tags the fetch published as local tags, in listing order.
+    pub tags_fetched: Vec<String>,
+    /// Remote tags the fetch refused. A refusal does not fail the fetch: the
+    /// branches and the other tags are published, the cursor is not
+    /// recorded, and the next fetch tries the tag again.
+    pub tags_rejected: Vec<TagRejection>,
+    /// Remote tags skipped because their name is not one a client can push
+    /// or fetch. A warning only: it does not block the cursor record.
+    pub tag_warnings: Vec<TagWarning>,
+    /// The tag or tag map listing failed, so the tag phase stopped there. The
+    /// branches are published and the cursor is not recorded.
+    pub tag_listing_failed: Option<String>,
+}
+
+impl FetchReport {
+    /// Whether the tag phase left something for the user to act on: a
+    /// refused tag or a failed listing. A caller exits non-zero on it.
+    #[must_use]
+    pub fn tags_incomplete(&self) -> bool {
+        !self.tags_rejected.is_empty() || self.tag_listing_failed.is_some()
+    }
 }
 
 /// One branch's pack chain, resolved over the network. Consumed by
@@ -74,10 +96,14 @@ pub(crate) struct ResolvedChain {
     packs: usize,
     nodes: usize,
     prefix_packs: usize,
+    /// The nodes walked, and the checkpoint's head when the walk stopped
+    /// there: once the chain is applied and checked, a tag chain's walk
+    /// stops at any of them.
+    keys: Vec<Hash>,
 }
 
-/// Step 1 of a branch fetch: walk `branch`'s packmap chain from `head_key`
-/// and check its length limits. Pure network I/O: it downloads only packlist
+/// Step 1 of a branch fetch: walk the packmap chain of `head_ref` from
+/// `head_key` and check its length limits. Pure network I/O: it downloads only packlist
 /// nodes, never packs, and touches neither the object store nor any lock.
 ///
 /// A matching checkpoint skips the immutable prefix. Missing or unrelated
@@ -85,25 +111,23 @@ pub(crate) struct ResolvedChain {
 pub(crate) fn resolve_chain(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
-    branch: &str,
+    head_ref: &str,
     head_key: Hash,
     checkpoint: Option<Checkpoint>,
 ) -> Result<ResolvedChain, SyncError> {
-    let (nodes, reached) = walk_pack_chain_until(
-        source,
-        observer,
-        branch,
-        head_key,
-        checkpoint.map(|c| c.head),
-    )?;
-    let prefix = checkpoint.filter(|_| reached);
-    let node_count = nodes.len() + prefix.map_or(0, |c| c.nodes);
-    let chain = flatten_oldest_first(nodes);
+    let walk = walk_pack_chain_until(source, observer, head_ref, head_key, &|key| {
+        checkpoint.is_some_and(|c| c.head == *key)
+    })?;
+    let prefix = checkpoint.filter(|_| walk.stopped);
+    let node_count = walk.nodes.len() + prefix.map_or(0, |c| c.nodes);
+    let mut keys = walk.keys;
+    keys.extend(prefix.map(|c| c.head));
+    let chain = flatten_oldest_first(walk.nodes);
     let prefix_packs = prefix.map_or(0, |c| c.packs);
     let packs = chain.len() + prefix_packs;
     if node_count > MAX_PACK_CHAIN_DEPTH || packs > MAX_FETCH_PACKS {
         return Err(SyncError::PackChainInvalid {
-            branch: branch.to_owned(),
+            branch: chain_label(head_ref).to_owned(),
             source: None,
         });
     }
@@ -113,6 +137,7 @@ pub(crate) fn resolve_chain(
         packs,
         nodes: node_count,
         prefix_packs,
+        keys,
     })
 }
 
@@ -162,7 +187,7 @@ pub(crate) fn apply_and_verify_chain(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
-    branch: &str,
+    head_ref: &str,
     resolved: ResolvedChain,
     tip: Hash,
     applied: &mut AppliedPacks,
@@ -180,7 +205,7 @@ pub(crate) fn apply_and_verify_chain(
         source,
         observer,
         remote,
-        branch,
+        head_ref,
         &chain,
         applied,
         require_signed,
@@ -205,7 +230,7 @@ pub(crate) fn apply_and_verify_chain(
     };
     observer.event(&SyncEvent::AppliedPacksStale {
         remote: remote.to_owned(),
-        branch: branch.to_owned(),
+        branch: chain_label(head_ref).to_owned(),
         cause: stale.to_string(),
     });
     // Clear the suspected-stale record and retry the whole chain with no
@@ -219,7 +244,7 @@ pub(crate) fn apply_and_verify_chain(
     if prefix_packs > 0 {
         // Release suffix metadata before allocating the complete walk.
         drop(chain);
-        chain = resolve_pack_chain(source, observer, branch, head)?;
+        chain = resolve_pack_chain(source, observer, head_ref, head)?;
     }
     let mut retry = ChainApplied::default();
     apply_pack_chain(
@@ -227,7 +252,7 @@ pub(crate) fn apply_and_verify_chain(
         source,
         observer,
         remote,
-        branch,
+        head_ref,
         &chain,
         applied,
         require_signed,
@@ -245,7 +270,11 @@ pub(crate) fn apply_and_verify_chain(
 /// Rewrite the applied-packs record atomically. The record is a cache, so a
 /// failure is reported, unless the fetch reported one already, and never fails
 /// the fetch.
-fn persist_record(applied: &mut AppliedPacks, observer: &dyn Observer<SyncEvent>, remote: &str) {
+pub(crate) fn persist_record(
+    applied: &mut AppliedPacks,
+    observer: &dyn Observer<SyncEvent>,
+    remote: &str,
+) {
     if let Err(e) = applied.persist()
         && applied.first_failure()
     {
@@ -298,6 +327,12 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 ///    the tip's history, whether or not this run downloaded it,
 /// 4. acquire the repo lock, publish the remote-tracking ref and its
 ///    checkpoint, and release the lock.
+///
+/// Then, unless [`SyncOptions::tags`] is off, the tag phase publishes the
+/// remote's tags ([`crate::tags`]): each tag's closure is checked down to what
+/// local refs reach, and its signatures down to what is verified, before it
+/// is published. A tag that fails is refused alone and reported in
+/// [`FetchReport::tags_rejected`].
 ///
 /// Step 2's unpack and closure check are one call so a closure failure
 /// counts toward the applied-pack self-heal retry. An absent packmap beside a
@@ -400,15 +435,7 @@ fn fetch_objects_inner(
     // prune.
     if !options.prune
         && let Some(cursor) = &cursor
-        && remote_unchanged(
-            store,
-            layout,
-            &cursor_path,
-            cursor,
-            remote,
-            require_signed,
-            target_branch,
-        )?
+        && remote_unchanged(store, layout, &cursor_path, cursor, remote, options)?
     {
         report.remote_unchanged = true;
         return Ok(());
@@ -437,12 +464,15 @@ fn fetch_objects_inner(
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
     // The tracking refs this fetch published, with the tip it gave each.
     let mut published: Vec<(String, Hash)> = Vec::new();
+    // The nodes of the chains this fetch applied and checked.
+    let mut stop = StopSet::default();
     let result: Result<(), SyncError> = (|| {
         for r in remote_refs {
             if observer.cancelled() {
                 return Err(SyncError::Interrupted);
             }
             let Some(h) = r.hash else { continue };
+            let head_ref = format!("refs/heads/{}", r.name);
             // A branch tip without a packmap is a corrupt or incomplete
             // remote, not a format to degrade to: the push path ALWAYS
             // advertises a packmap before moving the branch ref. A real
@@ -475,7 +505,8 @@ fn fetch_objects_inner(
             let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
 
             // Step 1: resolve this branch's chain.
-            let resolved = resolve_chain(source, observer, &r.name, chain_head, checkpoint)?;
+            let mut resolved = resolve_chain(source, observer, &head_ref, chain_head, checkpoint)?;
+            let mut keys = std::mem::take(&mut resolved.keys);
             let completed = Checkpoint {
                 head: chain_head,
                 tip: h,
@@ -492,7 +523,7 @@ fn fetch_objects_inner(
                 source,
                 observer,
                 remote,
-                &r.name,
+                &head_ref,
                 resolved,
                 h,
                 applied,
@@ -510,7 +541,8 @@ fn fetch_objects_inner(
                     ) else {
                         return Err(e);
                     };
-                    let fresh = resolve_chain(source, observer, &r.name, fresh_head, None)?;
+                    let mut fresh = resolve_chain(source, observer, &head_ref, fresh_head, None)?;
+                    keys = std::mem::take(&mut fresh.keys);
                     let completed = Checkpoint {
                         head: fresh_head,
                         tip: fresh_h,
@@ -522,7 +554,7 @@ fn fetch_objects_inner(
                         source,
                         observer,
                         remote,
-                        &r.name,
+                        &head_ref,
                         fresh,
                         fresh_h,
                         applied,
@@ -540,6 +572,7 @@ fn fetch_objects_inner(
             if require_signed {
                 verify_history_signatures(store, observer, &completed.tip, verified)?;
             }
+            stop.extend(keys);
 
             // Step 4: publish under a repo lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
@@ -581,10 +614,32 @@ fn fetch_objects_inner(
     if options.prune {
         prune_tracking(layout, source, observer, remote, &listed, lock_wait, report)?;
     }
+    if options.tags {
+        TagPhase {
+            store,
+            layout,
+            source,
+            observer,
+            remote,
+            require_signed,
+            lock_wait,
+            applied: &mut *applied,
+            verified: &mut *verified,
+            stop,
+            report: &mut *report,
+            packs_since_refresh: 0,
+        }
+        .run()?;
+    }
+    if report.tags_incomplete() {
+        // A refused tag is tried and reported again by the next fetch.
+        return Ok(());
+    }
     if let Some(cursor) = cursor {
         // A disposable cache: failing to write it costs the next fetch a
         // full walk, never this fetch.
         let tracking_digest = crate::cursor::tracking_digest(layout, remote)?;
+        let tag_digest = crate::cursor::tag_digest(layout)?;
         // Another fetch of this remote may have moved a ref this fetch
         // published, for example back to the tip of an older listing. The
         // digest above then describes refs that do not match the cursor, so
@@ -592,11 +647,15 @@ fn fetch_objects_inner(
         // refs are read after the digest: a ref that still holds its tip now
         // held it when the digest was taken, or the digest no longer matches
         // the refs on disk.
-        if tips_still_published(layout, remote, &published) {
+        if tips_still_published(layout, remote, &published)
+            && tags_still_published(layout, &report.tags_fetched)?
+        {
             let record = crate::cursor::CursorRecord {
                 cursor,
                 tracking: tracking_digest,
                 signed: require_signed,
+                tags: options.tags,
+                tag_digest,
             };
             let _ = record.persist(&cursor_path);
         }
@@ -609,6 +668,18 @@ fn tips_still_published(layout: &RepoLayout, remote: &str, published: &[(String,
     published.iter().all(|(name, tip)| {
         matches!(refs::read_remote_ref(layout, remote, name), Ok(Some(held)) if held == *tip)
     })
+}
+
+/// Whether every tag in `fetched` is still a local tag. A local tag moved
+/// since the digest was taken no longer matches it; one deleted since is
+/// caught here.
+fn tags_still_published(layout: &RepoLayout, fetched: &[String]) -> Result<bool, SyncError> {
+    for name in fetched {
+        if refs::read_tag(layout, name)?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Delete the tracking refs of `remote` whose branch the listing lacks. It
@@ -652,24 +723,36 @@ fn prune_tracking(
 }
 
 /// Whether the last complete fetch saw `cursor`, the remote-tracking refs
-/// are as it left them, and the object of every tracked tip is in the store
-/// (a wiped store still heals). A fetch that verifies signatures does not
-/// trust a fetch that did not, nor a tracking ref whose tip no signed fetch
-/// recorded, such as one a fetch with the opt-out left for a branch the
-/// remote no longer lists. A fetch of a named branch needs its tracking ref.
+/// and local tags are as it left them, and the object of every tracked tip
+/// and tag is in the store (a wiped store still heals). A fetch that
+/// verifies signatures does not trust a fetch that did not, nor a tracking
+/// ref whose tip no signed fetch recorded, such as one a fetch with the
+/// opt-out left for a branch the remote no longer lists. A fetch that takes
+/// tags does not trust one that did not, nor the reverse. A fetch of a named
+/// branch needs its tracking ref.
 fn remote_unchanged(
     store: &ObjectStore,
     layout: &RepoLayout,
     path: &std::path::Path,
     cursor: &kit_core::protocol::RepoCursor,
     remote: &str,
-    require_signed: bool,
-    target_branch: Option<&str>,
+    options: &SyncOptions,
 ) -> Result<bool, SyncError> {
+    let require_signed = options.verify_signatures;
+    let target_branch = options.target_branch.as_deref();
     let Some(record) = crate::cursor::CursorRecord::load(path) else {
         return Ok(false);
     };
-    if record.cursor != *cursor || (require_signed && !record.signed) {
+    if record.cursor != *cursor || (require_signed && !record.signed) || record.tags != options.tags
+    {
+        return Ok(false);
+    }
+    let mut tags = refs::list_tags(layout)?;
+    if record.tag_digest != crate::cursor::digest_of(&mut tags)
+        || !tags
+            .iter()
+            .all(|t| t.hash.is_some_and(|value| store.contains(&value)))
+    {
         return Ok(false);
     }
     if let Some(branch) = target_branch

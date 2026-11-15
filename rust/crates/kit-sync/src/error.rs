@@ -79,7 +79,7 @@ pub enum SyncError {
     #[error("remote advertised branch '{0}' but no pack map to reconstruct it")]
     PackmapMissing(String),
     /// The packmap names a pack the remote does not hold.
-    #[error("remote advertised pack {pack} for branch '{branch}' but does not hold it")]
+    #[error("remote advertised pack {pack} for '{branch}' but does not hold it")]
     AdvertisedPackMissing {
         branch: String,
         pack: String,

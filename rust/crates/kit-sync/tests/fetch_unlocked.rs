@@ -339,6 +339,9 @@ impl RemoteSource for HookSource<'_> {
     fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.inner.read_ref(name)
     }
@@ -895,6 +898,10 @@ impl RemoteSource for ViewBeforePush<'_> {
             hash: Some(self.tip),
         }])
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        let _ = prefix;
+        Ok(Vec::new())
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         if name == "refs/kit/packmap/main" {
             Ok(self.packmap)
@@ -923,6 +930,9 @@ struct PauseOnRead<'a> {
 impl RemoteSource for PauseOnRead<'_> {
     fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
         self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         if name == self.name {

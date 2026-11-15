@@ -1,8 +1,8 @@
 //! Disposable record of the repository cursor that the last complete fetch
 //! of a remote saw (SPEC-TRANSPORT §1.2). A fetch whose fresh cursor equals
-//! the recorded one, while the remote-tracking refs are as that fetch left
-//! them, has nothing to do and makes no other request. Loss or corruption of
-//! the record only costs one full fetch.
+//! the recorded one, while the remote-tracking refs and the local tags are as
+//! that fetch left them, has nothing to do and makes no other request. Loss or
+//! corruption of the record only costs one full fetch.
 
 use std::path::{Path, PathBuf};
 
@@ -15,7 +15,7 @@ use crate::SyncError;
 use crate::source::RemoteSource;
 
 /// First field of a cursor record. It names the record format and version.
-const FETCH_CURSOR_TAG: &str = "kit-fetch-cursor-v1";
+const FETCH_CURSOR_TAG: &str = "kit-fetch-cursor-v2";
 
 /// The largest record [`parse`] accepts.
 const RECORD_MAX_BYTES: usize = 512;
@@ -30,6 +30,10 @@ pub struct CursorRecord {
     pub tracking: Hash,
     /// Whether the fetch verified signatures.
     pub signed: bool,
+    /// Whether the fetch ran the tag phase.
+    pub tags: bool,
+    /// [`tag_digest`] after the fetch.
+    pub tag_digest: Hash,
 }
 
 /// The record file of `remote`, keyed like a fetch checkpoint so that a
@@ -50,6 +54,11 @@ pub(crate) fn path(layout: &RepoLayout, source: &dyn RemoteSource, remote: &str)
 /// A digest of every remote-tracking ref of `remote`, names and values.
 pub(crate) fn tracking_digest(layout: &RepoLayout, remote: &str) -> Result<Hash, SyncError> {
     Ok(digest_of(&mut refs::list_remote_refs(layout, remote)?))
+}
+
+/// A digest of every local tag, names and values.
+pub(crate) fn tag_digest(layout: &RepoLayout) -> Result<Hash, SyncError> {
+    Ok(digest_of(&mut refs::list_tags(layout)?))
 }
 
 /// The digest [`tracking_digest`] takes over `tracked`, which it sorts.
@@ -83,11 +92,9 @@ pub fn parse(bytes: &[u8]) -> Option<CursorRecord> {
     }
     let cursor = parse_hex(fields.next()?)?;
     let tracking = parse_lowercase_hash(fields.next()?.as_bytes())?;
-    let signed = match fields.next()? {
-        "0" => false,
-        "1" => true,
-        _ => return None,
-    };
+    let signed = parse_flag(fields.next()?)?;
+    let tags = parse_flag(fields.next()?)?;
+    let tag_digest = parse_lowercase_hash(fields.next()?.as_bytes())?;
     if fields.next().is_some() {
         return None;
     }
@@ -95,7 +102,17 @@ pub fn parse(bytes: &[u8]) -> Option<CursorRecord> {
         cursor: RepoCursor::new(&cursor).ok()?,
         tracking,
         signed,
+        tags,
+        tag_digest,
     })
+}
+
+fn parse_flag(field: &str) -> Option<bool> {
+    match field {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
 }
 
 /// Lowercase hex of at most [`REPO_CURSOR_MAX_LEN`] bytes.
@@ -141,10 +158,12 @@ impl CursorRecord {
     #[doc(hidden)]
     pub fn persist(&self, path: &Path) -> std::io::Result<()> {
         let body = format!(
-            "{FETCH_CURSOR_TAG}\n{}\n{}\n{}",
+            "{FETCH_CURSOR_TAG}\n{}\n{}\n{}\n{}\n{}",
             lower_hex(self.cursor.as_bytes()),
             to_hex(&self.tracking),
-            u8::from(self.signed)
+            u8::from(self.signed),
+            u8::from(self.tags),
+            to_hex(&self.tag_digest)
         );
         let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
         if let Some(parent) = path.parent() {
@@ -166,6 +185,8 @@ mod tests {
             cursor: RepoCursor::new(&[0xab; REPO_CURSOR_MAX_LEN]).unwrap(),
             tracking: hash(b"tracking"),
             signed: true,
+            tags: true,
+            tag_digest: hash(b"tags"),
         };
         record.persist(&path).unwrap();
         assert_eq!(CursorRecord::load(&path), Some(record.clone()));
@@ -176,9 +197,17 @@ mod tests {
             assert_eq!(parse(&bad), None, "a flipped byte at {i}");
         }
         assert_eq!(parse(&good[..good.len() - 1]), None);
-        let body = format!("{FETCH_CURSOR_TAG}\n\n{}\n1", to_hex(&hash(b"t")));
+        let body = format!(
+            "{FETCH_CURSOR_TAG}\n\n{}\n1\n1\n{}",
+            to_hex(&hash(b"t")),
+            to_hex(&hash(b"g"))
+        );
         let empty_cursor = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
         assert_eq!(parse(empty_cursor.as_bytes()), None);
         assert_eq!(parse(&vec![b'a'; RECORD_MAX_BYTES + 1]), None);
+        // A record of the first format is not read.
+        let body = format!("kit-fetch-cursor-v1\nab\n{}\n1", to_hex(&hash(b"t")));
+        let v1 = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
+        assert_eq!(parse(v1.as_bytes()), None);
     }
 }

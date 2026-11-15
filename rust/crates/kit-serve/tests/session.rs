@@ -175,23 +175,25 @@ fn frame_budget_exceeded_ends_protocol_error() {
     assert_error(&frames[n], ErrorCode::InvalidRequest, FRAME_BUDGET_EXCEEDED);
 }
 
-/// The requests of a fetch that finds `branches` branches unchanged: one
-/// listing, then a packmap read and a pack list node download per branch.
+/// The requests of a fetch that finds `branches` branches unchanged and no
+/// tags: one branch listing, a packmap read and a pack list node download per
+/// branch, then the tag listing.
 fn unchanged_fetch(branches: usize, node: &[u8]) -> Vec<Option<Body>> {
     let mut bodies = vec![list_refs(Some("refs/heads/"))];
     for _ in 0..branches {
         bodies.push(read_ref("refs/kit/packmap/b"));
         bodies.push(download(Some(node)));
     }
+    bodies.push(list_refs(Some("refs/tags/")));
     bodies
 }
 
 /// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,999 branches fits one
-/// session (9,999 frames); one of 5,000 branches (10,001 frames) is refused
+/// session (10,000 frames); one of 5,000 branches (10,002 frames) is refused
 /// with the budget reply, and the session ends.
 #[test]
 fn the_largest_unchanged_fetch_fits_one_session_and_one_more_branch_does_not() {
-    let largest = (MAX_FRAMES_PER_CONN as usize - 1) / 2;
+    let largest = (MAX_FRAMES_PER_CONN as usize - 2) / 2;
     assert_eq!(largest, 4_999);
     let fx = Fixture::new();
     let (pack, id) = valid_pack();

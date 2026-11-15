@@ -232,6 +232,9 @@ impl RemoteSource for MeasuredSource<'_> {
     fn list_branches(&self) -> Result<Vec<refs::Ref>, SourceError> {
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, SourceError> {
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.inner.read_ref(name)
     }

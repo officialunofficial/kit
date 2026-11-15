@@ -619,6 +619,11 @@ impl RemoteSource for Counting<'_> {
         self.inner.list_branches()
     }
 
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        self.bump(|c| c.list += 1);
+        self.inner.list_refs(prefix)
+    }
+
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.bump(|c| c.read_ref += 1);
         self.inner.read_ref(name)
@@ -667,6 +672,10 @@ impl<'a> Uploads<'a> {
 impl RemoteSource for Uploads<'_> {
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.inner.list_branches()
+    }
+
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        self.inner.list_refs(prefix)
     }
 
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
