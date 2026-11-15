@@ -26,9 +26,9 @@ use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_core::{delta, serialize, transfer};
 use kit_sync::{
-    AppliedPacks, CloneRemote, FetchReport, NoopObserver, Observer, PullOutcome, RemoteSource,
-    SourceError, SyncError, SyncEvent, SyncOptions, TransportSource, clone, fetch, init_clone_dir,
-    pull,
+    AppliedPacks, CloneInitError, CloneRemote, FetchReport, NoopObserver, Observer, PullOutcome,
+    RemoteSource, SourceError, SyncError, SyncEvent, SyncOptions, TransportSource, clone, fetch,
+    init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
 
@@ -884,6 +884,79 @@ fn a_resumed_clone_equals_an_uninterrupted_one() {
             "a clone killed in download {k} and resumed"
         );
     }
+}
+
+#[test]
+fn a_clone_run_again_over_its_unfinished_self_resumes() {
+    const PACKS: usize = 4;
+    let remote = Remote::with_commits(PACKS);
+
+    let dir = tempfile::tempdir().unwrap();
+    let whole = dir.path().join("whole");
+    clone(
+        &whole,
+        &remote.source(),
+        &clone_remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let expected = footprint(&whole, &RepoLayout::single(&whole));
+
+    let resumed = dir.path().join("resumed");
+    let layout = init_clone_dir(&resumed, &clone_remote()).unwrap();
+    let dying = HookSource::new(&remote, 2, Action::Panic);
+    let died = catch_unwind(AssertUnwindSafe(|| {
+        run_fetch(&resumed, &dying, &NoopObserver)
+    }));
+    assert!(died.is_err());
+    let kept = ObjectStore::open(&layout)
+        .unwrap()
+        .iter_object_hashes()
+        .unwrap()
+        .len();
+    assert!(kept > 0, "the stopped clone kept the packs it applied");
+
+    // Another remote, or a file in the worktree, rules the directory out.
+    let other = CloneRemote {
+        url: "kit+memory://other".to_owned(),
+        ..clone_remote()
+    };
+    assert!(matches!(
+        init_clone_dir(&resumed, &other),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
+    std::fs::write(resumed.join("note"), b"mine").unwrap();
+    assert!(matches!(
+        init_clone_dir(&resumed, &clone_remote()),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
+    std::fs::remove_file(resumed.join("note")).unwrap();
+    // A record of a verified tip left in the directory is not trusted: the
+    // resumed clone checks every history in full.
+    let planted = layout.applied_packs_dir().join(".verified").join("planted");
+    std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    std::fs::write(&planted, b"not made by this clone").unwrap();
+
+    let report = clone(
+        &resumed,
+        &remote.source(),
+        &clone_remote(),
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(matches!(
+        report.pull.outcome,
+        PullOutcome::FastForwarded { .. }
+    ));
+    assert!(!planted.exists());
+    assert_eq!(footprint(&resumed, &layout), expected);
+    // A finished clone has published its refs: it is not resumed again.
+    assert!(matches!(
+        init_clone_dir(&resumed, &clone_remote()),
+        Err(CloneInitError::AlreadyInitialized)
+    ));
 }
 
 // ---------------------------------------------------------------------------

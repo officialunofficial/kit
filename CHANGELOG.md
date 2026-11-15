@@ -67,6 +67,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not after a total time (300 s over Connect), and is retried like a lost
   connection; a slow link that keeps moving now finishes a large pack.
   `kit-client` reports such a stall as `FailureKind::Stalled`.
+- `kit clone` into an unfinished clone of the same remote resumes it,
+  keeping the packs it already has and checking everything again; any other
+  existing destination is still refused. `kit_sync::init_clone_dir` returns
+  such a clone where it returned `AlreadyInitialized`.
 - A fetch checks the closure of a new tip only down to the tracking tips an
   earlier fetch that verified signatures checked, the tips it published
   itself, and their history, so a fetch of one commit reads what that commit
