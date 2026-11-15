@@ -356,6 +356,7 @@ fn ensure_pull_restore_safe(
         &RestoreOptions::default(),
         &Expected {
             trees: &[Some(before_tree), Some(tree)],
+            unchanged_base: None,
             restore_temp_files: true,
             refuse_untracked_dirs: true,
             refusals: &PULL_RECOVERY_REFUSALS,

@@ -103,9 +103,9 @@ pub(crate) use kit_sync::worktree::{
     index_tracks_path_or_descendant, restore_affects_path,
 };
 pub use kit_sync::worktree::{
-    ensure_restore_safe, ensure_restore_safe_with_options, read_or_seed_index_from_head,
-    restore_worktree_and_index, sync_index_to_tree, sync_index_to_tree_observed,
-    write_ref_recording_history,
+    ensure_restore_safe, ensure_restore_safe_from, ensure_restore_safe_with_options,
+    read_or_seed_index_from_head, restore_worktree_and_index, sync_index_to_tree,
+    sync_index_to_tree_observed, write_ref_recording_history,
 };
 
 /// Stream the content of the blob `h` to `out`, one chunk at a time. A write
@@ -514,16 +514,24 @@ pub fn record_superseded(
 /// destructive worktree moves (`reset --hard`, `checkout`) these files
 /// are deleted explicitly (`restore_tree_to_worktree` with `clean =
 /// false` writes/overwrites but never deletes). The `(status, hash)`
-/// lets the caller detect local edits by content AND mode/type.
+/// lets the caller detect local edits by content AND mode/type. Pass the
+/// `base_tree` the restore that follows leaves alone, as for
+/// [`ensure_restore_safe_from`], or `None`.
 pub(crate) fn dropped_tracked_paths(
     layout: &RepoLayout,
     store: &ObjectStore,
     target_tree: Hash,
+    base_tree: Option<Hash>,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, String> {
     let idx = read_or_seed_index_from_head(layout, store)?;
     let snapshot = kit_core::store::EphemeralSink::new(store);
-    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, &idx, false)
-        .map_err(|e| format!("index tree: {e}"))?;
+    // Entries `base_tree` holds unchanged open no object; the restore-safety
+    // check with the same base has checked that the store has the objects of
+    // each path the move changes. With no base every object is opened, so a
+    // missing one refuses the move before anything is written.
+    let index_tree =
+        core_worktree::build_tree_from_index_against(store, &snapshot, &idx, false, base_tree)
+            .map_err(|e| format!("index tree: {e}"))?;
     let mut out = Vec::new();
     for e in diff_trees(&snapshot, Some(index_tree), Some(target_tree))
         .map_err(|e| format!("diff index vs target: {e}"))?

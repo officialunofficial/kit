@@ -557,7 +557,7 @@ pub fn build_tree_from_index(
 /// point at blob-shaped objects (a sink cannot read).
 ///
 /// `verify` selects the staged-object integrity check. With `verify =
-/// true` (every path that publishes a durable tree) each referenced
+/// true` (a path that publishes a durable tree) each referenced
 /// object is read and re-hashed before the tree is materialised, so a
 /// corrupt staged object can never be published. With `verify = false`
 /// (ephemeral status/diff snapshots that publish nothing durable) only
@@ -566,41 +566,61 @@ pub fn build_tree_from_index(
 ///
 /// # Errors
 /// See [`build_tree_from_index`].
-#[allow(clippy::items_after_statements, clippy::too_many_lines)]
 pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
     store: &ObjectStore,
     sink: &S,
     index: &crate::index::Index,
     verify: bool,
 ) -> WorktreeResult<Hash> {
+    build_tree_from_index_against(store, sink, index, verify, None)
+}
+
+/// [`build_tree_from_index_with`] that checks only the staged objects that
+/// differ from the tree `base`, the tree the index is expected to match:
+/// the tree of `HEAD` for status, commit and a plain checkout.
+///
+/// An entry with the same path, mode and object id as in `base` is not
+/// opened: `base` already names that object there, so the new tree adds no
+/// reference the repository did not have. Such an object that is damaged or
+/// missing goes unnoticed here. `closure verify`, which re-hashes a whole
+/// closure, a push that sends the object, and any read that uses it still
+/// check it.
+///
+/// The comparison goes by directory. A directory whose tree id equals the
+/// one in `base`, and whose object file in the store has the length of its
+/// tree object, costs one hash compare and one `stat`, and its tree object
+/// is not written again. A tree of `base` that is missing, has another
+/// length or cannot be read counts as different: every entry under it is
+/// checked and its tree object is written. With `base = None` every entry is
+/// checked, as [`build_tree_from_index_with`] does.
+///
+/// Reads through `sink` must see what `store` holds: a skipped directory is
+/// one `store` holds.
+/// A skipped tree needs no flush either: `base` names it, and a tree is
+/// durable before any ref names it.
+///
+/// # Errors
+/// See [`build_tree_from_index`]. An entry equal to `base` is not checked,
+/// so its object raises no error.
+pub fn build_tree_from_index_against<S: ObjectSink + ?Sized>(
+    store: &ObjectStore,
+    sink: &S,
+    index: &crate::index::Index,
+    verify: bool,
+    base: Option<Hash>,
+) -> WorktreeResult<Hash> {
     use crate::index::EntryStatus;
 
-    // Build an in-memory directory tree. Each node is either a leaf
-    // (one staged blob/symlink) or a directory containing children.
-    #[derive(Default)]
-    struct Node {
-        // Subdirectory name → child node.
-        children: std::collections::BTreeMap<String, Node>,
-        // Leaf entries directly under this dir: name → (mode, hash).
-        leaves: std::collections::BTreeMap<String, (EntryMode, Hash)>,
-    }
-
-    let mut root = Node::default();
     let mut seen_paths = std::collections::HashSet::with_capacity(index.entries.len());
 
     // Pass 1: validate paths/status and collect the surviving entries'
     // (path, mode, staged hash) — cheap, pure-CPU work, no store access.
-    // The original single-pass loop bailed on the *first* entry (in
-    // index order) with any problem — duplicate path, reserved status,
-    // or bad staged object — never even looking at later entries. A
-    // path/status problem here defers its error via `deferred_status_err`
-    // and stops collecting instead of returning immediately, so pass 2
-    // below still gets a chance to surface an *earlier* staged-object
-    // problem among the entries collected before the stopping point —
-    // preserving that same index-order precedence across both error
-    // classes. Entries at or after the stopping point are unreachable
-    // either way (the original loop never got there), so excluding them
-    // from `kept` changes nothing observable.
+    // A path/status problem here defers its error via
+    // `deferred_status_err` and stops collecting instead of returning
+    // immediately, so pass 3 below still gets a chance to surface a
+    // staged-object problem among the entries collected before the
+    // stopping point: the earlier of the two in index order wins.
+    // Entries at or after the stopping point are never checked.
     let mut kept: Vec<(&str, EntryMode, Hash)> = Vec::with_capacity(index.entries.len());
     let mut deferred_status_err: Option<WorktreeError> = None;
     for entry in &index.entries {
@@ -632,141 +652,254 @@ pub fn build_tree_from_index_with<S: ObjectSink + ?Sized>(
         kept.push((entry.path.as_str(), mode, entry.object_hash));
     }
 
-    // Pass 2: one batched staged-object check (fetch the type, then the
-    // same blob-shape check the original loop ran inline right after
-    // its own per-entry fetch) for every entry pass 1 kept, instead of
-    // interleaving it one-at-a-time with the pass-3 tree walk below.
+    // Pass 2: lay the kept entries out as directories and compute each
+    // directory's tree id — pure CPU, nothing is written yet. A layout
+    // error (path conflict, bad name) waits until pass 3 has checked
+    // every kept entry, so a staged-object problem wins over it.
+    let mut laid_out = IndexDir::lay_out(&kept).and_then(|mut root| {
+        root.seal()?;
+        Ok(root)
+    });
+
+    // Pass 3: one batched staged-object check (fetch the type, then the
+    // blob-shape check) for every kept entry that differs from `base`,
+    // or for every kept entry when there is no base or pass 2 failed.
     // `probe_staged_objects` fans this out across threads once there's
-    // enough work to amortize it (native builds only) — a `status`/
-    // `diff` snapshot over a many-file repo was paying one serialized
-    // `open`+`read`(+`close`) per tracked file here, dominating wall
-    // time well before hashing or tree-materialization cost did. Its
-    // sequential (default) path still short-circuits on the first
-    // failing entry in `kept`'s (index) order, so — combined with pass
-    // 1 stopping at the same point the original loop would have —
-    // whichever of the two errors is earlier in index order is the one
-    // that surfaces, exactly matching the original interleaved loop.
-    probe_staged_objects(store, &kept, verify)?;
+    // enough work to amortize it (native builds only). Its sequential
+    // (default) path short-circuits on the first failing entry in
+    // `kept`'s (index) order.
+    match (&mut laid_out, base) {
+        (Ok(root), Some(base)) => {
+            let mut differing = std::collections::HashSet::new();
+            root.collect_differing(store, Some(base), "", &mut differing);
+            let to_check: Vec<(&str, EntryMode, Hash)> = kept
+                .iter()
+                .copied()
+                .filter(|(path, _, _)| differing.contains(*path))
+                .collect();
+            probe_staged_objects(store, &to_check, verify)?;
+        }
+        _ => probe_staged_objects(store, &kept, verify)?,
+    }
     if let Some(err) = deferred_status_err {
         return Err(err);
     }
+    let root = laid_out?;
+    root.write(sink)?;
+    Ok(root.id)
+}
 
-    // Pass 3: walk each surviving, already-validated entry into the
-    // in-memory node tree.
-    for (path, mode, object_hash) in kept {
-        // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
-        let segments: Vec<&str> = path.split('/').collect();
-        let Some((leaf, dirs)) = segments.split_last() else {
-            return Err(WorktreeError::Io(io::Error::other("empty index path")));
-        };
-        if leaf.is_empty() {
-            return Err(WorktreeError::Io(io::Error::other(
-                "trailing slash in index path",
-            )));
-        }
+/// One directory of the tree [`build_tree_from_index_against`] builds.
+#[derive(Default)]
+struct IndexDir {
+    /// Subdirectory name → child directory.
+    children: std::collections::BTreeMap<String, IndexDir>,
+    /// Leaf entries directly under this directory: name → (mode, hash).
+    leaves: std::collections::BTreeMap<String, (EntryMode, Hash)>,
+    /// The tree id, set by [`IndexDir::seal`].
+    id: Hash,
+    /// The serialized tree object, set by [`IndexDir::seal`].
+    bytes: Vec<u8>,
+    /// The base tree holds this directory as it is, so its tree object is
+    /// already stored and is not written.
+    in_base: bool,
+}
 
-        let mut node = &mut root;
-        let mut walked = String::new();
-        for seg in dirs {
-            if seg.is_empty() {
+impl IndexDir {
+    /// Lay out the validated `(path, mode, hash)` entries as directories.
+    fn lay_out(kept: &[(&str, EntryMode, Hash)]) -> WorktreeResult<Self> {
+        let mut root = Self::default();
+        for &(path, mode, object_hash) in kept {
+            // Split "a/b/c.txt" into ["a", "b"] + "c.txt".
+            let segments: Vec<&str> = path.split('/').collect();
+            let Some((leaf, dirs)) = segments.split_last() else {
+                return Err(WorktreeError::Io(io::Error::other("empty index path")));
+            };
+            if leaf.is_empty() {
                 return Err(WorktreeError::Io(io::Error::other(
-                    "empty path segment in index",
+                    "trailing slash in index path",
                 )));
             }
-            // Collision: this segment was previously staged as a blob
-            // (e.g. earlier index entry was `a` as a file, this one
-            // is `a/b`). Tree object format requires unique entry
-            // names per directory; emitting both would produce an
-            // invalid tree the deserializer rejects under its strict
-            // ascending-name rule.
-            if node.leaves.contains_key(*seg) {
-                let conflicting = if walked.is_empty() {
+
+            let mut node = &mut root;
+            let mut walked = String::new();
+            for seg in dirs {
+                if seg.is_empty() {
+                    return Err(WorktreeError::Io(io::Error::other(
+                        "empty path segment in index",
+                    )));
+                }
+                // Collision: this segment was previously staged as a blob
+                // (e.g. earlier index entry was `a` as a file, this one
+                // is `a/b`). Tree object format requires unique entry
+                // names per directory; emitting both would produce an
+                // invalid tree the deserializer rejects under its strict
+                // ascending-name rule.
+                if node.leaves.contains_key(*seg) {
+                    let conflicting = if walked.is_empty() {
+                        (*seg).to_string()
+                    } else {
+                        format!("{walked}/{seg}")
+                    };
+                    return Err(WorktreeError::Io(io::Error::other(format!(
+                        "index path conflict: '{conflicting}' is staged as both a file and a directory"
+                    ))));
+                }
+                walked = if walked.is_empty() {
                     (*seg).to_string()
                 } else {
                     format!("{walked}/{seg}")
+                };
+                node = node.children.entry((*seg).to_string()).or_default();
+            }
+            // The reverse collision: this entry's leaf name already exists
+            // as a child directory under the same parent (an earlier
+            // entry staged `a/b` and now this one stages `a` as a file).
+            if node.children.contains_key(*leaf) {
+                let conflicting = if walked.is_empty() {
+                    (*leaf).to_string()
+                } else {
+                    format!("{walked}/{leaf}")
                 };
                 return Err(WorktreeError::Io(io::Error::other(format!(
                     "index path conflict: '{conflicting}' is staged as both a file and a directory"
                 ))));
             }
-            walked = if walked.is_empty() {
-                (*seg).to_string()
-            } else {
-                format!("{walked}/{seg}")
-            };
-            node = node.children.entry((*seg).to_string()).or_default();
+            if node
+                .leaves
+                .insert((*leaf).to_string(), (mode, object_hash))
+                .is_some()
+            {
+                let duplicate = if walked.is_empty() {
+                    (*leaf).to_string()
+                } else {
+                    format!("{walked}/{leaf}")
+                };
+                return Err(WorktreeError::Io(io::Error::other(format!(
+                    "duplicate index path: '{duplicate}'"
+                ))));
+            }
         }
-        // The reverse collision: this entry's leaf name already exists
-        // as a child directory under the same parent (an earlier
-        // entry staged `a/b` and now this one stages `a` as a file).
-        if node.children.contains_key(*leaf) {
-            let conflicting = if walked.is_empty() {
-                (*leaf).to_string()
-            } else {
-                format!("{walked}/{leaf}")
-            };
-            return Err(WorktreeError::Io(io::Error::other(format!(
-                "index path conflict: '{conflicting}' is staged as both a file and a directory"
-            ))));
-        }
-        if node
-            .leaves
-            .insert((*leaf).to_string(), (mode, object_hash))
-            .is_some()
-        {
-            let duplicate = if walked.is_empty() {
-                (*leaf).to_string()
-            } else {
-                format!("{walked}/{leaf}")
-            };
-            return Err(WorktreeError::Io(io::Error::other(format!(
-                "duplicate index path: '{duplicate}'"
-            ))));
-        }
+        Ok(root)
     }
 
-    fn write_node<S: ObjectSink + ?Sized>(sink: &S, node: &Node) -> WorktreeResult<Hash> {
-        let mut entries: Vec<TreeEntry> = Vec::new();
-
-        // Subdirectories first (alphabetical via BTreeMap).
-        for (name, child) in &node.children {
-            let h = write_node(sink, child)?;
+    /// Serialize this directory's tree object and compute its id. The
+    /// children must be sealed.
+    fn seal_one(&mut self) -> WorktreeResult<()> {
+        let mut entries: Vec<TreeEntry> =
+            Vec::with_capacity(self.children.len() + self.leaves.len());
+        let named = self
+            .children
+            .iter()
+            .map(|(name, child)| (name, EntryMode::Tree, child.id))
+            .chain(
+                self.leaves
+                    .iter()
+                    .map(|(name, (mode, hash))| (name, *mode, *hash)),
+            );
+        for (name, mode, object_hash) in named {
             let bytes = name.as_bytes().to_vec();
-            if !crate::object::TreeEntry::validate_name(&bytes) {
+            if !TreeEntry::validate_name(&bytes) {
                 return Err(WorktreeError::Io(io::Error::other(format!(
                     "invalid tree entry name: {name:?}"
                 ))));
             }
             entries.push(TreeEntry {
                 name: bytes,
-                mode: EntryMode::Tree,
-                object_hash: h,
+                mode,
+                object_hash,
             });
         }
-
-        // Then leaves.
-        for (name, (mode, hash)) in &node.leaves {
-            let bytes = name.as_bytes().to_vec();
-            if !crate::object::TreeEntry::validate_name(&bytes) {
-                return Err(WorktreeError::Io(io::Error::other(format!(
-                    "invalid tree entry name: {name:?}"
-                ))));
-            }
-            entries.push(TreeEntry {
-                name: bytes,
-                mode: *mode,
-                object_hash: *hash,
-            });
-        }
-
         // Tree-entry order is name-ascending per SPEC-OBJECTS §4.
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let tree = Object::Tree(Tree { entries });
-        let bytes = serialize::serialize(&tree)?;
-        Ok(sink.put(&bytes)?)
+        self.bytes = serialize::serialize(&tree)?;
+        self.id = crate::object::id_from_object(&tree, &self.bytes);
+        Ok(())
     }
 
-    write_node(sink, &root)
+    /// Serialize the tree object of this directory and every one below it,
+    /// and compute their ids.
+    fn seal(&mut self) -> WorktreeResult<()> {
+        for child in self.children.values_mut() {
+            child.seal()?;
+        }
+        self.seal_one()
+    }
+
+    /// Collect into `differing` the path of every leaf below this directory
+    /// that the tree `base` does not hold with the same mode and object id,
+    /// and mark each directory equal to its tree in `base`, which adds
+    /// nothing. `prefix` is this directory's path.
+    fn collect_differing(
+        &mut self,
+        store: &ObjectStore,
+        base: Option<Hash>,
+        prefix: &str,
+        differing: &mut std::collections::HashSet<String>,
+    ) {
+        // The store holds this tree as it is when its object file has the
+        // tree's length, the rule a `WriteBatch` dedups by. Otherwise the
+        // tree is checked and written, whatever `base` says.
+        if base == Some(self.id)
+            && fs::metadata(store.path_for(&self.id))
+                .is_ok_and(|m| u64::try_from(self.bytes.len()) == Ok(m.len()))
+        {
+            self.in_base = true;
+            return;
+        }
+        // A base tree that cannot be read counts as absent: every entry
+        // under it is checked.
+        let base_entries = match base.map(|h| store.read_object(&h)) {
+            Some(Ok(Object::Tree(tree))) => tree.entries,
+            _ => Vec::new(),
+        };
+        let base_hash = |name: &str, mode: EntryMode| {
+            base_entries
+                .binary_search_by(|e| e.name.as_slice().cmp(name.as_bytes()))
+                .ok()
+                .map(|i| &base_entries[i])
+                .filter(|e| e.mode == mode)
+                .map(|e| e.object_hash)
+        };
+        let join = |name: &str| {
+            if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}/{name}")
+            }
+        };
+        for (name, child) in &mut self.children {
+            child.collect_differing(
+                store,
+                base_hash(name, EntryMode::Tree),
+                &join(name),
+                differing,
+            );
+        }
+        for (name, (mode, hash)) in &self.leaves {
+            if base_hash(name, *mode) != Some(*hash) {
+                differing.insert(join(name));
+            }
+        }
+    }
+
+    /// Write this directory's tree object and every one below it that the
+    /// base does not hold, children first.
+    fn write<S: ObjectSink + ?Sized>(&self, sink: &S) -> WorktreeResult<()> {
+        if self.in_base {
+            return Ok(());
+        }
+        for child in self.children.values() {
+            child.write(sink)?;
+        }
+        if sink.put(&self.bytes)? != self.id {
+            return Err(WorktreeError::Io(io::Error::other(
+                "the sink stored a tree under another id",
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// `std::thread::available_parallelism()`, cached process-wide — the
@@ -866,7 +999,7 @@ where
 }
 
 /// Staged-object check for every `(path, mode, hash)` triple in
-/// `entries`, in order — [`build_tree_from_index_with`]'s batched pass-2
+/// `entries`, in order — [`build_tree_from_index_against`]'s batched pass-3
 /// step. Below a small-batch threshold this runs a plain sequential
 /// loop (short-circuiting on `entries`' first failure, same as a plain
 /// `for` loop would); at or above it (native builds only — wasm32 has
@@ -925,9 +1058,7 @@ fn probe_staged_objects_parallel(
 // Pure per-entry step shared by both branches of
 // `probe_staged_objects`: fetch `hash`'s object-type tag —
 // `verify_object_type` (full read + rehash) when `verify`, else the
-// cheap prologue-only `object_type` — then run the same blob-shape
-// check the original single-pass loop ran inline right after its own
-// per-entry fetch.
+// cheap prologue-only `object_type` — then run the blob-shape check.
 //
 // A regular file (Blob/Executable) may be stored as a single Blob or,
 // for content above CHUNK_THRESHOLD, a ChunkedBlob manifest —
@@ -936,11 +1067,11 @@ fn probe_staged_objects_parallel(
 // path). Accept both blob shapes for file entries so the commit/index
 // path agrees with the worktree-hashing path; a tree/commit/etc.
 // under a file entry is still rejected. Publishing paths (`verify`)
-// read + re-hash the staged object so a tree never references a
-// corrupt blob; the read path's hash check is the same one `add`
-// passed, so this only catches post-`add` corruption. Ephemeral
-// status/diff snapshots skip it — re-reading every staged blob on
-// every status dominates large repos of small files, and they
+// read + re-hash each staged object they check, so a tree never adds a
+// reference to a corrupt blob; the read path's hash check is the same
+// one `add` passed, so this only catches post-`add` corruption.
+// Ephemeral status/diff snapshots skip it — re-reading every staged
+// blob on every status dominates large repos of small files, and they
 // publish nothing durable.
 fn check_one_staged_object(
     store: &ObjectStore,
@@ -3262,11 +3393,269 @@ mod tests {
         );
     }
 
-    /// The batched pass-2 staged-object check (`probe_staged_objects`)
+    /// An index entry with no stat cache.
+    fn staged(path: &str, status: crate::index::EntryStatus, h: Hash) -> crate::index::IndexEntry {
+        crate::index::IndexEntry {
+            status,
+            object_hash: h,
+            path: path.to_string(),
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        }
+    }
+
+    /// An index holding `entries` in order.
+    fn index_of(entries: &[(&str, crate::index::EntryStatus, Hash)]) -> crate::index::Index {
+        let mut idx = crate::index::Index::default();
+        idx.entries = entries
+            .iter()
+            .map(|&(path, status, h)| staged(path, status, h))
+            .collect();
+        idx
+    }
+
+    /// A sink that stores into another sink and counts the objects put.
+    struct CountingSink<'a>(&'a dyn ObjectSink, std::cell::Cell<usize>);
+
+    impl ObjectSink for CountingSink<'_> {
+        fn put(&self, bytes: &[u8]) -> crate::store::StoreResult<Hash> {
+            self.1.set(self.1.get() + 1);
+            self.0.put(bytes)
+        }
+        fn put_parts(&self, parts: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            self.1.set(self.1.get() + 1);
+            self.0.put_parts(parts)
+        }
+        fn has(&self, h: &Hash) -> bool {
+            self.0.has(h)
+        }
+    }
+
+    /// A sink that claims to store every object under the zero id.
+    struct ZeroIdSink;
+
+    impl ObjectSink for ZeroIdSink {
+        fn put(&self, _: &[u8]) -> crate::store::StoreResult<Hash> {
+            Ok(crate::hash::ZERO)
+        }
+        fn put_parts(&self, _: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            Ok(crate::hash::ZERO)
+        }
+        fn has(&self, _: &Hash) -> bool {
+            false
+        }
+    }
+
+    fn is_not_found(result: &WorktreeResult<Hash>) -> bool {
+        matches!(
+            result,
+            Err(WorktreeError::Store(
+                crate::store::StoreError::ObjectNotFound(_)
+            ))
+        )
+    }
+
+    /// The id of the directory `name` in the tree `tree`.
+    fn subtree(store: &ObjectStore, tree: Hash, name: &[u8]) -> Hash {
+        let Object::Tree(root) = store.read_object(&tree).unwrap() else {
+            panic!("not a tree");
+        };
+        root.entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap()
+            .object_hash
+    }
+
+    /// Against a base tree, only the directories that differ from it are
+    /// written, and a directory the store lost is written again.
+    #[test]
+    fn build_tree_from_index_against_writes_only_directories_that_differ() {
+        use crate::index::EntryStatus::Blob;
+
+        let (_sd, store) = fresh_store();
+        let put = |data: &[u8]| {
+            let blob = Object::Blob(crate::object::Blob {
+                data: data.to_vec(),
+            });
+            store.write(&serialize::serialize(&blob).unwrap()).unwrap()
+        };
+        let (a, c, e) = (put(b"a"), put(b"c"), put(b"e"));
+        let with_b = |b| {
+            index_of(&[
+                ("a.txt", Blob, a),
+                ("d/b.txt", Blob, b),
+                ("d/c.txt", Blob, c),
+                ("e/f.txt", Blob, e),
+            ])
+        };
+        let base_index = with_b(put(b"b"));
+        let base = build_tree_from_index(&store, &base_index).unwrap();
+        let build = |idx| {
+            let sink = CountingSink(&store, std::cell::Cell::new(0));
+            let tree = build_tree_from_index_against(&store, &sink, idx, true, Some(base));
+            (tree.unwrap(), sink.1.get())
+        };
+
+        // The index equals the base: nothing is written.
+        assert_eq!(build(&base_index), (base, 0));
+        // One file changed: the root and `d`, not `e`.
+        let edited = with_b(put(b"b2"));
+        let expected = build_tree_from_index(&store, &edited).unwrap();
+        assert_eq!(build(&edited), (expected, 2));
+        // The store lost the tree of `e`: it is written again.
+        let e_tree = subtree(&store, base, b"e");
+        std::fs::remove_file(store.path_for(&e_tree)).unwrap();
+        assert_eq!(build(&edited), (expected, 3));
+        assert!(store.contains(&e_tree));
+        // A truncated or a longer tree of `e` is written again too, and a
+        // commit's batch replaces it.
+        let e_path = store.path_for(&e_tree);
+        let e_bytes = std::fs::read(&e_path).unwrap();
+        let mut longer = e_bytes.clone();
+        longer.push(0);
+        for damaged in [&e_bytes[..e_bytes.len() - 1], &longer[..]] {
+            std::fs::write(&e_path, damaged).unwrap();
+            let batch = store.batch();
+            let sink = CountingSink(&batch, std::cell::Cell::new(0));
+            let tree = build_tree_from_index_against(&store, &sink, &edited, true, Some(base));
+            assert_eq!((tree.unwrap(), sink.1.get()), (expected, 3));
+            batch.commit().unwrap();
+            assert_eq!(std::fs::read(&e_path).unwrap(), e_bytes);
+        }
+
+        // A sink that stores a tree under another id is refused.
+        let err = build_tree_from_index_against(&store, &ZeroIdSink, &edited, true, Some(base))
+            .unwrap_err();
+        assert!(err.to_string().contains("another id"), "got: {err}");
+
+        // A changed entry is still verified against a base: a flipped byte
+        // in its object fails the re-hash, and passes the shape-only check.
+        let b2 = edited.entries[1].object_hash;
+        let b2_path = store.path_for(&b2);
+        let mut bytes = std::fs::read(&b2_path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        std::fs::write(&b2_path, &bytes).unwrap();
+        let checked =
+            |verify| build_tree_from_index_against(&store, &store, &edited, verify, Some(base));
+        assert!(matches!(
+            checked(true),
+            Err(WorktreeError::Store(
+                crate::store::StoreError::HashMismatch { .. }
+            ))
+        ));
+        assert_eq!(checked(false).unwrap(), expected);
+    }
+
+    /// Against a base tree, only entries that differ from it open their
+    /// object: a missing object the base holds at the same path with the same
+    /// mode passes, while any other entry that names it is refused, in both
+    /// the verifying and the shape-only check.
+    #[test]
+    fn build_tree_from_index_against_checks_only_entries_that_differ_from_base() {
+        use crate::index::EntryStatus::{Blob, Executable, Removed, Symlink};
+
+        let (_sd, store) = fresh_store();
+        let put = |data: &[u8]| {
+            let blob = Object::Blob(crate::object::Blob {
+                data: data.to_vec(),
+            });
+            store.write(&serialize::serialize(&blob).unwrap()).unwrap()
+        };
+        let (a, b, c, d) = (put(b"a"), put(b"b"), put(b"c"), put(b"d"));
+        let base_entries = [
+            ("a.txt", Blob, a),
+            ("d/b.txt", Blob, b),
+            ("d/c.txt", Blob, c),
+        ];
+        let base = build_tree_from_index(&store, &index_of(&base_entries)).unwrap();
+        let d_tree = subtree(&store, base, b"d");
+        let edited = index_of(&[
+            ("a.txt", Blob, a),
+            ("d/b.txt", Blob, d),
+            ("d/c.txt", Blob, c),
+        ]);
+        let edited_tree = build_tree_from_index(&store, &edited).unwrap();
+        let without_c = build_tree_from_index(
+            &store,
+            &index_of(&[("a.txt", Blob, a), ("d/b.txt", Blob, b)]),
+        )
+        .unwrap();
+
+        // The objects the base holds are gone; only `d` is left.
+        for h in [a, b, c] {
+            std::fs::remove_file(store.path_for(&h)).unwrap();
+        }
+        for verify in [true, false] {
+            let build = |idx: &crate::index::Index| {
+                build_tree_from_index_against(&store, &store, idx, verify, Some(base))
+            };
+            // The same index, one that changes one file and one that only
+            // removes a file build the same trees as before without opening
+            // a missing object.
+            assert_eq!(build(&index_of(&base_entries)).unwrap(), base);
+            assert_eq!(build(&edited).unwrap(), edited_tree);
+            let mut removed = index_of(&base_entries);
+            removed.entries[2].status = Removed;
+            assert_eq!(build(&removed).unwrap(), without_c);
+            // With no base, every entry is opened.
+            assert!(is_not_found(&build_tree_from_index_against(
+                &store, &store, &edited, verify, None
+            )));
+            // A missing object under a path or mode the base does not hold
+            // is opened and refused: a mode-only change, a symlink, a
+            // case-only rename and a move to another directory.
+            for changed in [
+                ("a.txt", Executable, a),
+                ("a.txt", Symlink, a),
+                ("A.txt", Blob, a),
+                ("e/b.txt", Blob, b),
+            ] {
+                let mut entries = vec![changed];
+                entries.extend(base_entries.iter().copied().filter(|e| e.0 != "a.txt"));
+                entries.sort_by(|x, y| x.0.cmp(y.0));
+                assert!(
+                    is_not_found(&build(&index_of(&entries))),
+                    "{changed:?} must open its object (verify = {verify})"
+                );
+            }
+            // A file that names the tree the base holds at its path is a
+            // non-blob.
+            let err = build(&index_of(&[("a.txt", Blob, a), ("d", Blob, d_tree)])).unwrap_err();
+            assert!(err.to_string().contains("non-blob"), "got: {err}");
+            // A layout error checks every entry first, so the missing object
+            // of an entry the base holds is what is reported.
+            assert!(is_not_found(&build(&index_of(&[
+                ("a.txt", Blob, a),
+                ("a.txt/x", Blob, d),
+            ]))));
+            // A duplicate after an entry the base holds still refuses.
+            let err = build(&index_of(&[("a.txt", Blob, a), ("a.txt", Blob, a)])).unwrap_err();
+            assert!(
+                err.to_string().contains("duplicate index path"),
+                "got: {err}"
+            );
+        }
+
+        // A base tree that cannot be read counts as different: the files
+        // under it are opened.
+        std::fs::remove_file(store.path_for(&d_tree)).unwrap();
+        assert!(is_not_found(&build_tree_from_index_against(
+            &store,
+            &store,
+            &edited,
+            true,
+            Some(base)
+        )));
+    }
+
+    /// The batched pass-3 staged-object check (`probe_staged_objects`)
     /// must not change *which* error an index with more than one kind
     /// of problem reports — the sequential (default, non-parallel)
-    /// path has to surface the same error the original single
-    /// interleaved loop would have: whichever entry comes first in
+    /// path surfaces the error of whichever entry comes first in
     /// index order, checked dup-path, then status, then staged-object
     /// shape, in that sub-order. Here entry 0's staged hash was never
     /// written (fails the staged-object check) while entry 1 uses the

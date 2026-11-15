@@ -741,8 +741,11 @@ impl ObjectStore {
     /// tree-publication paths (commit, merge, rebase, …) — `object_type`
     /// alone reads only the 6-byte prologue, so a staged object corrupted
     /// after `add` would otherwise be published into a durable tree and
-    /// only fail at later read time. Use `object_type` on hot read-only
-    /// paths (status/diff snapshots) where nothing durable is published.
+    /// only fail at later read time. A commit skips the objects its parent
+    /// tree already names at the same path (see
+    /// [`build_tree_from_index_against`](crate::worktree::build_tree_from_index_against)).
+    /// Use `object_type` on hot read-only paths (status/diff snapshots)
+    /// where nothing durable is published.
     pub fn verify_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
         let bytes = self.read(h)?; // read() re-hashes and rejects on mismatch
         if bytes.len() < 6 {

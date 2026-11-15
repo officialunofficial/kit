@@ -285,6 +285,9 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         super::current_head_tree(&layout, &store).ok().flatten()
     };
+    // The safety checks skip the entries the restore skips: none when the
+    // restore is sparse, which rewrites every entry in the cone.
+    let checked_base = base_tree.filter(|_| sparse_opts.sparse_patterns.is_none());
 
     // Run the destructive-restore safety gate BEFORE touching
     // anything. This is read-only — it refuses the checkout if dirty
@@ -295,7 +298,7 @@ pub fn run(args: &[String]) -> u8 {
     // `--force` (git checkout -f) skips the gate, discarding local edits.
     if !opts.force
         && let Err(e) =
-            super::ensure_restore_safe_with_options(&layout, &store, tree_hash, &sparse_opts)
+            super::ensure_restore_safe_from(&layout, &store, tree_hash, &sparse_opts, checked_base)
     {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
@@ -303,8 +306,14 @@ pub fn run(args: &[String]) -> u8 {
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
     // first if any of them carries local edits (unless `--force`).
-    let dropped = match dropped_paths_guarded(&layout, &store, tree_hash, &sparse_opts, opts.force)
-    {
+    let dropped = match dropped_paths_guarded(
+        &layout,
+        &store,
+        tree_hash,
+        checked_base,
+        &sparse_opts,
+        opts.force,
+    ) {
         Ok(d) => d,
         Err(code) => return code,
     };
@@ -314,11 +323,7 @@ pub fn run(args: &[String]) -> u8 {
         tree_hash,
         &cwd,
         &sparse_opts,
-        if sparse_opts.sparse_patterns.is_some() {
-            None
-        } else {
-            base_tree
-        },
+        checked_base,
     ) {
         return emit_err(&format!("restore: {e}"), exit::CANTCREAT);
     }
@@ -422,11 +427,12 @@ fn dropped_paths_guarded(
     layout: &RepoLayout,
     store: &ObjectStore,
     tree_hash: Hash,
+    base_tree: Option<Hash>,
     opts: &RestoreOptions,
     force: bool,
 ) -> Result<Vec<(String, EntryStatus, Hash)>, u8> {
     let dropped: Vec<(String, EntryStatus, Hash)> =
-        match super::dropped_tracked_paths(layout, store, tree_hash) {
+        match super::dropped_tracked_paths(layout, store, tree_hash, base_tree) {
             Ok(all) => all
                 .into_iter()
                 .filter(|(path, _, _)| super::restore_affects_path(opts, path))
