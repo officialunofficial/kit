@@ -2050,3 +2050,103 @@ fn connect_head_only_force_replans_after_atomic_rebaseline() {
 fn connect_appending_force_replans_after_atomic_rebaseline() {
     run_rebaseline_race(true);
 }
+
+/// `push --tags` to a ticketed server sends each tag and its tag map in one
+/// advance; a clone takes the tags and the signed one verifies.
+#[test]
+fn cli_ticketed_push_tags_then_clone_verifies() {
+    let (src, _tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let kit = |dir: &std::path::Path, args: &[&str]| {
+        let out = Command::new(kit_bin())
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", xdg.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "kit {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    kit(src.path(), &["push", "origin"]);
+    kit(src.path(), &["tag", "v1"]);
+    std::fs::write(src.path().join("hello.txt"), b"hello again\n").unwrap();
+    kit(src.path(), &["add", "hello.txt"]);
+    kit(src.path(), &["commit", "-m", "second"]);
+    kit(src.path(), &["tag", "-s", "v2", "-m", "release 2"]);
+    calls.lock().unwrap().clear();
+
+    let out = kit(src.path(), &["push", "origin", "--tags"]);
+
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(" * [new tag]         v1 -> v1"), "{err}");
+    assert!(err.contains(" * [new tag]         v2 -> v2"), "{err}");
+    {
+        let calls = calls.lock().unwrap();
+        assert!(calls.iter().any(|call| call.procedure == "BeginUpload"));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.procedure == "AdvanceRefs")
+                .count(),
+            2,
+            "one advance per tag: {calls:?}"
+        );
+    }
+    let layout = kit_core::layout::RepoLayout::single(src.path());
+    for t in ["v1", "v2"] {
+        assert_eq!(
+            backend.read_ref(&format!("refs/tags/{t}")).unwrap(),
+            kit_core::refs::read_tag(&layout, t).unwrap()
+        );
+        assert!(
+            backend
+                .read_ref(&format!("refs/kit/tagmap/{t}"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // The reader clones with no key of its own.
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("trusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let clone = dst.path().join("clone");
+    kit(
+        dst.path(),
+        &["clone", "-o", "origin", &url, clone.to_str().unwrap()],
+    );
+    let cloned = kit_core::layout::RepoLayout::single(&clone);
+    for t in ["v1", "v2"] {
+        assert_eq!(
+            kit_core::refs::read_tag(&cloned, t).unwrap(),
+            kit_core::refs::read_tag(&layout, t).unwrap()
+        );
+    }
+    kit(&clone, &["verify", "v2"]);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}

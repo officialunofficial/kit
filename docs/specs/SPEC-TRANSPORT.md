@@ -970,6 +970,71 @@ bases a concurrent reset dropped. A re-baseline replaces that node too, so
 a force push plans again after one. On an ordered advance no reset happens
 except over a broken chain, and a force push appends on the ordered path.
 
+**Tag maps.** A tag push moves `refs/tags/<t>` and its tag map
+`refs/kit/tagmap/<t>` (§1.4) as a branch push moves a head and its
+packmap: the tag map first, then the tag, with `advance_refs` on the
+transport's advance kind. When the tag resolves to `v`, the tag map's
+chain rebuilds the closure of `v`. Every tag map write is a create
+(`Missing`) or an append whose node's `prev` is the value it replaces,
+written under `Match` on that value, and covers both the remote tag's
+current value and its new value. A tag map is therefore a superset of
+every value its tag held, a reader of an earlier value is still served in
+whatever order the two refs land, and a crash between the writes leaves
+nothing to clean up. That holds against tag pushes. On an ordered advance,
+a tag written without its tag map by anything else between the two writes
+is not covered, the same window a branch push has. A tag map is never
+re-baselined or reset.
+
+A tag map create may **graft**: its node's `prev` names the packmap node
+of one of the remote's branches, and several tag maps may name the same
+node. A tag chain never grafts on another tag chain. The push finds the
+base by walking each tag's peeled commit backward to the nearest commit
+that is the local tracking tip of one of this remote's branches, at most
+100,000 commits not seen before per tag. Unless the tag's commit is itself
+such a tip, the push first walks the tips' own histories, once per push and
+at most 100,000 commits, so that the walk back stops at the first commit a
+branch holds: a tag below a branch tip, or on a fork of that branch's
+history, grafts on that branch. It reads that branch stably: its
+head, then its packmap `p`, then its head again, up to eight times, and
+uses the base only when both head reads agree on a commit the local store
+holds. A branch whose read gives no base is passed over for the next
+branch at the same tip or below the tag, and the tips' histories are walked
+again without it, at most eight times per push. Two equal head reads do not
+rule out a head that moved away and back
+around a reset of its chain: a fetch then refuses a tag grafted in that
+window, and loses nothing. Tags that share a base form one group. A group is planned once,
+against that head, under one node `{prev: p, packs}` that every tag of the
+group takes as its tag map, or takes `p` itself when the plan is empty.
+Without a base the node has no `prev` and lists the full closure. The
+base changes only how much is sent, never what a reader can rebuild.
+
+For each tag with local value `v`, from the remote tag `T` and tag map
+`M` it reads:
+
+| Remote `T` | Remote `M` | Push |
+|---|---|---|
+| absent | absent | Create: tag map `Missing`, then tag `Missing`. |
+| absent | present | Append to `M` a node of the full closure of `v` under `Match(M)`, then tag `Missing`. |
+| `v` | present | Up to date. |
+| `v` | absent | Repair: tag map `Missing`, then tag `Match(v) → v`. |
+| other | any | Refused, unless forced. |
+| other, forced | present | Append to `M` a node planned against `T` when the local store holds `T`'s whole closure, else the full closure of `v`, under `Match(M)`; then tag `Match(T)`. When that plan is empty, `T`'s history holds all of `v`'s and `M` already rebuilds `v`, so the tag moves alone under `Match(T)`. |
+| other, forced | absent | Tag map `Missing` on a node whose plan includes `T`, then tag `Match(T)`. Refused when the local store lacks `T` or its closure. |
+
+A forced update conditions on the value it read, never `Any`. When a tag
+map write reports a conflict and a read shows the tag map already holds the
+push's own node with the tag absent, as after a retried write whose answer
+was lost, a push whose tag condition is `Missing` writes the tag alone
+under `Missing`. A tag read back at the pushed value with no tag map is a
+conflict, so the next decision repairs it. A push
+refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
+would not be a valid ref name, an annotated tag whose object names
+another tag, and an unsigned annotated tag. On a remote whose tag listing
+comes in one `kit serve` frame (`kit+ssh`, `kit+file`), a push refuses a
+create that would take the listing of `refs/tags/` or `refs/kit/tagmap/`
+past 960 KiB, counting each name without its prefix plus 48 bytes. A
+conflict reads that tag again and decides again, at most eight times.
+
 ---
 
 ## 8. Pack format

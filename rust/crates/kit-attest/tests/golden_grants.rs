@@ -604,6 +604,7 @@ fn reject_goldens() {
         GrantError::RefScopesMissing,
         GrantError::RefPattern,
         GrantError::PackmapPattern,
+        GrantError::TagmapPattern,
         GrantError::UnknownRefFlag,
         GrantError::RefFlagsNotCanonical,
         GrantError::RefScopeCount,

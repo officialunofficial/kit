@@ -158,6 +158,19 @@ true for a refusal or a failed listing, and the CLI then exits 1. A refused tag
 never fails the branches. An existing local tag with another value is refused
 and never moved, and no fetch deletes a tag.
 
+`PushTarget::Tags` pushes every local tag (`TagSelection::All`) or named ones
+(`TagSelection::Named`), and `PushReport::tags` gives one `TagPushResult` per
+tag (SPEC-TRANSPORT §7.2). Each tag goes with its tag map, the tag map first.
+A create grafts on the packmap node of the nearest branch this remote holds,
+found by walking back at most `MAX_BASE_WALK_COMMITS` new commits per tag.
+Tags that share a base are planned and uploaded once, as one node, so a push
+sends each object at most once per base. A remote tag with another value is
+refused unless `force`, which conditions on the value it read and keeps that
+value in the new tag map. Before reading the remote, a push refuses a tag whose
+tag map name is not a valid ref, an annotated tag named for another tag, and an
+unsigned annotated tag. On a remote that lists in one frame, a create past
+`MAX_TAG_LISTING_BYTES` is refused. A refused tag does not stop the others.
+
 ### Incremental fetch checkpoints
 
 With signature verification enabled, fetch records the last fully applied

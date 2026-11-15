@@ -102,6 +102,16 @@ pub trait RemoteSource {
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         kit_core::protocol::UploadLimits::default()
     }
+    /// The most distinct objects one advance may carry for the server to
+    /// inspect, when it says (SPEC-TRANSPORT-CONNECT §2.1,
+    /// `inspection_max_objects`). `None` sets no bound.
+    fn inspection_max_objects(&self) -> Option<u64> {
+        None
+    }
+    /// How [`Self::list_refs`] answers, as [`Transport::ref_listing`].
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Ordered
+    }
     /// Both conditioned refs can advance atomically.
     fn supports_atomic_advance(&self) -> bool {
         false
@@ -243,6 +253,9 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.transport.upload_limits()
+    }
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        self.transport.ref_listing()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()

@@ -236,7 +236,8 @@ impl VerifiedGrant {
     /// [`super::packmap_head`], take the head's flags from this method, and
     /// allow the packmap write only together with that head in one
     /// `AdvanceRefs`. A direct `UpdateRef` on a packmap ref is
-    /// `permission_denied`.
+    /// `permission_denied`. Tag map refs under `refs/kit/tagmap/` follow the
+    /// same rule through their tag; see [`super::tagmap_tag`].
     #[must_use]
     pub fn effective_flags(&self, ref_name: &str) -> RefFlags {
         if self.capability != Capability::Write {

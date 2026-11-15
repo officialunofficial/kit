@@ -6,6 +6,9 @@
 pub enum GrantCondition {
     Missing,
     Match,
+    /// A `MATCH` write whose new value is the expected one: it changes
+    /// nothing, as a tag's repair does (SPEC-WRITE-GRANTS §8.3).
+    Unchanged,
     Any,
     Delete,
 }

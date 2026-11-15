@@ -1,11 +1,12 @@
 //! Host-owned credentials, retry scheduling, admission and progress policy.
 use crate::{
-    ConnectTransport, EnvelopeSigner, GrantOperation, GrantRef, GrantRequest, PendingEvent,
-    UploadEvent,
+    ConnectTransport, EnvelopeSigner, GrantCondition, GrantOperation, GrantRef, GrantRequest,
+    PendingEvent, UploadEvent,
 };
 use http::HeaderMap;
 use kit_client::{
-    Clock, RequestContext, RequestHeaders, RequestPolicy, Signer, UnsignedRequestContext, Veto,
+    Clock, RefTarget, RequestContext, RequestHeaders, RequestPolicy, Signer,
+    UnsignedRequestContext, Veto,
 };
 use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, BackoffIterator, CommitOutcome, TransportError};
@@ -324,7 +325,14 @@ impl RequestPolicy for HostPolicy<'_> {
                     .ref_moves
                     .iter()
                     .map(|movement| {
-                        GrantRef::new(&movement.name, crate::client::grant_condition(movement.old))
+                        let condition = match (movement.old, &movement.new) {
+                            (
+                                kit_core::refs::RefWriteCondition::Match(old),
+                                RefTarget::Set(new),
+                            ) if old == *new => GrantCondition::Unchanged,
+                            (old, _) => crate::client::grant_condition(old),
+                        };
+                        GrantRef::new(&movement.name, condition)
                     })
                     .collect()
             })
@@ -809,6 +817,12 @@ impl RemoteSource for HostSource<'_> {
     }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.0.upload_limits()
+    }
+    fn inspection_max_objects(&self) -> Option<u64> {
+        self.0.inspection_max_objects()
+    }
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        self.0.ref_listing()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.0.supports_atomic_advance()

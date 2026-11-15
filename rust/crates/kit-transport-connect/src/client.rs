@@ -1143,6 +1143,12 @@ impl Transport for ConnectTransport {
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.with_client_source(|source| source.read_ref(name))
     }
+    /// A Connect server's listing may lag a write (SPEC-TRANSPORT-CONNECT
+    /// §7.9).
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Eventual
+    }
+
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         self.list_refs_with_page_limit(prefix, kit_core::ref_listing::MAX_PAGES)
     }

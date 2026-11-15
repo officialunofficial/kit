@@ -81,6 +81,9 @@ pub enum PushError {
         total: usize,
         cause: Box<PushError>,
     },
+    /// A tag the push names is not a local tag.
+    #[error("tag '{0}' does not exist")]
+    NoSuchTag(String),
     #[error("upload ticket was rejected after the push was retried")]
     TicketRejected,
     #[error("delta base is unavailable after a restart")]

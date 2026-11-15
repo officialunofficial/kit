@@ -15,6 +15,7 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::UploadLimits;
+use kit_sync::push::{TagPushOutcome, TagSelection};
 use libkit::push::{self, PushLease};
 
 use crate::clap_args;
@@ -44,13 +45,19 @@ struct PushOpts {
     /// `<src>:<dst>`, or a branch as `<branch>` for `<branch>:<branch>`.
     /// The branch need not be the current one. Each side is a branch name or
     /// a `refs/heads/` ref.
-    /// Wildcards, a leading `+`, an empty `<src>` (a delete) and refs outside
-    /// `refs/heads/` are errors. Needs a `<remote>`.
+    /// A local tag, as `<tag>` or `refs/tags/<tag>`, pushes that tag under
+    /// its own name; a name that is both a branch and a tag needs its full ref.
+    /// Wildcards, a leading `+`, an empty `<src>` (a delete) and other refs
+    /// are errors. Needs a `<remote>`.
     #[arg(requires = "remote", conflicts_with = "all")]
     refspec: Option<String>,
     /// Mirror every local branch instead of just the current one.
     #[arg(long)]
     all: bool,
+    /// Push every local tag, and no branch. A remote tag that holds another
+    /// value is refused unless --force.
+    #[arg(long, conflicts_with_all = ["all", "refspec", "set_upstream"])]
+    tags: bool,
     /// Overwrite the remote branch unconditionally (skip CAS).
     #[arg(short = 'f', long)]
     force: bool,
@@ -100,11 +107,6 @@ pub fn run(args: &[String]) -> u8 {
         Ok(lease) => lease,
         Err(e) => return plan_failure(e, false),
     };
-    let refspec = match opts.refspec.as_deref().map(push::parse_refspec) {
-        Some(Ok(spec)) => Some(spec),
-        Some(Err(e)) => return plan_failure(e, json),
-        None => None,
-    };
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
@@ -119,10 +121,156 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     if opts.all {
-        push_all(&layout, &cfg, &opts)
-    } else {
-        push_current(&layout, &cfg, &opts, lease, refspec.as_ref())
+        return push_all(&layout, &cfg, &opts);
     }
+    if opts.tags {
+        return push_tags(&layout, &cfg, &opts, TagSelection::All);
+    }
+    match opts
+        .refspec
+        .as_deref()
+        .map(|spec| push::resolve_push_name(&layout, spec))
+    {
+        Some(Ok(push::PushName::Tag(tag))) if opts.set_upstream => emit_err_json(
+            &format!("-u records a branch's upstream; '{tag}' is a tag"),
+            exit::USAGE,
+            json,
+        ),
+        Some(Ok(push::PushName::Tag(tag))) => {
+            push_tags(&layout, &cfg, &opts, TagSelection::Named(vec![tag]))
+        }
+        Some(Ok(push::PushName::Branch(spec))) => {
+            push_current(&layout, &cfg, &opts, lease, Some(&spec))
+        }
+        Some(Err(e)) => plan_failure(e, json),
+        None => push_current(&layout, &cfg, &opts, lease, None),
+    }
+}
+
+/// `--tags`, or a tag by name: push tags to the named or default remote. Each
+/// tag gets its own line, and a refused tag exits 1 after the others go.
+#[allow(clippy::too_many_lines)] // linear flow: resolve + push + one line per tag
+fn push_tags(
+    layout: &RepoLayout,
+    cfg: &config::LayeredConfig,
+    opts: &PushOpts,
+    selection: TagSelection,
+) -> u8 {
+    let json = matches!(opts.format, PushFormat::Json);
+    let resolved = match push::plan_all(cfg, opts.remote.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(e) => return plan_failure(e, json),
+    };
+    if opts.dry_run {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "(dry-run) would push tags to {} ({})",
+            resolved.name, resolved.endpoint
+        );
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_bool("dry_run", true)
+                .field_str("remote", &resolved.name)
+                .field_str("endpoint", &resolved.endpoint);
+            emit_json_stdout(obj);
+        }
+        return exit::OK;
+    }
+    let progress = crate::progress::start(
+        "Writing objects",
+        None,
+        crate::progress::should_report(opts.quiet),
+        opts.quiet,
+    );
+    let remote = match remote_dispatch::open_trusted_for_push(
+        &resolved.endpoint,
+        &resolved.name,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+        progress.terminal(),
+    ) {
+        Ok(remote) => remote,
+        Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
+            return emit_err_json(&msg, exit::CONFIG_ERROR, json);
+        }
+        Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
+    };
+    let tx = remote.tx;
+    let outcome = {
+        let outcome = tx
+            .with_source(|source| {
+                remote_dispatch::push_tags_with_source(
+                    layout.worktree_root(),
+                    source,
+                    &resolved.name,
+                    selection,
+                    opts.force || opts.force_with_lease,
+                    remote.authority.as_deref(),
+                    progress.terminal(),
+                )
+            })
+            .and_then(|result| result);
+        drop(progress);
+        outcome
+    };
+    let results = match outcome {
+        Ok(results) => results,
+        Err(libkit::transfer::Error::Interrupted) => {
+            return emit_err_json(
+                interrupted_hint(&resolved.endpoint, tx.upload_limits()),
+                exit::TEMPFAIL,
+                json,
+            );
+        }
+        Err(e) => return emit_push_error(e, None, json),
+    };
+    let mut stderr = std::io::stderr().lock();
+    let (mut pushed, mut rejected) = (0u64, 0u64);
+    if results
+        .iter()
+        .all(|r| matches!(r.outcome, TagPushOutcome::UpToDate { .. }))
+    {
+        let _ = writeln!(stderr, "Everything up-to-date");
+    } else {
+        let _ = writeln!(stderr, "To {}", resolved.endpoint);
+    }
+    for result in &results {
+        let t = &result.name;
+        let line = match &result.outcome {
+            TagPushOutcome::Created { .. } => format!(" * [new tag]         {t} -> {t}"),
+            TagPushOutcome::Repaired { .. } => format!(" * [tag map]         {t} -> {t}"),
+            TagPushOutcome::Forced { old, value } => format!(
+                " + {}...{} {t} -> {t} (forced update)",
+                crate::format::short_hash(old, crate::format::SUMMARY_ABBREV),
+                crate::format::short_hash(value, crate::format::SUMMARY_ABBREV),
+            ),
+            TagPushOutcome::Rejected(reason) => {
+                rejected += 1;
+                let _ = writeln!(stderr, " ! [rejected]        {t} -> {t} ({reason})");
+                continue;
+            }
+            _ => continue,
+        };
+        pushed += 1;
+        let _ = writeln!(stderr, "{line}");
+    }
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", rejected == 0)
+            .field_str("remote", &resolved.name)
+            .field_str("endpoint", &resolved.endpoint)
+            .field_u64("tags_pushed", pushed)
+            .field_u64("tags_rejected", rejected);
+        emit_json_stdout(obj);
+    }
+    if rejected > 0 {
+        return exit::GENERAL_ERROR;
+    }
+    exit::OK
 }
 
 /// Default push: current branch → its upstream, CAS-protected.

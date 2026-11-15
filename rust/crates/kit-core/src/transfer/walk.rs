@@ -226,7 +226,34 @@ impl PushWalk {
         limits: WalkLimits,
         sink: Option<ObjectSink<'_>>,
     ) -> Result<Self, StoreError> {
-        let (commits, others) = discover(store, tip, held, shallow, limits)?;
+        Self::run_tips(store, &[tip], held, shallow, limits, sink)
+    }
+
+    /// [`PushWalk::run`] for several tips at once: the union of what each
+    /// brings, each object kept once.
+    ///
+    /// A tip that is an annotated tag is peeled: the walk keeps each tag
+    /// object on the way and walks its target as a tip of its own, so a tag
+    /// on a commit sends what that commit's history sends, and a tag on a
+    /// held commit sends only the tag objects.
+    ///
+    /// # Errors
+    ///
+    /// As [`PushWalk::run`].
+    pub fn run_tips(
+        store: &ObjectStore,
+        tips: &[Hash],
+        held: &HeldCommits,
+        shallow: &HashSet<Hash>,
+        limits: WalkLimits,
+        sink: Option<ObjectSink<'_>>,
+    ) -> Result<Self, StoreError> {
+        let mut tags = Vec::new();
+        let mut starts = Vec::with_capacity(tips.len());
+        for &tip in tips {
+            starts.push(peel_tags(store, tip, held, &mut tags)?);
+        }
+        let (commits, others) = discover(store, &starts, held, shallow, limits)?;
         let mut walk = Builder {
             store,
             held,
@@ -238,14 +265,19 @@ impl PushWalk {
                 .iter()
                 .map(|commit| commit.id)
                 .chain(others.iter().copied())
+                .chain(tags.iter().copied())
                 .collect(),
             log: sink.is_some().then(Vec::new),
         };
         for (owner, commit) in commits.iter().enumerate() {
             walk.add_commit(owner, commit)?;
         }
+        let first_tag = commits.len() + others.len();
         for (offset, root) in others.into_iter().enumerate() {
             walk.add_closure(commits.len() + offset, root)?;
+        }
+        for (offset, tag) in tags.into_iter().enumerate() {
+            walk.keep(first_tag + offset, tag, false)?;
         }
         walk.filter_held();
         if let (Some(sink), Some(log)) = (sink, walk.log.take()) {
@@ -427,10 +459,33 @@ fn read_commit(store: &ObjectStore, id: &Hash) -> Result<Option<(Hash, Vec<Hash>
     })
 }
 
-/// The new commits, parents first, and the roots that are not commits.
-fn discover(
+/// Peel the annotated tags of `tip` that `held` lacks, pushing each onto
+/// `tags`, and return the object the walk takes as the tip.
+fn peel_tags(
     store: &ObjectStore,
     tip: Hash,
+    held: &HeldCommits,
+    tags: &mut Vec<Hash>,
+) -> Result<Hash, StoreError> {
+    let mut id = tip;
+    for _ in 0..super::MAX_PEELED_TAGS {
+        if held.contains(&id) || store.object_type(&id)? != ObjectType::Tag {
+            break;
+        }
+        let Object::Tag(tag) = store.read_object(&id)? else {
+            break;
+        };
+        tags.push(id);
+        id = tag.target;
+    }
+    Ok(id)
+}
+
+/// The new commits of every tip, parents first, and the roots that are not
+/// commits.
+fn discover(
+    store: &ObjectStore,
+    tips: &[Hash],
     held: &HeldCommits,
     shallow: &HashSet<Hash>,
     limits: WalkLimits,
@@ -439,7 +494,8 @@ fn discover(
     let mut order: Vec<NewCommit> = Vec::new();
     let mut others: Vec<Hash> = Vec::new();
     let mut frames: Vec<(NewCommit, usize)> = Vec::new();
-    let mut next = Some(tip);
+    let mut tips = tips.iter().copied();
+    let mut next = tips.next();
     loop {
         if let Some(id) = next.take()
             && !held.contains(&id)
@@ -459,7 +515,13 @@ fn discover(
             }
         }
         let Some((commit, cursor)) = frames.last_mut() else {
-            break;
+            match tips.next() {
+                Some(tip) => {
+                    next = Some(tip);
+                    continue;
+                }
+                None => break,
+            }
         };
         if let Some(parent) = commit.parents.get(*cursor) {
             next = Some(*parent);

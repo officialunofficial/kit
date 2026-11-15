@@ -44,10 +44,11 @@ These divergences stay while kit uses BLAKE3.
 
 - Submodules and subtrees.
 - Hooks, including `core.hooksPath`.
-- The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches and
-  nothing else: no wildcard, no leading `+` and no ref outside `refs/heads/`.
-  `push` does not take `--tags` or `--delete`. `push` sends no tag, and a
-  remote delete needs a transport verb that kit does not have.
+- The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches,
+  a lone tag name or `refs/tags/<t>` for one tag, and nothing else: no
+  wildcard, no leading `+`, no renamed tag and no other ref. `push` does not
+  take `--delete`; a remote delete needs a transport verb that kit does not
+  have.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
 - Shallow clone. `clone --depth` is a usage error. A clone holds the full
@@ -337,6 +338,15 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   fetch, and only when a fresh read of the remote branch finds nothing. It
   prints ` - [deleted]         (none) -> <remote>/<branch>`. Git also prunes
   tags that a refspec maps; kit prunes no tag.
+- **Tags on `push`.** `push --tags` pushes every local tag and nothing else,
+  and conflicts with `--all` and a refspec, as in Git. `push <remote> <t>`
+  pushes one tag; a name that is both a branch and a tag is an error, and
+  `refs/heads/<n>` or `refs/tags/<n>` picks one. A remote tag with another
+  value is refused unless `--force` (or `--force-with-lease`), and a forced
+  update conditions on the value kit read. Unlike Git, kit refuses an
+  unsigned annotated tag and an annotated tag
+  whose object names another tag. Each tag is reported on its own line, and
+  the push exits 1 if any was refused.
 - **Tags on `fetch`, `pull` and `clone`.** kit takes every remote tag by
   default, as Git's `--tags` does; Git follows only the tags that point into
   the fetched history. `--tags` is accepted and means the same, and

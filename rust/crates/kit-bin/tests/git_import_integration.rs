@@ -1884,3 +1884,36 @@ fn map_tail_truncation_at_line_boundary_rebuilds() {
     let rebuilt = std::fs::read_to_string(state.join("map")).unwrap();
     assert_eq!(rebuilt.lines().count(), lines.len(), "tail recovered");
 }
+
+/// An annotated tag imported from git is signed by the import key, so a
+/// native push takes it with its tag map.
+#[test]
+fn an_imported_annotated_tag_is_signed_and_pushes() {
+    if !git_available() {
+        return;
+    }
+    let f = Fixture::new();
+    let fork = f.import();
+    let layout = RepoLayout::single(&fork);
+    let tag = refs::read_tag(&layout, "v1").unwrap().unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
+    let Ok(Object::Tag(object)) = store.read_object(&tag) else {
+        panic!("v1 is not a tag object");
+    };
+    assert_ne!(object.signature, [0; 64]);
+
+    let native = f.root.path().join("native");
+    std::fs::create_dir_all(&native).unwrap();
+    f.kit_ok(&native, &["init"]);
+    let url = format!("kit+file://{}", native.display());
+    f.kit_ok(&fork, &["remote", "add", "native", &url]);
+    f.kit_ok(&fork, &["push", "native", "main"]);
+    let out = f.kit_ok(&fork, &["push", "native", "--tags"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains(" * [new tag]         v1 -> v1"), "{err}");
+    let remote = kit_transport_file::FileTransport::new(native);
+    assert_eq!(
+        kit_core::protocol::Transport::read_ref(&remote, "refs/tags/v1").unwrap(),
+        Some(tag)
+    );
+}

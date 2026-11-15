@@ -396,6 +396,17 @@ impl<
         self.write_upload_limits()
     }
 
+    fn inspection_max_objects(&self) -> Option<u64> {
+        self.write_info()
+            .and_then(|info| info.inspection_max_objects)
+            .map(u64::from)
+    }
+
+    /// A Connect server's listing may lag a write.
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::Eventual
+    }
+
     fn supports_atomic_advance(&self) -> bool {
         self.write_supports_atomic_advance()
     }

@@ -513,6 +513,11 @@ impl Transport for SshTransport {
         })
     }
 
+    /// `kit serve` answers a listing in one frame.
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::OneFrame
+    }
+
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !prefix.is_empty() && !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.into()));

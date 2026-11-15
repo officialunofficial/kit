@@ -783,9 +783,32 @@ pub fn plan_pack_with(
         &[DeltaCandidate],
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
 ) -> Result<PackPlan, StoreError> {
-    plan_pack_capped(
+    plan_pack_tips(store, &[new_tip], old_tip, encode_deltas)
+}
+
+/// [`plan_pack_with`] for several tips at once, such as the tags of one push
+/// that share a remote head: the union of their closures less what `old_tip`
+/// holds, each object once.
+///
+/// An annotated tag among `new_tips` is peeled ([`PushWalk::run_tips`]): the
+/// plan sends the tag objects and what their target's history sends, and its
+/// delta bases pair the target's tree with the remote head's.
+///
+/// # Errors
+///
+/// As [`plan_pack_with`].
+pub fn plan_pack_tips(
+    store: &ObjectStore,
+    new_tips: &[Hash],
+    old_tip: Option<Hash>,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+) -> Result<PackPlan, StoreError> {
+    plan_tips_capped(
         store,
-        new_tip,
+        new_tips,
         old_tip,
         encode_deltas,
         WalkLimits::default(),
@@ -793,6 +816,7 @@ pub fn plan_pack_with(
 }
 
 /// [`plan_pack_with`] with caller-supplied bounds, so a test can cut the walk.
+#[cfg(test)]
 fn plan_pack_capped(
     store: &ObjectStore,
     new_tip: Hash,
@@ -803,14 +827,63 @@ fn plan_pack_capped(
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
     limits: WalkLimits,
 ) -> Result<PackPlan, StoreError> {
+    plan_tips_capped(store, &[new_tip], old_tip, encode_deltas, limits)
+}
+
+/// The most annotated tags a push peels from one tip, as a revision peels
+/// them. The push walk takes a deeper tag as a closure.
+pub const MAX_PEELED_TAGS: usize = 16;
+
+/// The object a tip's tree comes from: the tip with its annotated tags
+/// peeled, at most [`MAX_PEELED_TAGS`] deep. A tag whose target this store
+/// lacks peels to that target.
+///
+/// # Errors
+/// A store read that fails other than for a missing object.
+pub fn peeled_tip(store: &ObjectStore, tip: Hash) -> Result<Hash, StoreError> {
+    let mut id = tip;
+    for _ in 0..MAX_PEELED_TAGS {
+        match store.object_type(&id) {
+            Ok(ObjectType::Tag) => {}
+            Ok(_) | Err(StoreError::ObjectNotFound(_)) => break,
+            Err(e) => return Err(e),
+        }
+        let Object::Tag(tag) = store.read_object(&id)? else {
+            break;
+        };
+        id = tag.target;
+    }
+    Ok(id)
+}
+
+/// [`plan_pack_tips`] with caller-supplied bounds, so a test can cut the walk.
+fn plan_tips_capped(
+    store: &ObjectStore,
+    new_tips: &[Hash],
+    old_tip: Option<Hash>,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+    limits: WalkLimits,
+) -> Result<PackPlan, StoreError> {
     // What the remote holds is decided from its head alone. A head this store
     // lacks leaves nothing held, and the plan is the whole closure.
     let held = HeldCommits::collect(store, old_tip, limits.objects)?;
-    let walk = PushWalk::run(store, new_tip, &held, &HashSet::new(), limits, None)?;
-    let base_map = match held.tip() {
-        Some(old) => select_chunk_delta_bases(store, new_tip, old)?,
-        None => HashMap::new(),
-    };
+    let walk = PushWalk::run_tips(store, new_tips, &held, &HashSet::new(), limits, None)?;
+    let mut base_map = HashMap::new();
+    if let Some(old) = held.tip() {
+        for &tip in new_tips {
+            // A tip the head holds sends no blob, so it needs no delta base.
+            let peeled = peeled_tip(store, tip)?;
+            if held.contains(&peeled) {
+                continue;
+            }
+            for (target, base) in select_chunk_delta_bases(store, peeled, old)? {
+                base_map.entry(target).or_insert(base);
+            }
+        }
+    }
 
     // Objects the walk kept, in BLAKE3 order so the plan, and so the pack
     // bytes, are deterministic. Classify via the cheap 6-byte prologue check

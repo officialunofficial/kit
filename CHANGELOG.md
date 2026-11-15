@@ -29,8 +29,27 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ObjectStore::spool_dir`, `pack::sweep_spool_dir`,
   `transfer::MAX_PACKLIST_NODE_BYTES` and `delta::max_encoded_len`. The
   `fault-injection` feature (`kit_core::fault`) fails writes for tests.
+- `kit push --tags` and `kit push <remote> <tag>` push tags, each with its
+  tag map `refs/kit/tagmap/<t>` (SPEC-TRANSPORT §7.2). A tag map grafts on
+  the nearest branch the remote holds, and the tags that share it upload
+  once. A remote tag with another value is refused unless `--force`, which
+  keeps the old value fetchable. An unsigned annotated tag is refused. In
+  kit-sync, `PushTarget::Tags` and `PushReport::tags`; in kit-core,
+  `transfer::plan_pack_tips`, `packmap::ChainState::Graft` and
+  `protocol::RefListing`; in libkit, `transfer::push_tags_with_source` and
+  `push::resolve_push_name`.
 
 ### Changed
+
+- `kit_sync::PushReport` is no longer `Copy`: it carries the per-tag results
+  in `tags`. `RemoteSource` gains `inspection_max_objects` and `ref_listing`.
+  A ticketed Connect advance may pair `refs/tags/<t>` with
+  `refs/kit/tagmap/<t>` (SPEC-TRANSPORT-CONNECT §4, §7.6), and a scope on
+  `refs/tags/<t>` covers its tag map (SPEC-WRITE-GRANTS §8.3). A grant
+  pattern under `refs/kit/tagmap/` is refused (`GrantError::TagmapPattern`),
+  and a tag map ref gets no flags of its own; kit-attest adds `tagmap_tag`
+  and `tag_tagmap`. `GrantCondition::Unchanged` names a `MATCH` write that
+  changes nothing, so a tag's repair is chosen a grant with `c`.
 
 - Fetch and push stream packs through files. `Transport::upload_pack`
   reads a `PackBody` and `download_pack` writes a `PackSink`; both take the
