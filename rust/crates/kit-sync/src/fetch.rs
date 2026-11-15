@@ -34,6 +34,7 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
+use crate::verify::{VerifiedHistory, verify_history_signatures};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,7 +153,9 @@ pub(crate) struct Applied {
 ///
 /// When `require_signed` is `true` every commit, remix and tag in each
 /// freshly unpacked pack is verified before the pack is recorded as applied.
-/// On the self-heal path every re-downloaded object is re-verified.
+/// On the self-heal path every re-downloaded object is re-verified. This
+/// covers only the packs a run applies: [`fetch_objects`] checks the history
+/// of the tip itself before it publishes it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_and_verify_chain(
     store: &ObjectStore,
@@ -291,7 +294,9 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// 2. walk its chain oldest-first, then download, check, unpack and record
 ///    each pack the applied-pack record does not already have, one at a time,
 ///    with no repo lock held, and assert the tip's closure is fully present,
-/// 3. acquire the repo lock, publish the remote-tracking ref and its
+/// 3. when signatures are required, verify every commit, remix and tag in
+///    the tip's history, whether or not this run downloaded it,
+/// 4. acquire the repo lock, publish the remote-tracking ref and its
 ///    checkpoint, and release the lock.
 ///
 /// Step 2's unpack and closure check are one call so a closure failure
@@ -325,6 +330,16 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// is applied, and rewritten atomically once after, unconditionally and
 /// best-effort (a pure performance cache whose own I/O must never fail a
 /// fetch whose objects durably landed).
+///
+/// # Signed history
+///
+/// With signatures required, the history of each tip is verified before it
+/// is published, down to the tips earlier signed fetches recorded (see
+/// [`crate::anchor`]), and each tip it publishes is recorded in turn. So a
+/// fetch verifies only the commits between a new tip and what an earlier
+/// signed fetch verified. The returned set holds those recorded tips and every
+/// object whose history this call verified, so branches that share history
+/// walk it once, and a pull does not walk again a tip this call published.
 pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -333,10 +348,16 @@ pub(crate) fn fetch_objects(
     remote: &str,
     options: &SyncOptions,
     lock_wait: &LockWait,
-) -> Result<FetchReport, SyncError> {
+) -> Result<(FetchReport, VerifiedHistory), SyncError> {
     let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
+    // The tips earlier signed fetches recorded: a history walk stops at them.
+    let mut verified = if options.verify_signatures {
+        crate::anchor::load_all(layout)
+    } else {
+        VerifiedHistory::default()
+    };
     let result = fetch_objects_inner(
         store,
         layout,
@@ -347,9 +368,10 @@ pub(crate) fn fetch_objects(
         lock_wait,
         &mut applied,
         &mut report,
+        &mut verified,
     );
     persist_record(&mut applied, observer, remote);
-    result.map(|()| report)
+    result.map(|()| (report, verified))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -363,6 +385,7 @@ fn fetch_objects_inner(
     lock_wait: &LockWait,
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
+    verified: &mut VerifiedHistory,
 ) -> Result<(), SyncError> {
     let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
@@ -510,7 +533,15 @@ fn fetch_objects_inner(
                 Err(e) => return Err(e),
             };
 
-            // Step 3: publish under a repo lock acquired fresh for this
+            // Step 3: the signatures checked so far cover only the packs this
+            // run applied. The tip can name history no such pack carried, for
+            // example objects a refused pack left in the store, so its
+            // history is checked here, whatever path it took into the store.
+            if require_signed {
+                verify_history_signatures(store, observer, &completed.tip, verified)?;
+            }
+
+            // Step 4: publish under a repo lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
             // has a deadline only when `lock_wait` sets one: the work above
             // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune
@@ -521,6 +552,15 @@ fn fetch_objects_inner(
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
             published.push((r.name.clone(), completed.tip));
+            if require_signed {
+                // The history of the tip was verified above. Like the
+                // checkpoint, the record is a disposable cache: losing it
+                // makes a later walk longer, never shorter.
+                let _ = crate::anchor::persist(
+                    &crate::anchor::path(layout, remote, &r.name),
+                    &completed.tip,
+                );
+            }
             if require_signed && let Some(path) = &checkpoint_path {
                 let batch =
                     std::mem::replace(&mut tracking, refs::RemoteRefBatch::new(layout, remote)?);
@@ -601,7 +641,10 @@ fn prune_tracking(
     let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
     for name in gone {
         match refs::delete_remote_ref(layout, remote, &name) {
-            Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),
+            Ok(()) | Err(refs::RefError::NotFound(_)) => {
+                let _ = std::fs::remove_file(crate::anchor::path(layout, remote, &name));
+                report.branches_pruned.push(name);
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -611,8 +654,9 @@ fn prune_tracking(
 /// Whether the last complete fetch saw `cursor`, the remote-tracking refs
 /// are as it left them, and the object of every tracked tip is in the store
 /// (a wiped store still heals). A fetch that verifies signatures does not
-/// trust a fetch that did not, and a fetch of a named branch needs its
-/// tracking ref.
+/// trust a fetch that did not, nor a tracking ref whose tip no signed fetch
+/// recorded, such as one a fetch with the opt-out left for a branch the
+/// remote no longer lists. A fetch of a named branch needs its tracking ref.
 fn remote_unchanged(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -637,9 +681,12 @@ fn remote_unchanged(
     if record.tracking != crate::cursor::digest_of(&mut tracked) {
         return Ok(false);
     }
-    Ok(tracked
-        .iter()
-        .all(|r| r.hash.is_some_and(|tip| store.contains(&tip))))
+    Ok(tracked.iter().all(|r| {
+        r.hash.is_some_and(|tip| {
+            store.contains(&tip)
+                && (!require_signed || crate::anchor::names(layout, remote, &r.name, &tip))
+        })
+    }))
 }
 
 #[cfg(test)]

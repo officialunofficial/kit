@@ -7,7 +7,9 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 downloads the packs it does not already have, and unpacks and records each one
 as it arrives, with no repository lock held and nothing staged on disk. It
 verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete, publishes the remote-tracking ref under the
+the tip's closure is complete, verifies the signature of every commit, remix
+and tag in the tip's history down to the tips earlier signed fetches
+verified, publishes the remote-tracking ref under the
 repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
 with rollback on failure. A `PruneGuard` keeps gc from deleting the fetch's
 objects before a ref names them. The wait for the repository lock has no
@@ -56,8 +58,12 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 `SyncOptions`:
 
 * `verify_signatures` (default `true`): verify every commit, remix and tag the
-  call introduces and fail closed with `SyncError::UnsignedOrInvalidObject`.
-  Setting it to `false` is the explicit opt-out.
+  call introduces, and every one in the history of each tip it publishes down
+  to a tip an earlier signed fetch verified (see "Verified tips" below), and
+  fail closed with `SyncError::UnsignedOrInvalidObject`. A tip is checked even
+  when no pack of this call carried it, for example when a refused pack, another
+  remote or a fetch with the opt-out left its objects in the store. Setting it
+  to `false` is the explicit opt-out.
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).
@@ -73,7 +79,8 @@ cursor, a digest of the remote-tracking refs and whether it verified
 signatures. The next fetch makes no other request when all of these hold: the
 fresh cursor equals the recorded one, the tracking refs still match the
 digest, the object of every tracked tip is in the store, a fetch that verifies
-signatures follows one that did, and a named target branch has a tracking
+signatures follows one that did and finds every tracked tip recorded as
+verified (see "Verified tips" below), and a named target branch has a tracking
 ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
 check of the tips, so an object lost below a tip heals on the next fetch that
 does work, not on this one.
@@ -87,6 +94,36 @@ digest, `1` or `0` for signature verification, and lowercase BLAKE3 of the
 preceding four fields including their three separators. Readers cap input at
 512 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
 delete these files.
+
+### Verified tips
+
+A fetch that verifies signatures checks the history of each tip before it
+publishes the tip: every commit and remix parent and every tag target, whatever
+type the tag declares, down to a tip whose history an earlier signed fetch
+verified. It then records the tip
+it published, next to the tracking ref. So a fetch verifies only the commits
+between the new tip and what was verified before, and a pull checks the tip it
+moves the branch to the same way. A tip published by a fetch with the opt-out,
+or by an older kit, is not recorded, so it is no stopping point. The walk
+visits at most the closure check's 10,000,000 objects.
+
+The disposable records live in **.kit/applied-packs/.verified/**, one per
+remote and branch. The filename is lowercase BLAKE3 over the remote name and
+the branch name, each with an eight-byte little-endian byte-length prefix.
+File contents are three LF-separated fields, without a final LF:
+`kit-verified-tip-v1`, the lowercase tip hash, and lowercase BLAKE3 of the
+preceding two fields including their separator. Readers cap input at 256
+bytes and read at most 65,536 records. A record names content-addressed
+history, so it stays true after the tracking ref moves on, and every record of
+every remote is a stopping point. Missing, unreadable, or invalid records make
+the next walk longer: the first signed fetch after an upgrade walks each
+history once. A tracking ref whose tip no signed fetch recorded, such as one a
+fetch with the opt-out left for a branch the remote no longer lists, keeps a
+signed fetch from trusting an unchanged cursor, so each signed fetch lists the
+remote until `--prune` removes that ref. You can delete these files; they
+never pin objects for GC. A pruned tracking ref takes its record with it.
+Renaming or removing a remote leaves its records behind; they stay true and
+only stop a later walk sooner.
 
 ### Incremental fetch checkpoints
 

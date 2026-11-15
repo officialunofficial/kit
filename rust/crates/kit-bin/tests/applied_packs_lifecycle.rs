@@ -263,11 +263,14 @@ fn rename_moves_record_and_next_fetch_reuses_it() {
     bob.ok(&["remote", "rename", "team/upstream", "archive/upstream"]);
 
     // The record moved: exactly one flat, percent-encoded file, no orphan.
+    // Dot-named entries are the other caches (verified tips, cursors,
+    // checkpoints), outside the remote-record namespace.
     let dir = bob.kit_dir().join("applied-packs");
     let names: Vec<String> = fs::read_dir(&dir)
         .unwrap()
         .filter_map(Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
         .collect();
     assert_eq!(
         names,

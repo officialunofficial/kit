@@ -18,6 +18,7 @@ use crate::fetch::{FetchReport, fetch_objects};
 use crate::lock::{LockWait, acquire_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
+use crate::verify::verify_history_signatures;
 use crate::worktree::{
     current_head_tree, ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
     restore_worktree_and_index_from, write_ref_recording_history,
@@ -80,6 +81,7 @@ pub(crate) fn open_store(
 /// lock's job is worktree-mutation exclusivity against concurrent commands,
 /// not GC protection. The fetch's own protection from gc is a
 /// [`kit_core::store::PruneGuard`], released before this phase starts.
+#[allow(clippy::too_many_lines)]
 pub fn pull(
     dir: &Path,
     source: &dyn RemoteSource,
@@ -93,7 +95,7 @@ pub fn pull(
     }
     let store = open_store(&layout, options)?;
     let lock_wait = LockWait::new(options.lock_wait);
-    let fetch = fetch_objects(
+    let (fetch, mut verified) = fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
@@ -156,6 +158,13 @@ pub fn pull(
         refs::RefWriteCondition::Missing
     };
 
+    // The fetch checked the history of each tip it published. The tracking
+    // ref of `branch` can hold a tip this fetch did not publish, such as one
+    // a fetch with the opt-out wrote for a branch this listing omits, so the
+    // tip the branch moves to is checked too, unless the fetch just did.
+    if options.verify_signatures {
+        verify_history_signatures(&store, observer, &remote_tip, &mut verified)?;
+    }
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
     // The check above proved that the worktree and the index equal the tree
@@ -213,6 +222,7 @@ pub fn fetch(
     fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )
+    .map(|(report, _)| report)
 }
 
 fn rollback_pull_ref_and_head(

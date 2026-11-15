@@ -2,16 +2,20 @@
 //!
 //! A hostile remote can otherwise push an unsigned or forged history that a
 //! clone, pull or fetch would silently materialise. Every commit, remix and
-//! tag a fetch introduces is checked with the same function `kit verify`
-//! uses, failing closed.
+//! tag a fetch introduces, and every one in the history of each tip it
+//! publishes, is checked with the same function `kit verify` uses, failing
+//! closed.
+
+use std::collections::HashSet;
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::Object;
+use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
 use kit_core::store::ObjectStore;
 use rayon::prelude::*;
 
 use crate::error::SyncError;
+use crate::observer::{Observer, SyncEvent};
 
 /// Entries-per-thread budget below which [`verify_new_object_signatures`]
 /// checks signatures sequentially instead of fanning out across rayon's
@@ -218,7 +222,14 @@ fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<
             .collect::<Result<_, _>>()?
     };
 
-    if batch_entries(&entries).is_some_and(|batch| verify_batch(&batch, parallel)) {
+    verify_entries(&entries, parallel)
+}
+
+/// Verify the signature of every entry in `entries`, as a batch first, and
+/// object by object only when the batch fails, so the first failure names
+/// the offending hash. In parallel iff `parallel`.
+fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), SyncError> {
+    if batch_entries(entries).is_some_and(|batch| verify_batch(&batch, parallel)) {
         return Ok(());
     }
     if parallel {
@@ -232,9 +243,102 @@ fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<
     }
 }
 
+/// The objects whose history has been verified in full, which a walk need
+/// not read again. A fetch starts it from the tips earlier signed fetches
+/// recorded ([`crate::anchor`]). An object enters it only once the walk that
+/// reached it has succeeded. It lives for one fetch (and the pull after it)
+/// and holds the union of the histories that fetch verified: each walk is
+/// capped, the union is not, so a remote with many unrelated branches costs
+/// 32 bytes of id per signed object it delivered.
+pub(crate) type VerifiedHistory = HashSet<Hash>;
+
+/// Verify the signature of every commit, remix and tag in the history of
+/// `tip`: `tip` itself, the parents of each commit and remix, and the target
+/// of each tag, recursively. Trees and blobs carry no signature and name no
+/// signed object, so where a parent, a tag or `tip` names one the walk reads
+/// only its type and goes no further. Remix `sources` are foreign-repo pointers and are not
+/// followed (SPEC-OBJECTS §6).
+///
+/// [`verify_new_object_signatures`] checks the objects of the packs one run
+/// applies, but a ref can name history that no such pack carries: objects a
+/// refused pack left in the store, objects another remote or a fetch without
+/// verification wrote, or a pack the applied-pack record skips. Fetch runs
+/// this on each tip right before it publishes the tip, so what a ref names
+/// is checked whatever path its objects took into the store.
+///
+/// An object in `verified` had its whole history verified, by an earlier
+/// walk or by the signed fetch that recorded it, so the walk stops there.
+/// This makes the walk a range check: it reads the commits between `tip` and
+/// what was verified before. When the walk succeeds, every object it
+/// visited joins `verified`; when it fails, `verified` is unchanged.
+///
+/// One walk visits at most [`kit_core::ops::graph::MAX_REACHABLE`] objects,
+/// the cap of the closure check fetch runs first over a superset of this
+/// history. A longer history is [`SyncError::ClosureTooLarge`], never a
+/// partial check. The signed objects are checked in chunks of
+/// [`verify_chunk_size`] as the walk reads them, so at most one chunk of
+/// decoded objects is held at a time, and `observer` is polled for
+/// cancellation after each full chunk.
+pub(crate) fn verify_history_signatures(
+    store: &ObjectStore,
+    observer: &dyn Observer<SyncEvent>,
+    tip: &Hash,
+    verified: &mut VerifiedHistory,
+) -> Result<(), SyncError> {
+    let cap = kit_core::ops::graph::MAX_REACHABLE;
+    let chunk = verify_chunk_size();
+    let check = |entries: &[(Hash, Object)]| {
+        verify_entries(entries, entries.len() >= verify_fanout_threshold())
+    };
+    let mut seen: HashSet<Hash> = HashSet::new();
+    let mut pending = vec![*tip];
+    let mut entries: Vec<(Hash, Object)> = Vec::new();
+    while let Some(h) = pending.pop() {
+        if verified.contains(&h) || !seen.insert(h) {
+            continue;
+        }
+        if seen.len() > cap {
+            return Err(SyncError::ClosureTooLarge(cap));
+        }
+        // A leaf carries no signature and names no signed object, so only
+        // its type prologue is read, like the closure check does: a parent or
+        // tag target that is a large blob costs no full read.
+        if !matches!(
+            store.object_type(&h)?,
+            ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
+        ) {
+            continue;
+        }
+        let obj = store.read_object(&h)?;
+        match &obj {
+            Object::Commit(c) => pending.extend(&c.parents),
+            Object::Remix(r) => pending.extend(&r.parents),
+            // The target is followed whatever type the tag declares: the
+            // walk decides by the type of the object it reads, so a tag
+            // that calls a commit a tree does not hide it.
+            Object::Tag(t) => pending.push(t.target),
+            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+                continue;
+            }
+        }
+        entries.push((h, obj));
+        if entries.len() >= chunk {
+            check(&entries)?;
+            entries.clear();
+            if observer.cancelled() {
+                return Err(SyncError::Interrupted);
+            }
+        }
+    }
+    check(&entries)?;
+    verified.extend(seen);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observer::NoopObserver;
     use kit_core::object::Object;
 
     fn h(seed: &str) -> Hash {
@@ -406,6 +510,168 @@ mod tests {
             }
             other => panic!("expected UnsignedOrInvalidObject, got {other:?}"),
         }
+    }
+
+    /// A commit over the tree `seed` names, parented on `parents`, signed
+    /// with `kp` when `signed`.
+    fn history_commit(
+        store: &ObjectStore,
+        kp: &kit_core::sign::KeyPair,
+        seed: usize,
+        parents: Vec<Hash>,
+        signed: bool,
+    ) -> Hash {
+        use kit_core::object::{Commit, Identity};
+        let mut c = Commit::new_unannotated(
+            h(&format!("tree #{seed}")),
+            parents,
+            Identity::ed25519(kp.public.0),
+            kp.public.0,
+            format!("history #{seed}").into_bytes(),
+            1_700_000_000 + seed as u64,
+            [0u8; 64],
+        );
+        if signed {
+            c.signature = kit_core::sign::sign_commit(&c, kp).unwrap().0;
+        }
+        store
+            .write(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
+            .unwrap()
+    }
+
+    /// The walk reaches the root below more than one chunk of signed
+    /// commits, through a merge's first parent, and names it when it is
+    /// unsigned.
+    #[test]
+    fn verify_history_signatures_finds_an_unsigned_root_below_a_long_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let line = |root_signed: bool, offset: usize| {
+            let root = history_commit(&store, &kp, offset, Vec::new(), root_signed);
+            let mut tip = root;
+            for seed in 1..verify_chunk_size() + 8 {
+                tip = history_commit(&store, &kp, offset + seed, vec![tip], true);
+            }
+            (root, tip)
+        };
+        let (_, clean) = line(true, 0);
+        verify_history_signatures(&store, &NoopObserver, &clean, &mut VerifiedHistory::new())
+            .expect("every commit is signed");
+        let (unsigned, forged) = line(false, 10_000);
+        let merge = history_commit(&store, &kp, 20_000, vec![forged, clean], true);
+        match verify_history_signatures(&store, &NoopObserver, &merge, &mut VerifiedHistory::new())
+        {
+            Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) => {
+                assert_eq!(got, hash::to_hex(&unsigned));
+            }
+            other => panic!("expected UnsignedOrInvalidObject, got {other:?}"),
+        }
+    }
+
+    /// A walk that succeeds adds what it visited to the verified set, and a
+    /// later walk stops at it without reading it. A walk that fails leaves
+    /// the set as it was, and a cancelled one stops after a full chunk.
+    #[test]
+    fn verify_history_signatures_reuses_only_a_successful_walk() {
+        struct Cancelled;
+        impl Observer<SyncEvent> for Cancelled {
+            fn event(&self, _: &SyncEvent) {}
+            fn cancelled(&self) -> bool {
+                true
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let root = history_commit(&store, &kp, 0, Vec::new(), true);
+        let mut tip = root;
+        for seed in 1..verify_chunk_size() + 8 {
+            tip = history_commit(&store, &kp, seed, vec![tip], true);
+        }
+        assert!(matches!(
+            verify_history_signatures(&store, &Cancelled, &tip, &mut VerifiedHistory::new()),
+            Err(SyncError::Interrupted)
+        ));
+
+        let mut verified = VerifiedHistory::new();
+        verify_history_signatures(&store, &NoopObserver, &tip, &mut verified).unwrap();
+        assert!(verified.contains(&root) && verified.contains(&tip));
+        let before = verified.clone();
+        let unsigned = history_commit(&store, &kp, 20_000, vec![tip], false);
+        assert!(matches!(
+            verify_history_signatures(&store, &NoopObserver, &unsigned, &mut verified),
+            Err(SyncError::UnsignedOrInvalidObject { .. })
+        ));
+        assert_eq!(verified, before);
+
+        // The root is gone, and a walk over the verified history does not
+        // read it.
+        store.remove_object(&root).unwrap();
+        let next = history_commit(&store, &kp, 30_000, vec![tip], true);
+        verify_history_signatures(&store, &NoopObserver, &next, &mut verified).unwrap();
+        assert!(verified.contains(&next));
+    }
+
+    /// A tag is checked and so is the commit it names, whatever type the tag
+    /// declares for it. A tag that names a tree is checked itself, and the
+    /// walk reads only the tree's type and stops there.
+    #[test]
+    fn verify_history_signatures_checks_a_tag_and_its_target() {
+        use kit_core::object::{Identity, Tag};
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let tag = |target: Hash, target_type: ObjectType| {
+            let mut t = Tag {
+                target,
+                target_type,
+                name: b"v1".to_vec(),
+                tagger: Identity::ed25519(kp.public.0),
+                signer: kp.public.0,
+                message: b"release".to_vec(),
+                timestamp: 1_700_000_000,
+                signature: [0u8; 64],
+            };
+            t.signature = kit_core::sign::sign_tag(&t, &kp).unwrap().0;
+            store
+                .write(&kit_core::serialize::serialize(&Object::Tag(t)).unwrap())
+                .unwrap()
+        };
+        let unsigned = history_commit(&store, &kp, 0, Vec::new(), false);
+        let over_unsigned = tag(unsigned, ObjectType::Commit);
+        assert!(matches!(
+            verify_history_signatures(&store, &NoopObserver, &over_unsigned, &mut VerifiedHistory::new()),
+            Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) if got == hash::to_hex(&unsigned)
+        ));
+        let signed = history_commit(&store, &kp, 1, Vec::new(), true);
+        verify_history_signatures(
+            &store,
+            &NoopObserver,
+            &tag(signed, ObjectType::Commit),
+            &mut VerifiedHistory::new(),
+        )
+        .unwrap();
+        let tree = store
+            .write(
+                &kit_core::serialize::serialize(&Object::Tree(kit_core::object::Tree {
+                    entries: Vec::new(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        verify_history_signatures(
+            &store,
+            &NoopObserver,
+            &tag(tree, ObjectType::Tree),
+            &mut VerifiedHistory::new(),
+        )
+        .unwrap();
+        // A tag that declares a tree but names the unsigned commit.
+        assert!(matches!(
+            verify_history_signatures(&store, &NoopObserver, &tag(unsigned, ObjectType::Tree), &mut VerifiedHistory::new()),
+            Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) if got == hash::to_hex(&unsigned)
+        ));
     }
 
     #[test]
