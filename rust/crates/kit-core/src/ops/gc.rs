@@ -104,10 +104,10 @@ pub enum GcRootsError {
         /// The cap that applied.
         cap: usize,
     },
-    /// A manifest lists an object that is neither a blob nor a delta. A chunk
+    /// A manifest lists an object that is not a blob, a delta included. A chunk
     /// is a leaf, so gc cannot tell what that object reaches and refuses.
     #[error(
-        "chunk {} of manifest {} is not a blob or delta (fail closed)",
+        "chunk {} of manifest {} is not a blob (fail closed)",
         hash::to_hex(.chunk),
         hash::to_hex(.manifest)
     )]

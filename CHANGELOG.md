@@ -27,6 +27,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rev-list -n` and ranges, `show-ref <pattern>`, `commit --allow-empty`,
   `pull --rebase` and `--no-ff`, `fetch --prune`, `push <remote> <src>:<dst>`,
   `rebase --onto` and `--skip`, `stash push` and `rev-parse --verify`.
+- The `gc` error for a manifest chunk that is not a blob now reads `chunk
+  <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
+  delta`, but gc refuses a delta there too.
 
 ### Fixed
 
