@@ -259,8 +259,61 @@ type ChunkCheck<'a> = dyn Fn(&[(Hash, Object)]) -> Result<(), SyncError> + 'a;
 /// whose history holds an object that failed its signature check, mapped to
 /// that object's hex id and the failure. A walk that reaches one of them
 /// fails at once with the same failure, so many tags over one bad history
-/// cost one walk. It lives for one fetch.
-pub(crate) type FailedHistory = HashMap<Hash, (String, String)>;
+/// cost one walk. It lives for one fetch. Each failure is stored once, and
+/// each object holds only its index.
+#[derive(Default)]
+pub(crate) struct FailedHistory {
+    /// Each failure: the failing object's hex id and the reason.
+    failures: Vec<(String, String)>,
+    /// The index in `failures` of each failure's hex id.
+    index: HashMap<String, u32>,
+    /// Each object whose history holds a failure, and that failure's index.
+    at: HashMap<Hash, u32>,
+}
+
+impl FailedHistory {
+    /// The failure in the history of `h`: the failing object's hex id and
+    /// the reason.
+    pub(crate) fn get(&self, h: &Hash) -> Option<&(String, String)> {
+        self.at.get(h).map(|&i| &self.failures[i as usize])
+    }
+
+    /// Add `at` and every object on the walk path from the walk's tip to it,
+    /// each with the failure of `hash`. At most `cap` objects are held; past
+    /// that the memory is cleared, which makes later walks longer only.
+    fn remember(
+        &mut self,
+        via: &HashMap<Hash, Hash>,
+        at: Hash,
+        hash: &str,
+        reason: &str,
+        cap: usize,
+    ) {
+        let mut next = Some(at);
+        let mut failure = self.failure(hash, reason);
+        while let Some(h) = next {
+            if self.at.len() >= cap {
+                self.at.clear();
+                self.failures.clear();
+                self.index.clear();
+                failure = self.failure(hash, reason);
+            }
+            self.at.insert(h, failure);
+            next = via.get(&h).copied();
+        }
+    }
+
+    /// The index of the failure of `hash`, added when new.
+    fn failure(&mut self, hash: &str, reason: &str) -> u32 {
+        if let Some(&i) = self.index.get(hash) {
+            return i;
+        }
+        let i = u32::try_from(self.failures.len()).unwrap_or(u32::MAX);
+        self.failures.push((hash.to_owned(), reason.to_owned()));
+        self.index.insert(hash.to_owned(), i);
+        i
+    }
+}
 
 /// The missing objects one fetch found in history walks and closure checks:
 /// each object whose closure lacks a missing object, mapped to that object.
@@ -364,7 +417,7 @@ impl HistoryWalk<'_> {
             if let Some(failed) = self.failed.as_deref_mut()
                 && let Some((hash, reason)) = failed.get(&h).cloned()
             {
-                remember_failure(failed, &via, h, &hash, &reason, self.cap);
+                failed.remember(&via, h, &hash, &reason, self.cap);
                 return Err(SyncError::UnsignedOrInvalidObject { hash, reason });
             }
             if let Some(object) = self.missing.as_deref().and_then(|m| m.get(&h).copied()) {
@@ -441,30 +494,9 @@ impl HistoryWalk<'_> {
             && let Some(failed) = self.failed.as_deref_mut()
             && let Some(at) = kit_core::refs::parse_lowercase_hash(hash.as_bytes())
         {
-            remember_failure(failed, via, at, hash, reason, self.cap);
+            failed.remember(via, at, hash, reason, self.cap);
         }
         result
-    }
-}
-
-/// Add `at` and every object on the walk path from the walk's tip to it to
-/// `failed`, each with the failure of `hash`. `failed` holds at most `cap`
-/// objects; past that it is cleared, which makes later walks longer only.
-fn remember_failure(
-    failed: &mut FailedHistory,
-    via: &HashMap<Hash, Hash>,
-    at: Hash,
-    hash: &str,
-    reason: &str,
-    cap: usize,
-) {
-    let mut next = Some(at);
-    while let Some(h) = next {
-        if failed.len() >= cap {
-            failed.clear();
-        }
-        failed.insert(h, (hash.to_owned(), reason.to_owned()));
-        next = via.get(&h).copied();
     }
 }
 

@@ -180,8 +180,11 @@ branch or another tag.
 - **Local tags.** A local tag with the same value is up to date. A local tag
   with another value is refused ("would clobber existing tag"): no fetch moves
   a tag. A remote tag whose name is a directory of a local tag's name, or the
-  reverse, as `v1` and `v1/rc` are, is refused too, and so is the later of two
-  such remote tags in listing order. No fetch deletes a tag, with or without
+  reverse, as `v1` and `v1/rc` are, is refused too ("conflicts with existing
+  tag"). Of two such remote tags, the later in listing order is refused when
+  the earlier one proved. A file system that folds case can report the clash
+  only when the tag is read or written, as for `V1/rc` beside `v1`, and that
+  tag is refused the same way. No fetch deletes a tag, with or without
   `--prune`.
 - **Proof.** A tag is proved when all of these hold:
   - its peel reaches a commit, remix, tree or blob through at most 16 tags;
@@ -208,7 +211,9 @@ branch or another tag.
   reads both refs again with `read_ref` and tries once more. If a run skipped a
   pack that the applied-pack record lists, or stopped at a node of the stop
   set, the fetch clears the record and applies the whole chain again. The tag
-  phase of one fetch does this at most once, whatever the number of tags.
+  phase of one fetch does this at most once, whatever the number of tags. A
+  pack that this fetch refused for one tag refuses every later tag whose chain
+  holds it, with no second download.
 - **Failure scope.** A refusal names the tag and its reason. The fetch reports
   it and goes on. A failed tag listing stops the tag phase with "tag listing
   failed (possibly too many tags): `<error>`", and the branches stay
@@ -512,7 +517,9 @@ per-branch checkpoint for it and walks each packmap chain again. The tag phase
 when some tag is not yet proved from local objects. With one node per packmap
 chain and no new tag that is two frames plus two per branch, so one session
 fetches at most 4,999 branches; a fetch of more fails closed with the reply
-above.
+above. A new annotated tag pushed alone adds one node and one pack download,
+so a clone of a remote with about 5,000 such tags fails the same way; tags
+pushed together share their node and pack.
 When the served repository offers a cursor (§4.2.2), a fetch that finds the
 cursor it recorded after its last complete fetch costs one frame, the
 `ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A

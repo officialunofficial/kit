@@ -59,8 +59,10 @@ pub enum TagRejectReason {
     WouldClobber,
     /// A local tag's name is a directory of this one, or this one's name is
     /// a directory of it, as `v1` and `v1/rc` are. One of them must go first.
-    #[error("conflicts with existing tag `{other}`")]
-    NameConflict { other: String },
+    /// `other` names the local tag, or is `None` when the file system
+    /// reported the clash, as a case-insensitive one does for `V1/rc`.
+    #[error("{}", name_conflict_message(.other.as_deref()))]
+    NameConflict { other: Option<String> },
     /// The tag's objects are not local and the remote has no tag map that
     /// rebuilds them.
     #[error("the remote has no tag map for it")]
@@ -92,6 +94,25 @@ pub enum TagRejectReason {
     /// not decode, or an object of it breaks its manifest.
     #[error("{0}")]
     Transfer(String),
+}
+
+fn name_conflict_message(other: Option<&str>) -> String {
+    match other {
+        Some(other) => format!("conflicts with existing tag `{other}`"),
+        None => "conflicts with the name of an existing tag".to_owned(),
+    }
+}
+
+/// Whether a tag read or write failed because a tag's name is a directory of
+/// another's, as a case-insensitive file system reports `V1/rc` beside `v1`.
+fn is_name_clash(error: &refs::RefError) -> bool {
+    matches!(
+        error,
+        refs::RefError::Io(e) if matches!(
+            e.kind(),
+            std::io::ErrorKind::NotADirectory | std::io::ErrorKind::IsADirectory
+        )
+    )
 }
 
 /// A remote tag a fetch refused.
@@ -191,7 +212,7 @@ impl TagProver {
             cap,
             trusted: None,
             proved: HashSet::new(),
-            failed: FailedHistory::new(),
+            failed: FailedHistory::default(),
             missing: MissingHistory::new(),
             missing_objects: HashSet::new(),
             objects_checked: 0,
@@ -234,7 +255,7 @@ impl TagProver {
             return Ok(proof);
         }
         if self.trusted.is_none() {
-            self.trusted = Some(self.trusted_set(store, layout, verified)?);
+            self.trusted = Some(self.trusted_set(store, layout, observer, verified)?);
         }
         let Self {
             require_signed,
@@ -379,6 +400,7 @@ impl TagProver {
         &self,
         store: &ObjectStore,
         layout: &RepoLayout,
+        observer: &dyn Observer<SyncEvent>,
         verified: &VerifiedHistory,
     ) -> Result<Trusted, SyncError> {
         let mut tips = Vec::new();
@@ -399,15 +421,24 @@ impl TagProver {
             (Vec::new(), tips)
         };
         let mut trusted = Trusted::default();
+        let cancelled = || observer.cancelled();
         reach(
             store,
             &anchored,
             &mut trusted.anchored,
             &HashSet::new(),
             self.cap,
+            &cancelled,
         )?;
         let room = self.cap.saturating_sub(trusted.anchored.len());
-        reach(store, &rest, &mut trusted.rest, &trusted.anchored, room)?;
+        reach(
+            store,
+            &rest,
+            &mut trusted.rest,
+            &trusted.anchored,
+            room,
+            &cancelled,
+        )?;
         Ok(trusted)
     }
 }
@@ -415,18 +446,24 @@ impl TagProver {
 /// Add to `into` the commits, remixes and tags reachable from `tips`
 /// through parents and tag targets. An object `into` or `skip` holds is not
 /// walked again, a missing one is skipped, and the walk stops once `into`
-/// holds `cap` ids.
+/// holds `cap` ids. `cancelled` is polled every few thousand objects.
 fn reach(
     store: &ObjectStore,
     tips: &[Hash],
     into: &mut HashSet<Hash>,
     skip: &HashSet<Hash>,
     cap: usize,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(), SyncError> {
     let mut pending = tips.to_vec();
+    let mut visited = 0usize;
     while let Some(h) = pending.pop() {
         if into.len() >= cap {
             return Ok(());
+        }
+        visited += 1;
+        if visited.is_multiple_of(4096) && cancelled() {
+            return Err(SyncError::Interrupted);
         }
         if into.contains(&h) || skip.contains(&h) {
             continue;
@@ -487,6 +524,8 @@ pub(crate) struct TagPhase<'a> {
     pub(crate) verified: &'a mut VerifiedHistory,
     pub(crate) stop: StopSet,
     pub(crate) report: &'a mut FetchReport,
+    /// `report.packs_downloaded` when `M` was last refreshed.
+    pub(crate) packs_since_refresh: usize,
 }
 
 /// What became of one listed tag.
@@ -495,6 +534,18 @@ enum Outcome {
     /// A stale listing: the tag is gone.
     Skip,
     Refused(TagRejectReason),
+}
+
+/// What the tag phase remembers between tags.
+#[derive(Default)]
+struct Attempts {
+    /// The tag maps, listed once, the first time a tag needs its chain.
+    tagmaps: Option<HashMap<String, Hash>>,
+    /// The self-heals run so far.
+    heals: usize,
+    /// Each pack whose download or apply this fetch refused, with the
+    /// refusal, so a pack that many tag chains share costs one download.
+    failed_packs: HashMap<Hash, TagRejectReason>,
 }
 
 /// A failure of the tag or tag map listing, which stops the phase.
@@ -548,8 +599,7 @@ impl TagPhase<'_> {
             }
         };
         let mut prover = TagProver::new(self.require_signed);
-        let mut tagmaps: Option<HashMap<String, Hash>> = None;
-        let mut heals = 0usize;
+        let mut attempts = Attempts::default();
         let mut publish: Vec<(String, Hash)> = Vec::new();
         // Local tag names and the names this phase will publish: a name that
         // is a directory of another cannot be written beside it.
@@ -573,11 +623,15 @@ impl TagPhase<'_> {
                 continue;
             }
             if let Some(other) = name_conflict(&names, &name) {
-                self.refuse(name, TagRejectReason::NameConflict { other });
+                self.refuse(name, TagRejectReason::NameConflict { other: Some(other) });
                 continue;
             }
             let local = match refs::read_tag(self.layout, &name) {
                 Ok(local) => local,
+                Err(e) if is_name_clash(&e) => {
+                    self.refuse(name, TagRejectReason::NameConflict { other: None });
+                    continue;
+                }
                 Err(e) => {
                     fatal = Some(e.into());
                     break;
@@ -591,7 +645,7 @@ impl TagPhase<'_> {
                 }
                 None => {}
             }
-            match self.fetch_tag(&mut prover, &mut tagmaps, &mut heals, &name, value) {
+            match self.fetch_tag(&mut prover, &mut attempts, &name, value) {
                 Ok(Outcome::Publish(value)) => {
                     names.insert(name.clone());
                     publish.push((name, value));
@@ -612,7 +666,9 @@ impl TagPhase<'_> {
         // failed branch do. An interrupt publishes nothing more.
         if let Some(e) = fatal {
             if !matches!(e, SyncError::Interrupted) {
-                self.publish(publish)?;
+                // The first failure is the one to report; a failed publish
+                // here only leaves those tags for the next fetch.
+                let _ = self.publish(publish);
             }
             return Err(e);
         }
@@ -623,8 +679,7 @@ impl TagPhase<'_> {
     fn fetch_tag(
         &mut self,
         prover: &mut TagProver,
-        tagmaps: &mut Option<HashMap<String, Hash>>,
-        heals: &mut usize,
+        attempts: &mut Attempts,
         name: &str,
         value: Hash,
     ) -> Result<Outcome, Result<ListingFailed, SyncError>> {
@@ -635,6 +690,7 @@ impl TagPhase<'_> {
         }
         // The tag needs its chain. The tag maps are listed once, after the
         // tags, so on an ordered listing a tag map covers its tag's value.
+        let tagmaps = &mut attempts.tagmaps;
         if tagmaps.is_none() {
             let listed = self
                 .source
@@ -666,8 +722,8 @@ impl TagPhase<'_> {
                 None => return Ok(Outcome::Refused(TagRejectReason::NoTransferChain)),
             }
         };
-        let applied = self.apply_chain(&tag_ref, map, true);
-        prover.refresh_missing(self.store);
+        let applied = self.apply_chain(&tag_ref, map, true, &mut attempts.failed_packs);
+        self.refresh_after_apply(prover);
         let skipped = match applied {
             Ok((skipped, keys)) => match self.prove(prover, name, value).map_err(Err)? {
                 Proof::Proved => {
@@ -692,9 +748,9 @@ impl TagPhase<'_> {
         // A first try that skipped packs, or stopped at a node of a chain
         // already applied, may have trusted a stale record: the retry then
         // clears it and walks the whole chain, at most once per fetch.
-        let heal = skipped && *heals < TAG_SELF_HEALS_PER_FETCH;
+        let heal = skipped && attempts.heals < TAG_SELF_HEALS_PER_FETCH;
         if heal {
-            *heals += 1;
+            attempts.heals += 1;
             self.observer.event(&SyncEvent::AppliedPacksStale {
                 remote: self.remote.to_owned(),
                 branch: tag_ref.clone(),
@@ -703,8 +759,8 @@ impl TagPhase<'_> {
             self.applied.clear();
             crate::fetch::persist_record(self.applied, self.observer, self.remote);
         }
-        let applied = self.apply_chain(&tag_ref, map, !heal);
-        prover.refresh_missing(self.store);
+        let applied = self.apply_chain(&tag_ref, map, !heal, &mut attempts.failed_packs);
+        self.refresh_after_apply(prover);
         match applied {
             Ok((_, keys)) => match self.prove(prover, name, value).map_err(Err)? {
                 Proof::Proved => {
@@ -738,15 +794,27 @@ impl TagPhase<'_> {
         )
     }
 
+    /// Drop what `M` holds for objects the last apply brought, if it brought
+    /// any.
+    fn refresh_after_apply(&mut self, prover: &mut TagProver) {
+        if self.packs_since_refresh != self.report.packs_downloaded {
+            self.packs_since_refresh = self.report.packs_downloaded;
+            prover.refresh_missing(self.store);
+        }
+    }
+
     /// Walk the chain of `tag_ref` from `map`, stopping at the stop set when
-    /// `use_stop`, and apply its packs. Returns whether anything was skipped
-    /// (a recorded pack or a node of the stop set) and the nodes it walked.
+    /// `use_stop`, and apply its packs. A chain that holds a pack this fetch
+    /// already refused is refused with no download, and a pack refused here
+    /// joins `failed_packs`. Returns whether anything was skipped (a recorded
+    /// pack or a node of the stop set) and the nodes it walked.
     #[allow(clippy::type_complexity)]
     fn apply_chain(
         &mut self,
         tag_ref: &str,
         map: Hash,
         use_stop: bool,
+        failed_packs: &mut HashMap<Hash, TagRejectReason>,
     ) -> Result<(bool, Vec<Hash>), (bool, ChainFailure)> {
         let stop = &self.stop;
         let walk = walk_pack_chain_until(self.source, self.observer, tag_ref, map, &|key| {
@@ -756,6 +824,9 @@ impl TagPhase<'_> {
         let stopped = walk.stopped;
         let keys = walk.keys;
         let chain = flatten_oldest_first(walk.nodes);
+        if let Some(reason) = chain.iter().find_map(|pack| failed_packs.get(pack)) {
+            return Err((stopped, ChainFailure::Refused(reason.clone())));
+        }
         let mut done = ChainApplied::default();
         let result = apply_pack_chain(
             self.store,
@@ -772,7 +843,17 @@ impl TagPhase<'_> {
         self.report.packs_already_applied += done.skipped;
         self.report.objects_unpacked += done.objects;
         let skipped = stopped || done.skipped > 0;
-        result.map_err(|e| (skipped, ChainFailure::from(e)))?;
+        if let Err(e) = result {
+            let failure = ChainFailure::from(e);
+            // Packs apply in chain order, so the one that failed follows
+            // those applied or skipped.
+            if let ChainFailure::Refused(reason) = &failure
+                && let Some(pack) = chain.get(done.packs + done.skipped)
+            {
+                failed_packs.insert(*pack, reason.clone());
+            }
+            return Err((skipped, failure));
+        }
         Ok((skipped, keys))
     }
 
@@ -804,6 +885,12 @@ impl TagPhase<'_> {
                     self.report.tags_rejected.push(TagRejection {
                         name,
                         reason: TagRejectReason::WouldClobber,
+                    });
+                }
+                Err(e) if is_name_clash(&e) => {
+                    self.report.tags_rejected.push(TagRejection {
+                        name,
+                        reason: TagRejectReason::NameConflict { other: None },
                     });
                 }
                 // A local write failed: the other tags still publish, and the

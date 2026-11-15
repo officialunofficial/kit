@@ -419,8 +419,7 @@ pub fn plan_push_steps(
 }
 
 /// [`pull_with_source`] over `transport` with the default settings. It checks
-/// signatures, fetches no tags and reports no progress. Returns the number of
-/// branches fetched.
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
 /// As [`pull_with_source`].
@@ -429,7 +428,7 @@ pub fn pull_all(
     transport: &dyn Transport,
     remote: &str,
     target_branch: Option<&str>,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     pull_all_with(cwd, transport, remote, target_branch, true)
 }
 
@@ -443,36 +442,37 @@ pub fn pull_all_with(
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::PullReport, Error> {
     pull_with_source(
         cwd,
         &source(transport),
         remote,
         target_branch,
         require_signed,
-        false,
+        true,
         SyncPolicy::Batch,
         &NoopObserver,
     )
-    .map(|report| report.fetch.branches_fetched)
 }
 
 /// [`fetch_with_source`] over `transport` with the default settings. It checks
-/// signatures, fetches no tags and reports no progress. Returns the number of
-/// branches fetched.
+/// signatures, fetches the remote's tags and reports no progress.
 ///
 /// # Errors
 /// As [`fetch_with_source`].
-pub fn fetch_all(cwd: &Path, transport: &dyn Transport, remote: &str) -> Result<usize, Error> {
+pub fn fetch_all(
+    cwd: &Path,
+    transport: &dyn Transport,
+    remote: &str,
+) -> Result<kit_sync::FetchReport, Error> {
     fetch_with_source(
         cwd,
         &source(transport),
         remote,
         true,
         false,
-        false,
+        true,
         SyncPolicy::Batch,
         &NoopObserver,
     )
-    .map(|report| report.branches_fetched)
 }

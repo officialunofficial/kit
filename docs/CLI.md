@@ -1391,7 +1391,8 @@ Remote / sync:
   server refuses the next one with an error that names the limit. An
   unchanged fetch costs two frames (the branch and tag listings) plus at
   least two per branch, so one session fetches at most 4,999 branches
-  (SPEC-TRANSPORT §4.4).
+  (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
+  frames, so a clone of about 5,000 of them fails the same way.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.

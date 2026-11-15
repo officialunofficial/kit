@@ -743,6 +743,50 @@ fn a_grafted_tag_chain_downloads_only_its_pack() {
     }
 }
 
+/// Tags whose chains share a pack the fetch refuses download it once: the
+/// first tag is refused for it, and the rest are refused with no download.
+#[test]
+fn tags_that_share_a_broken_pack_download_it_once() {
+    for kind in KINDS {
+        let remote = Remote::new(kind);
+        let (c1, main) = remote.grow("main", true);
+        let broken = b"not a pack".to_vec();
+        let key = pack::pack_key(&broken);
+        remote
+            .tx
+            .upload_pack(&broken, &PackKey::from_hash(key))
+            .unwrap();
+        let group = remote.node(Some(main), &[key]);
+        for i in 0..3 {
+            let (tag, id) = remote.tag_object(&format!("r{i}"), c1, true);
+            let own = remote.node(Some(group), &[remote.upload(&[tag])]);
+            remote.set(&format!("refs/kit/tagmap/r{i}"), own);
+            remote.set(&format!("refs/tags/r{i}"), id);
+        }
+        let (_dir, target) = work();
+        let source = remote.source();
+        let counted = CountingSource::new(&source);
+
+        let report = clone_with(&counted, &target, &SyncOptions::default());
+
+        assert!(report.tags_fetched.is_empty(), "{kind:?}");
+        let reasons = rejected(&report);
+        assert_eq!(reasons.len(), 3, "{reasons:?}");
+        assert!(
+            reasons
+                .iter()
+                .all(|(_, r)| matches!(r, TagRejectReason::Transfer(_))),
+            "{reasons:?}"
+        );
+        let calls = counted.take();
+        assert_eq!(
+            count(&calls, &format!("Pack {}", hash::to_hex(&key))),
+            1,
+            "{calls:?}"
+        );
+    }
+}
+
 /// Tags pushed together share one node: a clone downloads it once and each
 /// pack once. Tags of two groups download two nodes.
 #[test]
@@ -1061,13 +1105,13 @@ fn a_tag_whose_name_collides_with_another_tag_is_refused_alone() {
         assert!(reasons.contains(&(
             "a/b",
             &TagRejectReason::NameConflict {
-                other: "a".to_owned()
+                other: Some("a".to_owned())
             }
         )));
         assert!(reasons.contains(&(
             "v1/rc",
             &TagRejectReason::NameConflict {
-                other: "v1".to_owned()
+                other: Some("v1".to_owned())
             }
         )));
         assert_eq!(

@@ -79,6 +79,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `tag_listing_failed`, and `SyncOptions` gains `tags`.
 - `RemoteSource::list_refs(prefix)` is a required method. Every source of
   this repository implements it.
+- `kit_core::ops::check_closure_present_above` checks a closure as
+  `check_closure_present` does, but takes a `Known` answer for each object
+  (present, missing, or to read) and a stop poll, and returns a `Presence`
+  that names the missing object and the path to it.
+- `CursorRecord` gains `tags` and `tag_digest`.
 - `kit push <remote> <branch>` pushes the local branch `<branch>` under its
   own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
   be the current one. Like any refspec push, it records an upstream only with
@@ -95,6 +100,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The fetch cursor record is `kit-fetch-cursor-v2`. It also records whether
   the fetch took tags and a digest of the local tags. A v1 record is invalid,
   so the first fetch after an upgrade lists the remote once.
+- `libkit::transfer::pull_with_source` and `fetch_with_source` take a `tags`
+  switch and return the `PullReport` and `FetchReport`. `pull_all`,
+  `pull_all_with` and `fetch_all` fetch tags and return the reports too, not a
+  branch count.
+- `walk_pack_chain` and `resolve_pack_chain` take the full head ref, such as
+  `refs/kit/packmap/<b>` or `refs/kit/tagmap/<t>`, not a branch name.
 - A fetch sends one more request, the `ListRefs` of `refs/tags/`, and one
   `ListRefs` of `refs/kit/tagmap/` when some tag is not yet local. An
   unchanged `kit serve` fetch still fits 4,999 branches in one session.

@@ -342,3 +342,87 @@ fn an_over_size_tag_listing_stops_only_the_tag_phase() {
     assert_eq!(fx.tracking_main(), head);
     assert_eq!(fx.local_tag("bulk-00000"), None);
 }
+
+/// A refused tag fails the clone with exit 1, and the branch is still
+/// checked out.
+#[test]
+fn a_clone_with_a_refused_tag_exits_1_and_checks_out_the_branch() {
+    let fx = Fixture::new();
+    let source = fx.source();
+    ok(
+        &fx.kit(&source, &["tag", "-s", "v1", "-m", "release 1"]),
+        "tag v1",
+    );
+    // The tag ref with no tag map: its object is on no chain.
+    let value = refs::read_tag(&RepoLayout::single(&source), "v1")
+        .unwrap()
+        .unwrap();
+    fx.tx()
+        .update_ref("refs/tags/v1", RefWriteCondition::Any, &value)
+        .unwrap();
+
+    let out = fx.clone();
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains(" ! [rejected]        v1 -> v1 (the remote has no tag map for it)"),
+        "{err}"
+    );
+    assert_eq!(fx.local_tag("v1"), None);
+    assert_eq!(
+        fs::read_to_string(fx.clone_dir().join("file.txt")).unwrap(),
+        "one"
+    );
+}
+
+/// The remote moves a tag the clone holds. The pull refuses it and exits 1
+/// after the fast-forward of the branch.
+#[test]
+fn a_pull_that_refuses_a_tag_exits_1_after_the_fast_forward() {
+    let fx = Fixture::new();
+    let source = fx.source();
+    ok(&fx.kit(&source, &["tag", "v1"]), "tag v1");
+    let old = fx.publish_tag("v1");
+    ok(&fx.clone(), "clone");
+    fx.commit_and_push("two");
+    ok(&fx.kit(&source, &["tag", "-d", "v1"]), "tag -d");
+    ok(&fx.kit(&source, &["tag", "v1"]), "tag v1 again");
+    fx.publish_tag("v1");
+
+    let out = fx.over_ssh(&fx.clone_dir(), &["pull", "origin"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains(" ! [rejected]        v1 -> v1 ("), "{err}");
+    assert_eq!(fx.local_tag("v1"), Some(old));
+    assert_eq!(
+        fs::read_to_string(fx.clone_dir().join("file.txt")).unwrap(),
+        "two"
+    );
+}
+
+/// A remote tag whose name no push could write warns, and the fetch exits 0.
+#[test]
+fn a_remote_tag_name_over_the_bound_warns_and_exits_0() {
+    let fx = Fixture::new();
+    ok(&fx.clone(), "clone");
+    // 497 bytes in two directory levels, so each file name fits.
+    let (dir, file) = ("d".repeat(248), "f".repeat(248));
+    let remote = fx.remote();
+    let wire = fs::read(remote.join("refs/heads/main")).unwrap();
+    fs::create_dir_all(remote.join("refs/tags").join(&dir)).unwrap();
+    fs::write(remote.join("refs/tags").join(&dir).join(&file), &wire).unwrap();
+    let name = format!("{dir}/{file}");
+    assert_eq!(name.len(), refs::MAX_TAG_NAME_BYTES + 1);
+
+    let out = fx.over_ssh(&fx.clone_dir(), &["fetch", "origin"]);
+
+    ok(&out, "fetch");
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!("warning: skipped remote tag '{name}': ")),
+        "{err}"
+    );
+    assert!(!fx.clone_dir().join(".kit/refs/tags").join(&dir).exists());
+}

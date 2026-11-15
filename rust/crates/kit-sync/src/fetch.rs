@@ -627,6 +627,7 @@ fn fetch_objects_inner(
             verified: &mut *verified,
             stop,
             report: &mut *report,
+            packs_since_refresh: 0,
         }
         .run()?;
     }

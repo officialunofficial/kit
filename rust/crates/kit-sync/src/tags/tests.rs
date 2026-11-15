@@ -396,3 +396,27 @@ fn name_conflicts_are_directory_relations() {
     assert_eq!(name_conflict(&names, "x"), None);
     assert_eq!(name_conflict(&names, "re"), None);
 }
+
+/// A tag read or write that meets a file where a directory should be, or the
+/// reverse, is a name clash; any other I/O failure is not.
+#[test]
+fn a_directory_clash_from_the_file_system_is_a_name_clash() {
+    use std::io::{Error, ErrorKind};
+    for kind in [ErrorKind::NotADirectory, ErrorKind::IsADirectory] {
+        assert!(is_name_clash(&refs::RefError::Io(Error::from(kind))));
+    }
+    assert!(!is_name_clash(&refs::RefError::Io(Error::other(
+        "disk full"
+    ))));
+    assert_eq!(
+        TagRejectReason::NameConflict { other: None }.to_string(),
+        "conflicts with the name of an existing tag"
+    );
+    assert_eq!(
+        TagRejectReason::NameConflict {
+            other: Some("v1".to_owned())
+        }
+        .to_string(),
+        "conflicts with existing tag `v1`"
+    );
+}

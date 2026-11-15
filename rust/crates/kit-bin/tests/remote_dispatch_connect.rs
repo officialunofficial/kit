@@ -871,7 +871,10 @@ fn push_then_pull_roundtrip_through_real_connect_server() {
     let dst = tempfile::tempdir().unwrap();
     assert!(run_in(dst.path(), &["init"]).status.success());
     let tx = remote_dispatch::open(&url).expect("open kit+http (pull)");
-    let n = libkit::transfer::pull_all(dst.path(), tx.as_ref(), "default", None).expect("pull");
+    let n = libkit::transfer::pull_all(dst.path(), tx.as_ref(), "default", None)
+        .expect("pull")
+        .fetch
+        .branches_fetched;
     assert_eq!(n, 1, "one remote branch must be fetched");
     drop(tx);
 

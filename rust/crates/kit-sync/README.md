@@ -145,8 +145,11 @@ A tag whose closure is local publishes with no further request. Otherwise the
 fetch lists `refs/kit/tagmap/` once and applies the tag's chain. The walk stops
 at the nodes of the chains this fetch applied and at checkpoint heads, so a tag
 grafted on a branch chain downloads only its own nodes and packs. An object
-still missing after a strong re-read of both refs triggers one self-heal for
-the whole tag phase (`TAG_SELF_HEALS_PER_FETCH`).
+still missing after a strong re-read of both refs, when the try skipped a pack
+the applied-pack record lists or stopped at a node of the stop set, triggers
+one self-heal for the whole tag phase (`TAG_SELF_HEALS_PER_FETCH`). A pack the
+fetch refused for one tag refuses the later tags that share it, with no second
+download.
 
 `FetchReport` names the outcome: `tags_fetched`, `tags_rejected` (each a
 `TagRejection` with its `TagRejectReason`), `tag_warnings` for remote names that
