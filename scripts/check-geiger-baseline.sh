@@ -13,16 +13,12 @@
 # justified block can move the count a little. Change the ceiling in
 # `ceiling_for()` and explain why in the same commit.
 #
-# Why some first-party crates have a non-zero count:
+# Why one first-party crate has a non-zero count:
 #   kit-core - two `#[allow(unsafe_code)]` sites, both documented in the
 #               header of rust/crates/kit-core/src/lib.rs: the
 #               `libc::geteuid()` call in `sign::effective_uid`, and the
 #               `libc::fcntl(.., F_BARRIERFSYNC)` call in
 #               `batch::RealSyncer::file_barrier` on macOS and iOS.
-#
-#   kit-bin  - one `#[allow(unsafe_code)]` site in `main.rs`: the two
-#               `libc::mallopt` calls that pin glibc's malloc thresholds at
-#               startup (Linux with glibc only).
 #
 # All other first-party crates MUST stay at 0.
 #
@@ -37,7 +33,7 @@ set -euo pipefail
 
 ceiling_for() {
     case "$1" in
-        kit-bin)               echo 2  ;;
+        kit-bin)               echo 0  ;;
         kit-client)            echo 0  ;;
         kit-core)              echo 3  ;;
         kit-keystore)          echo 0  ;;

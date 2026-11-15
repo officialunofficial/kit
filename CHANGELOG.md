@@ -30,9 +30,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `gc` error for a manifest chunk that is not a blob now reads `chunk
   <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
   delta`, but gc refuses a delta there too.
-- On Linux with glibc, `kit` fixes glibc's malloc thresholds at 128 KiB when
-  it starts. A 16 GiB clone peaked at 359 to 437 MB and now peaks at 303 MB,
-  and the peak no longer grows with the size of the file.
 
 ### Fixed
 
