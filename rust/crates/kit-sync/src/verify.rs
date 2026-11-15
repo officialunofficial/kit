@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::Object;
+use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
 use kit_core::store::ObjectStore;
 use rayon::prelude::*;
@@ -255,8 +255,8 @@ pub(crate) type VerifiedHistory = HashSet<Hash>;
 /// Verify the signature of every commit, remix and tag in the history of
 /// `tip`: `tip` itself, the parents of each commit and remix, and the target
 /// of each tag, recursively. Trees and blobs carry no signature and name no
-/// signed object, so the walk reads one only where a parent or `tip` names it
-/// and goes no further. Remix `sources` are foreign-repo pointers and are not
+/// signed object, so where a parent, a tag or `tip` names one the walk reads
+/// only its type and goes no further. Remix `sources` are foreign-repo pointers and are not
 /// followed (SPEC-OBJECTS §6).
 ///
 /// [`verify_new_object_signatures`] checks the objects of the packs one run
@@ -300,6 +300,15 @@ pub(crate) fn verify_history_signatures(
         if seen.len() > cap {
             return Err(SyncError::ClosureTooLarge(cap));
         }
+        // A leaf carries no signature and names no signed object, so only
+        // its type prologue is read, like the closure check does: a parent or
+        // tag target that is a large blob costs no full read.
+        if !matches!(
+            store.object_type(&h)?,
+            ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
+        ) {
+            continue;
+        }
         let obj = store.read_object(&h)?;
         match &obj {
             Object::Commit(c) => pending.extend(&c.parents),
@@ -330,7 +339,7 @@ pub(crate) fn verify_history_signatures(
 mod tests {
     use super::*;
     use crate::observer::NoopObserver;
-    use kit_core::object::{Object, ObjectType};
+    use kit_core::object::Object;
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
@@ -606,7 +615,7 @@ mod tests {
 
     /// A tag is checked and so is the commit it names, whatever type the tag
     /// declares for it. A tag that names a tree is checked itself, and the
-    /// walk reads the tree and stops there.
+    /// walk reads only the tree's type and stops there.
     #[test]
     fn verify_history_signatures_checks_a_tag_and_its_target() {
         use kit_core::object::{Identity, Tag};

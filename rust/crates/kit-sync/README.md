@@ -120,9 +120,10 @@ the next walk longer: the first signed fetch after an upgrade walks each
 history once. A tracking ref whose tip no signed fetch recorded, such as one a
 fetch with the opt-out left for a branch the remote no longer lists, keeps a
 signed fetch from trusting an unchanged cursor, so each signed fetch lists the
-remote until `--prune` removes that ref. You can delete these files; they never pin objects for GC. A
-pruned tracking ref takes its record with it. Renaming or removing a remote
-leaves its records behind; they stay true and only stop a later walk sooner.
+remote until `--prune` removes that ref. You can delete these files; they
+never pin objects for GC. A pruned tracking ref takes its record with it.
+Renaming or removing a remote leaves its records behind; they stay true and
+only stop a later walk sooner.
 
 ### Incremental fetch checkpoints
 
