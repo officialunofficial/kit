@@ -1811,7 +1811,46 @@ exit cleanly without a "Broken pipe" message.
 .Dv SIGINT
 and
 .Dv SIGTERM
-set a flag that long-running operations honor at the next checkpoint.
+stop a local command at once.
+In
+.Cm push ,
+.Cm pull ,
+.Cm fetch ,
+.Cm clone ,
+.Cm log ,
+.Cm reflog ,
+.Cm grant ,
+.Cm epoch
+and
+.Cm visibility
+the first one sets a flag that the command honors at its next checkpoint.
+.Cm merge ,
+.Cm rebase ,
+.Cm cherry-pick ,
+.Cm revert ,
+.Cm stash ,
+.Cm bisect ,
+.Cm worktree ,
+.Cm remote
+and
+.Cm git pull
+let the first one pass, so a multi-step operation is not cut between two
+writes.
+In all of them a second one stops the command at once.
+While an editor runs,
+.Nm
+ignores
+.Dv SIGINT
+and
+.Dv SIGQUIT
+and waits for the editor to exit;
+.Dv SIGTERM
+still ends it.
+.Cm checkout
+and
+.Cm reset --hard
+write the files first and then the branch, HEAD and the index, as git
+does, so a stopped one leaves them where they were.
 .Sh SEE ALSO
 .Xr git 1 ,
 .Xr ssh 1 ,

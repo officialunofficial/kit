@@ -139,6 +139,11 @@ pub fn run(args: &[String]) -> u8 {
     let create_new = opts.create.as_deref().or(opts.create_force.as_deref());
     let create_plan: Option<(String, Hash, refs::RefWriteCondition, bool)> =
         if let Some(new) = create_new {
+            // The branch is written after the files, so its name is checked
+            // before anything is.
+            if let Err(e) = refs::check_new_name(new, refs::RefNameKind::Branch) {
+                return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT);
+            }
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
             let start = match libkit::revspec::resolve_revision(&store, &layout, start_spec) {
                 Ok(h) => h,
@@ -318,39 +323,14 @@ pub fn run(args: &[String]) -> u8 {
         return emit_err(&format!("restore: {e}"), exit::CANTCREAT);
     }
 
-    // Safety gate passed — NOW create the `-b`/`-B` branch ref. Deferring
-    // it to here means a refused switch above leaves no orphan branch
-    // behind (git creates nothing when it refuses the operation).
-    if let Some((new, start, cond, _)) = &create_plan {
-        match super::write_ref_recording_history(&layout, new, *cond, start) {
-            Ok(()) => {}
-            Err(refs::RefError::Conflict(_)) => {
-                return emit_err(&format!("branch '{new}' already exists"), exit::CANTCREAT);
-            }
-            Err(e) => return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT),
-        }
-    }
-
-    // Update HEAD FIRST, before mutating the worktree/index. The
-    // failure modes are asymmetric: if we materialised the new tree and
-    // *then* HEAD failed to advance, the worktree would hold the new
-    // branch's files while HEAD still pointed at the old branch — a
-    // silent, hard-to-diagnose split. Writing HEAD first inverts the
-    // hazard: a subsequent worktree/index failure leaves HEAD on the new
-    // branch with a stale worktree, which `kit status` surfaces as
-    // ordinary local changes and a re-run of `kit checkout` repairs.
-    // The `ensure_restore_safe` gate above already guaranteed no real
-    // user work is at risk, so the stale-worktree window is benign.
-    let is_branch = matches!(refs::read_ref(&layout, name), Ok(Some(_)));
-    let head_err = if is_branch {
-        refs::write_head_branch(&layout, name)
-    } else {
-        refs::write_head_detached(&layout, &commit_hash)
-    };
-    if let Err(e) = head_err {
-        return emit_err(&format!("update HEAD: {e}"), exit::CANTCREAT);
-    }
-
+    // Write the files first, then the `-b`/`-B` branch ref, HEAD and the
+    // index together, as git does. A checkout stopped or failed partway
+    // leaves HEAD and the index where they were, and the files it wrote
+    // show as unstaged changes;
+    // running the same checkout again (with `-f`) finishes it. Signals are
+    // held across the ref, HEAD and index writes, so they never split, and
+    // a refused or stopped switch leaves no orphan branch behind.
+    //
     // Materialise the tree with `clean = false`: tracked entries are
     // written/overwritten, untracked files are preserved. Then delete
     // the tracked paths the target drops (computed above) and prune any
@@ -361,6 +341,7 @@ pub fn run(args: &[String]) -> u8 {
     // the index can carry a stat cache for it and the next command does
     // not re-hash it. Observation paths are relative to the restore root,
     // so they are used only when that root is the worktree root.
+    let is_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
     let mut observed = Vec::new();
     let report = match restore_tree_to_worktree_observed(
         &store,
@@ -377,7 +358,25 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(code) = remove_dropped(&cwd, &dropped) {
         return code;
     }
-    if let Err(e) = super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed) {
+    let published = crate::signal::defer(|| {
+        if let Some((new, start, cond, _)) = &create_plan {
+            match super::write_ref_recording_history(&layout, new, *cond, start) {
+                Ok(()) => {}
+                Err(refs::RefError::Conflict(_)) => {
+                    return Err(format!("branch '{new}' already exists"));
+                }
+                Err(e) => return Err(format!("create branch {new}: {e}")),
+            }
+        }
+        if is_branch {
+            refs::write_head_branch(&layout, name)
+        } else {
+            refs::write_head_detached(&layout, &commit_hash)
+        }
+        .map_err(|e| format!("update HEAD: {e}"))?;
+        super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)
+    });
+    if let Err(e) = published {
         return emit_err(&e, exit::CANTCREAT);
     }
 

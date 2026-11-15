@@ -2149,11 +2149,30 @@ that kit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 
-- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** set a graceful-shutdown flag.
-  Long-running operations (push, pull, clone, log) poll it at natural
-  checkpoints and exit with `tempfail` (75) so the operation can be
-  retried. Wired via `signal-hook`'s `flag` module so the CLI stays
-  under its crate-level `#![deny(unsafe_code)]`.
+- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** stop a local command at once.
+  Every write is a temp file renamed into place, so a stopped command
+  leaves no half-written ref or index. `checkout` and `reset --hard`
+  write the files first and then the branch, HEAD and the index
+  together, as git does: a stopped one leaves its branch, HEAD and the
+  index where they were, the files it wrote show as local changes (new
+  files as untracked), and the same command run again with `-f`
+  finishes it.
+  `kit gc` sweeps the object temp files a stopped command leaves, the
+  next restore that writes into a directory (a checkout, `kit reset
+  --hard`, a pull) removes the worktree temp files left there, and a temp
+  file left beside a ref is never read as one.
+- `push`, `pull`, `fetch`, `clone`, `log`, `reflog`, `grant`, `epoch` and
+  `visibility` instead set a graceful-shutdown flag on the first signal.
+  They poll it at natural checkpoints and exit with `tempfail` (75) so the
+  operation can be retried. `merge`, `rebase`, `cherry-pick`, `revert`,
+  `stash`, `bisect`, `worktree`, `remote` and `git pull` let the first
+  signal pass, so a multi-step operation is not cut between two writes.
+  In all of them a second signal stops the command at once. Wired via
+  `signal-hook`'s `flag` module so the CLI stays under its crate-level
+  `#![deny(unsafe_code)]`.
+- While an editor runs (`kit commit`, `kit tag -a`, `kit rebase -i`), kit
+  ignores `SIGINT` and `SIGQUIT`, as git does: the editor gets Ctrl-C, and
+  kit waits for it to exit. `SIGTERM` still ends kit.
 - **`SIGPIPE`** is ignored. Pipelines like `kit log | head -1` exit
   cleanly without a "Broken pipe" message &mdash; the next write just
   propagates `EPIPE` as a normal I/O error. This is the Rust runtime

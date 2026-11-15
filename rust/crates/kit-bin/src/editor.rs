@@ -64,10 +64,12 @@ pub fn spawn_editor(template: &str) -> io::Result<String> {
     let extra_args: Vec<&str> = parts.collect();
     let path_arg: PathBuf = tmp.path().to_path_buf();
 
-    let status = Command::new(program)
-        .args(&extra_args)
-        .arg(&path_arg)
-        .status()?;
+    let status = crate::signal::while_editor_runs(|| {
+        Command::new(program)
+            .args(&extra_args)
+            .arg(&path_arg)
+            .status()
+    })?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "editor exited with status {status:?}"

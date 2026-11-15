@@ -169,6 +169,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   would remove, where it trusted its caller's check.
 - A push reads and compresses a batch of large objects on all cores, as it
   does a batch of many small ones. A batch is still at most 64 MiB.
+- Ctrl-C and SIGTERM stop a local command such as `add`, `checkout` or
+  `gc` at once; they ran to the end. A second Ctrl-C stops `push`, `pull`,
+  `fetch`, `clone`, `log`, `merge`, `rebase` and the other commands that
+  stop at a checkpoint or finish a multi-step operation. `checkout` and
+  `reset --hard` now write the files before HEAD and the index, as git
+  does, so a stopped one leaves them where they were; the next restore
+  that writes into a directory removes the temp files it left there.
 
 ### Removed
 
