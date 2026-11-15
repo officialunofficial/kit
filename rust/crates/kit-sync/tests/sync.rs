@@ -4103,3 +4103,95 @@ fn a_stale_record_is_cleared_on_disk_before_the_retry_runs() {
         "the stale entries are still on disk"
     );
 }
+
+#[test]
+fn a_pull_keeps_untracked_nested_repository_files() {
+    for marker in [".git", ".kit", ".GiT"] {
+        for nested in ["vendor", "outer/vendor"] {
+            let remote = Remote::new();
+            let first = remote.publish_paths(None, &[("a.txt", EntryMode::Blob, b"one\n")]);
+            let dir = tempfile::tempdir().unwrap();
+            clone_into(&remote, dir.path());
+            remote.publish_paths(Some(first), &[("a.txt", EntryMode::Blob, b"two\n")]);
+            let repo = dir.path().join(nested);
+            std::fs::create_dir_all(&repo).unwrap();
+            // A metadata file, as used by a linked worktree, is a marker too.
+            std::fs::write(repo.join(marker), b"gitdir: elsewhere\n").unwrap();
+            std::fs::write(repo.join("README"), b"mine\n").unwrap();
+            pull(
+                dir.path(),
+                &remote.source(),
+                "default",
+                &SyncOptions::default(),
+                &NoopObserver,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read(repo.join("README")).unwrap(), b"mine\n");
+            assert_eq!(
+                std::fs::read(repo.join(marker)).unwrap(),
+                b"gitdir: elsewhere\n"
+            );
+            assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
+        }
+    }
+}
+
+#[test]
+fn a_pull_still_refuses_files_beside_a_listed_repository_marker() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, &[("vendor/a", EntryMode::Blob, b"one\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("vendor/a", EntryMode::Blob, b"two\n")]);
+    std::fs::write(dir.path().join("vendor/.git"), b"gitdir: elsewhere\n").unwrap();
+    std::fs::write(dir.path().join("vendor/README"), b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("vendor/README")).unwrap(),
+        b"mine\n"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("vendor/a")).unwrap(),
+        b"one\n"
+    );
+}
+
+#[test]
+fn a_pull_refuses_a_repository_directory_that_aliases_a_target_directory() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, &[("a.txt", EntryMode::Blob, b"one\n")]);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("vendor/a", EntryMode::Blob, b"two\n")]);
+    std::fs::create_dir(dir.path().join("Vendor")).unwrap();
+    std::fs::write(dir.path().join("Vendor/.git"), b"gitdir: elsewhere\n").unwrap();
+    std::fs::write(dir.path().join("Vendor/README"), b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    // Also conservative on a case-sensitive filesystem: a spelling that may
+    // alias a target directory never grants an exemption from the safety gate.
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("Vendor/README")).unwrap(),
+        b"mine\n"
+    );
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+}
