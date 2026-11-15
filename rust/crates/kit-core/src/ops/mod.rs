@@ -4,6 +4,8 @@
 //! Submodules are split by concern. Public surface is intentionally
 //! narrow.
 
+pub(crate) mod chunk_heads;
+
 // OPS1 — diff / graph / merge / cherry_pick.
 pub mod cherry_pick;
 pub mod conflict_state;

@@ -53,6 +53,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `gc` error for a manifest chunk that is not a blob now reads `chunk
   <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
   delta`, but gc refuses a delta there too.
+- The push plan and the closure check of a fetch read the head of up to 32
+  chunks at a time, not one after another, so they no longer wait on the disk
+  once per chunk. A refused chunk is reported as before: the first one in the
+  manifest.
 
 ### Fixed
 
