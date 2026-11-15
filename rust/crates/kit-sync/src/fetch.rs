@@ -17,12 +17,12 @@
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
-use kit_core::object::KitError;
 use kit_core::refs;
-use kit_core::store::{ObjectStore, StoreError};
+use kit_core::store::ObjectStore;
 
 use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
+use crate::closure::{self, Anchors};
 
 use crate::SyncOptions;
 use crate::apply::{ChainApplied, apply_pack_chain};
@@ -151,8 +151,8 @@ pub(crate) struct Applied {
 
 /// Step 2 of a branch fetch: download and unpack each pack of `resolved`
 /// into `store` as it arrives, recording each one, then verify the closure at
-/// `tip` is complete, running the applied-pack self-heal retry on a stale
-/// record.
+/// `tip` is complete down to `anchors` ([`crate::closure`]), running the
+/// applied-pack self-heal retry on a stale record.
 ///
 /// **The caller MUST hold a [`kit_core::store::PruneGuard`] across this call
 /// and through the branch's subsequent ref publish.** Unpacking writes
@@ -172,7 +172,8 @@ pub(crate) struct Applied {
 /// Every other failure propagates without triggering self-heal, because none
 /// is evidence the local store is stale: a corrupt pack, a remote missing a
 /// pack, a transport error, a closure too large to verify, an interruption,
-/// or a failed signature.
+/// or a failed signature. The retry checks the whole closure, ignoring
+/// `anchors`, as the store is suspect.
 ///
 /// # Signature verification
 ///
@@ -192,6 +193,7 @@ pub(crate) fn apply_and_verify_chain(
     tip: Hash,
     applied: &mut AppliedPacks,
     require_signed: bool,
+    anchors: &Anchors,
 ) -> Result<Applied, SyncError> {
     let ResolvedChain {
         mut chain,
@@ -213,7 +215,7 @@ pub(crate) fn apply_and_verify_chain(
     )
     // Closure completeness. With skips this is the sole guarantee the store
     // is whole.
-    .and_then(|()| verify_closure_present(store, &tip));
+    .and_then(|()| verify_closure_above(store, observer, &tip, anchors));
     let skipped = done.skipped + prefix_packs;
     let stats = Applied {
         packs_downloaded: done.packs,
@@ -285,6 +287,20 @@ pub(crate) fn persist_record(
     }
 }
 
+/// [`verify_closure_present`] down to `anchors`, or in full when there are
+/// none.
+fn verify_closure_above(
+    store: &ObjectStore,
+    observer: &dyn Observer<SyncEvent>,
+    tip: &Hash,
+    anchors: &Anchors,
+) -> Result<(), SyncError> {
+    if anchors.is_empty() {
+        return verify_closure_present(store, tip);
+    }
+    closure::check_above(store, tip, anchors, &|| observer.cancelled()).map(drop)
+}
+
 /// Assert that every object reachable from `tip` is already present in the
 /// local store after the packmap chain has been unpacked. A pure integrity
 /// check with no network access: a reachable object the chain failed to
@@ -303,11 +319,7 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
         Ok(true) => Err(SyncError::ClosureTooLarge(
             kit_core::ops::graph::MAX_REACHABLE,
         )),
-        Err(StoreError::ObjectNotFound(hex)) => Err(SyncError::RemoteMissingObject(hex)),
-        Err(StoreError::Decode(
-            e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
-        )) => Err(SyncError::RemoteObject(e)),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(closure::closure_error(e)),
     }
 }
 
@@ -323,6 +335,8 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// 2. walk its chain oldest-first, then download, check, unpack and record
 ///    each pack the applied-pack record does not already have, one at a time,
 ///    with no repo lock held, and assert the tip's closure is fully present,
+///    down to the tips of this remote's tracking refs and the tips this call
+///    published ([`crate::closure`]),
 /// 3. when signatures are required, verify every commit, remix and tag in
 ///    the tip's history, whether or not this run downloaded it,
 /// 4. acquire the repo lock, publish the remote-tracking ref and its
@@ -465,6 +479,8 @@ fn fetch_objects_inner(
     let mut tracking = refs::RemoteRefBatch::new(layout, remote)?;
     // The tracking refs this fetch published, with the tip it gave each.
     let mut published: Vec<(String, Hash)> = Vec::new();
+    // The tips a closure check stops at. Read under the prune guard.
+    let mut anchors = Anchors::load(store, layout, remote)?;
     // The nodes of the chains this fetch applied and checked.
     let mut stop = StopSet::default();
     let result: Result<(), SyncError> = (|| {
@@ -502,7 +518,8 @@ fn fetch_objects_inner(
             let checkpoint_path = checkpoint::path(layout, source, remote, &r.name);
             // The immutable prefix remains verified even if tracking moved.
             // Always check the listed tip's closure before publishing,
-            // including when the head matches but that tip changed.
+            // including when the head matches but that tip changed. The check
+            // stops at the anchors.
             let checkpoint = checkpoint_path.as_deref().and_then(Checkpoint::load);
 
             // Step 1: resolve this branch's chain.
@@ -529,6 +546,7 @@ fn fetch_objects_inner(
                 h,
                 applied,
                 require_signed,
+                &anchors,
             ) {
                 Ok(stats) => (completed, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -560,6 +578,7 @@ fn fetch_objects_inner(
                         fresh_h,
                         applied,
                         require_signed,
+                        &anchors,
                     )?;
                     (completed, stats)
                 }
@@ -586,6 +605,7 @@ fn fetch_objects_inner(
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
             published.push((r.name.clone(), completed.tip));
+            anchors.insert(completed.tip);
             if require_signed {
                 // The history of the tip was verified above. Like the
                 // checkpoint, the record is a disposable cache: losing it
@@ -777,7 +797,7 @@ fn remote_unchanged(
 mod tests {
     use super::*;
     use kit_core::object::{
-        Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
+        Blob, KitError, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
     };
     use kit_core::sign::{self, KeyPair};
 

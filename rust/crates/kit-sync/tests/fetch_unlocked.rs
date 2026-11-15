@@ -1034,3 +1034,64 @@ fn a_fetch_overtaken_by_a_slower_one_does_not_hide_the_new_tip_from_later_fetche
         hash::to_hex(&old_tip)
     );
 }
+
+// ---------------------------------------------------------------------------
+// 9. Kill and gc above an earlier tracking tip
+// ---------------------------------------------------------------------------
+
+/// A target that fetched the first three commits of a remote that then added
+/// three more, one pack each. The tracking tip, returned last, is where the
+/// closure check of the next fetch stops.
+fn above_an_earlier_tip() -> (Remote, tempfile::TempDir, std::path::PathBuf, RepoLayout, Hash) {
+    let mut remote = Remote::with_commits(3);
+    let (dir, target, layout) = fresh_target();
+    run_fetch(&target, &remote.source(), &NoopObserver).unwrap();
+    let anchor = remote.tip();
+    for i in 3..6 {
+        remote.push_file(&format!("f{i}.txt"), format!("content {i}\n").as_bytes());
+    }
+    (remote, dir, target, layout, anchor)
+}
+
+fn kill_fetch_in(remote: &Remote, target: &Path, die_at: usize) {
+    let dying = HookSource::new(remote, die_at, Action::Panic);
+    let died = catch_unwind(AssertUnwindSafe(|| {
+        run_fetch(target, &dying, &NoopObserver)
+    }));
+    assert!(died.is_err(), "the fetch must die in download {die_at}");
+}
+
+#[test]
+fn a_fetch_killed_above_an_earlier_tip_resumes_and_publishes_a_whole_closure() {
+    for die_at in 1..=3 {
+        let (remote, _dir, target, layout, anchor) = above_an_earlier_tip();
+        kill_fetch_in(&remote, &target, die_at);
+        assert_eq!(tracking_tip(&layout), Some(anchor), "death in {die_at}");
+
+        let probe = Probe::default();
+        let report = run_fetch(&target, &remote.source(), &probe).unwrap();
+        assert_eq!(probe.stale.load(Ordering::SeqCst), 0, "death in {die_at}");
+        assert_eq!(report.packs_downloaded, 3 - (die_at - 1));
+        assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+        assert_closure_complete(&layout, remote.tip());
+    }
+}
+
+/// gc prunes what a killed fetch applied above the tracking tip, and keeps
+/// the tracking tip's closure. The next fetch's check stops at that tip, still
+/// finds the pruned objects missing above it, and heals.
+#[test]
+fn gc_after_a_fetch_killed_above_an_earlier_tip_is_healed_by_the_next_fetch() {
+    for die_at in 2..=3 {
+        let (remote, _dir, target, layout, anchor) = above_an_earlier_tip();
+        kill_fetch_in(&remote, &target, die_at);
+        assert!(gc_now(&layout).pruned > 0, "death in {die_at}");
+        assert_closure_complete(&layout, anchor);
+
+        let probe = Probe::default();
+        run_fetch(&target, &remote.source(), &probe).unwrap();
+        assert_eq!(probe.stale.load(Ordering::SeqCst), 1, "death in {die_at}");
+        assert_eq!(tracking_tip(&layout), Some(remote.tip()));
+        assert_closure_complete(&layout, remote.tip());
+    }
+}
