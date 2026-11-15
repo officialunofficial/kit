@@ -81,7 +81,86 @@ pub fn sync_index_to_tree_observed(
             }
         }
     }
-    kit_core::index::write_index(layout, &idx).map_err(|e| format!("write index: {e}"))
+    write_index_settled(layout, &idx)
+}
+
+/// The longest wait for the racy window to pass, in nanoseconds. A recorded
+/// mtime so far ahead of the clock that the wait would pass this (about 11 ms
+/// ahead: clock skew) is not waited for.
+const SETTLE_MAX_WAIT_NS: u64 = 25_000_000;
+
+/// One tick of the kernel's coarse file clock, which a file's mtime follows
+/// (4 ms at 250 Hz). A longer tick is absorbed by the rewrite below.
+const SETTLE_TICK_NS: u64 = 4_000_000;
+
+/// How many times the index is written again when it is still too close to
+/// the newest entry.
+const SETTLE_REWRITES: usize = 2;
+
+/// Write the index once the racy window has passed for its newest entry.
+///
+/// A restore records the stat of each file it writes, then writes the index a
+/// few milliseconds later. `read_index` treats an entry within 10 ms of the
+/// index file's mtime as racy, so without this wait the next command would
+/// hash the newest files again, which for one large file takes minutes. The
+/// wait is usually under 15 ms and only happens when an entry was written
+/// that recently; a rewrite for a coarse clock adds a few milliseconds, and
+/// the call never takes more than about 35 ms of waiting. An entry with a
+/// whole-second mtime has a one-second window and is not waited for.
+///
+/// The file's stat then no longer counts as racy, so an edit made by another
+/// process during the restore, inside the same timestamp tick as the restore's
+/// own write, is not caught. git has the same blind spot.
+/// An edit made after the command returns has a later mtime and is caught.
+fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
+    let write =
+        || kit_core::index::write_index(layout, idx).map_err(|e| format!("write index: {e}"));
+    let Some(newest) = idx
+        .entries
+        .iter()
+        .map(|e| e.mtime_ns)
+        .filter(|m| *m != 0 && !m.is_multiple_of(1_000_000_000))
+        .max()
+    else {
+        return write();
+    };
+    let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
+    // A mtime so far ahead that the wait would pass the longest wait is skew,
+    // not a fresh write: do not wait for it.
+    let now = now_nanos();
+    let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
+    if ready > now && ready - now > SETTLE_MAX_WAIT_NS {
+        return write();
+    }
+    if ready > now {
+        std::thread::sleep(std::time::Duration::from_nanos(ready - now));
+    }
+    write()?;
+    // The index's mtime comes from the kernel's coarse clock, so it can sit
+    // up to a tick behind the clock read above. Check the real stamp.
+    for _ in 0..SETTLE_REWRITES {
+        let Ok(meta) = std::fs::metadata(kit_core::index::index_path(layout)) else {
+            break;
+        };
+        let stamp = core_worktree::mtime_nanos(&meta);
+        if stamp == 0
+            || stamp.is_multiple_of(1_000_000_000)
+            || newest < stamp.saturating_sub(window)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_nanos(SETTLE_TICK_NS));
+        write()?;
+    }
+    Ok(())
+}
+
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
 }
 
 /// Materialise `tree_hash` and align the index while preserving `.kitignore` entries.
@@ -428,5 +507,92 @@ mod tests {
         );
         let eb = &idx.entries[idx.find_entry("b").unwrap()];
         assert_eq!((eb.mtime_ns, eb.size, eb.ino, eb.ctime_ns), (0, 0, 0, 0));
+    }
+
+    /// A file the restore wrote a moment ago keeps its stat cache: the index
+    /// is written after the racy window, so `read_index` does not discard it.
+    #[test]
+    fn the_index_waits_out_the_racy_window_for_a_just_written_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let a = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"a".to_vec(),
+            }),
+        );
+        let tree = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: a,
+                }],
+            }),
+        );
+        for _ in 0..20 {
+            // The file's mtime is now, as the restore just wrote it. Keep it
+            // off a whole second, the case with a one-second window.
+            let mtime_ns = (now_nanos() | 1) + 1_000;
+            let seen = core_worktree::StatObservation {
+                path: "a".to_owned(),
+                object_hash: a,
+                mtime_ns,
+                size: 1,
+                ino: 7,
+                ctime_ns: mtime_ns,
+            };
+            let started = std::time::Instant::now();
+            sync_index_to_tree_observed(&layout, &store, tree, &[seen]).unwrap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "the wait is bounded"
+            );
+            let idx = kit_core::index::read_index(&layout).unwrap();
+            let e = &idx.entries[idx.find_entry("a").unwrap()];
+            assert_eq!((e.mtime_ns, e.size, e.ino), (mtime_ns, 1, 7));
+        }
+    }
+
+    /// A recorded mtime far ahead of the clock is skew: the write does not
+    /// wait for it.
+    #[test]
+    fn a_future_mtime_is_not_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let a = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"a".to_vec(),
+            }),
+        );
+        let tree = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: a,
+                }],
+            }),
+        );
+        let mtime_ns = (now_nanos() | 1) + 3_600_000_000_000;
+        let seen = core_worktree::StatObservation {
+            path: "a".to_owned(),
+            object_hash: a,
+            mtime_ns,
+            size: 1,
+            ino: 7,
+            ctime_ns: mtime_ns,
+        };
+        let started = std::time::Instant::now();
+        sync_index_to_tree_observed(&layout, &store, tree, &[seen]).unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "a future mtime is not waited for"
+        );
     }
 }

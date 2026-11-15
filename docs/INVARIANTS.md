@@ -233,8 +233,10 @@ must observe verification progress without changing the logical operation.
 expired signature, or keep polling after its ticket is invalid.
 
 **Enforced by:** `ConnectTransport::advance_refs_with_deadline` and its pending
-response, renewal and deadline tests. The caller's real ticket deadline is
-not yet wired; until then the helper uses the seven-day maximum lifetime.
+response, renewal and deadline tests. An advance that consumes upload tickets
+polls until the earliest expiry among them. An advance that consumes none, or
+none that carries an expiry, has no ticket deadline, and the seven-day maximum
+lifetime bounds it.
 
 ## External signer capabilities precede signing material
 

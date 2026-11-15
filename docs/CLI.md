@@ -224,9 +224,10 @@ Working-tree commands:
   moved by hand; `repair` with no path rewrites a missing or broken pointer
   file. On-disk: a linked tree's `.kit` is a pointer
   *file* (`kitdir: <path>`) into the main repository's
-  `.kit/worktrees/<id>/`. Interim limit: `kit gc` refuses to run while
-  linked worktrees exist (cross-tree root collection is a tracked
-  follow-up) &mdash; remove or prune them first.
+  `.kit/worktrees/<id>/`. `kit gc` keeps what every tree reaches: it takes
+  each tree's `HEAD`, index, stash and in-progress operation state as roots,
+  together with the shared refs. If a tree's state cannot be read, gc stops
+  before it removes anything and names the linked tree.
 - `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
   changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops
