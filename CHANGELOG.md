@@ -60,8 +60,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PackSink` and returns the length; its caller checks the key.
   `HttpTransport::fetch_pack_location` writes into a `PackSink` under a
   `u64` limit, and a location falls back to the RPC only when its length or
-  key is wrong or its fetch fails. A sink's own failure, a full disk say,
-  ends the download with no fallback and no retry. The client refuses a
+  key is wrong or its fetch fails. A streamed pack with the wrong key fails
+  at the fetch's spool, with no fallback. A sink's own failure, a full disk
+  say, ends the download with no fallback and no retry. An error answer to a
+  streamed call is held only up to 1 MiB. The client refuses a
   `DownloadPack` frame over `DOWNLOAD_FRAME_MAX` (4 MiB) from its envelope.
   `ClientSource` and `ConnectTransport` pass bodies and sinks through. Over
   a loopback Connect server, a multipart push and a fetch of one 1 GiB

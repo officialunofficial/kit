@@ -1025,6 +1025,33 @@ impl ConnectTransport {
         }
     }
 }
+/// A blob download into memory that remembers a length over its bound, so
+/// the refusal reaches the caller as `PayloadTooLarge`.
+struct BlobSink {
+    inner: kit_core::protocol::MemorySink,
+    refused: Option<u64>,
+}
+
+impl PackSink for BlobSink {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        let begun = self.inner.begin(declared);
+        if let Err(TransportError::PayloadTooLarge(_)) = begun {
+            self.refused = declared;
+        }
+        begun
+    }
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        let written = self.inner.write(bytes);
+        if let Err(TransportError::PayloadTooLarge(len)) = written {
+            self.refused = Some(len as u64);
+        }
+        written
+    }
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.inner.failed()
+    }
+}
+
 impl Transport for ConnectTransport {
     /// Streams the pack from its body, one chunk at a time.
     fn upload_pack(
@@ -1072,9 +1099,19 @@ impl Transport for ConnectTransport {
         let bytes = match ref_hint {
             Some(name) => self.with_client_source(|source| source.download_blob(key, name))?,
             None => {
-                let mut sink = kit_core::protocol::MemorySink::new(max);
-                self.with_client_source(|source| source.download_pack_unhinted(key, &mut sink))?;
-                sink.into_bytes()?
+                let mut sink = BlobSink {
+                    inner: kit_core::protocol::MemorySink::new(max),
+                    refused: None,
+                };
+                let downloaded =
+                    self.with_client_source(|source| source.download_pack_unhinted(key, &mut sink));
+                if let Some(len) = sink.refused {
+                    return Err(TransportError::PayloadTooLarge(
+                        kit_core::protocol::saturating_usize(len),
+                    ));
+                }
+                downloaded?;
+                sink.inner.into_bytes()?
             }
         };
         if bytes.len() as u64 > max {

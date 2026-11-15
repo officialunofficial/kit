@@ -110,6 +110,8 @@ fn a_location_with_the_wrong_key_or_length_falls_back_to_the_rpc() {
         Location::WrongKey,
         Location::Short,
         Location::Long,
+        Location::ShortUnsized,
+        Location::LongUnsized,
         Location::Honest,
     ] {
         server.set_location(mode);
@@ -366,5 +368,40 @@ fn the_ticketless_and_single_part_paths_upload_with_one_read() {
                 .unwrap(),
             body.bytes
         );
+    }
+}
+
+/// The `Transport` adapter streams an unhinted download into the caller's
+/// sink, and refuses a blob longer than the caller's bound as
+/// `PayloadTooLarge`, from its declared length.
+#[test]
+fn the_transport_adapter_streams_unhinted_downloads_and_refuses_a_long_blob() {
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let server = PackServer::start(dir.path());
+    let seeded = seed(server.remote(), 2 * MIB);
+    let transport =
+        kit_transport_connect::ConnectTransport::connect_for_test(server.origin().parse().unwrap());
+    let key = PackKey::new(seeded.pack);
+
+    let mut sink = kit_core::protocol::MemorySink::new(seeded.pack_len);
+    transport.download_pack(&key, None, &mut sink).unwrap();
+    assert_eq!(
+        kit_core::pack::pack_key(&sink.into_bytes().unwrap()),
+        seeded.pack
+    );
+    assert_eq!(
+        transport
+            .download_blob(&key, None, seeded.pack_len)
+            .unwrap()
+            .len() as u64,
+        seeded.pack_len
+    );
+    server.reset_counts();
+    match transport.download_blob(&key, None, seeded.pack_len - 1) {
+        Err(kit_core::protocol::TransportError::PayloadTooLarge(len)) => {
+            assert_eq!(len as u64, seeded.pack_len);
+        }
+        other => panic!("expected PayloadTooLarge, got {other:?}"),
     }
 }

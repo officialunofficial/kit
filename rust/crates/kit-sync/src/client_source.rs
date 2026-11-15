@@ -422,7 +422,7 @@ impl<
         }
     }
 
-    /// A node is at most [`NODE_LIMIT`] bytes, held in memory. The caller
+    /// A node is at most 1 MiB, held in memory. The caller
     /// checks it against its key.
     fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
         let mut sink = kit_core::protocol::MemorySink::new(NODE_LIMIT);

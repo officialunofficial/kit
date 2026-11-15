@@ -881,9 +881,11 @@ unchanged, and a server that streams within them needs no change.
   refuses a larger declared length before any byte is read.
 - Location bytes stream into the same sink through a check that refuses a
   declared length other than the location's `total_bytes`, counts the
-  bytes and hashes them. Only a length or key mismatch, or a failed fetch,
-  is a location failure, and the client then streams the RPC into the same
-  sink, which starts over at its `header`.
+  bytes and hashes them. Only an invalid location, a length or key
+  mismatch, or a failed fetch is a location failure, and the client then
+  streams the RPC into the same sink, which starts over at its `header`.
+- A streamed answer, to the offer or to the RPC, is hashed only by the
+  sink's owner, so one with the wrong key fails the fetch with no fallback.
 - A failure of the sink itself, such as a full disk, is local and is not a
   location failure. It ends the download on every attempt, including a
   streamed answer to a location offer, with no fallback and no retry; the

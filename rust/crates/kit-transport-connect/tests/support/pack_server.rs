@@ -50,6 +50,10 @@ pub enum Location {
     Short,
     /// The host serves one byte more, declared.
     Long,
+    /// The host serves one byte less, with no declared length.
+    ShortUnsized,
+    /// The host serves one byte more, with no declared length.
+    LongUnsized,
     /// Locations are advertised, but the server streams instead.
     Stream,
 }
@@ -380,14 +384,15 @@ struct SocketSink {
 impl PackSink for SocketSink {
     fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
         let len = declared.ok_or(TransportError::ProtocolError)?;
-        let len = match self.mode {
-            Location::Short => len - 1,
-            Location::Long => len + 1,
-            _ => len,
+        let length = match self.mode {
+            Location::Short => format!("Content-Length: {}\r\n", len - 1),
+            Location::Long => format!("Content-Length: {}\r\n", len + 1),
+            Location::ShortUnsized | Location::LongUnsized => String::new(),
+            _ => format!("Content-Length: {len}\r\n"),
         };
         write!(
             self.stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 200 OK\r\n{length}Connection: close\r\n\r\n"
         )
         .map_err(|_| TransportError::ConnectionFailed)
     }
@@ -396,10 +401,10 @@ impl PackSink for SocketSink {
         if !self.started && self.mode == Location::WrongKey {
             bytes[0] ^= 1;
         }
-        if !self.started && self.mode == Location::Short {
+        if !self.started && matches!(self.mode, Location::Short | Location::ShortUnsized) {
             bytes.remove(0);
         }
-        if !self.started && self.mode == Location::Long {
+        if !self.started && matches!(self.mode, Location::Long | Location::LongUnsized) {
             bytes.insert(0, 0);
         }
         self.started = true;

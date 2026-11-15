@@ -192,7 +192,14 @@ impl<S: ResponseStream, D: FailureObserver + ?Sized> ResponseStream for Checked<
             .as_ref()
             .ok_or(Error::Invalid("missing HTTP response"))?;
         self.received = self.received.saturating_add(bytes.len());
-        if self.received > self.limit {
+        // An error body is held whole to decode it, so it gets the small
+        // bound whatever the success limit, a pack download's included.
+        let limit = if response.status().is_success() {
+            self.limit
+        } else {
+            self.limit.min(ERROR_BODY_LIMIT)
+        };
+        if self.received > limit {
             let failure = FailureDiagnostic {
                 procedure: "",
                 kind: FailureKind::WireLimit,
@@ -201,7 +208,7 @@ impl<S: ResponseStream, D: FailureObserver + ?Sized> ResponseStream for Checked<
                 body: None,
                 parsed_error: None,
                 cause: "RPC response exceeds limit",
-                limit: Some(self.limit),
+                limit: Some(limit),
             };
             return Err(self
                 .diagnostics
@@ -409,6 +416,9 @@ impl FrameSink for SingleFrame {
 /// envelope, and a longer frame is refused before any of it is read.
 pub const DOWNLOAD_FRAME_MAX: usize = 4 * 1024 * 1024;
 
+/// The largest error response body a streamed call holds to decode it.
+const ERROR_BODY_LIMIT: usize = 1024 * 1024;
+
 /// A local failure of the caller's sink. The caller checks
 /// [`PackSink::failed`] and reports that error instead.
 pub(crate) fn sink_error(error: TransportError) -> Error {
@@ -608,6 +618,25 @@ mod tests {
         assert!(matches!(result, std::task::Poll::Ready(Ok(()))));
         assert_eq!(*channel.0.borrow(), b"firstsecond");
         assert_eq!(reply.sink.sink.0, [b"reply".to_vec()]);
+    }
+
+    /// A pack download's limit is the pack's; an error answer to it is held
+    /// whole, so it is refused past 1 MiB instead.
+    #[test]
+    fn an_error_body_is_refused_past_its_own_bound() {
+        let request = Request::post("https://example.invalid/")
+            .header("content-type", "application/connect+proto")
+            .body(())
+            .unwrap();
+        let mut reply = Checked::new(&request, Decoder::new(Frames::default(), 1024), 1 << 30);
+        let mut head = Response::new(());
+        *head.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
+        reply.start(head).unwrap();
+        reply.chunk(&vec![b' '; ERROR_BODY_LIMIT]).unwrap();
+        assert!(matches!(
+            reply.chunk(b" "),
+            Err(Error::Limit("RPC response"))
+        ));
     }
 
     #[test]

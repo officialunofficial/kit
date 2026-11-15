@@ -73,7 +73,7 @@ checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 | Behavior | Detail |
 | --- | --- |
 | Uploads | Pull frames through a bounded channel. No producer thread. |
-| Downloads | Incremental bounded Connect and protobuf decoding into the caller's pack sink, one frame of at most 4 MiB at a time. Pack locations stream into the sink too. |
+| Downloads | Incremental bounded Connect and protobuf decoding into the caller's pack sink, one frame of at most 4 MiB at a time. This adapter does not opt in to pack locations. |
 | Runtime | Current-thread runtime, driven by the synchronous caller. |
 | Connections | One idle connection per origin, including streams, with a ten-second idle timeout. Hyper retries only untouched requests canceled before writing starts. |
 | HTTP and content coding | HTTP/1.1, gzip or identity. |
