@@ -127,8 +127,10 @@ Run top to bottom. Do not skip steps.
 - [ ] Every publishable crate has a trusted publisher on crates.io that names
       `release.yml` and the environment `crates-io`, and the GitHub environment
       `crates-io` exists and allows only `v*` tags (see
-      [Publishing to crates.io](#one-time-setup)). Without it, the
-      `publish-crates` job fails after the GitHub Release exists.
+      [Publishing to crates.io](#one-time-setup)). Without the trusted
+      publishers, the `publish-crates` job fails after the GitHub Release
+      exists. A job that names an environment that does not exist creates it
+      with no rules, so create the environment with the tag rule first.
 - [ ] `KIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
       release tag signing key fingerprint.
 - [ ] The release tag signing public key is published to `keys.openpgp.org` or
@@ -287,29 +289,37 @@ step revokes it when the job ends. No crates.io token or repository secret
 exists. The trusted publisher cannot publish a new crate, only a new version of
 a crate that is on crates.io.
 
-The job runs in the GitHub environment `crates-io`, after the GitHub Release
-exists and on the commit that `validate-release-tag` checked. It runs beside
-`publish-npm` and does not wait for it, so the two never block each other.
-The job:
+Two jobs do the work, both on the commit that `validate-release-tag` checked.
+
+The `verify-crates` job runs `cargo publish --workspace --dry-run --locked`.
+It packs and builds every crate to publish, so a build failure stops the
+release before the first upload. It has no `id-token` permission and no
+environment. The build scripts and proc macros of the dependencies run there,
+and they have no way to get a crates.io token. A crate that is already on
+crates.io only makes the dry run warn.
+
+The `publish-crates` job runs in the GitHub environment `crates-io`, after the
+GitHub Release and `verify-crates` succeed. It runs beside `publish-npm` and
+does not wait for it, so the two never block each other. The job:
 
 1. Checks that every publishable crate has the version of the tag. A
    mismatch stops the job before any upload.
 2. Asks the crates.io API about each crate at that version (200 means
-   published, 404 means not yet, anything else stops the job). The job
-   excludes each published crate with `--exclude` and ends if all of them are
-   published. cargo does not do this itself: it stops with `crate X@V already
-   exists` when any selected crate is on the registry, before it uploads
-   anything.
-3. Runs `cargo publish --workspace --dry-run --locked` with the same
-   `--exclude` flags and no token. This packs and builds every crate to
-   publish, so a build failure shows before the first upload and the build of
-   the real run is warm inside the 30 minutes of the token.
-4. Gets the token and runs `cargo publish --workspace --locked` with the same
-   flags. cargo publishes the crates in dependency order and waits for each to
-   index before the next.
+   published, 404 means not yet, anything else stops the job). A 404 also
+   stops the job when the crate has no version at all, because a trusted
+   publisher cannot create a crate. The job excludes each published crate with
+   `--exclude` and ends if all of them are published. cargo does not do this
+   itself: it stops with `crate X@V already exists` when any selected crate is
+   on the registry, before it uploads anything.
+3. Gets the token and runs `cargo publish --workspace --locked --no-verify`
+   with the same `--exclude` flags. `--no-verify` skips the build because
+   `verify-crates` built the same commit with the same lockfile. The job
+   therefore runs no third-party build code while it can reach an OIDC token or
+   the publish token. cargo publishes the crates in dependency order and
+   waits for each to index before the next.
 
-A crate that publishes cannot be republished, so a build problem found after
-the first upload needs a new version.
+A crate that publishes cannot be republished, so a problem found after the
+first upload needs a new version.
 
 ### Dry run
 
@@ -416,8 +426,13 @@ is already on crates.io, so the setup can be done at any time before the tag.
    | Workflow filename | `release.yml` |
    | Environment | `crates-io` |
 
-   The configuration belongs to one crate, so repeat it for each of the
-   crates. crates.io does not check the values until a publish. The token of
+   Fill in the environment. The form marks it optional, but a configuration
+   without an environment accepts a token from any job of `release.yml`,
+   including the jobs that build and sign. The configuration belongs to one
+   crate, so repeat it for each of the crates. You must own the crate, have a
+   verified email address and have a linked GitHub account. crates.io checks
+   that the GitHub owner exists when you save. It checks the repository, the
+   workflow filename and the environment only when a run asks for a token. The token of
    a run covers exactly the crates that have a matching configuration, so a
    crate without one cannot publish, and the job fails at the upload of that
    crate. A crate that is configured for one environment name only accepts a
@@ -428,8 +443,8 @@ is already on crates.io, so the setup can be done at any time before the tag.
    [manual fallback](#manual-fallback) stops working until you turn the
    setting off.
 
-crates.io sends the crate owners an email for each publish by trusted
-publishing.
+crates.io emails the owners of a crate when a trusted publisher is added, and
+for each publish to owners who have publish notifications turned on.
 
 ### Rerun a failed publish
 
@@ -472,6 +487,9 @@ published. Keep the token out of the repository and revoke it afterwards.
 - **Token lifetime**: the token lasts 30 minutes from the moment the job gets
   it, and the publish waits for each crate to index. A run that outlasts the
   token fails on the next upload. Re-run the job to continue.
+- **`--no-verify`**: the job passes it because `verify-crates` already built the
+  crates, so the job runs no build while it holds a token. Do not use it
+  anywhere else. A publish that skips the build checks nothing.
 - **Native deps**: `cargo publish` builds each crate with **default** features.
   No `protoc` is needed, because `kit-rpc` ships its generated code in
   `generated/`. No hardware keystore backend is implemented.
@@ -762,7 +780,9 @@ The remaining direct dependencies are listed in
 All third-party actions in `.github/workflows/` must be pinned to a major
 version tag (`@v4`) or a full SHA. No `@main`, no `@latest`. Trusted publishers:
 `actions/*`, `dtolnay/rust-toolchain`, `sigstore/cosign-installer`,
-`anchore/sbom-action`, `softprops/action-gh-release`, `ossf/scorecard-action`.
+`anchore/sbom-action`, `softprops/action-gh-release`, `ossf/scorecard-action`,
+`rust-lang/crates-io-auth-action` (the crates.io project's own action, pinned to
+a full SHA in `release.yml`).
 Any new action from an untrusted publisher needs the same two-maintainer review
 as a Rust dep.
 

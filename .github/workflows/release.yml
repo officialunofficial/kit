@@ -849,22 +849,56 @@ jobs:
           case "${VERSION}" in *-*) TAG=next ;; esac
           npm publish --access public --tag "${TAG}"
 
+  # Packs and builds every crate that publishes, the way cargo publish does,
+  # without uploading. The job holds no id-token and runs in no environment, so
+  # the build scripts and proc macros of the dependencies run with no way to
+  # get a crates.io token. A build problem stops the release here, before the
+  # first upload. A crate that is already on crates.io only makes cargo warn.
+  verify-crates:
+    name: Verify the crates build for crates.io
+    runs-on: ubuntu-latest
+    needs: validate-release-tag
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout (at resolved tag)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ needs.validate-release-tag.outputs.commit }}
+          persist-credentials: false
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: echo "version=$(bash scripts/toolchain-version.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust ${{ steps.pin.outputs.version }}
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          toolchain: ${{ steps.pin.outputs.version }}
+
+      - name: Dry run
+        shell: bash
+        working-directory: rust
+        run: cargo publish --workspace --dry-run --locked
+
   # Publishes the workspace crates to crates.io. crates.io trusted publishing
   # exchanges the job's OIDC token for a publish token that lasts 30 minutes
   # and covers only the crates whose trusted publisher names this repository,
   # this file, release.yml, and the environment crates-io. The job needs no
   # crates.io token and no repository secret.
   #
-  # The job runs beside publish-npm, after the GitHub Release exists. The two
-  # do not wait on each other, so a failure of one leaves the other published,
-  # and a re-run of the failed job alone brings the two back in step. A
-  # re-run is safe. cargo stops on a version that is already on crates.io, so
-  # the job asks the registry which crates of the version are published and
-  # excludes them.
+  # The job builds nothing: verify-crates has built every crate already, and
+  # cargo publish runs with --no-verify, so no build script runs while the job
+  # holds an id-token or a publish token. The job runs beside publish-npm,
+  # after the GitHub Release exists. The two do not wait on each other, so a
+  # failure of one leaves the other published, and a re-run of the failed job
+  # alone brings the two back in step. A re-run is safe. cargo stops on a
+  # version that is already on crates.io, so the job asks the registry which
+  # crates of the version are published and excludes them.
   publish-crates:
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
-    needs: [validate-release-tag, build, release]
+    needs: [validate-release-tag, release, verify-crates]
     environment: crates-io
     permissions:
       contents: read
@@ -889,9 +923,11 @@ jobs:
 
       # The tag, the workspace version and the version of every crate that
       # publishes must be equal. The registry answers 200 for a published
-      # version and 404 for any other. Any other status stops the job. The
-      # job excludes each crate that answers 200. crates.io asks a client for
-      # one request a second at most.
+      # version and 404 for any other. A 404 for the version of a crate that
+      # has no version at all stops the job: a trusted publisher cannot create
+      # a crate, and a stop here comes before the first upload. Any other
+      # status stops the job. The job excludes each crate that answers 200.
+      # crates.io asks a client for one request a second at most.
       - name: Select the crates to publish
         id: select
         shell: bash
@@ -915,19 +951,28 @@ jobs:
                   sys.exit(f"ERROR: unexpected crate name {p['name']!r}")
               print(p["name"])
           PY
+          UA='kit-release-workflow (https://github.com/officialunofficial/kit)'
+          status() {
+            curl -sS -o /dev/null -w '%{http_code}' --retry 3 \
+              --connect-timeout 10 --max-time 60 -A "${UA}" "$1"
+          }
           PENDING=0
           EXCLUDES=""
           while read -r NAME; do
-            STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --retry 3 \
-              --connect-timeout 10 --max-time 60 \
-              -A 'kit-release-workflow (https://github.com/officialunofficial/kit)' \
-              "https://crates.io/api/v1/crates/${NAME}/${VERSION}")"
+            STATUS="$(status "https://crates.io/api/v1/crates/${NAME}/${VERSION}")"
+            sleep 1
             case "${STATUS}" in
               200)
                 EXCLUDES="${EXCLUDES} --exclude ${NAME}"
                 echo "::notice::${NAME}@${VERSION} is already on crates.io; skipping it."
                 ;;
               404)
+                CRATE_STATUS="$(status "https://crates.io/api/v1/crates/${NAME}")"
+                sleep 1
+                if [ "${CRATE_STATUS}" != "200" ]; then
+                  echo "ERROR: ${NAME} is not on crates.io (status ${CRATE_STATUS}). Trusted publishing cannot create a crate; publish its first version by hand." >&2
+                  exit 1
+                fi
                 PENDING=$((PENDING + 1))
                 echo "${NAME}@${VERSION} is not on crates.io yet."
                 ;;
@@ -936,25 +981,9 @@ jobs:
                 exit 1
                 ;;
             esac
-            sleep 1
           done < "${RUNNER_TEMP}/crates.txt"
           echo "pending=${PENDING}" >> "$GITHUB_OUTPUT"
           echo "excludes=${EXCLUDES# }" >> "$GITHUB_OUTPUT"
-
-      # The same command as the publish, without a token. It packs and builds
-      # every crate to publish, so a build failure shows before the first
-      # upload, and the build of the real run starts warm inside the 30
-      # minutes of the token.
-      - name: Dry run
-        if: steps.select.outputs.pending != '0'
-        shell: bash
-        working-directory: rust
-        env:
-          EXCLUDES: ${{ steps.select.outputs.excludes }}
-        run: |
-          set -euo pipefail
-          # shellcheck disable=SC2086  # EXCLUDES is a list of flags
-          cargo publish --workspace --dry-run --locked ${EXCLUDES}
 
       - name: Get a crates.io token
         if: steps.select.outputs.pending != '0'
@@ -962,8 +991,9 @@ jobs:
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9  # v1.0.6
 
       # cargo publishes the crates in dependency order and waits for each to
-      # reach the index before the next. The action revokes the token when the
-      # job ends.
+      # reach the index before the next. --no-verify skips the build, which
+      # verify-crates ran on the same commit with the same --locked. The action
+      # revokes the token when the job ends.
       - name: Publish to crates.io
         if: steps.select.outputs.pending != '0'
         shell: bash
@@ -974,4 +1004,4 @@ jobs:
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086  # EXCLUDES is a list of flags
-          cargo publish --workspace --locked ${EXCLUDES}
+          cargo publish --workspace --locked --no-verify ${EXCLUDES}
