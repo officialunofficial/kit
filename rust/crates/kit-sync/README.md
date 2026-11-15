@@ -260,7 +260,9 @@ let report = push(&dir, &source, &options)?;
 
 A push reads the remote head before it plans. When that head differs from
 the push's lease, the push fails with `PushError::NonFastForwardPush` before
-it uploads anything. When the head already equals the tip, an earlier
+it uploads anything. A `PushLease::FastForward` push, or a push of every
+branch without `force`, to a remote that does not hold the branch writes
+`Missing` whatever the tracking ref says. When the head already equals the tip, an earlier
 attempt landed, and the push writes nothing.
 
 On sources whose advance is atomic or serialized (the file transport checks

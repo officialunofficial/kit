@@ -1292,9 +1292,14 @@ Remote / sync:
   `--force`. When the remote head differs from the lease, a push without
   `--force` fails as a non-fast-forward before it uploads anything. A
   remote head that already equals the tip means an earlier attempt landed:
-  the push succeeds and writes nothing. `-u`/`--set-upstream` records the pushed remote as the
+  the push succeeds and writes nothing. The push reads the remote's head
+  every time and never trusts the tracking ref alone, so a remote that lost
+  the branch, for example one deleted and made again, gets it again. A
+  push without `--force-with-lease` creates a branch the remote does not
+  hold. `-u`/`--set-upstream` records the pushed remote as the
   branch's upstream even if one was already set. `--dry-run`
-  resolves the push plan without contacting the remote. Every endpoint
+  resolves the push plan without contacting the remote, so it goes by the
+  tracking ref. Every endpoint
   flows through the per-endpoint credential-trust gate, which is keyed on
   the resolved endpoint URL, never the remote name. On success `push`
   prints git's `To <url>` plus ref-update summary (or `Everything

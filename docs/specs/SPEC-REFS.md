@@ -103,7 +103,10 @@ under `refs/remotes/<name>/<branch>`. `kit push` uses the local
 remote-tracking ref as its **CAS lease**: a default (current-branch)
 push writes the remote `refs/heads/<branch>` with a `Match(tracked)`
 condition (or `Missing` for a first push). The push reads the remote
-head before it plans. When that head fails the lease, the push
+head before it plans. A default push to a remote that does not hold the
+branch writes `Missing`, whatever the tracking ref says: there is
+nothing on the remote to overwrite. `--force-with-lease` keeps
+`Match(tracked)` and fails. When that head fails the lease, the push
 fails as non-fast-forward before it uploads anything, unless the head
 is already the pushed tip: an earlier attempt landed, and the push
 writes nothing (SPEC-TRANSPORT §7.2). A head that moves after that read

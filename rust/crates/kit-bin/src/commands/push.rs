@@ -384,6 +384,33 @@ fn push_delete(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts
     exit::OK
 }
 
+/// Say that the remote holds the branch's tip already.
+fn report_up_to_date(
+    json: bool,
+    resolved: &libkit::config::ResolvedRemote,
+    branch: &str,
+    remote_branch: &str,
+    old: Option<kit_core::hash::Hash>,
+    new: Option<kit_core::hash::Hash>,
+) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "Everything up-to-date");
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("remote", &resolved.name)
+            .field_str("endpoint", &resolved.endpoint)
+            .field_str("branch", branch)
+            .field_str("remote_branch", remote_branch)
+            .field_opt_hash("old", old.as_ref())
+            .field_opt_hash("new", new.as_ref())
+            .field_bool("forced", false)
+            .field_bool("up_to_date", true)
+            .field_u64("steps", 0);
+        emit_json_stdout(obj);
+    }
+}
+
 /// Default push: current branch → its upstream, CAS-protected.
 #[allow(clippy::too_many_lines)] // linear flow: resolve + no-op + push + report
 fn push_current(
@@ -411,25 +438,17 @@ fn push_current(
         tracked: old_tracked,
         ..
     } = plan;
-    // Nothing to do when the remote-tracking ref already matches the local
-    // tip (and we're not forcing). Matches git's `Everything up-to-date`.
-    if up_to_date {
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "Everything up-to-date");
-        if json {
-            let mut obj = JsonObject::new();
-            obj.field_bool("ok", true)
-                .field_str("remote", &resolved.name)
-                .field_str("endpoint", &resolved.endpoint)
-                .field_str("branch", &branch)
-                .field_str("remote_branch", &remote_branch)
-                .field_opt_hash("old", old_tracked.as_ref())
-                .field_opt_hash("new", old_tracked.as_ref())
-                .field_bool("forced", false)
-                .field_bool("up_to_date", true)
-                .field_u64("steps", 0);
-            emit_json_stdout(obj);
-        }
+    // A dry run does not contact the remote, so it goes by the tracking ref.
+    // A real push asks the remote: it may have lost the branch since.
+    if opts.dry_run && up_to_date {
+        report_up_to_date(
+            json,
+            &resolved,
+            &branch,
+            &remote_branch,
+            old_tracked,
+            old_tracked,
+        );
         return exit::OK;
     }
 
@@ -478,6 +497,9 @@ fn push_current(
     let push_outcome = {
         let outcome = tx
             .with_source(|source| {
+                // What the remote holds before the push, for the summary.
+                // The tracking ref is only what it held when last seen.
+                let old = source.read_ref(&format!("refs/heads/{remote_branch}"))?;
                 remote_dispatch::push_branch_tracked_source(
                     layout.worktree_root(),
                     source,
@@ -488,6 +510,7 @@ fn push_current(
                     remote.authority.as_deref(),
                     progress.terminal(),
                 )
+                .map(|(tip, steps)| (old, tip, steps))
             })
             .and_then(|result| result);
         // The progress guard's final `, done.` line lands before the
@@ -497,7 +520,7 @@ fn push_current(
         outcome
     };
     match push_outcome.map_err(libkit::transfer::Error::into_published_prefix) {
-        Ok((new_tip, steps)) => {
+        Ok((old, new_tip, steps)) => {
             // Remember the upstream so a bare `kit push` works next
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
@@ -517,18 +540,24 @@ fn push_current(
                     opts.set_upstream,
                 );
             }
+            // The remote held the tip already. Matches git's
+            // `Everything up-to-date`.
+            if steps == 0 {
+                report_up_to_date(json, &resolved, &branch, &remote_branch, old, Some(new_tip));
+                return exit::OK;
+            }
             // git-style ref-update summary block: `To <url>` then one
             // `<old>..<new>` / `* [new branch]` / `+ …(forced)` line.
             // On a store error during the ancestry check, assume a
             // fast-forward (don't mislabel an ordinary push as forced).
-            let forced = !push::is_fast_forward(layout, old_tracked, new_tip).unwrap_or(true);
+            let forced = !push::is_fast_forward(layout, old, new_tip).unwrap_or(true);
             let mut stderr = std::io::stderr().lock();
             let _ = writeln!(stderr, "To {}", resolved.endpoint);
             let _ = writeln!(
                 stderr,
                 "{}",
                 crate::format::ref_update_line(
-                    old_tracked.as_ref(),
+                    old.as_ref(),
                     &new_tip,
                     &branch,
                     &remote_branch,
@@ -542,7 +571,7 @@ fn push_current(
                     .field_str("endpoint", &resolved.endpoint)
                     .field_str("branch", &branch)
                     .field_str("remote_branch", &remote_branch)
-                    .field_opt_hash("old", old_tracked.as_ref())
+                    .field_opt_hash("old", old.as_ref())
                     .field_hash("new", &new_tip)
                     .field_bool("forced", forced)
                     .field_bool("up_to_date", false)

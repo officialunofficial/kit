@@ -224,6 +224,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `404` from a store that names the key, request and host in its error
   document (MinIO does, in about 350 bytes) failed `read_ref` with
   `PayloadTooLarge`, so a push to a new S3 remote failed.
+- `kit push` reads the remote's head before it says "Everything up-to-date",
+  so a push with nothing to send now contacts the remote. A remote that
+  lost the branch, for example one deleted and made again under the same
+  name, got nothing while its tracking ref matched the local tip; `kit push`
+  and `kit push --all` now send it the branch.
 
 ## [0.8.1] - 2026-11-15
 

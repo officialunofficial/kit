@@ -96,7 +96,8 @@ pub enum PushLease {
     Force,
     /// Require the last locally tracked remote tip, allowing divergence.
     WithLease,
-    /// Require both ancestry from the tracked tip and its live CAS lease.
+    /// Require both ancestry from the tracked tip and its live CAS lease. A
+    /// branch the remote no longer holds is created.
     FastForward,
 }
 /// Repository refs to publish.
@@ -179,7 +180,8 @@ impl Default for PushOptions<'_> {
 pub struct PushReport {
     /// Completed branches.
     pub refs: usize,
-    /// Published advances across completed branches.
+    /// Published advances across completed branches. A branch push whose
+    /// remote already held the tip publishes none.
     pub steps: usize,
     /// Tip of a selected single branch; absent for a mirror push.
     pub tip: Option<Hash>,
@@ -232,6 +234,18 @@ fn push_refs(
                 tags: Vec::new(),
                 deleted: None,
             };
+            // The branches the remote holds, read once: a branch it lost is
+            // created, as the push of one branch creates it. A listing gone
+            // stale can only refuse a push: the remote checks the condition.
+            let held: std::collections::HashSet<String> = if *force {
+                std::collections::HashSet::new()
+            } else {
+                tx.list_branches()?
+                    .into_iter()
+                    .filter(|b| b.hash.is_some())
+                    .map(|b| b.name)
+                    .collect()
+            };
             let result: Result<(), PushError> = (|| {
                 for r in refs_list {
                     if tx.observer.cancelled() {
@@ -241,7 +255,12 @@ fn push_refs(
                     let condition = if *force {
                         refs::RefWriteCondition::Any
                     } else {
-                        lease(layout, options.remote_name, &r.name)?
+                        match lease(layout, options.remote_name, &r.name)? {
+                            refs::RefWriteCondition::Match(_) if !held.contains(&r.name) => {
+                                refs::RefWriteCondition::Missing
+                            }
+                            condition => condition,
+                        }
                     };
                     tx.observer.event(&SyncEvent::PushBranchStarted {
                         branch: r.name.clone(),
@@ -272,7 +291,22 @@ fn push_refs(
         } => {
             let tip = refs::read_ref(layout, local)?
                 .ok_or_else(|| SyncError::RemoteBranchMissing(local.clone()))?;
+            refs::check_pushable_branch(remote)?;
+            // The remote's head decides, not the tracking ref: the remote
+            // may have lost the branch since this repository last saw it.
+            let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
+            if head == Some(tip) {
+                refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
+                return Ok(PushReport {
+                    refs: 1,
+                    steps: 0,
+                    tip: Some(tip),
+                    tags: Vec::new(),
+                    deleted: None,
+                });
+            }
             if matches!(policy, PushLease::FastForward)
+                && head.is_some()
                 && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
             {
@@ -280,10 +314,14 @@ fn push_refs(
                     branch: remote.clone(),
                 });
             }
-            let condition = if matches!(policy, PushLease::Force) {
-                refs::RefWriteCondition::Any
-            } else {
-                lease(layout, options.remote_name, remote)?
+            let condition = match (policy, lease(layout, options.remote_name, remote)?) {
+                (PushLease::Force, _) => refs::RefWriteCondition::Any,
+                // A fast-forward push of a branch the remote does not hold
+                // creates it: there is nothing on the remote to overwrite.
+                (PushLease::FastForward, refs::RefWriteCondition::Match(_)) if head.is_none() => {
+                    refs::RefWriteCondition::Missing
+                }
+                (_, condition) => condition,
             };
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
