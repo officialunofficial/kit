@@ -5,9 +5,8 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 `kit-sync` is the filesystem layer behind the `kit` command line's `clone`,
 `fetch`, `pull`, and `push`. The read path walks a branch's packmap chain,
 downloads the packs it does not already have, and unpacks and records each one
-as it arrives, with no repository lock held and one unnamed spool file in
-`.kit/tmp/` at a time. It
-verifies the signature of every commit, remix and tag it introduced, checks
+as it arrives, with no repository lock held and one spool file in `.kit/tmp/`
+at a time. It verifies the signature of every commit, remix and tag it introduced, checks
 the tip's closure is complete, verifies the signature of every commit, remix
 and tag in the tip's history down to the tips earlier signed fetches
 verified, publishes the remote-tracking ref under the

@@ -825,8 +825,8 @@ enum SealKind {
 
 /// Bytes of raw objects (or delta streams) read into memory and compressed
 /// for one batch of entries, 64 MiB. A single larger object is a batch of its
-/// own. The pack itself is spooled to disk, so a push holds one batch, not a
-/// pack.
+/// own. The pack itself is spooled to disk, so the push holds one batch, not
+/// a pack; a transport that buffers the body still holds the pack.
 pub const PUSH_BATCH_BYTES: u64 = 64 << 20;
 
 /// Build `plan`'s entries into one or more packs, each staying under
@@ -857,8 +857,8 @@ pub const PUSH_BATCH_BYTES: u64 = 64 << 20;
 /// goes into a pack of its own, and that pack is the only kind that can
 /// exceed the cap. Entries are read and compressed in batches of at most
 /// [`PUSH_BATCH_BYTES`] and [`pack_fanout_threshold`] entries, so the memory
-/// a push holds is one batch (twice, raw bytes and frames), whatever the
-/// pack size.
+/// the push itself holds is one batch (twice, raw bytes and frames), whatever
+/// the pack size; a transport that buffers the body also holds the pack.
 ///
 /// Takes `plan` BY VALUE: each batch drains its deltas out of `plan.deltas`.
 /// The caller reads whatever it needs off `plan` (just `self_contained`)

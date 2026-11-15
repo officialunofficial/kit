@@ -157,15 +157,17 @@ machine under heavy load from other builds, so they report no times.
 
 ### The pack size of a push
 
-A push builds packs of at most 256 MiB. Each pack is written to an unnamed
-spool in `.kit/tmp/`, so memory holds one prepared batch of at most 64 MiB of
-objects, not the pack. A ticketed advance carries six data packs unless
+A push builds packs of at most 256 MiB. Each pack is written to a spool in
+`.kit/tmp/`, so kit-sync holds one prepared batch of about 64 MiB of objects
+(or one larger object), not the pack. The ssh, S3 and Connect transports still
+read a pack into memory to upload it (SPEC-TRANSPORT §1.1). A ticketed advance carries six data packs unless
 the server advertises another number, which is about 1.5 GiB of objects. A
 push that has a single commit heavier than that raises the pack size for that
 push, once, to what the commit needs and no further. It never passes the
 format limit of 4 GiB or the largest pack the server accepts. The same objects
 spread over several commits keep packs of 256 MiB. A raised size makes a
-larger spool on disk; the batch in memory stays at 64 MiB.
+larger spool on disk; kit-sync's batch stays at about 64 MiB, and a transport
+that reads the pack into memory holds the raised size.
 
 ### The memory of a proof
 
