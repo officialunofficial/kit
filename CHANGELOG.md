@@ -138,6 +138,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - S3 multipart upload, with `S3_SINGLE_PUT_MAX` and the
   `test-small-multipart-caps` feature of `kit-transport-s3`. It never ran:
   a pack is at most 4 GiB, and one S3 `PUT` takes up to 5 GiB.
+- `kit_core::merkle::build_chunks_range_proof`. kit-core has no verifier for
+  it. `build_chunks_multi_proof` over the same run of positions writes the
+  same bytes.
 
 ### Fixed
 

@@ -1239,15 +1239,6 @@ pub fn build_chunk_proof(cb: &ChunkedBlob, position: u32) -> Result<Proof, Merkl
     )
 }
 
-/// Build a range proof that the chunks at `start..=end` belong to `cb`.
-pub fn build_chunks_range_proof(
-    cb: &ChunkedBlob,
-    start: u32,
-    end: u32,
-) -> Result<Proof, MerkleError> {
-    range_proof_streaming(chunked_leaf_count(cb), chunked_leaves(cb), start, end)
-}
-
 /// Build a multi-leaf proof that the chunks at `positions` belong to `cb`.
 /// The positions must be strictly ascending.
 pub fn build_chunks_multi_proof(
@@ -2034,8 +2025,9 @@ mod tests {
             let last = u32_of(chunks);
             for p in [0, last / 2, last] {
                 assert_eq!(build_chunk_proof(&manifest, p), reference.proof(p));
+                // A run of positions proves with the bytes of a range proof.
                 assert_eq!(
-                    build_chunks_range_proof(&manifest, p, last),
+                    build_chunks_multi_proof(&manifest, p..=last),
                     reference.range_proof(p, last)
                 );
                 assert_eq!(
