@@ -159,8 +159,8 @@ machine under heavy load from other builds, so they report no times.
 
 A push builds packs of at most 256 MiB. Each pack is written to a spool in
 `.kit/tmp/`, so kit-sync holds one prepared batch of about 64 MiB of objects
-(or one larger object), not the pack. Every transport sends the pack from the
-spool a chunk at a time, Connect a part at a time when it uploads in parts
+(or one larger object), not the pack. The file, ssh and S3 transports and
+Connect's native channel send the pack from the spool a chunk at a time
 (SPEC-TRANSPORT §1.1). A ticketed advance carries six data packs unless
 the server advertises another number, which is about 1.5 GiB of objects. A
 push that has a single commit heavier than that raises the pack size for that
