@@ -86,6 +86,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bytes::{Buf as _, BufMut};
+use commonware_codec::varint::UInt;
 use commonware_codec::{Buf, Copying};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, ReadRangeExt, Write};
 
@@ -218,6 +219,25 @@ fn levels_in_tree(leaf_count: u32) -> usize {
     (leaf_count.saturating_sub(1).bit_width() + 1) as usize
 }
 
+/// The index of the node that the node at `index` pairs with, on a level of
+/// `level_size` nodes: an even node pairs with the next one and an odd node
+/// with the one before. `None` for a level's odd last node, which pairs
+/// with itself. This is the one statement of the pairing rule that the
+/// fold, the proof builders and the verifiers share.
+fn sibling_index(index: usize, level_size: usize) -> Option<usize> {
+    if index.is_multiple_of(2) {
+        (index + 1 < level_size).then_some(index + 1)
+    } else {
+        Some(index - 1)
+    }
+}
+
+/// The number of bytes LEB128 takes to encode `value`, as the codec writes
+/// it in a proof's sibling count and in the disclosure formats' lengths.
+pub(crate) fn varint_size(value: u64) -> usize {
+    UInt(value).encode_size()
+}
+
 /// A built BMT: every level from the position-hashed leaves up to the
 /// single pre-finalize root node. Test-only reference that the streaming
 /// proof builder ([`stream_proof`]) and [`BmtFold`] are checked against;
@@ -297,15 +317,28 @@ impl BmtFold {
 
     /// Append the next leaf. Each completed pair moves up a level at once.
     fn push(&mut self, leaf: &Hash) -> Result<(), MerkleError> {
+        self.push_observed(leaf, &mut |_, _| {})
+    }
+
+    /// [`Self::push`], calling `on_node(level, node)` for each node the
+    /// push makes: the position-hashed leaf at level 0, then each parent it
+    /// completes. Within a level, the nodes arrive in index order.
+    fn push_observed(
+        &mut self,
+        leaf: &Hash,
+        on_node: &mut impl FnMut(usize, &Hash),
+    ) -> Result<(), MerkleError> {
         let mut node = position_leaf(self.count, leaf);
         self.count = self
             .count
             .checked_add(1)
             .ok_or(MerkleError::TooManyLeaves)?;
         let mut level = 0;
+        on_node(level, &node);
         while let Some(left) = self.pending[level].take() {
             node = h2(&left, &node);
             level += 1;
+            on_node(level, &node);
         }
         self.pending[level] = Some(node);
         Ok(())
@@ -316,18 +349,28 @@ impl BmtFold {
     /// count. Below the top level, the node carried up from level `l - 1`
     /// is the last node of level `l`.
     fn root(&self) -> Hash {
+        self.root_observed(&mut |_, _| {})
+    }
+
+    /// [`Self::root`], calling `on_node(level, node)` for each node the
+    /// close makes, the last node of each level above the lowest unpaired
+    /// one.
+    fn root_observed(&self, on_node: &mut impl FnMut(usize, &Hash)) -> Hash {
         if self.count == 0 {
             return h2(&0u32.to_be_bytes(), &hash(b""));
         }
         let top = levels_in_tree(self.count) - 1;
         let mut carry: Option<Hash> = None;
-        for pending in &self.pending[..top] {
+        for (level, pending) in self.pending[..top].iter().enumerate() {
             carry = match (pending, carry) {
                 (Some(left), Some(right)) => Some(h2(left, &right)),
                 (Some(last), None) => Some(h2(last, last)),
                 (None, Some(last)) => Some(h2(&last, &last)),
                 (None, None) => None,
             };
+            if let Some(node) = &carry {
+                on_node(level + 1, node);
+            }
         }
         let tree_root = carry
             .or(self.pending[top])
@@ -353,9 +396,9 @@ impl BmtFold {
 /// function, and [`Self::finish`] checks the entry count and the last end. So
 /// the fold refuses the manifests a decoder refuses, at the same entry. The
 /// caller still reads the prologue and checks that the object is
-/// `22 + 40 * chunk_count` bytes long ([`crate::serialize::CHUNKED_HEADER_LEN`],
-/// [`crate::serialize::CHUNKED_ENTRY_LEN`]), which is the decoder's checks
-/// 1 and 2.
+/// `22 + 40 * chunk_count` bytes long (a 22-byte header, then
+/// [`crate::serialize::CHUNKED_ENTRY_LEN`] bytes per entry), which is the
+/// decoder's checks 1 and 2.
 #[derive(Debug)]
 pub struct ChunkedIdFold {
     fold: BmtFold,
@@ -369,21 +412,24 @@ pub struct ChunkedIdFold {
 }
 
 impl ChunkedIdFold {
-    /// Start a fold for a manifest with these header fields. The metadata
-    /// leaf takes position 0.
+    /// Start a fold for a manifest with these header fields: it pushes the
+    /// leaves that the manifest's leaf sequence puts before the chunks: the
+    /// metadata leaf, at position 0.
     ///
     /// # Errors
     /// [`KitError::TooManyChunks`] for a `chunk_count` above
     /// [`crate::serialize::MAX_CHUNKS`], and
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
     /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
-    // The expect cannot fire: one leaf is far below `u32::MAX`.
+    // The expect cannot fire: the metadata leaf is one leaf.
     #[allow(clippy::missing_panics_doc)]
     pub fn new(total_size: u64, chunk_size: u32, chunk_count: u32) -> Result<Self, KitError> {
         crate::serialize::check_chunked_header(total_size, chunk_count)?;
         let mut fold = BmtFold::new();
-        fold.push(&chunked_meta_leaf_raw(total_size, chunk_size))
-            .expect("one leaf fits u32");
+        for leaf in ChunkedBlob::leaf_sequence(total_size, chunk_size, core::iter::empty()) {
+            fold.push(&leaf)
+                .expect("the leaves before the chunks fit u32");
+        }
         Ok(Self {
             fold,
             total_size,
@@ -508,17 +554,10 @@ fn siblings_required_for_multi_proof(
     let mut level_size = leaf_count as usize;
     for level in 0..levels_count.saturating_sub(1) {
         for &index in &current {
-            let sibling_index = if index.is_multiple_of(2) {
-                if index + 1 < level_size {
-                    index + 1
-                } else {
-                    index
-                }
-            } else {
-                index - 1
-            };
-            if sibling_index != index && !current.contains(&sibling_index) {
-                sibling_positions.insert((level, sibling_index));
+            if let Some(sibling) = sibling_index(index, level_size)
+                && !current.contains(&sibling)
+            {
+                sibling_positions.insert((level, sibling));
             }
         }
         current = current.iter().map(|idx| idx / 2).collect();
@@ -555,14 +594,11 @@ fn siblings_required_for_range_proof(
     let mut level_end = end as usize;
     let mut level_size = leaf_count as usize;
     for level in 0..levels_count.saturating_sub(1) {
-        if !level_start.is_multiple_of(2) {
-            sibling_positions.insert((level, level_start - 1));
+        if let Some(left) = sibling_index(level_start, level_size).filter(|&s| s < level_start) {
+            sibling_positions.insert((level, left));
         }
-        if level_end.is_multiple_of(2) {
-            let right = level_end + 1;
-            if right < level_size {
-                sibling_positions.insert((level, right));
-            }
+        if let Some(right) = sibling_index(level_end, level_size).filter(|&s| s > level_end) {
+            sibling_positions.insert((level, right));
         }
         level_start /= 2;
         level_end /= 2;
@@ -575,10 +611,8 @@ fn siblings_required_for_range_proof(
 /// (level-major, then index ascending), from one pass over `leaves`.
 ///
 /// `leaves` holds the raw leaves of a tree of `leaf_count` leaves, in
-/// order. The pass pairs nodes as [`BmtFold`] does: a pair completes
-/// upward at once and an odd trailing node pairs with itself. Memory is
-/// one pending node and one node count per level plus the recorded
-/// siblings, so a proof never holds a level.
+/// order. The pass runs them through [`BmtFold`] and keeps each node the
+/// proof needs as the fold makes it, so a proof never holds a level.
 ///
 /// `required` comes from [`siblings_required_for_multi_proof`] or
 /// [`siblings_required_for_range_proof`] for the same `leaf_count`. Every
@@ -590,51 +624,26 @@ fn stream_proof(
     required: &BTreeSet<(usize, usize)>,
 ) -> Vec<Hash> {
     let mut found: BTreeMap<(usize, usize), Hash> = BTreeMap::new();
-    let levels = levels_in_tree(leaf_count);
-    let mut pending = vec![None::<Hash>; levels];
-    let mut produced = vec![0usize; levels];
+    let mut produced = vec![0usize; levels_in_tree(leaf_count)];
     // A node made at `level` takes the next index there and is kept when
     // the proof needs it.
-    let mut emit = |level: usize, node: &Hash| {
+    let mut keep = |level: usize, node: &Hash| {
         let index = produced[level];
         produced[level] += 1;
         if required.contains(&(level, index)) {
             found.insert((level, index), *node);
         }
     };
-
-    let mut count = 0u32;
+    let mut fold = BmtFold::new();
     for leaf in leaves {
-        let mut node = position_leaf(count, &leaf);
-        count += 1;
-        let mut level = 0;
-        emit(level, &node);
-        while let Some(left) = pending[level].take() {
-            node = h2(&left, &node);
-            level += 1;
-            emit(level, &node);
-        }
-        pending[level] = Some(node);
+        fold.push_observed(&leaf, &mut keep)
+            .expect("merkle leaf count fits u32 (objects are decode-capped)");
     }
     debug_assert_eq!(
-        count, leaf_count,
+        fold.count, leaf_count,
         "the leaf iterator matches the leaf count"
     );
-
-    // Close the unpaired nodes bottom-up, as `BmtFold::root` does. The node
-    // carried out of a level is the last node of the level above.
-    let top = levels - 1;
-    let mut carry: Option<Hash> = None;
-    for (level, unpaired) in pending.iter().enumerate().take(top) {
-        carry = match (*unpaired, carry) {
-            (Some(left), Some(right)) => Some(h2(&left, &right)),
-            (Some(last), None) | (None, Some(last)) => Some(h2(&last, &last)),
-            (None, None) => None,
-        };
-        if let Some(node) = &carry {
-            emit(level + 1, node);
-        }
-    }
+    fold.root_observed(&mut keep);
 
     required
         .iter()
@@ -858,8 +867,7 @@ impl Proof {
         let mut sibling_iter = self.siblings.iter();
 
         while level_size > 1 {
-            let is_last_odd = position.is_multiple_of(2) && position as usize + 1 >= level_size;
-            let (left, right) = if is_last_odd {
+            let (left, right) = if sibling_index(position as usize, level_size).is_none() {
                 (computed, computed)
             } else if position.is_multiple_of(2) {
                 let sib = *sibling_iter.next().ok_or(MerkleError::UnalignedProof)?;
@@ -943,7 +951,7 @@ impl Proof {
                     let right = if idx + 1 < current.len() && current[idx + 1].0 == pos + 1 {
                         idx += 1;
                         current[idx].1
-                    } else if pos + 1 >= level_size {
+                    } else if sibling_index(pos as usize, level_size as usize).is_none() {
                         left
                     } else {
                         *sibling_iter.next().ok_or(MerkleError::UnalignedProof)?
@@ -1126,15 +1134,17 @@ pub(crate) fn tree_entry_leaf(e: &TreeEntry) -> Hash {
     domain_digest(TREE_ENTRY_DOMAIN, &body)
 }
 
-/// The raw leaves of a `ChunkedBlob`, per [`ChunkedBlob::leaf_sequence`].
-fn chunked_leaves(cb: &ChunkedBlob) -> impl Iterator<Item = Hash> + '_ {
-    cb.leaves()
+/// The BMT position of the chunk at `index` in a manifest, per
+/// [`ChunkedBlob::leaf_sequence`]: the metadata leaf takes position 0, so
+/// each chunk sits one past its index.
+fn chunk_leaf_position(index: usize) -> u32 {
+    u32_of(index + 1)
 }
 
-/// The leaf count of a `ChunkedBlob`'s tree: the metadata leaf and one
-/// leaf per chunk. It does not walk the chunks.
+/// The leaf count of a `ChunkedBlob`'s tree: the position a chunk after
+/// the last would take. It does not walk the chunks.
 fn chunked_leaf_count(cb: &ChunkedBlob) -> u32 {
-    u32_of(cb.chunks().len() + 1)
+    chunk_leaf_position(cb.chunks().len())
 }
 
 /// The raw leaves of a `Tree`: one per entry.
@@ -1163,7 +1173,7 @@ pub fn chunked_inner_root(cb: &ChunkedBlob) -> Hash {
 /// kit callers use the id-based [`verify_tree_entry`] instead.
 #[must_use]
 pub fn tree_inner_root(tree: &Tree) -> Hash {
-    fold_root(tree.entries.iter().map(tree_entry_leaf))
+    fold_root(tree_leaves(tree))
 }
 
 /// The content-address (object id) of a `ChunkedBlob`.
@@ -1200,7 +1210,7 @@ pub fn chunk_position(cb: &ChunkedBlob, chunk_hash: &Hash) -> Option<u32> {
     cb.chunks()
         .iter()
         .position(|chunk| chunk == chunk_hash)
-        .map(|index| u32_of(index + 1))
+        .map(chunk_leaf_position)
 }
 
 /// BMT position (= entry index) of the entry named `name` within `tree`,
@@ -1216,13 +1226,7 @@ pub(crate) fn proof_encoded_size(
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<usize, MerkleError> {
     let siblings = siblings_required_for_multi_proof(leaf_count, positions)?.len();
-    let mut count = siblings;
-    let mut prefix = 1;
-    while count >= 128 {
-        prefix += 1;
-        count >>= 7;
-    }
-    Ok(4 + prefix + siblings * 32)
+    Ok(4 + varint_size(siblings as u64) + siblings * HASH_LEN)
 }
 
 // ---------------------------------------------------------------------------
@@ -1234,7 +1238,7 @@ pub(crate) fn proof_encoded_size(
 pub fn build_chunk_proof(cb: &ChunkedBlob, position: u32) -> Result<Proof, MerkleError> {
     multi_proof_streaming(
         chunked_leaf_count(cb),
-        chunked_leaves(cb),
+        cb.leaves(),
         core::iter::once(position),
     )
 }
@@ -1245,7 +1249,7 @@ pub fn build_chunks_multi_proof(
     cb: &ChunkedBlob,
     positions: impl IntoIterator<Item = u32>,
 ) -> Result<Proof, MerkleError> {
-    multi_proof_streaming(chunked_leaf_count(cb), chunked_leaves(cb), positions)
+    multi_proof_streaming(chunked_leaf_count(cb), cb.leaves(), positions)
 }
 
 /// Build an inclusion proof that the entry at `position` (= entry index)
@@ -1565,7 +1569,7 @@ mod tests {
             assert_eq!(chunked_leaf_count(&c), u32::from(count) + 1);
             assert_eq!(
                 chunked_inner_root(&c),
-                build_bmt(&chunked_leaves(&c).collect::<Vec<_>>()).root
+                build_bmt(&c.leaves().collect::<Vec<_>>()).root
             );
         }
     }
@@ -2021,7 +2025,7 @@ mod tests {
         for chunks in [0usize, 1, 2, 3, 6, 7, 8, 9, 31, 32, 33, 100] {
             let ids: Vec<u8> = (1..=u8::try_from(chunks).unwrap()).collect();
             let manifest = cb(chunks as u64 * 10, 0, &ids);
-            let reference = build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>());
+            let reference = build_bmt(&manifest.leaves().collect::<Vec<_>>());
             let last = u32_of(chunks);
             for p in [0, last / 2, last] {
                 assert_eq!(build_chunk_proof(&manifest, p), reference.proof(p));
@@ -2123,7 +2127,7 @@ mod tests {
             let manifest = generated_manifest(count);
             let levels = wrap_id(
                 ObjectKind::ChunkedBlob,
-                &build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>()).root,
+                &build_bmt(&manifest.leaves().collect::<Vec<_>>()).root,
             );
             assert_eq!(
                 crate::hash::to_hex(&levels),
@@ -2150,7 +2154,7 @@ mod tests {
             assert_eq!(fold.finish().unwrap(), compute_chunked_id(&manifest));
             assert_eq!(
                 chunked_inner_root(&manifest),
-                build_bmt(&chunked_leaves(&manifest).collect::<Vec<_>>()).root
+                build_bmt(&manifest.leaves().collect::<Vec<_>>()).root
             );
         }
     }

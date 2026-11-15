@@ -163,6 +163,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_core::merkle::build_chunks_range_proof`. kit-core has no verifier for
   it. `build_chunks_multi_proof` over the same run of positions writes the
   same bytes.
+- `kit_core::serialize::CHUNKED_HEADER_LEN`. Only a test used it; the
+  22-byte manifest header is in the `CHUNKED_ENTRY_LEN` docs.
 
 ### Fixed
 
