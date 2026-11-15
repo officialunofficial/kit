@@ -244,7 +244,7 @@ fn read_heads_parallel(
     };
     std::thread::scope(|scope| {
         let handles: Vec<_> = (1..workers)
-            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, &work).ok())
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
             .collect();
         let mut finished = vec![work()];
         for handle in handles {
