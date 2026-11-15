@@ -1089,7 +1089,8 @@ impl Transport for ConnectTransport {
     }
     /// A hinted node download keeps the client's own node bound, which is
     /// tighter than any `max` a caller passes. An unhinted one is bounded by
-    /// `max`.
+    /// `max`. The bytes are in memory, so they are checked against the key
+    /// here.
     fn download_blob(
         &self,
         key: &PackKey,
@@ -1117,6 +1118,7 @@ impl Transport for ConnectTransport {
         if bytes.len() as u64 > max {
             return Err(TransportError::PayloadTooLarge(bytes.len()));
         }
+        key.verify_bytes(&bytes)?;
         Ok(bytes)
     }
     fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool> {

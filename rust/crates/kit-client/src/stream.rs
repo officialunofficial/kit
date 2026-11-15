@@ -259,8 +259,9 @@ pub(crate) trait FrameSink {
 }
 
 /// Retain one frame, rather than a complete framed pack alongside its output.
-/// There is no protocol chunk-size ceiling: a frame is bounded by the same
-/// response cap as the complete exchange.
+/// A frame is bounded by the decoder's limit, read from its envelope before
+/// any of it: the response cap for a unary answer, and at most
+/// [`DOWNLOAD_FRAME_MAX`] for a `DownloadPack` stream.
 pub(crate) struct Decoder<S> {
     pub(crate) sink: S,
     limit: usize,

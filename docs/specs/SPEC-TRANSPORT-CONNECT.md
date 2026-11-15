@@ -867,7 +867,8 @@ unchanged, and a server that streams within them needs no change.
 
 - The client reads each response frame's length from its 5-byte Connect
   envelope and refuses a `DownloadPack` frame over 4 MiB
-  (`DOWNLOAD_FRAME_MAX`) before reading it, as an invalid response. A
+  (`DOWNLOAD_FRAME_MAX`) before reading it; the sync adapters report the
+  refusal as an invalid response. A
   server that sends a pack in 800 KiB chunks, or a packmap node in one
   frame under the client's 1 MiB node bound, is unaffected.
 - The client forwards `header.total_bytes` and each chunk's bytes to the

@@ -771,6 +771,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         opts: Opts<'_>,
         sink: &mut dyn PackSink,
     ) -> Result<(u64, Option<Identity>), Error> {
+        local_failure(sink)?;
         let lifetime = self.pack_location_lifetime().await;
         if let Some(lifetime) = lifetime {
             let opts = Opts {
