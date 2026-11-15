@@ -49,7 +49,7 @@ pub enum SyncError {
     #[error("store: {0}")]
     Store(#[from] StoreError),
     #[error("pack: {0}")]
-    Pack(#[from] PackError),
+    Pack(PackError),
     #[error("packlist: {0}")]
     PackList(#[from] PackListError),
     /// A pull needs HEAD to name a branch.
@@ -111,4 +111,40 @@ pub enum SyncError {
     /// under `.kit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]
     InvalidRemoteName(String),
+}
+
+/// A local disk error while a pack is spooled, read back or unpacked is
+/// [`SyncError::Io`]: [`PackError::Io`], and a store write's
+/// [`StoreError::Io`] (out of space, say). Every other pack error is about
+/// the pack.
+impl From<PackError> for SyncError {
+    fn from(error: PackError) -> Self {
+        match error {
+            PackError::Io(error) | PackError::Store(StoreError::Io(error)) => Self::Io(error),
+            error => Self::Pack(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_local_disk_error_in_a_pack_is_an_io_error() {
+        let full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
+        for error in [
+            PackError::Io(full()),
+            PackError::Store(StoreError::Io(full())),
+        ] {
+            let SyncError::Io(io) = SyncError::from(error) else {
+                panic!("not an I/O error");
+            };
+            assert_eq!(io.kind(), std::io::ErrorKind::StorageFull);
+        }
+        assert!(matches!(
+            SyncError::from(PackError::KeyMismatch),
+            SyncError::Pack(PackError::KeyMismatch)
+        ));
+    }
 }

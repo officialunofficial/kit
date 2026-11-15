@@ -81,17 +81,31 @@ impl CountingTransport {
 }
 
 impl Transport for CountingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.pack_downloads.fetch_add(1, Ordering::SeqCst);
-        self.inner.download_pack(key)
+        self.inner.download_pack(key, ref_hint, sink)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
 
     // Explicitly delegated (rather than left to the trait's default, which
@@ -99,12 +113,22 @@ impl Transport for CountingTransport {
     // inflate the pack counter with chain-node blob traffic): the packlist
     // chain walk is unconditional by design and must never count
     // against the pack-download assertions below.
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
 
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
 
     fn update_ref(
@@ -264,7 +288,9 @@ fn packmap_chain_packs(tx: &dyn Transport, branch: &str) -> HashSet<Hash> {
     let mut out = HashSet::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         out.extend(node.packs.iter().copied());
         cursor = node.prev;
@@ -597,16 +623,30 @@ struct StaleListing {
 }
 
 impl Transport for StaleListing {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
 
     fn update_ref(

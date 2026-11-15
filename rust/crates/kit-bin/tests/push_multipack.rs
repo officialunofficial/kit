@@ -46,7 +46,9 @@ fn packmap_chain(tx: &dyn Transport, branch: &str) -> Vec<PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         cursor = node.prev;
         nodes.push(node);
@@ -107,7 +109,7 @@ fn oversized_push_splits_into_one_node_with_multiple_packs_and_stays_fetchable()
     // Every advertised pack must actually exist — no node references an
     // un-uploaded pack.
     for pack_key in &chain[0].packs {
-        tx.download_pack(&PackKey::from_hash(*pack_key))
+        tx.download_blob(&PackKey::from_hash(*pack_key), None, u64::MAX)
             .unwrap_or_else(|e| panic!("pack {pack_key:?} must be downloadable: {e}"));
     }
 
@@ -192,7 +194,9 @@ fn a_push_of_more_than_the_default_pack_cap_splits_unless_a_larger_cap_is_set() 
     assert!(packs.len() > 1, "{} pack(s)", packs.len());
     let framing = (HEADER_LEN + TRAILER_LEN) as u64 + (FILES + 2) * ENTRY_FRAME_LEN as u64;
     for key in packs {
-        let pack = tx.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let pack = tx
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         assert!(
             pack.len() as u64 <= kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP + framing,
             "{} bytes",

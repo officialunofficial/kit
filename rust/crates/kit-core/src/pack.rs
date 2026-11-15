@@ -80,7 +80,10 @@ pub use file_read::{
     STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
 };
 pub use rewrite::{Rewritten, rewrite_excluding};
-pub use spool::{PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack};
+pub use spool::{
+    CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,
+    sweep_spool_dir,
+};
 pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
@@ -1301,10 +1304,13 @@ fn maybe_compress_within(data: &[u8], framing: usize, budget: u64) -> Option<Vec
     if !fits(0) {
         return None;
     }
-    let compressed = ZSTD_COMPRESSOR
+    let mut compressed = ZSTD_COMPRESSOR
         .with(|c| c.borrow_mut().compress(data))
         .ok()?;
     if ZSTD_LEN_PREFIX + compressed.len() < data.len() && fits(compressed.len() as u64) {
+        // The compressor reserves its worst case; a writer holds many frames
+        // at once, so each keeps only its bytes.
+        compressed.shrink_to_fit();
         Some(compressed)
     } else {
         None
@@ -5194,12 +5200,9 @@ mod tests {
         );
         #[cfg(target_pointer_width = "64")]
         {
-            use crate::protocol::PACK_BODY_LIMIT_USIZE;
-            assert_eq!(over(PACK_BODY_LIMIT_USIZE, 0, 0, 1), None);
-            assert_eq!(
-                over(PACK_BODY_LIMIT_USIZE + 1, 0, 0, 1),
-                Some(ReadLimit::BodyLimit)
-            );
+            let limit = usize::try_from(PACK_BODY_LIMIT).unwrap();
+            assert_eq!(over(limit, 0, 0, 1), None);
+            assert_eq!(over(limit + 1, 0, 0, 1), Some(ReadLimit::BodyLimit));
         }
         // Each error names its limit.
         for (limit, text) in [

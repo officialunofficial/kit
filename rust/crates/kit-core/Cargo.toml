@@ -122,6 +122,9 @@ history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 sparse-checkout = []
 # Exposes private parser seams to the `kit-fuzz` harness. Off by default.
 fuzzing = []
+# Injected write failures for tests (`kit_core::fault`). Only test builds
+# turn it on.
+fault-injection = []
 
 [dev-dependencies]
 # `hazmat::ExpandedSecretKey` (test-only): builds torsion-padded and

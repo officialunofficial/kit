@@ -115,10 +115,12 @@ fn extra_ca_trusts_real_rpc_and_streamed_pack_transfers() {
     assert!(client.list_refs("").unwrap().is_empty());
     let data = vec![0xAB; 3 * 1024 * 1024];
     let key = PackKey::from(hash(&data));
-    assert!(!client.pack_exists(&key).unwrap());
-    client.upload_pack(&data, &key).unwrap();
-    assert!(client.pack_exists(&key).unwrap());
-    assert_eq!(client.download_pack(&key).unwrap(), data);
+    assert!(!client.pack_exists(&key, None).unwrap());
+    client
+        .upload_pack(&kit_core::protocol::SliceBody(&data), &key, None)
+        .unwrap();
+    assert!(client.pack_exists(&key, None).unwrap());
+    assert_eq!(client.download_blob(&key, None, u64::MAX).unwrap(), data);
     drop(client);
     drop(proxy);
     shutdown.send(()).unwrap();

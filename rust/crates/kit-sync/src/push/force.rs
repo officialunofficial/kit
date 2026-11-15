@@ -1,9 +1,9 @@
 //! Force publication keeps the planning dependencies in the two-ref advance,
 //! on an atomic or a serialized advance.
 use super::{
-    PackSink, PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs,
-    effective_payload_cap, encode_delta_candidates_batch, estimate_pack_sizes,
-    packmap::PACKMAP_CAS_ATTEMPTS, repository_operation_error,
+    PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs, dry_seal,
+    effective_payload_cap, estimate_pack_sizes, packmap::PACKMAP_CAS_ATTEMPTS,
+    repository_operation_error,
 };
 use crate::SyncError;
 use crate::packmap::{branch_head_ref, flatten_oldest_first, packmap_ref, walk_pack_chain};
@@ -12,10 +12,7 @@ use kit_core::{
     protocol::{AdvanceOutcome, CommitOutcome, PackKey, UploadLimits},
     refs::RefWriteCondition,
     store::ObjectStore,
-    transfer::{
-        self,
-        packmap::{ChainState, PlanError, plan_advance},
-    },
+    transfer::packmap::{ChainState, PlanError, plan_advance},
 };
 
 #[derive(Clone, Copy)]
@@ -219,7 +216,7 @@ impl ForcePush<'_, '_> {
             // plan compares both values, including an identical-root reset.
             let packmap = self.tx.read_ref(&self.packmap_name)?;
             let head = self.tx.read_ref(&self.head_name)?;
-            let plan = transfer::plan_pack_with(
+            let plan = self.tx.deltas.plan(
                 self.store,
                 self.tip,
                 if recovery == Some(RetryReason::LostDeltaBase) {
@@ -227,7 +224,6 @@ impl ForcePush<'_, '_> {
                 } else {
                     head
                 },
-                encode_delta_candidates_batch,
             )?;
             (Snapshot { packmap, head }, plan)
         };
@@ -251,8 +247,7 @@ impl ForcePush<'_, '_> {
             // real seal can merge two estimated packs into one that is ticketed.
             && estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?.len()
                 > budget
-            && let Err(PushError::PushTooLarge { packs, limit, .. }) = build_and_upload_packs(
-                PackSink::Count,
+            && let Err(PushError::PushTooLarge { packs, limit, .. }) = dry_seal(
                 self.store,
                 plan.clone(),
                 self.cap,
@@ -270,15 +265,12 @@ impl ForcePush<'_, '_> {
             Vec::new()
         } else {
             build_and_upload_packs(
-                PackSink::Upload {
-                    tx: self.tx,
-                    head_ref: &self.head_name,
-                },
+                self.tx,
+                &self.head_name,
                 self.store,
                 plan,
                 self.cap,
                 self.limits,
-                self.tx.observer,
             )?
         };
         Ok(Some(Uploaded {
@@ -341,11 +333,7 @@ impl ForcePush<'_, '_> {
             })?;
             if let Some(node) = node {
                 self.tx
-                    .upload_blob_via_ref(
-                        &node.bytes,
-                        &PackKey::from_hash(node.key),
-                        &self.head_name,
-                    )
+                    .upload_blob(&node.bytes, &PackKey::from_hash(node.key), &self.head_name)
                     .map_err(|error| repository_operation_error(self.tx, error))?;
                 keys.push(PackKey::from_hash(node.key));
                 node.key

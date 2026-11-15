@@ -538,13 +538,21 @@ fn ticketed_upload_402_never_runs_admission_helper_on_either_backend() {
             .with_request_policy(host.as_ref());
             ClientSource::new(&client, &http)
                 .with_write_recovery(host.as_ref())
-                .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(&bytes),
+                    &key,
+                    "refs/heads/main",
+                )
                 .unwrap_err()
         } else {
             let tx = transport(&server.origin, "default", WRITER_SEED)
                 .with_admission(AdmissionPolicy::new(host.clone()));
             TransportSource::new(&tx)
-                .upload_pack_via_ref(&bytes, &key, "refs/heads/main")
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(&bytes),
+                    &key,
+                    "refs/heads/main",
+                )
                 .unwrap_err()
         };
         assert!(matches!(error, SourceError::AdmissionRequired { .. }));

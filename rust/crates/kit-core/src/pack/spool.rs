@@ -6,9 +6,10 @@
 //! the trailer as the bytes arrive, and only then yields a [`VerifiedPack`]
 //! for [`super::PackReader::read_verified`].
 //!
-//! Every spool is an unnamed temporary file in the directory its caller
-//! names: only its handle reaches it, so nothing can change it after it is
-//! checked, and on Unix nothing is left on disk when the process ends.
+//! Every spool is a temporary file in the directory its caller names,
+//! unnamed on Unix and a `.tmp` file deleted on close on Windows: only its
+//! handle reaches it, so nothing can change it after it is checked, and on
+//! Unix nothing is left on disk when the process ends.
 
 use super::window::WindowSource;
 use super::{
@@ -16,7 +17,7 @@ use super::{
     initial_header, note_hashed,
 };
 use crate::hash::Hash;
-use crate::protocol::PackKey;
+use crate::protocol::{PackBody, PackKey, PackSink, TransportError, TransportResult};
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -32,6 +33,30 @@ pub type SpoolWriter = PackWriter<BufWriter<File>>;
 fn unnamed_file(dir: &Path) -> io::Result<File> {
     std::fs::create_dir_all(dir)?;
     tempfile::tempfile_in(dir)
+}
+
+/// Remove every spool file left in the spool directory `dir`: the files
+/// named as `tempfile` names them, `.tmp` and a random suffix.
+///
+/// Spools are unnamed, so on Unix nothing a spool wrote is ever listed here.
+/// On Windows a spool is deleted when its handle closes, which a power loss
+/// skips, so fetch, push and gc call this when they start. Deleting a spool
+/// another process still holds open fails, and that failure is ignored, as
+/// is a missing directory. A `dir` that is a symlink is left alone, so the
+/// sweep never deletes outside the repository.
+pub fn sweep_spool_dir(dir: &Path) {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let spool_name = entry.file_name().to_string_lossy().starts_with(".tmp");
+        if spool_name && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Fill `buf` from `file` at `offset`. Each call names its own offset, so
@@ -71,6 +96,8 @@ pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Res
 /// Write all of `bytes` to `file` at `offset`. Each call names its own
 /// offset, so threads may use one file at once.
 pub(crate) fn write_all_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    crate::fault::check(crate::fault::Site::Spool)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;
@@ -165,6 +192,27 @@ impl SpoolWriter {
     }
 }
 
+/// A writer that keeps nothing: it counts the bytes a pack would take, for a
+/// dry seal that only needs each pack's length.
+pub type CountingWriter = PackWriter<io::Sink>;
+
+impl CountingWriter {
+    /// A writer that stores no byte and counts the pack's length.
+    #[must_use]
+    pub fn counting() -> Self {
+        Self::over(io::sink())
+    }
+
+    /// The length the sealed pack would have, header and trailer included.
+    ///
+    /// # Errors
+    /// [`PackError::TooManyObjects`] past the entry cap.
+    pub fn finish_count(self) -> Result<u64, PackError> {
+        self.patched_header()?;
+        Ok(self.len + TRAILER_LEN as u64)
+    }
+}
+
 /// A sealed pack in an unnamed file, with its length and key.
 #[derive(Debug)]
 pub struct SpooledPack {
@@ -200,6 +248,43 @@ impl SpooledPack {
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         check_range(self.len, offset, buf.len())?;
         read_exact_at(&self.file, offset, buf)
+    }
+}
+
+impl PackBody for SpooledPack {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_from(&self, offset: u64) -> io::Result<Box<dyn Read + Send + '_>> {
+        if offset > self.len {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        Ok(Box::new(SpoolReader {
+            file: &self.file,
+            at: offset,
+            end: self.len,
+        }))
+    }
+}
+
+/// Reads a spooled pack from one offset to its end, by positional reads, so
+/// readers of one pack never share a cursor.
+struct SpoolReader<'a> {
+    file: &'a File,
+    at: u64,
+    end: u64,
+}
+
+impl Read for SpoolReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = usize::try_from(self.end - self.at).map_or(buf.len(), |left| left.min(buf.len()));
+        if n == 0 {
+            return Ok(0);
+        }
+        read_exact_at(self.file, self.at, &mut buf[..n])?;
+        self.at += n as u64;
+        Ok(n)
     }
 }
 
@@ -424,6 +509,36 @@ impl PackSpool {
             self.begun = false;
             PackError::Io(error)
         })
+    }
+}
+
+/// A transport writes into a spool through [`PackSink`]. An I/O failure is
+/// recorded in [`PackSpool::failed`] and shows to the transport as
+/// [`TransportError::ProtocolError`], which no transport retries.
+impl PackSink for PackSpool {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        let len = declared.unwrap_or(0);
+        Self::begin(self, declared).map_err(|error| transport_error(&error, len))
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        let end = self.written.saturating_add(bytes.len() as u64);
+        Self::write(self, bytes).map_err(|error| transport_error(&error, end))
+    }
+
+    fn failed(&self) -> Option<io::ErrorKind> {
+        self.failed
+    }
+}
+
+/// The transport's view of a spool error: a body too long, named by the
+/// length it reached, or a local failure no transport retries.
+fn transport_error(error: &PackError, len: u64) -> TransportError {
+    match error {
+        PackError::PackfileTooLarge => {
+            TransportError::PayloadTooLarge(crate::protocol::saturating_usize(len))
+        }
+        _ => TransportError::ProtocolError,
     }
 }
 

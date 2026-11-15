@@ -461,8 +461,12 @@ fn serve_stdio_matches_golden_session() {
         tx.update_ref(name, RefWriteCondition::Any, &id).unwrap();
     }
     let seeded = pack_bytes(1000, 7);
-    tx.upload_pack(&seeded, &PackKey::new(hash(&seeded)))
-        .unwrap();
+    tx.upload_pack(
+        &kit_core::protocol::SliceBody(&seeded),
+        &PackKey::new(hash(&seeded)),
+        None,
+    )
+    .unwrap();
 
     let (code, out) = serve(
         td.path(),
@@ -563,7 +567,11 @@ fn idle_timeout_counts_bytes_not_frames() {
         "{frames:?}"
     );
     let key = PackKey::new(hash(&pack));
-    assert!(FileTransport::new(td.path()).pack_exists(&key).unwrap());
+    assert!(
+        FileTransport::new(td.path())
+            .pack_exists(&key, None)
+            .unwrap()
+    );
 
     // The header, then silence.
     let td = repo_root();
@@ -573,7 +581,11 @@ fn idle_timeout_counts_bytes_not_frames() {
     assert_eq!(code, exit::PROTOCOL_ERROR);
     let frames = decode(&out);
     assert_error(&frames[1], ErrorCode::InvalidRequest, "idle timeout");
-    assert!(!FileTransport::new(td.path()).pack_exists(&key).unwrap());
+    assert!(
+        !FileTransport::new(td.path())
+            .pack_exists(&key, None)
+            .unwrap()
+    );
     let packs = td.path().join("packs");
     let left = fs::read_dir(&packs).map_or(0, Iterator::count);
     assert_eq!(left, 0, "the upload's temp file is removed");

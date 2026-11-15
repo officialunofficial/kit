@@ -373,9 +373,10 @@ fn tags_over_one_history_with_a_missing_commit_share_one_signature_walk() {
 #[test]
 fn a_store_failure_while_a_tag_pack_applies_is_fatal() {
     use kit_core::pack::PackError;
-    let io = SyncError::Pack(PackError::Store(StoreError::Io(std::io::Error::other(
+    let io = SyncError::from(PackError::Store(StoreError::Io(std::io::Error::other(
         "disk full",
     ))));
+    assert!(matches!(io, SyncError::Io(_)));
     assert!(matches!(ChainFailure::from(io), ChainFailure::Fatal(_)));
     let too_large = SyncError::Pack(PackError::Store(StoreError::ObjectTooLarge));
     assert!(matches!(

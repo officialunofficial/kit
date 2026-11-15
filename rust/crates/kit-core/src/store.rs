@@ -431,6 +431,17 @@ impl ObjectStore {
         &self.objects_root
     }
 
+    /// The directory transfers spool packs in: `tmp/` beside `objects/`, so
+    /// a spool takes its space from the repository's filesystem. It is
+    /// created on demand. Spools in it are unnamed files, see
+    /// [`crate::pack::sweep_spool_dir`].
+    #[must_use]
+    pub fn spool_dir(&self) -> PathBuf {
+        self.objects_root
+            .parent()
+            .map_or_else(|| self.objects_root.join("tmp"), |kit| kit.join("tmp"))
+    }
+
     /// Length of the path of the objects directory, which every staged and
     /// stored object path starts with.
     pub(crate) fn objects_root_len(&self) -> usize {
@@ -1081,6 +1092,8 @@ fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Res
         .to_string_lossy();
 
     let mut tmp = temp_file_in(parent, &file_name)?;
+    #[cfg(feature = "fault-injection")]
+    crate::fault::check(crate::fault::Site::Store)?;
     tmp.as_file_mut().write_all(bytes)?;
     syncer.full(tmp.as_file(), tmp.path())?;
 

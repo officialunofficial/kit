@@ -1019,10 +1019,10 @@ after every gc.
 ## A fetch holds a prune guard, not the repository lock
 
 **Always:** a fetch downloads, authenticates, unpacks and records each pack as
-it arrives, in chain order, with no `worktree.lock` held and nothing staged on
-disk. It takes `ObjectStore::prune_guard` first, before it reads the
-applied-packs record, and holds it until after its last ref publish, on every
-return path. While any guard is held, gc deletes no object at any grace period.
+it arrives, in chain order, with no `worktree.lock` held and one spool file in
+`.kit/tmp/` at a time. It takes `ObjectStore::prune_guard` first, before it
+reads the applied-packs record, and holds it until after its last ref publish,
+on every return path. While any guard is held, gc deletes no object at any grace period.
 `worktree.lock` is taken only around the tracking-ref write and the checkpoint.
 That wait has no deadline, reports itself once, and ends on an interrupt. No
 process ever blocks on the exclusive lock of the `format` file: gc only tries it.

@@ -136,7 +136,11 @@ impl Remote {
     fn publish_pack(&self, pack: &[u8], tip: Hash, reset: bool) {
         let pack_key = pack::pack_key(pack);
         self.tx
-            .upload_pack(pack, &PackKey::from_hash(pack_key))
+            .upload_pack(
+                &kit_core::protocol::SliceBody(pack),
+                &PackKey::from_hash(pack_key),
+                None,
+            )
             .unwrap();
         let prev = if reset {
             None
@@ -146,7 +150,7 @@ impl Remote {
         let node = transfer::encode_packlist(prev, &[pack_key]).unwrap();
         let node_key = hash::hash(&node);
         self.tx
-            .upload_blob(&node, &PackKey::from_hash(node_key))
+            .upload_blob(&node, &PackKey::from_hash(node_key), None)
             .unwrap();
         let condition = if reset {
             RefWriteCondition::Any
@@ -269,19 +273,20 @@ impl RemoteSource for StaleListing<'_> {
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &PackKey,
         ref_name: &str,
     ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -800,23 +805,24 @@ impl RemoteSource for FailingPack<'_> {
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &PackKey,
         ref_name: &str,
     ) -> Result<Vec<u8>, kit_sync::SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         ref_name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
         self.downloads.set(self.downloads.get() + 1);
         if self.downloads.get() == self.fail_at {
             return Err(kit_sync::SourceError::ConnectionFailed);
         }
-        self.inner.download_pack_via_ref(key, ref_name)
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -1797,13 +1803,17 @@ fn remote_with_zstd_pack() -> Remote {
     let pack_key = pack::pack_key(ZSTD_PACK);
     remote
         .tx
-        .upload_pack(ZSTD_PACK, &PackKey::from_hash(pack_key))
+        .upload_pack(
+            &kit_core::protocol::SliceBody(ZSTD_PACK),
+            &PackKey::from_hash(pack_key),
+            None,
+        )
         .unwrap();
     let node = transfer::encode_packlist(None, &[pack_key]).unwrap();
     let node_key = hash::hash(&node);
     remote
         .tx
-        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .upload_blob(&node, &PackKey::from_hash(node_key), None)
         .unwrap();
     remote
         .tx
@@ -2960,21 +2970,18 @@ impl RemoteSource for CountingCursor<'_> {
         self.calls.set(self.calls.get() + 1);
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
-        &self,
-        key: &PackKey,
-        name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+    fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
-        self.inner.download_blob_via_ref(key, name)
+        self.inner.download_blob(key, name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &PackKey,
         name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
-        self.inner.download_pack_via_ref(key, name)
+        self.inner.download_pack(key, name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> {
         self.inner.repo_cursor()

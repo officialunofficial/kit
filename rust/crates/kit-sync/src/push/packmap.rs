@@ -85,7 +85,7 @@ pub(crate) fn advance_packmap(
         let Some(node) = node else {
             return commit_head(tx, &head_name, head_condition, &tip, branch);
         };
-        tx.upload_blob_via_ref(&node.bytes, &PackKey::from_hash(node.key), &head_name)
+        tx.upload_blob(&node.bytes, &PackKey::from_hash(node.key), &head_name)
             .map_err(|error| super::repository_operation_error(tx, error))?;
         let commit_keys: Vec<PackKey> = pack_keys
             .iter()

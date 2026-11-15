@@ -325,7 +325,7 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     let key = PackKey::new(kit_core::hash::hash(b"slow-pack-payload"));
     let start = Instant::now();
     let bytes = client
-        .download_pack(&key)
+        .download_blob(&key, None, u64::MAX)
         .expect("a DownloadPack call within pack_transfer_timeout must succeed");
     let elapsed = start.elapsed();
     assert_eq!(bytes, b"slow-pack-payload".to_vec());

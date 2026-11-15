@@ -84,11 +84,11 @@ same trait `kit-transport-s3` and `-ssh` implement.
 | `update_ref(name, condition, hash)` | `UpdateRef` | unary |
 | `write_ref(name, hash)` (default impl: `update_ref(.., Any, ..)`) | *(none &mdash; client calls `UpdateRef` with `expectation = REF_EXPECTATION_ANY`)* | &mdash; |
 | `advance_refs(..)` | `AdvanceRefs` | unary |
-| `pack_exists(key)` | `PackExists` | unary |
-| `upload_pack(bytes, key)` | `UploadPack` | client-streaming |
-| `download_pack(key)` | `DownloadPack` | server-streaming |
-| `upload_blob(bytes, key)` (default impl: delegates to `upload_pack`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
-| `download_blob(key)` (default impl: delegates to `download_pack`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
+| `pack_exists(key, ref_hint)` | `PackExists` | unary |
+| `upload_pack(body, key, head_ref)` | `UploadPack` | client-streaming |
+| `download_pack(key, ref_hint, sink)` | `DownloadPack` | server-streaming |
+| `upload_blob(bytes, key, head_ref)` (default impl: `upload_pack` of a `SliceBody`) | *(none &mdash; client calls `UploadPack`)* | &mdash; |
+| `download_blob(key, ref_hint, max)` (default impl: `download_pack` into a `MemorySink` of `max`) | *(none &mdash; client calls `DownloadPack`)* | &mdash; |
 | *(none &mdash; deployment discovery)* | `GetServerInfo` (§2.1) | unary |
 | *(none &mdash; retained storage receipt)* | `GetReceipt` (§2.2) | unary |
 | *(none &mdash; upload ticket)* | `BeginUpload` (§7.6) | unary |

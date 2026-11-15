@@ -19,7 +19,7 @@ use kit_client::{
     RequestPolicy, Signer,
 };
 use kit_core::hash::Hash;
-use kit_core::protocol::PackKey;
+use kit_core::protocol::{PackBody, PackKey, PackSink};
 use kit_core::refs::Ref;
 
 use crate::SourceError;
@@ -311,28 +311,26 @@ impl<
         self.client.supports_writes()
     }
 
-    fn upload_pack_via_ref(
+    /// Reads the whole pack into memory before it is sent: the Connect
+    /// client takes a pack as one buffer.
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        self.write_upload(bytes, key, name)
+        let bytes = kit_core::protocol::read_body(pack)?;
+        self.write_upload(&bytes, key, head_ref)
     }
 
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        name: &str,
-    ) -> Result<(), SourceError> {
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, head_ref: &str) -> Result<(), SourceError> {
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        self.write_upload(bytes, key, name)
+        self.write_upload(bytes, key, head_ref)
     }
 
     fn update_ref(
@@ -401,11 +399,11 @@ impl<
         }
     }
 
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
         self.write_call("DownloadPack", false, None, |identity| {
             self.executor.block_on(self.client.download_pack(
                 &key.into_hash(),
-                Some(ref_name),
+                Some(ref_hint),
                 NODE_LIMIT,
                 identity,
             ))
@@ -413,16 +411,26 @@ impl<
         .map(|reply| reply.value)
     }
 
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.write_call("DownloadPack", false, None, |identity| {
-            self.executor.block_on(self.client.download_pack(
-                &key.into_hash(),
-                Some(ref_name),
-                kit_core::protocol::PACK_BODY_LIMIT,
-                identity,
-            ))
-        })
-        .map(|reply| reply.value)
+    /// Receives the whole pack into memory, then writes it to `sink`: the
+    /// Connect client returns a pack as one buffer.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: &str,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
+        let bytes = self
+            .write_call("DownloadPack", false, None, |identity| {
+                self.executor.block_on(self.client.download_pack(
+                    &key.into_hash(),
+                    Some(ref_hint),
+                    kit_core::protocol::PACK_BODY_LIMIT,
+                    identity,
+                ))
+            })?
+            .value;
+        kit_core::protocol::write_body(sink, &bytes)?;
+        Ok(())
     }
 
     fn repository_address(&self) -> Option<(String, String)> {
@@ -537,8 +545,12 @@ mod tests {
         let key = PackKey::from_hash([4; 32]);
         assert!(!source.supports_push());
         for result in [
-            source.upload_pack_via_ref(&[0], &key, "refs/heads/main"),
-            source.upload_blob_via_ref(&[0], &key, "refs/heads/main"),
+            source.upload_pack(
+                &kit_core::protocol::SliceBody(&[0]),
+                &key,
+                "refs/heads/main",
+            ),
+            source.upload_blob(&[0], &key, "refs/heads/main"),
             source.update_ref(
                 "refs/heads/main",
                 kit_core::refs::RefWriteCondition::Missing,

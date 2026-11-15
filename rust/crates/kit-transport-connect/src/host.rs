@@ -741,45 +741,46 @@ impl RemoteSource for HostSource<'_> {
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.0.read_ref(name).map_err(|e| self.failure(e, false))
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        ref_hint: &str,
     ) -> Result<Vec<u8>, SourceError> {
         self.0
-            .download_pack_via_ref(key, name)
+            .download_blob(key, ref_hint)
             .map_err(|e| self.failure(e, false))
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &kit_core::protocol::PackKey,
-        name: &str,
-    ) -> Result<Vec<u8>, SourceError> {
+        ref_hint: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
         self.0
-            .download_pack_via_ref(key, name)
+            .download_pack(key, ref_hint, sink)
             .map_err(|e| self.failure(e, false))
     }
     fn supports_push(&self) -> bool {
         self.0.supports_push()
     }
-    fn upload_pack_via_ref(
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        pack: &dyn kit_core::protocol::PackBody,
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         self.0
-            .upload_pack_via_ref(bytes, key, name)
+            .upload_pack(pack, key, head_ref)
             .map_err(|e| self.failure(e, true))
     }
-    fn upload_blob_via_ref(
+    fn upload_blob(
         &self,
         bytes: &[u8],
         key: &kit_core::protocol::PackKey,
-        name: &str,
+        head_ref: &str,
     ) -> Result<(), SourceError> {
         self.0
-            .upload_blob_via_ref(bytes, key, name)
+            .upload_blob(bytes, key, head_ref)
             .map_err(|e| self.failure(e, true))
     }
     fn update_ref(

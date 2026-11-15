@@ -88,15 +88,29 @@ fn holds(condition: RefWriteCondition, current: Option<Hash>) -> bool {
 }
 
 impl Transport for Remote<'_> {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.uploads.fetch_add(1, Ordering::SeqCst);
-        self.inner.upload_pack(bytes, key)
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -264,9 +278,12 @@ fn chain(remote: &Remote<'_>) -> Vec<transfer::PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = remote.read_ref(&packmap_ref("main")).unwrap();
     while let Some(key) = cursor {
-        let node =
-            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
-                .unwrap();
+        let node = transfer::decode_packlist(
+            &remote
+                .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
         cursor = node.prev;
         nodes.push(node);
     }
@@ -281,7 +298,9 @@ fn rebuilds(remote: &Remote<'_>, head: Hash) -> bool {
     let mut nodes = chain(remote);
     nodes.reverse();
     for key in nodes.iter().flat_map(|node| &node.packs) {
-        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let bytes = remote
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         if PackReader::read(&bytes, &fresh).is_err() {
             return false;
         }
@@ -325,18 +344,24 @@ fn reset_to(remote: &Remote<'_>, store: &ObjectStore, tip: Hash) {
     push_at(&scratch, store, tip, RefWriteCondition::Missing, 0).unwrap();
     let node_key = scratch.read_ref(&packmap_ref("main")).unwrap().unwrap();
     let node = scratch
-        .download_blob(&PackKey::from_hash(node_key))
+        .download_blob(&PackKey::from_hash(node_key), None, u64::MAX)
         .unwrap();
     for key in transfer::decode_packlist(&node).unwrap().packs {
         let key = PackKey::from_hash(key);
         remote
             .inner
-            .upload_pack(&scratch.download_pack(&key).unwrap(), &key)
+            .upload_pack(
+                &kit_core::protocol::SliceBody(
+                    &scratch.download_blob(&key, None, u64::MAX).unwrap(),
+                ),
+                &key,
+                None,
+            )
             .unwrap();
     }
     remote
         .inner
-        .upload_blob(&node, &PackKey::from_hash(node_key))
+        .upload_blob(&node, &PackKey::from_hash(node_key), None)
         .unwrap();
     for (name, value) in [(packmap_ref("main"), node_key), (HEAD.to_owned(), tip)] {
         remote
@@ -613,15 +638,20 @@ fn branch_rebuilds(remote: &Remote<'_>, branch: &str, head: Hash) -> bool {
     let mut nodes = Vec::new();
     let mut cursor = remote.read_ref(&packmap_ref(branch)).unwrap();
     while let Some(key) = cursor {
-        let node =
-            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
-                .unwrap();
+        let node = transfer::decode_packlist(
+            &remote
+                .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
         cursor = node.prev;
         nodes.push(node);
     }
     nodes.reverse();
     for key in nodes.iter().flat_map(|node| &node.packs) {
-        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let bytes = remote
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         if PackReader::read(&bytes, &fresh).is_err() {
             return false;
         }
