@@ -85,7 +85,8 @@ pub fn sync_index_to_tree_observed(
 }
 
 /// The longest wait for the racy window to pass, in nanoseconds. A recorded
-/// mtime further ahead of the clock than this (clock skew) is not waited for.
+/// mtime so far ahead of the clock that the wait would pass this (about 11 ms
+/// ahead: clock skew) is not waited for.
 const SETTLE_MAX_WAIT_NS: u64 = 25_000_000;
 
 /// One tick of the kernel's coarse file clock, which a file's mtime follows
@@ -102,14 +103,14 @@ const SETTLE_REWRITES: usize = 2;
 /// few milliseconds later. `read_index` treats an entry within 10 ms of the
 /// index file's mtime as racy, so without this wait the next command would
 /// hash the newest files again, which for one large file takes minutes. The
-/// wait is about 15 ms at most and only happens when an entry was written
+/// wait is usually under 15 ms and only happens when an entry was written
 /// that recently; a rewrite for a coarse clock adds a few milliseconds, and
 /// the call never takes more than about 35 ms of waiting. An entry with a
 /// whole-second mtime has a one-second window and is not waited for.
 ///
 /// The file's stat then no longer counts as racy, so an edit made by another
 /// process during the restore, inside the same timestamp tick as the restore's
-/// own write and before its stat, is not caught. git has the same blind spot.
+/// own write, is not caught. git has the same blind spot.
 /// An edit made after the command returns has a later mtime and is caught.
 fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
     let write =
@@ -124,8 +125,8 @@ fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
         return write();
     };
     let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
-    // A mtime further ahead of the clock than the longest wait is skew, not
-    // a fresh write: do not wait for it.
+    // A mtime so far ahead that the wait would pass the longest wait is skew,
+    // not a fresh write: do not wait for it.
     let now = now_nanos();
     let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
     if ready > now && ready - now > SETTLE_MAX_WAIT_NS {

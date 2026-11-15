@@ -598,8 +598,9 @@ const RACY_WINDOW_NS: u64 = 1_000_000_000;
 
 /// The racy-clean window for an entry whose recorded mtime and the index
 /// file's mtime both have sub-second precision. A caller that writes files and
-/// then the index can wait this long first, so the entries it just recorded
-/// are not racy against the new index (see [`read_index`]).
+/// then the index can wait this long first, plus one tick of the file clock,
+/// and then check the index file's mtime, so the entries it just recorded are
+/// not racy against the new index (see [`read_index`]).
 pub const PRECISE_RACY_WINDOW_NS: u64 = RACY_WINDOW_NS / 100;
 
 /// Write this worktree's staging index atomically. The containing

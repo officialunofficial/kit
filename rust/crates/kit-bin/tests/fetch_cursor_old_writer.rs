@@ -6,6 +6,7 @@
 //! The marker `bmt-v2` already makes kit 0.7.x refuse such a root, so this
 //! is a second line of defence. The old writer is simulated by what it does
 //! on disk.
+#![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -105,7 +106,6 @@ fn cursor_records(dir: &Path) -> usize {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
 fn a_fetch_sees_a_ref_an_uncounted_writer_changed() {
     let repo = tempfile::tempdir().unwrap();
     let repo = repo.path();
@@ -144,8 +144,8 @@ fn a_fetch_sees_a_ref_an_uncounted_writer_changed() {
         Some(ahead.clone()),
         "a created ref was skipped"
     );
-    // Rewind a remote branch to the first commit by the same means, and
-    // let a fetch record that, then move it forward again.
+    // Create a branch at the first commit by the same means, let a fetch
+    // record it, then move it forward.
     old_writer_copies(remote.path(), "main", "late-main");
     settle_ref_dirs(remote.path());
     ok(repo, &["fetch", "origin"]);
