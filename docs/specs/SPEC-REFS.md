@@ -68,7 +68,7 @@ BLAKE3 of a packlist node whose chain rebuilds the closure of the value
 of `refs/tags/<t>` (SPEC-TRANSPORT §7.2). A writer writes it before the
 tag and only ever grows it, so it covers every value the tag held. A
 fetch reads it only for a tag whose closure it lacks (SPEC-TRANSPORT
-§1.3).
+§1.4).
 
 **Served names.** A transport server (`kit serve` or any Connect server) MUST serve only ref names under `refs/`. It MUST refuse
 any other name that passes the §3 grammar (for example `main`,

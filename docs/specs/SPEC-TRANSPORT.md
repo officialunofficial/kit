@@ -179,7 +179,10 @@ branch or another tag.
   skipped with a warning and no read. It is not a refusal.
 - **Local tags.** A local tag with the same value is up to date. A local tag
   with another value is refused ("would clobber existing tag"): no fetch moves
-  a tag. No fetch deletes a tag, with or without `--prune`.
+  a tag. A remote tag whose name is a directory of a local tag's name, or the
+  reverse, as `v1` and `v1/rc` are, is refused too, and so is the later of two
+  such remote tags in listing order. No fetch deletes a tag, with or without
+  `--prune`.
 - **Proof.** A tag is proved when all of these hold:
   - its peel reaches a commit, remix, tree or blob through at most 16 tags;
   - the name of its outermost tag object equals `<t>`;
@@ -193,7 +196,9 @@ branch or another tag.
   closure check. It counts as verified only when a signed fetch recorded it. A
   proof that would visit more than 10,000,000 objects refuses only that tag.
   A failed proof proves nothing, and a later tag over the same failed object is
-  refused without another walk.
+  refused without another walk. A proof that finds an object missing records
+  the walk path to it, so a later tag over the same incomplete history stops
+  there without another walk, until a pack brings the object.
 - **Download.** A tag that is not proved from local objects downloads its tag
   map chain. The walk stops at a node that this fetch already applied for a
   branch or a tag, or at a checkpoint head. So a grafted tag downloads only its
@@ -208,7 +213,9 @@ branch or another tag.
   it and goes on. A failed tag listing stops the tag phase with "tag listing
   failed (possibly too many tags): `<error>`", and the branches stay
   published. An interrupt, a transport failure other than a bad reply, or a
-  local I/O error fails the fetch, as for a branch.
+  local I/O error, including one while a tag's pack is written, fails the
+  fetch, as for a branch. The tags proved before such a failure still
+  publish, unless it is an interrupt.
 - **Publish.** The tags publish under the worktree lock, each with a create
   that fails when the tag exists. A tag that appears locally during the fetch
   is refused as one that would clobber.

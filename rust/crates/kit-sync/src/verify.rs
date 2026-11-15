@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectStore, StoreError};
 use rayon::prelude::*;
 
 use crate::error::SyncError;
@@ -252,15 +252,22 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
 /// 32 bytes of id per signed object it delivered.
 pub(crate) type VerifiedHistory = HashSet<Hash>;
 
+/// Checks the signatures of one chunk of a history walk.
+type ChunkCheck<'a> = dyn Fn(&[(Hash, Object)]) -> Result<(), SyncError> + 'a;
+
 /// The signature failures one fetch found in history walks: each object
 /// whose history holds an object that failed its signature check, mapped to
 /// that object's hex id and the failure. A walk that reaches one of them
 /// fails at once with the same failure, so many tags over one bad history
 /// cost one walk. It lives for one fetch.
-/// Checks the signatures of one chunk of a history walk.
-type ChunkCheck<'a> = dyn Fn(&[(Hash, Object)]) -> Result<(), SyncError> + 'a;
-
 pub(crate) type FailedHistory = HashMap<Hash, (String, String)>;
+
+/// The missing objects one fetch found in history walks and closure checks:
+/// each object whose closure lacks a missing object, mapped to that object.
+/// A walk that reaches one of them ends at once as at the missing object.
+/// Unlike a signature failure, this holds only while the object is missing,
+/// so its owner drops an entry once the store holds its object.
+pub(crate) type MissingHistory = HashMap<Hash, Hash>;
 
 /// Verify the signature of every commit, remix and tag in the history of
 /// `tip`: `tip` itself, the parents of each commit and remix, and the target
@@ -297,7 +304,9 @@ pub(crate) fn verify_history_signatures(
 ) -> Result<(), SyncError> {
     let mut walk = HistoryWalk {
         verified,
+        anchored: None,
         failed: None,
+        missing: None,
         cap: kit_core::ops::graph::MAX_REACHABLE,
         read: 0,
     };
@@ -305,12 +314,20 @@ pub(crate) fn verify_history_signatures(
 }
 
 /// One [`verify_history_signatures`] walk, with the knobs the tag phase of a
-/// fetch adds: a memory of failures and a cap it can lower in a test.
+/// fetch adds: more verified history, a memory of failures and missing
+/// objects, and a cap it can lower in a test.
 pub(crate) struct HistoryWalk<'a> {
     pub(crate) verified: &'a mut VerifiedHistory,
+    /// More objects whose history was verified in full, which the walk stops
+    /// at like `verified` but does not copy into it.
+    pub(crate) anchored: Option<&'a HashSet<Hash>>,
     /// When set, a walk fails at once on an object it holds, and a failed
     /// walk adds the failing object and the objects on its walk path to it.
     pub(crate) failed: Option<&'a mut FailedHistory>,
+    /// When set, a walk ends at once on an object it holds, as at a missing
+    /// object, and a walk that finds an object missing adds that object and
+    /// the objects on its walk path to it.
+    pub(crate) missing: Option<&'a mut MissingHistory>,
     /// The most objects one walk visits.
     pub(crate) cap: usize,
     /// Commits, remixes and tags the walk read in full, counted on success
@@ -330,15 +347,18 @@ impl HistoryWalk<'_> {
         let check = |entries: &[(Hash, Object)]| {
             verify_entries(entries, entries.len() >= verify_fanout_threshold())
         };
-        let tracking = self.failed.is_some();
+        let tracking = self.failed.is_some() || self.missing.is_some();
         // The object that first named each one, to find the walk path to a
-        // failing object. Kept only when failures are remembered.
+        // failing or missing object. Kept only when either is remembered.
         let mut via: HashMap<Hash, Hash> = HashMap::new();
         let mut seen: HashSet<Hash> = HashSet::new();
         let mut pending = vec![*tip];
         let mut entries: Vec<(Hash, Object)> = Vec::new();
         while let Some(h) = pending.pop() {
-            if self.verified.contains(&h) || !seen.insert(h) {
+            if self.verified.contains(&h)
+                || self.anchored.is_some_and(|anchored| anchored.contains(&h))
+                || !seen.insert(h)
+            {
                 continue;
             }
             if let Some(failed) = self.failed.as_deref_mut()
@@ -347,19 +367,26 @@ impl HistoryWalk<'_> {
                 remember_failure(failed, &via, h, &hash, &reason, self.cap);
                 return Err(SyncError::UnsignedOrInvalidObject { hash, reason });
             }
+            if let Some(object) = self.missing.as_deref().and_then(|m| m.get(&h).copied()) {
+                return Err(self.missing_at(&via, h, object));
+            }
             if seen.len() > self.cap {
                 return Err(SyncError::ClosureTooLarge(self.cap));
             }
             // A leaf carries no signature and names no signed object, so only
             // its type prologue is read, like the closure check does: a parent or
             // tag target that is a large blob costs no full read.
-            if !matches!(
-                store.object_type(&h)?,
-                ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
-            ) {
+            let ty = match store.object_type(&h) {
+                Err(StoreError::ObjectNotFound(_)) => return Err(self.missing_at(&via, h, h)),
+                ty => ty?,
+            };
+            if !matches!(ty, ObjectType::Commit | ObjectType::Remix | ObjectType::Tag) {
                 continue;
             }
-            let obj = store.read_object(&h)?;
+            let obj = match store.read_object(&h) {
+                Err(StoreError::ObjectNotFound(_)) => return Err(self.missing_at(&via, h, h)),
+                obj => obj?,
+            };
             self.read += 1;
             let before = pending.len();
             match &obj {
@@ -390,6 +417,15 @@ impl HistoryWalk<'_> {
         self.check_chunk(&entries, &check, &via)?;
         self.verified.extend(seen);
         Ok(())
+    }
+
+    /// The error of a walk that reached `at`, whose closure lacks `object`,
+    /// remembered on the walk path when missing objects are remembered.
+    fn missing_at(&mut self, via: &HashMap<Hash, Hash>, at: Hash, object: Hash) -> SyncError {
+        if let Some(missing) = self.missing.as_deref_mut() {
+            remember_missing(missing, via, at, object, self.cap);
+        }
+        SyncError::Store(StoreError::ObjectNotFound(hash::to_hex(&object)))
     }
 
     /// Check one chunk, and remember a signature failure when failures are
@@ -428,6 +464,27 @@ fn remember_failure(
             failed.clear();
         }
         failed.insert(h, (hash.to_owned(), reason.to_owned()));
+        next = via.get(&h).copied();
+    }
+}
+
+/// Add `at` and every object on the walk path from the walk's tip to it to
+/// `missing`, each mapped to the missing `object`. `missing` holds at most
+/// `cap` objects; past that it is cleared, which makes later walks longer
+/// only.
+pub(crate) fn remember_missing(
+    missing: &mut MissingHistory,
+    via: &HashMap<Hash, Hash>,
+    at: Hash,
+    object: Hash,
+    cap: usize,
+) {
+    let mut next = Some(at);
+    while let Some(h) = next {
+        if missing.len() >= cap {
+            missing.clear();
+        }
+        missing.insert(h, object);
         next = via.get(&h).copied();
     }
 }

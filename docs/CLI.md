@@ -1179,8 +1179,10 @@ Remote / sync:
   signature checks on, its history verifies. Each new tag prints
   ` * [new tag]         <t> -> <t>`. A refused tag prints
   ` ! [rejected]        <t> -> <t> (<reason>)`: a local tag with another value
-  (`would clobber existing tag`, never moved), a signature failure, a name
-  mismatch, a missing tag map or object, or a history past the check's bound.
+  (`would clobber existing tag`, never moved), a name that is a directory of a
+  local tag's name or the reverse (`conflicts with existing tag`), a signature
+  failure, a name mismatch, a missing tag map or object, or a history past the
+  check's bound.
   A remote tag name that kit cannot push prints a `warning:` line and is not a
   refusal. A tag listing that fails, for example one too large for one
   `kit serve` frame, prints `error: tag listing failed (possibly too many
@@ -1212,7 +1214,9 @@ Remote / sync:
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
   fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
   fetch takes tags and reports them as `kit fetch` does; a refused tag makes
-  the pull exit 1 after the branch moved. The fast-forward writes only
+  the pull exit 1 after the branch moved. With `--rebase` or `--no-ff` the
+  JSON object is the one of `kit rebase` or `kit merge` and carries no tag
+  fields; the tag lines are on stderr and the exit status is 1. The fast-forward writes only
   the files the new tip changed; the others keep their inode and mtime.
   Divergent histories are
   refused; use `--rebase`, `--no-ff` or an explicit merge after resolving the

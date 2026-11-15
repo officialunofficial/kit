@@ -1018,3 +1018,134 @@ fn a_failed_tag_listing_stops_only_the_tag_phase() {
     );
     assert!(!fetch_with(&failing, &target, &SyncOptions::default()).remote_unchanged);
 }
+
+/// A remote tag whose name is a directory of a local tag, or the reverse, is
+/// refused alone; the other tags and the branches still publish. Of two new
+/// remote tags in that relation, which a remote that keeps refs as files
+/// cannot hold but another can list, the first in listing order publishes.
+#[test]
+fn a_tag_whose_name_collides_with_another_tag_is_refused_alone() {
+    for kind in KINDS {
+        let remote = Remote::new(kind);
+        let (c1, main) = remote.grow("main", true);
+        let (_dir, target) = work();
+        clone_with(
+            &remote.source(),
+            &target,
+            &SyncOptions::default().with_tags(false),
+        );
+        let layout = RepoLayout::single(&target);
+        refs::update_tag(&layout, "v1", RefWriteCondition::Missing, &c1).unwrap();
+        remote.push_tag("v1/rc", &[], c1, Some(main));
+        remote.push_tag("a", &[], c1, Some(main));
+        remote.push_tag("v2", &[], c1, Some(main));
+        let (c2, _) = remote.grow("main", true);
+        let source = remote.source();
+        let mut listing = source.list_refs("refs/tags/").unwrap();
+        listing.push(refs::Ref {
+            name: "a/b".to_owned(),
+            hash: Some(c1),
+        });
+        listing.sort_by(|x, y| x.name.cmp(&y.name));
+        let listed = Listing {
+            inner: &source,
+            prefix: "refs/tags/",
+            refs: listing,
+        };
+
+        let report = fetch_with(&listed, &target, &SyncOptions::default());
+
+        assert_eq!(report.tags_fetched, ["a", "v2"], "{kind:?}");
+        let reasons = rejected(&report);
+        assert_eq!(reasons.len(), 2, "{reasons:?}");
+        assert!(reasons.contains(&(
+            "a/b",
+            &TagRejectReason::NameConflict {
+                other: "a".to_owned()
+            }
+        )));
+        assert!(reasons.contains(&(
+            "v1/rc",
+            &TagRejectReason::NameConflict {
+                other: "v1".to_owned()
+            }
+        )));
+        assert_eq!(
+            refs::read_remote_ref(&layout, "default", "main").unwrap(),
+            Some(c2)
+        );
+    }
+}
+
+/// A source whose download of one node fails with a transport error.
+struct FailNode<'a> {
+    inner: &'a dyn RemoteSource,
+    node: Hash,
+}
+
+impl RemoteSource for FailNode<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        if *key == PackKey::from_hash(self.node) {
+            return Err(kit_sync::SourceError::ConnectionFailed);
+        }
+        self.inner.download_blob_via_ref(key, name)
+    }
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_pack_via_ref(key, name)
+    }
+    fn supports_push(&self) -> bool {
+        false
+    }
+}
+
+/// A transport failure in the tag phase fails the fetch, but the tags proved
+/// before it still publish.
+#[test]
+fn a_fatal_error_in_the_tag_phase_keeps_the_tags_proved_before_it() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    remote.push_tag("a", &[], c1, Some(main));
+    let (tag, b) = remote.tag_object("b", c1, true);
+    let node = remote.push_tag("b", std::slice::from_ref(&tag), b, Some(main));
+    let (_dir, target) = work();
+    clone_with(
+        &remote.source(),
+        &target,
+        &SyncOptions::default().with_tags(false),
+    );
+
+    let source = remote.source();
+    let failing = FailNode {
+        inner: &source,
+        node,
+    };
+    let error = fetch(
+        &target,
+        &failing,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, SyncError::Source(_)), "{error:?}");
+    assert_eq!(local_tag(&target, "a"), Some(c1));
+    assert_eq!(local_tag(&target, "b"), None);
+}

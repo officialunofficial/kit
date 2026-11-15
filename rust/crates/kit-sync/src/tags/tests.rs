@@ -280,3 +280,119 @@ fn a_tracking_tip_no_signed_fetch_verified_is_not_trusted_for_signatures() {
     );
     assert_eq!(prover.objects_checked, 1, "the closure check stops at C3");
 }
+
+/// One blob is missing from a long history. The first tag over it walks
+/// the history; each later tag over the same history stops where the first
+/// walk found the closure incomplete. A pack that brings the blob drops that
+/// memory, and the tags then prove.
+#[test]
+fn tags_over_one_history_with_a_missing_blob_share_one_walk() {
+    let repo = Repo::new();
+    let history = repo.line(None, 200);
+    let base = *history.last().unwrap();
+    // The blob of the oldest commit.
+    let Object::Commit(c) = repo.store.read_object(&history[0]).unwrap() else {
+        unreachable!()
+    };
+    let Object::Tree(tree) = repo.store.read_object(&c.tree_hash).unwrap() else {
+        unreachable!()
+    };
+    let blob = tree.entries[0].object_hash;
+    let blob_bytes = repo.store.read(&blob).unwrap();
+    repo.store.remove_object(&blob).unwrap();
+
+    let tips: Vec<(String, Hash)> = (0..20)
+        .map(|i| {
+            let tip = repo.commit(Some(base), true);
+            let name = format!("t{i}");
+            let tag = repo.tag(&name, tip);
+            (name, tag)
+        })
+        .collect();
+    for signed in [false, true] {
+        let mut verified = VerifiedHistory::new();
+        let mut prover = TagProver::new(signed);
+        let (name, tag) = &tips[0];
+        assert_eq!(
+            repo.prove(&mut prover, &mut verified, name, *tag),
+            Proof::Missing(to_hex(&blob))
+        );
+        let first = prover.objects_checked;
+        assert!(first > 400, "the first walk reads the history: {first}");
+        for (name, tag) in &tips[1..] {
+            assert_eq!(
+                repo.prove(&mut prover, &mut verified, name, *tag),
+                Proof::Missing(to_hex(&blob))
+            );
+        }
+        let later = prover.objects_checked - first;
+        assert!(
+            later <= 19 * 6,
+            "each later tag reads only its own objects: {later}"
+        );
+
+        repo.store.write(&blob_bytes).unwrap();
+        prover.refresh_missing(&repo.store);
+        for (name, tag) in &tips {
+            assert_eq!(
+                repo.prove(&mut prover, &mut verified, name, *tag),
+                Proof::Proved
+            );
+        }
+        repo.store.remove_object(&blob).unwrap();
+    }
+}
+
+/// A commit is missing from a long signed history. The signature walk of the
+/// first tag reads down to it; each later tag stops where that walk did.
+#[test]
+fn tags_over_one_history_with_a_missing_commit_share_one_signature_walk() {
+    let repo = Repo::new();
+    let history = repo.line(None, 200);
+    let base = *history.last().unwrap();
+    let gone = history[10];
+    repo.store.remove_object(&gone).unwrap();
+    let mut verified = VerifiedHistory::new();
+    let mut prover = TagProver::new(true);
+    for i in 0..20 {
+        let tip = repo.commit(Some(base), true);
+        let name = format!("t{i}");
+        let tag = repo.tag(&name, tip);
+        assert_eq!(
+            repo.prove(&mut prover, &mut verified, &name, tag),
+            Proof::Missing(to_hex(&gone))
+        );
+    }
+    // The first walk reads its tag, its tip and 189 commits of the history;
+    // each later one its tag and its tip.
+    assert_eq!(prover.signed_read, 2 + 189 + 19 * 2);
+}
+
+/// A local store failure while a tag's pack is written fails the fetch; a
+/// store refusal the remote's object causes refuses only that tag.
+#[test]
+fn a_store_failure_while_a_tag_pack_applies_is_fatal() {
+    use kit_core::pack::PackError;
+    let io = SyncError::Pack(PackError::Store(StoreError::Io(std::io::Error::other(
+        "disk full",
+    ))));
+    assert!(matches!(ChainFailure::from(io), ChainFailure::Fatal(_)));
+    let too_large = SyncError::Pack(PackError::Store(StoreError::ObjectTooLarge));
+    assert!(matches!(
+        ChainFailure::from(too_large),
+        ChainFailure::Refused(TagRejectReason::Transfer(_))
+    ));
+}
+
+/// Names in a directory relation conflict, in both directions; siblings and
+/// names that only share a prefix do not.
+#[test]
+fn name_conflicts_are_directory_relations() {
+    let names: BTreeSet<String> = ["v1", "rel/a", "x"].into_iter().map(String::from).collect();
+    assert_eq!(name_conflict(&names, "v1/rc"), Some("v1".to_owned()));
+    assert_eq!(name_conflict(&names, "rel"), Some("rel/a".to_owned()));
+    assert_eq!(name_conflict(&names, "v10"), None);
+    assert_eq!(name_conflict(&names, "rel/b"), None);
+    assert_eq!(name_conflict(&names, "x"), None);
+    assert_eq!(name_conflict(&names, "re"), None);
+}

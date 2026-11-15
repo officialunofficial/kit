@@ -18,11 +18,12 @@
 //! a refused tag never fails the branches. Interruption, transport and local
 //! I/O errors fail the fetch, as on the branch path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use kit_core::hash::{Hash, to_hex};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{KitError, Object, ObjectType};
+use kit_core::ops::{Known, Presence};
 use kit_core::refs::{self, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -34,7 +35,9 @@ use crate::lock::{LockWait, wait_for_worktree_lock};
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::{MAX_PACK_CHAIN_DEPTH, flatten_oldest_first, walk_pack_chain_until};
 use crate::source::RemoteSource;
-use crate::verify::{FailedHistory, HistoryWalk, VerifiedHistory};
+use crate::verify::{
+    FailedHistory, HistoryWalk, MissingHistory, VerifiedHistory, remember_missing,
+};
 
 /// The most self-heals the tag phase of one fetch runs. A self-heal clears
 /// the applied-pack record and walks a tag's whole chain again, so a remote
@@ -54,6 +57,10 @@ pub enum TagRejectReason {
     /// tag; delete the local one to take the remote's.
     #[error("would clobber existing tag")]
     WouldClobber,
+    /// A local tag's name is a directory of this one, or this one's name is
+    /// a directory of it, as `v1` and `v1/rc` are. One of them must go first.
+    #[error("conflicts with existing tag `{other}`")]
+    NameConflict { other: String },
     /// The tag's objects are not local and the remote has no tag map that
     /// rebuilds them.
     #[error("the remote has no tag map for it")]
@@ -121,29 +128,55 @@ pub(crate) enum Proof {
 ///
 /// - The trusted set `R`: the commits, remixes and tags that local refs
 ///   reach, read once, the first time a tag needs it. Their closure is in the
-///   store. When signatures are required, the part of `R` below a tip the
-///   verified set holds joins the verified set too: the history of a verified
-///   object was verified in full. A tip that no signed fetch verified, such as
-///   one a fetch with the opt-out published, adds to `R` only, so a tag above
+///   store. When signatures are required, `R` is kept in two parts. The part
+///   below a tip the verified set holds is anchored: the history of a
+///   verified object was verified in full, so the signature walk stops there
+///   as at the verified set. A tip that no signed fetch verified, such as one
+///   a fetch with the opt-out published, is in the other part, so a tag above
 ///   it is still checked down to verified history.
 /// - The proved set `P`: the objects whose closure a successful `prove`
 ///   checked. A failed `prove` adds nothing.
-/// - The failed set `F`: the signature failures of earlier walks, so many
-///   tags over one bad history cost one walk. A missing object needs no
-///   memory: the store itself says it is missing.
+/// - The failed set `F`: the signature failures of earlier walks, with their
+///   walk paths, so many tags over one bad history cost one walk.
+/// - The missing set `M`: the objects whose closure lacked a missing object,
+///   with the walk paths of the signature walk and the closure check, so many
+///   tags over one incomplete history cost one walk too. An entry holds only
+///   while its object is missing: [`TagProver::refresh_missing`] drops it
+///   once a pack brings the object.
 ///
-/// Each set holds at most `cap` ids. Past that, `R` stops growing and `P`
-/// and `F` are cleared. That only makes later walks longer.
+/// Each set holds at most `cap` ids. Past that, `R` stops growing, and `P`,
+/// `F` and `M` are cleared. That only makes later walks longer. A walk also
+/// keeps, while it runs, the objects it visited and the object that first
+/// named each one.
 pub(crate) struct TagProver {
     require_signed: bool,
     cap: usize,
-    trusted: Option<HashSet<Hash>>,
+    trusted: Option<Trusted>,
     proved: HashSet<Hash>,
     failed: FailedHistory,
+    missing: MissingHistory,
+    /// The missing objects that `missing` maps to.
+    missing_objects: HashSet<Hash>,
     /// Objects the closure checks visited, and signed objects the history
     /// walks read, over every call.
     pub(crate) objects_checked: usize,
     pub(crate) signed_read: usize,
+}
+
+/// The set `R`, in two disjoint parts.
+#[derive(Default)]
+struct Trusted {
+    /// Reached from a tip the verified set holds, when signatures are
+    /// required.
+    anchored: HashSet<Hash>,
+    /// Reached from the other tips.
+    rest: HashSet<Hash>,
+}
+
+impl Trusted {
+    fn contains(&self, h: &Hash) -> bool {
+        self.anchored.contains(h) || self.rest.contains(h)
+    }
 }
 
 impl TagProver {
@@ -159,9 +192,28 @@ impl TagProver {
             trusted: None,
             proved: HashSet::new(),
             failed: FailedHistory::new(),
+            missing: MissingHistory::new(),
+            missing_objects: HashSet::new(),
             objects_checked: 0,
             signed_read: 0,
         }
+    }
+
+    /// Drop the entries of `M` whose object the store now holds. Called after
+    /// each chain apply.
+    pub(crate) fn refresh_missing(&mut self, store: &ObjectStore) {
+        let found: HashSet<Hash> = self
+            .missing_objects
+            .iter()
+            .filter(|object| store.contains(object))
+            .copied()
+            .collect();
+        if found.is_empty() {
+            return;
+        }
+        self.missing.retain(|_, object| !found.contains(object));
+        self.missing_objects
+            .retain(|object| !found.contains(object));
     }
 
     /// Whether tag `name` may publish at `value`: T5 on the outermost tag
@@ -184,15 +236,29 @@ impl TagProver {
         if self.trusted.is_none() {
             self.trusted = Some(self.trusted_set(store, layout, verified)?);
         }
-        if self.require_signed {
+        let Self {
+            require_signed,
+            cap,
+            trusted,
+            proved,
+            failed,
+            missing,
+            missing_objects,
+            objects_checked,
+            signed_read,
+        } = self;
+        let trusted = trusted.as_ref().unwrap_or_else(|| unreachable!());
+        if *require_signed {
             let mut walk = HistoryWalk {
                 verified,
-                failed: Some(&mut self.failed),
-                cap: self.cap,
+                anchored: Some(&trusted.anchored),
+                failed: Some(failed),
+                missing: Some(missing),
+                cap: *cap,
                 read: 0,
             };
             let result = walk.run(store, observer, &value);
-            self.signed_read += walk.read;
+            *signed_read += walk.read;
             match result {
                 Ok(()) => {}
                 Err(SyncError::UnsignedOrInvalidObject { hash, reason }) => {
@@ -202,22 +268,25 @@ impl TagProver {
                     return Ok(Proof::Refused(TagRejectReason::ClosureTooLarge(cap)));
                 }
                 Err(SyncError::Store(StoreError::ObjectNotFound(hex))) => {
+                    missing_objects.extend(refs::parse_lowercase_hash(hex.as_bytes()));
                     return Ok(Proof::Missing(hex));
                 }
                 Err(e) => return Err(e),
             }
         }
-        let trusted = self.trusted.as_ref().unwrap_or_else(|| unreachable!());
-        let proved = &self.proved;
-        let known = |h: &Hash| trusted.contains(h) || proved.contains(h);
-        let checked =
-            match kit_core::ops::check_closure_present_above(store, &value, &known, self.cap) {
-                Ok((checked, false)) => checked,
-                Ok((checked, true)) => {
-                    self.objects_checked += checked.len();
-                    return Ok(Proof::Refused(TagRejectReason::ClosureTooLarge(self.cap)));
-                }
-                Err(StoreError::ObjectNotFound(hex)) => return Ok(Proof::Missing(hex)),
+        let known = |h: &Hash| {
+            if trusted.contains(h) || proved.contains(h) {
+                Known::Present
+            } else if missing.contains_key(h) {
+                Known::Missing
+            } else {
+                Known::Unknown
+            }
+        };
+        let stop = || observer.cancelled();
+        let presence =
+            match kit_core::ops::check_closure_present_above(store, &value, &known, *cap, &stop) {
+                Ok(presence) => presence,
                 Err(StoreError::Decode(
                     e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
                 )) => {
@@ -227,17 +296,42 @@ impl TagProver {
                 }
                 Err(e) => return Err(e.into()),
             };
-        self.objects_checked += checked.len();
-        if self.proved.len() + checked.len() > self.cap {
-            self.proved.clear();
+        match presence {
+            Presence::Complete(checked) => {
+                *objects_checked += checked.len();
+                if proved.len() + checked.len() > *cap {
+                    proved.clear();
+                }
+                proved.extend(checked);
+                Ok(Proof::Proved)
+            }
+            Presence::TooLarge(checked) => {
+                *objects_checked += checked;
+                Ok(Proof::Refused(TagRejectReason::ClosureTooLarge(*cap)))
+            }
+            Presence::Missing {
+                object,
+                path,
+                checked,
+            } => {
+                *objects_checked += checked;
+                // An object `M` holds stands for the object it lacks.
+                let lacked = missing.get(&object).copied().unwrap_or(object);
+                let via: HashMap<Hash, Hash> = path.windows(2).map(|w| (w[0], w[1])).collect();
+                remember_missing(missing, &via, object, lacked, *cap);
+                missing_objects.insert(lacked);
+                Ok(Proof::Missing(to_hex(&lacked)))
+            }
+            Presence::Stopped(checked) => {
+                *objects_checked += checked;
+                Err(SyncError::Interrupted)
+            }
         }
-        self.proved.extend(checked);
-        Ok(Proof::Proved)
     }
 
     /// Peel `value` through its annotated tags: T5 on the outermost one, at
-    /// most [`MAX_TAG_DEPTH`] of them, and no object the failed set holds.
-    /// `None` when the tag passes.
+    /// most [`MAX_TAG_DEPTH`] of them, and no object the failed or missing
+    /// set holds. `None` when the tag passes.
     fn peel(
         &self,
         store: &ObjectStore,
@@ -252,6 +346,9 @@ impl TagProver {
                     hash: hash.clone(),
                     reason: reason.clone(),
                 })));
+            }
+            if let Some(object) = self.missing.get(&at) {
+                return Ok(Some(Proof::Missing(to_hex(object))));
             }
             match store.object_type(&at) {
                 Ok(ObjectType::Tag) => {}
@@ -277,13 +374,13 @@ impl TagProver {
 
     /// The set `R`, walked from the tips of every local branch, tracking ref
     /// and tag. When signatures are required, the walk from the tips that
-    /// `verified` holds runs first and adds what it reaches to `verified`.
+    /// `verified` holds runs first and fills the anchored part.
     fn trusted_set(
         &self,
         store: &ObjectStore,
         layout: &RepoLayout,
-        verified: &mut VerifiedHistory,
-    ) -> Result<HashSet<Hash>, SyncError> {
+        verified: &VerifiedHistory,
+    ) -> Result<Trusted, SyncError> {
         let mut tips = Vec::new();
         for r in refs::list_refs(layout)?
             .into_iter()
@@ -301,30 +398,37 @@ impl TagProver {
         } else {
             (Vec::new(), tips)
         };
-        let mut trusted = HashSet::new();
-        reach(store, &anchored, &mut trusted, self.cap, Some(verified))?;
-        reach(store, &rest, &mut trusted, self.cap, None)?;
+        let mut trusted = Trusted::default();
+        reach(
+            store,
+            &anchored,
+            &mut trusted.anchored,
+            &HashSet::new(),
+            self.cap,
+        )?;
+        let room = self.cap.saturating_sub(trusted.anchored.len());
+        reach(store, &rest, &mut trusted.rest, &trusted.anchored, room)?;
         Ok(trusted)
     }
 }
 
 /// Add to `into` the commits, remixes and tags reachable from `tips`
-/// through parents and tag targets, and to `verified` too when given. An
-/// object `into` holds is not walked again, a missing one is skipped, and the
-/// walk stops once `into` holds `cap` ids.
+/// through parents and tag targets. An object `into` or `skip` holds is not
+/// walked again, a missing one is skipped, and the walk stops once `into`
+/// holds `cap` ids.
 fn reach(
     store: &ObjectStore,
     tips: &[Hash],
     into: &mut HashSet<Hash>,
+    skip: &HashSet<Hash>,
     cap: usize,
-    mut verified: Option<&mut VerifiedHistory>,
 ) -> Result<(), SyncError> {
     let mut pending = tips.to_vec();
     while let Some(h) = pending.pop() {
         if into.len() >= cap {
             return Ok(());
         }
-        if into.contains(&h) {
+        if into.contains(&h) || skip.contains(&h) {
             continue;
         }
         let object = match store.object_type(&h) {
@@ -344,9 +448,6 @@ fn reach(
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {}
         }
         into.insert(h);
-        if let Some(verified) = verified.as_deref_mut() {
-            verified.insert(h);
-        }
     }
     Ok(())
 }
@@ -419,6 +520,11 @@ impl From<SyncError> for ChainFailure {
                 Self::Refused(TagRejectReason::Signature { hash, reason })
             }
             SyncError::ClosureTooLarge(cap) => Self::Refused(TagRejectReason::ClosureTooLarge(cap)),
+            // The local store failed while the pack was written: that is no
+            // fault of this tag, and the next tag would meet it too.
+            e @ SyncError::Pack(kit_core::pack::PackError::Store(
+                StoreError::Io(_) | StoreError::HashMismatch { .. },
+            )) => Self::Fatal(e),
             e @ (SyncError::AdvertisedPackMissing { .. }
             | SyncError::Pack(_)
             | SyncError::RemoteObject(_)
@@ -445,9 +551,17 @@ impl TagPhase<'_> {
         let mut tagmaps: Option<HashMap<String, Hash>> = None;
         let mut heals = 0usize;
         let mut publish: Vec<(String, Hash)> = Vec::new();
+        // Local tag names and the names this phase will publish: a name that
+        // is a directory of another cannot be written beside it.
+        let mut names: BTreeSet<String> = refs::list_tags(self.layout)?
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        let mut fatal = None;
         for listed in listed {
             if self.observer.cancelled() {
-                return Err(SyncError::Interrupted);
+                fatal = Some(SyncError::Interrupted);
+                break;
             }
             let Some(value) = listed.hash else { continue };
             let name = listed.name;
@@ -458,7 +572,18 @@ impl TagPhase<'_> {
                 });
                 continue;
             }
-            match refs::read_tag(self.layout, &name)? {
+            if let Some(other) = name_conflict(&names, &name) {
+                self.refuse(name, TagRejectReason::NameConflict { other });
+                continue;
+            }
+            let local = match refs::read_tag(self.layout, &name) {
+                Ok(local) => local,
+                Err(e) => {
+                    fatal = Some(e.into());
+                    break;
+                }
+            };
+            match local {
                 Some(local) if local == value => continue,
                 Some(_) => {
                     self.refuse(name, TagRejectReason::WouldClobber);
@@ -467,15 +592,29 @@ impl TagPhase<'_> {
                 None => {}
             }
             match self.fetch_tag(&mut prover, &mut tagmaps, &mut heals, &name, value) {
-                Ok(Outcome::Publish(value)) => publish.push((name, value)),
+                Ok(Outcome::Publish(value)) => {
+                    names.insert(name.clone());
+                    publish.push((name, value));
+                }
                 Ok(Outcome::Skip) => {}
                 Ok(Outcome::Refused(reason)) => self.refuse(name, reason),
                 Err(Ok(failed)) => {
                     self.listing_failed(&failed);
                     break;
                 }
-                Err(Err(e)) => return Err(e),
+                Err(Err(e)) => {
+                    fatal = Some(e);
+                    break;
+                }
             }
+        }
+        // The tags proved before a failure publish, as the branches before a
+        // failed branch do. An interrupt publishes nothing more.
+        if let Some(e) = fatal {
+            if !matches!(e, SyncError::Interrupted) {
+                self.publish(publish)?;
+            }
+            return Err(e);
         }
         self.publish(publish)
     }
@@ -527,7 +666,9 @@ impl TagPhase<'_> {
                 None => return Ok(Outcome::Refused(TagRejectReason::NoTransferChain)),
             }
         };
-        let skipped = match self.apply_chain(&tag_ref, map, true) {
+        let applied = self.apply_chain(&tag_ref, map, true);
+        prover.refresh_missing(self.store);
+        let skipped = match applied {
             Ok((skipped, keys)) => match self.prove(prover, name, value).map_err(Err)? {
                 Proof::Proved => {
                     self.stop.extend(keys);
@@ -562,7 +703,9 @@ impl TagPhase<'_> {
             self.applied.clear();
             crate::fetch::persist_record(self.applied, self.observer, self.remote);
         }
-        match self.apply_chain(&tag_ref, map, !heal) {
+        let applied = self.apply_chain(&tag_ref, map, !heal);
+        prover.refresh_missing(self.store);
+        match applied {
             Ok((_, keys)) => match self.prove(prover, name, value).map_err(Err)? {
                 Proof::Proved => {
                     self.stop.extend(keys);
@@ -653,6 +796,7 @@ impl TagPhase<'_> {
             return Ok(());
         }
         let _lock = wait_for_worktree_lock(self.layout, self.observer, self.lock_wait)?;
+        let mut first_error = None;
         for (name, value) in publish {
             match refs::update_tag(self.layout, &name, refs::RefWriteCondition::Missing, &value) {
                 Ok(()) => self.report.tags_fetched.push(name),
@@ -662,11 +806,31 @@ impl TagPhase<'_> {
                         reason: TagRejectReason::WouldClobber,
                     });
                 }
-                Err(e) => return Err(e.into()),
+                // A local write failed: the other tags still publish, and the
+                // fetch then fails with the first error.
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), |e| Err(e.into()))
     }
+}
+
+/// A name in `names` that is a directory of `name`, or of which `name` is a
+/// directory, as `v1` and `v1/rc` are.
+fn name_conflict(names: &BTreeSet<String>, name: &str) -> Option<String> {
+    for (at, _) in name.match_indices('/') {
+        if let Some(parent) = names.get(&name[..at]) {
+            return Some(parent.clone());
+        }
+    }
+    let below = format!("{name}/");
+    names
+        .range(below.clone()..)
+        .next()
+        .filter(|other| other.starts_with(&below))
+        .cloned()
 }
 
 #[cfg(test)]

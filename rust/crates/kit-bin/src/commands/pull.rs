@@ -61,7 +61,8 @@ struct PullOpts {
     /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`, plus
     /// the tag fields of `kit fetch --format=json`. With `--all`, one JSON
     /// object is printed per remote pulled. With `--rebase`, the object is
-    /// the one that `kit rebase` prints.
+    /// the one that `kit rebase` prints, and with `--no-ff` the one of
+    /// `kit merge`; neither carries the tag fields.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
     /// Suppress transfer progress output on stderr.
