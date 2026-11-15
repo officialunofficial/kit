@@ -51,6 +51,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PushReport::deleted` and `SourceError::Unsupported`; in libkit,
   `transfer::push_delete_with_source`; in kit-transport-file,
   `FileTransport::delete_ref_if`.
+- `kit_core::transfer::packlist_node_bound`, the most bytes a packlist node
+  that lists a given number of packs can take. kit-client sizes the node of
+  a plan with it, where it restated the node layout.
 
 ### Changed
 
@@ -132,12 +135,42 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gets its own `fdatasync` before its rename. A large object never grows the
   pool past 64 threads, a batch of only large objects renames them on one
   thread, and other platforms are unchanged.
+- The pack module no longer knows the transports' body limit; its callers
+  pass the limit. `kit_core::pack::serialized_limit` is now
+  `kit_core::protocol::max_pack_bytes`. `PackFill::seals_before` takes the
+  resolved limit as a `u64` where it took the advertised `Option<u64>`: pass
+  `protocol::max_pack_bytes(advertised)`. `pack::rewrite_excluding` takes a
+  fifth argument, the longest pack it may write (`protocol::PACK_BODY_LIMIT`
+  for the old behaviour), and `pack::ReadLimit::BodyLimit` carries that
+  limit as `BodyLimit(u64)`. Its text names the limit it carries, so it
+  reads as before for `PACK_BODY_LIMIT`.
+- A restore and a pull recovery run one safety check in kit-sync, where
+  each had its own. Recovery keeps its refusal texts and its stricter
+  rules: the index, never seeded from HEAD, must equal the tree from before
+  the pull or the target as a whole, and an untracked directory no ignore
+  rule matches is refused whatever it holds. It now takes an ignored path in
+  a directory the target deletes, as a pull does: the sweep keeps it.
+- A clean restore with a base checks the directories it will skip as
+  unchanged before it sweeps or writes anything, and refuses with the new
+  `RestoreError::UnsweptPath` when one holds an untracked path the sweep
+  would remove, where it trusted its caller's check.
 
 ### Removed
 
 - S3 multipart upload, with `S3_SINGLE_PUT_MAX` and the
   `test-small-multipart-caps` feature of `kit-transport-s3`. It never ran:
   a pack is at most 4 GiB, and one S3 `PUT` takes up to 5 GiB.
+- `kit_core::merkle::build_chunks_range_proof`. kit-core has no verifier for
+  it. `build_chunks_multi_proof` over the same run of positions writes the
+  same bytes.
+- `kit_core::serialize::CHUNKED_HEADER_LEN`. Only a test used it; the
+  22-byte manifest header is in the `CHUNKED_ENTRY_LEN` docs.
+- `kit_sync::push::PushControl::shallow` and the `shallow` argument of
+  `kit_core::transfer::walk::PushWalk::run`, `run_tips` and `run_one`.
+  Nothing writes a shallow boundary (`kit clone` has no `--depth`), so the
+  set was always empty, and a push no longer reads `.kit/shallow`.
+  `refs::load_shallow_boundaries`, `write_shallow_boundaries` and the file's
+  format (SPEC-REFS) stay.
 
 ### Fixed
 

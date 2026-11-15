@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::pack::{NoExternalBases, PackEntries, PackEntry, PackReader, TRAILER_LEN};
+use crate::protocol::PACK_BODY_LIMIT;
 use crate::{
     delta, hash,
     object::{Blob, Object},
@@ -46,6 +47,7 @@ fn rewrite(pack: &[u8], excluded: &[Hash]) -> Rewritten {
         &excluded.iter().copied().collect(),
         &mut NoExternalBases,
         DecodeLimits::default(),
+        PACK_BODY_LIMIT,
     )
     .unwrap()
 }
@@ -179,6 +181,7 @@ fn external_excluded_base_is_rawified() {
         &HashSet::from([objects[0].0]),
         &mut bases,
         DecodeLimits::default(),
+        PACK_BODY_LIMIT,
     )
     .unwrap();
     assert!(result.removed.is_empty());
@@ -200,6 +203,7 @@ fn unchanged_is_verbatim_and_absent_exclusions_do_not_lookup() {
         &HashSet::from([[99; 32]]),
         &mut bases,
         DecodeLimits::default(),
+        PACK_BODY_LIMIT,
     )
     .unwrap();
     assert_eq!(absent, empty);
@@ -239,6 +243,7 @@ fn denied_and_absent_bases_have_identical_errors() {
                     fetched: Vec::new(),
                 }),
                 DecodeLimits::default(),
+                PACK_BODY_LIMIT,
             )
             .unwrap_err();
             assert!(matches!(err, PackError::DeltaBaseMissing(_)));
@@ -297,6 +302,7 @@ fn an_output_with_more_entries_than_a_writer_seals_is_refused() {
             &excluded,
             &mut NoExternalBases,
             DecodeLimits::default(),
+            PACK_BODY_LIMIT,
         )
     };
     // Dropping two leaves exactly the entries a writer seals; dropping one
@@ -332,7 +338,7 @@ fn delta_bomb_rejected_before_sink_or_writer_grows() {
 
 fn assert_before_sink_rejection(pack: &[u8], limits: DecodeLimits) {
     let excluded = HashSet::new();
-    let mut state = Rewrite::new(pack, &excluded);
+    let mut state = Rewrite::new(pack, &excluded, PACK_BODY_LIMIT);
     let mut sink_calls = 0;
     let err = decode_entries_with(pack, &mut NoExternalBases, limits, |entry| {
         sink_calls += 1;
@@ -346,7 +352,14 @@ fn assert_before_sink_rejection(pack: &[u8], limits: DecodeLimits) {
         PackWriter::new().finish().unwrap()
     );
     assert!(matches!(
-        rewrite_excluding(pack, &excluded, &mut NoExternalBases, limits).unwrap_err(),
+        rewrite_excluding(
+            pack,
+            &excluded,
+            &mut NoExternalBases,
+            limits,
+            PACK_BODY_LIMIT
+        )
+        .unwrap_err(),
         PackError::PackfileTooLarge
     ));
 }
@@ -385,7 +398,13 @@ fn external_base_charges_release_at_last_use() {
         }
         let pack = w.finish().unwrap();
         let excluded = deltas.iter().map(|d| d.0).collect();
-        let result = rewrite_excluding(&pack, &excluded, &mut bases.clone(), limits);
+        let result = rewrite_excluding(
+            &pack,
+            &excluded,
+            &mut bases.clone(),
+            limits,
+            PACK_BODY_LIMIT,
+        );
         if succeeds {
             let result = result.unwrap();
             assert_eq!(
@@ -404,6 +423,7 @@ fn external_base_charges_release_at_last_use() {
         &HashSet::from([deltas[0].0]),
         &mut bases,
         limits.with_max_decoded_bytes(512 * 1024),
+        PACK_BODY_LIMIT,
     )
     .unwrap_err();
     assert!(matches!(err, PackError::PackfileTooLarge));
@@ -432,7 +452,8 @@ fn malformed_input_matches_decoder_even_when_everything_is_excluded() {
             &hostile,
             &excluded,
             &mut NoExternalBases,
-            DecodeLimits::default()
+            DecodeLimits::default(),
+            PACK_BODY_LIMIT
         )
         .unwrap_err(),
         PackError::UnexpectedEof
@@ -452,6 +473,7 @@ fn malformed_input_matches_decoder_even_when_everything_is_excluded() {
             &excluded,
             &mut NoExternalBases,
             DecodeLimits::default(),
+            PACK_BODY_LIMIT,
         )
         .unwrap_err();
         assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
@@ -466,7 +488,7 @@ fn decoder_errors_precede_deferred_writer_errors() {
     w.push_raw([0; 32], b"not an object").unwrap();
     let pack = w.finish().unwrap();
     let excluded = HashSet::from([hash::hash(&valid)]);
-    let mut state = Rewrite::new(&pack, &excluded);
+    let mut state = Rewrite::new(&pack, &excluded, PACK_BODY_LIMIT);
     // Inject a writer cap error instead of allocating a >4 GiB output.
     state.writer_error = Some(PackError::PackfileTooLarge);
     let mut calls = 0;
@@ -492,7 +514,7 @@ fn decoder_errors_precede_deferred_writer_errors() {
 fn unchanged_ignores_a_deferred_writer_error() {
     let (pack, _) = chain();
     let excluded = HashSet::new();
-    let mut state = Rewrite::new(&pack, &excluded);
+    let mut state = Rewrite::new(&pack, &excluded, PACK_BODY_LIMIT);
     state.writer_error = Some(PackError::PackfileTooLarge);
     decode_entries_with(
         &pack,
@@ -573,8 +595,8 @@ proptest! {
         let excluded: HashSet<_> = candidates.into_iter().zip(selections).filter_map(|(id, yes)| yes.then_some(id)).collect();
         let pack = w.finish().unwrap();
         let original = collect(&pack, &mut bases.clone());
-        let first = rewrite_excluding(&pack, &excluded, &mut bases.clone(), DecodeLimits::default()).unwrap();
-        let second = rewrite_excluding(&pack, &excluded, &mut bases.clone(), DecodeLimits::default()).unwrap();
+        let first = rewrite_excluding(&pack, &excluded, &mut bases.clone(), DecodeLimits::default(), PACK_BODY_LIMIT).unwrap();
+        let second = rewrite_excluding(&pack, &excluded, &mut bases.clone(), DecodeLimits::default(), PACK_BODY_LIMIT).unwrap();
         prop_assert_eq!(&first, &second);
         let expected: Vec<_> = original.into_iter().filter(|o| !excluded.contains(&o.0)).collect();
         // Takedown property: the output decodes without any excluded base.

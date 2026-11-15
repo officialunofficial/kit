@@ -85,9 +85,6 @@ pub struct PushControl<'a> {
     pub max_steps: usize,
     /// Refuse a first-parent walk longer than this.
     pub max_chain: usize,
-    /// Commits whose parents are not part of this repository (the shallow
-    /// boundary): the chain walk stops at them.
-    pub shallow: HashSet<Hash>,
 }
 
 impl std::fmt::Debug for PushControl<'_> {
@@ -96,7 +93,6 @@ impl std::fmt::Debug for PushControl<'_> {
             .field("checks_grants", &self.authority.is_some())
             .field("max_steps", &self.max_steps)
             .field("max_chain", &self.max_chain)
-            .field("shallow", &self.shallow.len())
             .finish()
     }
 }
@@ -108,7 +104,6 @@ impl Default for PushControl<'_> {
             authority: None,
             max_steps: MAX_SPLIT_STEPS,
             max_chain: MAX_CHAIN_COMMITS,
-            shallow: HashSet::new(),
         }
     }
 }
@@ -181,9 +176,6 @@ fn walk_chain_capped(
             return Err(PushError::Sync(crate::SyncError::Interrupted));
         }
         commits.push(cursor);
-        if ctl.shallow.contains(&cursor) {
-            break;
-        }
         match first_parent(&store.read_object(&cursor)?) {
             Some(parent) => cursor = parent,
             None => break,
@@ -220,12 +212,11 @@ fn weight_of(store: &ObjectStore, hash: &Hash) -> Result<u64, StoreError> {
 fn weigh_one(
     store: &ObjectStore,
     held: &HeldCommits,
-    shallow: &HashSet<Hash>,
     id: Hash,
     limits: WalkLimits,
     seen: &mut HashSet<Hash>,
 ) -> Result<u64, PushError> {
-    let walk = PushWalk::run_one(store, id, held, shallow, limits).map_err(walk_error)?;
+    let walk = PushWalk::run_one(store, id, held, limits).map_err(walk_error)?;
     let mut total = 0_u64;
     let mut add = |object: &Hash| -> Result<(), StoreError> {
         total = total.saturating_add(weight_of(store, object)?);
@@ -286,18 +277,7 @@ fn cumulative_weights_capped(
             if held.contains(&hash) || !taken.insert(hash) {
                 continue;
             }
-            total = total.saturating_add(weigh_one(
-                store,
-                held,
-                &ctl.shallow,
-                hash,
-                limits,
-                &mut seen,
-            )?);
-            // A shallow-boundary commit's parents are not in this repository.
-            if ctl.shallow.contains(&hash) {
-                continue;
-            }
+            total = total.saturating_add(weigh_one(store, held, hash, limits, &mut seen)?);
             match store.read_object(&hash)? {
                 Object::Commit(commit) => stack.extend(commit.parents),
                 Object::Remix(remix) => stack.extend(remix.parents),
@@ -310,12 +290,12 @@ fn cumulative_weights_capped(
 }
 
 /// The largest total weight (payload plus frames) after which a pack must
-/// seal: either the payload cap, or the serialized limit net of header and
-/// trailer. A search heuristic only: the decoded-byte and entry seals can close
+/// seal: either the payload cap, or the serialized limit net of the
+/// overhead of a pack of no entries. A search heuristic only: the decoded-byte and entry seals can close
 /// a lighter pack, so the real plan is always checked, never this weight.
 fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
-    let serialized = pack::serialized_limit(max_pack_bytes)
-        .saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64);
+    let serialized = kit_core::protocol::max_pack_bytes(max_pack_bytes)
+        .saturating_sub(pack::serialized_bound(0, 0));
     payload_cap.min(serialized).max(1)
 }
 
@@ -1025,26 +1005,6 @@ mod tests {
         let weight = |hash| weight_of(&store, &hash).unwrap();
         let expected = weight(once) + weight(tree_c) + weight(repeated) + weight(chunk);
         assert_eq!(weights.cumulative[1], expected);
-    }
-
-    #[test]
-    fn a_shallow_boundary_ends_the_walk_and_its_parents_are_not_followed() {
-        let (_dir, store) = store();
-        let c = line(&store, 6);
-        let control = PushControl {
-            shallow: std::iter::once(c[3]).collect(),
-            ..PushControl::default()
-        };
-        let chain = walk_chain(&store, c[5], None, &control).unwrap();
-        assert_eq!(chain.commits, [c[3], c[4], c[5]]);
-        // The boundary commit weighs its own tree closure only.
-        let weights = cumulative_weights(&store, &chain, &control)
-            .unwrap()
-            .cumulative;
-        let everything = cumulative_weights(&store, &chain, &PushControl::default())
-            .unwrap()
-            .cumulative;
-        assert!(weights[1] < everything[1]);
     }
 
     #[test]

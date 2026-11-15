@@ -205,9 +205,8 @@ pub type ObjectSink<'a> = &'a mut dyn FnMut(&Hash, &Hash) -> Result<(), StoreErr
 impl PushWalk {
     /// Walk the commits that `tip` reaches and `held` lacks.
     ///
-    /// `shallow` names commits whose parents this store does not hold. The
-    /// walk takes them as roots. `sink`, when given, sees each object the walk
-    /// keeps, once the held filter has run, with the commit that brought it.
+    /// `sink`, when given, sees each object the walk keeps, once the held
+    /// filter has run, with the commit that brought it.
     ///
     /// A tip that is neither a commit nor a remix gets its full closure,
     /// minus held commits.
@@ -222,11 +221,10 @@ impl PushWalk {
         store: &ObjectStore,
         tip: Hash,
         held: &HeldCommits,
-        shallow: &HashSet<Hash>,
         limits: WalkLimits,
         sink: Option<ObjectSink<'_>>,
     ) -> Result<Self, StoreError> {
-        Self::run_tips(store, &[tip], held, shallow, limits, sink)
+        Self::run_tips(store, &[tip], held, limits, sink)
     }
 
     /// [`PushWalk::run`] for several tips at once: the union of what each
@@ -244,7 +242,6 @@ impl PushWalk {
         store: &ObjectStore,
         tips: &[Hash],
         held: &HeldCommits,
-        shallow: &HashSet<Hash>,
         limits: WalkLimits,
         sink: Option<ObjectSink<'_>>,
     ) -> Result<Self, StoreError> {
@@ -253,7 +250,7 @@ impl PushWalk {
         for &tip in tips {
             starts.push(peel_tags(store, tip, held, &mut tags)?);
         }
-        let (commits, others) = discover(store, &starts, held, shallow, limits)?;
+        let (commits, others) = discover(store, &starts, held, limits)?;
         let mut walk = Builder {
             store,
             held,
@@ -308,7 +305,6 @@ impl PushWalk {
         store: &ObjectStore,
         id: Hash,
         held: &HeldCommits,
-        shallow: &HashSet<Hash>,
         limits: WalkLimits,
     ) -> Result<Self, StoreError> {
         let mut walk = Builder {
@@ -322,12 +318,7 @@ impl PushWalk {
             log: None,
         };
         match read_commit(store, &id)? {
-            Some((tree, mut parents)) => {
-                if shallow.contains(&id) {
-                    parents.clear();
-                }
-                walk.add_commit(0, &NewCommit { id, tree, parents })?;
-            }
+            Some((tree, parents)) => walk.add_commit(0, &NewCommit { id, tree, parents })?,
             None => walk.add_closure(0, id)?,
         }
         Ok(Self {
@@ -487,7 +478,6 @@ fn discover(
     store: &ObjectStore,
     tips: &[Hash],
     held: &HeldCommits,
-    shallow: &HashSet<Hash>,
     limits: WalkLimits,
 ) -> Result<(Vec<NewCommit>, Vec<Hash>), StoreError> {
     let mut seen: HashSet<Hash> = HashSet::new();
@@ -505,12 +495,7 @@ fn discover(
                 return Err(limit_error());
             }
             match read_commit(store, &id)? {
-                Some((tree, mut parents)) => {
-                    if shallow.contains(&id) {
-                        parents.clear();
-                    }
-                    frames.push((NewCommit { id, tree, parents }, 0));
-                }
+                Some((tree, parents)) => frames.push((NewCommit { id, tree, parents }, 0)),
                 None => others.push(id),
             }
         }

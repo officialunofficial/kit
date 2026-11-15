@@ -1,10 +1,8 @@
 //! Native repository push: bounded packs and conditioned ref publication.
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
-use kit_core::pack::{
-    self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_limit,
-};
-use kit_core::protocol::{PackKey, UploadLimits};
+use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
+use kit_core::protocol::{self, PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
@@ -143,7 +141,7 @@ pub struct PushOptions<'a> {
     /// single commit cannot fit a ticketed advance otherwise, and then only as
     /// large as that commit needs, up to what the format and the remote allow.
     pub pack_payload_cap: u64,
-    /// Observer, split bounds, shallow boundaries and host authority hook.
+    /// Observer, split bounds and host authority hook.
     pub control: PushControl<'a>,
 }
 
@@ -226,7 +224,6 @@ fn push_refs(
     match &options.target {
         PushTarget::All { force } => {
             let refs_list = refs::list_refs_with(layout, crate::worktree::fanout_read_batch)?;
-            let control = repository_control(layout, options)?;
             let mut tracking = refs::RemoteRefBatch::new(layout, options.remote_name)?;
             let mut report = PushReport {
                 refs: 0,
@@ -257,7 +254,7 @@ fn push_refs(
                         condition,
                         options.rebaseline_threshold,
                         options.pack_payload_cap,
-                        &control,
+                        &options.control,
                         &mut |published| Ok(tracking.write(&r.name, &published)?),
                     )?;
                     report.refs += 1;
@@ -288,7 +285,6 @@ fn push_refs(
             } else {
                 lease(layout, options.remote_name, remote)?
             };
-            let control = repository_control(layout, options)?;
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
             });
@@ -300,7 +296,7 @@ fn push_refs(
                 condition,
                 options.rebaseline_threshold,
                 options.pack_payload_cap,
-                &control,
+                &options.control,
                 &mut |published| {
                     Ok(refs::write_remote_ref(
                         layout,
@@ -356,24 +352,6 @@ fn push_tag_report(
         deleted: None,
     })
 }
-fn repository_control<'a>(
-    layout: &kit_core::layout::RepoLayout,
-    options: &PushOptions<'a>,
-) -> Result<PushControl<'a>, PushError> {
-    let mut control = PushControl {
-        authority: options.control.authority,
-        max_steps: options.control.max_steps,
-        max_chain: options.control.max_chain,
-        shallow: refs::load_shallow_boundaries(layout)?
-            .unwrap_or_default()
-            .into_iter()
-            .collect(),
-        observer: options.control.observer,
-    };
-    control.shallow.extend(&options.control.shallow);
-    Ok(control)
-}
-
 fn lease(
     layout: &kit_core::layout::RepoLayout,
     remote: &str,
@@ -878,7 +856,12 @@ fn estimate_pack_sizes_with(
         })
         .collect::<Result<Vec<_>, PushError>>()?;
     for add in raw.into_iter().chain(deltas) {
-        if fill.seals_before(add, payload_cap, max_pack_bytes, max_entries) {
+        if fill.seals_before(
+            add,
+            payload_cap,
+            protocol::max_pack_bytes(max_pack_bytes),
+            max_entries,
+        ) {
             packs.push(fill.serialized_bound());
             fill = PackFill::default();
         }
@@ -1017,7 +1000,7 @@ fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool,
             holds_remote_head: false,
         });
     }
-    if len > serialized_limit(limits.max_pack_bytes) {
+    if len > protocol::max_pack_bytes(limits.max_pack_bytes) {
         return Err(PushError::from(SourceError::PayloadTooLarge(
             kit_core::protocol::saturating_usize(len),
         )));
@@ -1217,7 +1200,12 @@ fn should_seal<W>(
     max_pack_bytes: Option<u64>,
     max_entries: usize,
 ) -> bool {
-    PackFill::of(w).seals_before(add, payload_cap, max_pack_bytes, max_entries)
+    PackFill::of(w).seals_before(
+        add,
+        payload_cap,
+        protocol::max_pack_bytes(max_pack_bytes),
+        max_entries,
+    )
 }
 
 #[cfg(test)]
@@ -1289,7 +1277,7 @@ mod tests {
                 "a sealed pack of {} bytes: {read:?}",
                 pack.len()
             );
-            assert!(pack.len() as u64 <= serialized_limit(max_pack_bytes));
+            assert!(pack.len() as u64 <= protocol::max_pack_bytes(max_pack_bytes));
             packs += 1;
         };
         for (id, bytes) in entries {
@@ -1672,7 +1660,7 @@ mod tests {
             let mut count = 0;
             for &(len, actual) in entries {
                 let add = Incoming::raw(len, if real { actual } else { len });
-                if fill.seals_before(add, 3 << 30, None, 7) {
+                if fill.seals_before(add, 3 << 30, protocol::PACK_BODY_LIMIT, 7) {
                     count += 1;
                     fill = PackFill::default();
                 }

@@ -1,7 +1,8 @@
 use crate::{Error, proto::GetServerInfoResponse};
 use kit_core::{
     hash::Hash,
-    pack::{self, PackFill, PackWriter, serialized_bound, serialized_limit},
+    pack::{self, PackFill, PackWriter, serialized_bound},
+    protocol::max_pack_bytes,
 };
 
 /// Ordered canonical input. Staging, closure selection, delta policy and
@@ -142,10 +143,6 @@ impl Plan {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
         }
-        // Reserve a prior pointer and the largest u32 length prefix. The
-        // empty canonical node has a one-byte prefix, which can grow by four.
-        let node_overhead =
-            kit_core::transfer::encode_packlist(Some([0; 32]), &[])?.len() as u64 + 4;
         let mut writer = PackWriter::new();
         let mut pending = Pending::new();
         let mut packs = Vec::new();
@@ -166,8 +163,8 @@ impl Plan {
             if PackFill::of(&writer).seals_before(
                 incoming,
                 cap,
-                Some(limits.max_pack_bytes),
-                pack::MAX_WRITE_ENTRIES,
+                max_pack_bytes(Some(limits.max_pack_bytes)),
+                usize::MAX,
             ) {
                 seal(
                     &mut writer,
@@ -184,14 +181,15 @@ impl Plan {
                 matches!(&entry, Entry::Delta { stream, .. } if !pack::delta_fits_reader(stream));
             if size > cap
                 || unreadable
-                || serialized_bound(size, 1) > serialized_limit(Some(limits.max_pack_bytes))
+                || serialized_bound(size, 1) > max_pack_bytes(Some(limits.max_pack_bytes))
             {
                 return Err(Error::Limit("one entry exceeds pack limit"));
             }
             // Bound memory before accepting an input entry, even if it
             // compresses dramatically. The caller owns its input allocation.
             let pack_count = packs.len().saturating_add(1) as u64;
-            let node_bound = node_overhead.saturating_add(pack_count.saturating_mul(32));
+            // The node with a prior pointer and the longest count prefix.
+            let node_bound = kit_core::transfer::packlist_node_bound(pack_count);
             if pack_count > u64::from(kit_core::transfer::PACKLIST_MAX_ENTRIES)
                 || node_bound > limits.max_pack_bytes
                 || staged
@@ -260,7 +258,7 @@ fn seal(
         return Ok(());
     }
     *staged = staged.saturating_add(bytes.len() as u64);
-    if bytes.len() as u64 > serialized_limit(Some(limits.max_pack_bytes))
+    if bytes.len() as u64 > max_pack_bytes(Some(limits.max_pack_bytes))
         || *staged > limits.max_staged_bytes
     {
         return Err(Error::Limit("sealed input limit"));

@@ -20,9 +20,11 @@ use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::verify::verify_history_signatures;
 use crate::worktree::{
-    current_head_tree, ensure_restore_safe, list_remote_refs_parallel, restore_worktree_and_index,
-    restore_worktree_and_index_from, write_ref_recording_history,
+    Expected, Refusals, check_restore_safe, current_head_tree, ensure_restore_safe,
+    list_remote_refs_parallel, restore_worktree_and_index, restore_worktree_and_index_from,
+    write_ref_recording_history,
 };
+use kit_core::ops::restore::RestoreOptions;
 
 /// What a pull did to the local branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,110 +326,54 @@ fn resume_pull(
     Ok(true)
 }
 
-// Each path may still contain the old index entry or an already-restored target
-// entry. Anything else is local work. The clean restore also requires that no
-// untracked, unignored path would be swept away.
+/// The refusals of a pull that resumes an interrupted restore.
+const PULL_RECOVERY_REFUSALS: Refusals = Refusals {
+    staged: |_| {
+        "pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again".to_owned()
+    },
+    local: pull_recovery_changes_message,
+    overwrite_untracked: pull_recovery_untracked_message,
+    remove_untracked: pull_recovery_untracked_message,
+};
+
+/// The restore-safety check of a pull that resumes an interrupted restore:
+/// each path may hold its entry from before the pull or the target's, and the
+/// restore's own temporary files may be swept.
 fn ensure_pull_restore_safe(
     layout: &RepoLayout,
     store: &ObjectStore,
     tree: Hash,
     before_tree: Hash,
 ) -> Result<(), String> {
-    use crate::worktree::{collect_worktree_paths, is_ignored_worktree_path};
-    use kit_core::ops::diff::diff_trees;
-    use kit_core::worktree;
-
+    // The index as it is, never seeded: HEAD already names the target, so an
+    // emptied index seeded from it would pass for the target.
     let index = kit_core::index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
-    let snapshot = kit_core::store::EphemeralSink::new(store);
-    let index_tree = worktree::build_tree_from_index_with(store, &snapshot, &index, false)
-        .map_err(|e| format!("index tree: {e}"))?;
-    if index_tree != before_tree && index_tree != tree {
-        return Err("pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again".to_owned());
-    }
-    let old = kit_core::index::from_tree(store, before_tree)
-        .map_err(|e| format!("pre-pull index: {e}"))?;
-    let target =
-        kit_core::index::from_tree(store, tree).map_err(|e| format!("target index: {e}"))?;
-    let mut tracked = old.clone();
-    for entry in &target.entries {
-        tracked.upsert_entry(entry.clone());
-    }
-    for entry in &mut tracked.entries {
-        entry.mtime_ns = 0;
-    }
-    let root = layout.worktree_root();
-    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
-    let mut paths = Vec::new();
-    collect_worktree_paths(root, root, "", &mut paths).map_err(|e| format!("check paths: {e}"))?;
-    let temporary_paths: std::collections::HashSet<_> = paths
-        .iter()
-        .filter(|path| is_restore_temp(root, &tracked, path))
-        .cloned()
-        .collect();
-    if let Some(path) = paths.iter().find(|path| {
-        !tracked.tracks_path_or_descendant(path)
-            && !temporary_paths.contains(*path)
-            && Path::new(path)
-                .ancestors()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .any(|parent| {
-                    let name = parent.to_str().expect("collected UTF-8 path");
-                    target.has_tracked_file_at(name)
-                        || (!target.tracks_path_or_descendant(name)
-                            && parent
-                                .file_name()
-                                .is_none_or(|name| name != ".kitignore" && name != ".gitignore")
-                            && !is_ignored_worktree_path(root, &ignore, name))
-                })
-    }) {
-        return Err(format!(
-            "pull recovery would remove untracked path '{path}'; move or remove it, then pull again"
-        ));
-    }
-    // The union can contain a former file and a target descendant. Keeping
-    // that file in the snapshot index would hide the whole directory.
-    let directories: std::collections::HashSet<_> = old
-        .entries
-        .iter()
-        .chain(&target.entries)
-        .flat_map(|entry| Path::new(&entry.path).ancestors().skip(1))
-        .filter_map(|parent| parent.to_str())
-        .filter(|parent| !parent.is_empty())
-        .collect();
-    tracked.retain_entries(|entry| !directories.contains(entry.path.as_str()));
-    let current = worktree::build_tree_filtered_observed_with_source(
-        &snapshot,
-        &snapshot,
-        root,
-        Some(&tracked),
-        &mut Vec::new(),
+    check_restore_safe(
+        layout,
+        store,
+        &index,
+        tree,
+        &RestoreOptions::default(),
+        &Expected {
+            trees: &[Some(before_tree), Some(tree)],
+            restore_temp_files: true,
+            refuse_untracked_dirs: true,
+            refusals: &PULL_RECOVERY_REFUSALS,
+        },
     )
-    .map_err(|e| format!("working tree: {e}"))?;
-    let from_old =
-        diff_trees(&snapshot, Some(before_tree), Some(current)).map_err(|e| e.to_string())?;
-    let from_target =
-        diff_trees(&snapshot, Some(tree), Some(current)).map_err(|e| e.to_string())?;
-    let changed: std::collections::HashSet<_> = from_target
-        .entries
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect();
-    if let Some(entry) = from_old.entries.iter().find(|entry| {
-        changed.contains(entry.path.as_str())
-            && !temporary_paths.contains(&entry.path)
-            && !(entry.kind == kit_core::ops::diff::DiffKind::Added
-                && (entry.path == ".kitignore" || entry.path == ".gitignore")
-                && !target.has_tracked_file_at(&entry.path))
-    }) {
-        return Err(pull_recovery_changes_message(&entry.path));
-    }
-    Ok(())
 }
 
 /// The refusal for a path the unfinished pull would overwrite.
 fn pull_recovery_changes_message(path: &str) -> String {
     format!(
         "pull recovery would overwrite local changes at '{path}'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    )
+}
+
+/// The refusal for an untracked path the unfinished pull would remove.
+fn pull_recovery_untracked_message(path: &str) -> String {
+    format!(
+        "pull recovery would remove untracked path '{path}'; move or remove it, then pull again"
     )
 }
 
@@ -449,18 +395,6 @@ fn write_pull_head(
         .encode(),
     )?;
     Ok(())
-}
-
-fn is_restore_temp(root: &Path, tracked: &kit_core::index::Index, path: &str) -> bool {
-    if tracked.tracks_path_or_descendant(path) {
-        return false;
-    }
-    let path = Path::new(path);
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    kit_core::ops::restore::is_restore_temp_name(name)
-        && fs::symlink_metadata(root.join(path)).is_ok_and(|meta| meta.is_file())
 }
 
 fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {

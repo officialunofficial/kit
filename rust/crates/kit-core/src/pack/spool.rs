@@ -13,7 +13,7 @@
 
 use super::window::WindowSource;
 use super::{
-    ENTRY_COUNT_OFFSET, HEADER_LEN, PackError, PackWriter, TRAILER_LEN, VERSION_OFFSET, hash,
+    EMPTY_PACK_LEN, ENTRY_COUNT_OFFSET, PackError, PackWriter, TRAILER_LEN, VERSION_OFFSET, hash,
     initial_header, note_hashed,
 };
 use crate::hash::Hash;
@@ -448,7 +448,7 @@ impl PackSpool {
         {
             return Err(PackError::UnexpectedEof);
         }
-        if self.written < (HEADER_LEN + TRAILER_LEN) as u64 {
+        if self.written < EMPTY_PACK_LEN as u64 {
             return Err(PackError::PackfileTooShort);
         }
         debug_assert_eq!(self.tail_len, TRAILER_LEN);

@@ -551,20 +551,11 @@ fn chunk_payload(
     })
 }
 
-fn varint_size(mut n: usize) -> usize {
-    let mut size = 1;
-    while n >= 128 {
-        n >>= 7;
-        size += 1;
-    }
-    size
-}
-
 /// Whether a KDSP container of `count` bundles whose framed bundles take
 /// `container_size` bytes fits the 64 MiB cap: the magic, the version, the
 /// commit id, the offset and the length, the count, then the bundles.
 fn span_container_fits(count: usize, container_size: usize) -> bool {
-    (4 + 1 + 32 + 8 + 8 + varint_size(count))
+    (4 + 1 + 32 + 8 + 8 + merkle::varint_size(count as u64))
         .checked_add(container_size)
         .is_some_and(|n| n <= MAX_BUNDLE_BYTES)
 }
@@ -650,7 +641,7 @@ pub fn build_range_proof_from<S: ObjectSource + ?Sized>(
         let payload = chunk_payload(&cb, inner_root, index, chunk_bytes)?;
         let bundle_size = encoded_disclosure_size(&commit_bytes, &steps, &payload)?;
         container_size = container_size
-            .checked_add(varint_size(bundle_size))
+            .checked_add(merkle::varint_size(bundle_size as u64))
             .and_then(|n| n.checked_add(bundle_size))
             .ok_or(RangeProofError::ProofTooLarge)?;
         if !span_container_fits(chunks.len() + 1, container_size) {
@@ -1285,9 +1276,15 @@ mod tests {
         for count in [2usize, 127, 128, 16_384] {
             let bundles = vec![&bundle[..]; count];
             let encoded = encode_span([1; 32], 2, 3, &bundles);
-            let framed: usize = bundles.iter().map(|b| varint_size(b.len()) + b.len()).sum();
+            let framed: usize = bundles
+                .iter()
+                .map(|b| merkle::varint_size(b.len() as u64) + b.len())
+                .sum();
             // The cap is the encoded length: it fits there and not one byte less.
-            assert_eq!(encoded.len(), 53 + varint_size(count) + framed);
+            assert_eq!(
+                encoded.len(),
+                53 + merkle::varint_size(count as u64) + framed
+            );
             let header = encoded.len() - framed;
             assert!(span_container_fits(count, MAX_BUNDLE_BYTES - header));
             assert!(!span_container_fits(count, MAX_BUNDLE_BYTES - header + 1));

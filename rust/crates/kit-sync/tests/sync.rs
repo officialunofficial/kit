@@ -2554,6 +2554,126 @@ fn pending_restore() -> (Remote, tempfile::TempDir, RepoLayout, Hash, Hash) {
     (remote, dir, layout, first, second)
 }
 
+/// The clean sweep keeps an ignore file by its name only in a directory the
+/// target keeps, so a pull refuses one the target's deletion of its
+/// directory would sweep.
+#[test]
+fn a_pull_refuses_an_untracked_ignore_file_in_a_directory_it_deletes() {
+    let remote = Remote::new();
+    let first = remote.publish_paths(
+        None,
+        &[
+            ("a.txt", EntryMode::Blob, b"one\n"),
+            ("old/f", EntryMode::Blob, b"f\n"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish_paths(Some(first), &[("a.txt", EntryMode::Blob, b"two\n")]);
+    std::fs::write(dir.path().join("old/.gitignore"), b"*.tmp\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("restore would remove untracked path 'old/.gitignore'"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("old/.gitignore")).unwrap(),
+        b"*.tmp\n"
+    );
+}
+
+/// Recovery reads the index as it is: one emptied after the interruption is
+/// staged work, not the target that HEAD would seed it with.
+#[test]
+fn recovery_refuses_an_emptied_index() {
+    let (remote, dir, layout, _, _) = pending_restore();
+    let mut index = kit_core::index::read_index(&layout).unwrap();
+    index.retain_entries(|_| false);
+    kit_core::index::write_index(&layout, &index).unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("pull recovery would overwrite staged changes; "),
+        "{message}"
+    );
+    assert!(layout.pull_head_file().exists());
+}
+
+/// A pull interrupted after HEAD moved from `before` to `target`, with the
+/// worktree and index still at `before`.
+fn pending_paths(
+    before: &[(&str, EntryMode, &[u8])],
+    target: &[(&str, EntryMode, &[u8])],
+) -> (Remote, tempfile::TempDir, RepoLayout) {
+    let remote = Remote::new();
+    let first = remote.publish_paths(None, before);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let second = remote.publish_paths(Some(first), target);
+    let layout = RepoLayout::single(dir.path());
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)));
+    (remote, dir, layout)
+}
+
+/// A file where the target or the tree from before the pull has a directory
+/// is local work, and recovery refuses to remove it.
+#[test]
+fn recovery_refuses_a_file_where_a_tree_has_a_directory() {
+    let a: (&str, EntryMode, &[u8]) = ("a.txt", EntryMode::Blob, b"a\n");
+    let y: (&str, EntryMode, &[u8]) = ("x/y", EntryMode::Blob, b"y\n");
+    for (before, target) in [(vec![a], vec![a, y]), (vec![a, y], vec![a])] {
+        let (remote, dir, layout) = pending_paths(&before, &target);
+        let x = dir.path().join("x");
+        if x.is_dir() {
+            std::fs::remove_dir_all(&x).unwrap();
+        }
+        std::fs::write(&x, b"mine\n").unwrap();
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        let Err(SyncError::RestoreSafety(message)) = result else {
+            panic!("expected a refusal, got {result:?}");
+        };
+        assert!(
+            message.starts_with("pull recovery would overwrite local changes at 'x'; "),
+            "{message}"
+        );
+        assert_eq!(std::fs::read(&x).unwrap(), b"mine\n");
+        assert!(layout.pull_head_file().exists());
+    }
+}
+
 #[test]
 fn recovery_preserves_new_untracked_files() {
     let (remote, dir, layout, _, _) = pending_restore();
@@ -3375,6 +3495,106 @@ fn the_restore_safety_messages_are_unchanged() {
     assert!(
         message.starts_with("unfinished pull cannot recover without a remote branch"),
         "{message}"
+    );
+}
+
+/// Each of the eight restore-safety refusals of a pull keeps its exact text. A
+/// downstream tells local work from other restore failures by these texts, so
+/// a reword would silently change what it reports.
+#[test]
+fn the_eight_restore_safety_refusals_keep_their_exact_text() {
+    fn refusal(result: Result<kit_sync::PullReport, SyncError>) -> String {
+        match result {
+            Err(SyncError::RestoreSafety(message)) => message,
+            other => panic!("expected a restore safety refusal, got {other:?}"),
+        }
+    }
+    let run = |dir: &Path, remote: &Remote| {
+        pull(
+            dir,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+    let unstage = |layout: &RepoLayout, path: &str| {
+        let mut index = kit_core::index::read_index(layout).unwrap();
+        index.retain_entries(|entry| entry.path != path);
+        kit_core::index::write_index(layout, &index).unwrap();
+    };
+    // A clone of `a.txt` and `c.txt` whose remote then moved `a.txt` on.
+    let behind = || {
+        let remote = Remote::new();
+        let first = remote.publish(None, &[("a.txt", b"one\n"), ("c.txt", b"same\n")], true);
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        remote.publish(
+            Some(first),
+            &[("a.txt", b"two\n"), ("c.txt", b"same\n")],
+            true,
+        );
+        (remote, dir)
+    };
+
+    let (remote, dir) = behind();
+    unstage(&RepoLayout::single(dir.path()), "a.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite staged changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("a.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite local changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish(Some(first), &[("a.txt", b"one\n"), ("b.txt", b"b\n")], true);
+    std::fs::write(dir.path().join("b.txt"), b"mine\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite untracked path 'b.txt'; move or remove it first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would remove untracked path 'notes.txt'; move or remove it first"
+    );
+
+    let (remote, dir, layout, _, _) = pending_restore();
+    unstage(&layout, "c.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite local changes at 'c.txt'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would remove untracked path 'notes.txt'; move or remove it, then pull again"
+    );
+
+    let (_, dir, layout, _, _) = pending_restore();
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &Remote::new())),
+        "unfinished pull cannot recover without a remote branch; restore the remote branch, then pull again"
     );
 }
 

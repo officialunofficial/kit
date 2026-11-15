@@ -73,7 +73,6 @@ mod spool;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
-use crate::protocol::PACK_BODY_LIMIT;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 pub use file_read::{
     MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
@@ -184,6 +183,10 @@ pub const TRAILER_LEN: usize = 32;
 
 /// Header is `[4B magic][4B version][4B entry_count]`.
 pub const HEADER_LEN: usize = 4 + 4 + 4;
+
+/// The length of a pack of no entries: its header and its trailer, the
+/// overhead every pack carries beside its entries.
+pub(crate) const EMPTY_PACK_LEN: usize = HEADER_LEN + TRAILER_LEN;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
 /// Byte offset of the 4-byte `version` field within the header —
@@ -224,8 +227,11 @@ const MIN_ZSTD_FRAME_LEN: usize = 9;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ReadLimit {
-    /// The body limit of every transport, header and trailer included.
-    BodyLimit,
+    /// The most bytes the pack may take, header and trailer included: the
+    /// limit its writer was given, the body limit of every transport
+    /// (`kit_core::protocol::PACK_BODY_LIMIT`) unless a remote advertises a
+    /// lower one.
+    BodyLimit(u64),
     /// The decoded-byte budget of [`DecodeLimits::default`] with the delta
     /// bases a reader holds at once.
     DecodedBytes,
@@ -236,7 +242,7 @@ pub enum ReadLimit {
 impl std::fmt::Display for ReadLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BodyLimit => write!(f, "the {PACK_BODY_LIMIT}-byte body limit"),
+            Self::BodyLimit(limit) => write!(f, "the {limit}-byte body limit"),
             Self::DecodedBytes => write!(
                 f,
                 "the {}-byte decoded-byte budget, delta bases held at once included",
@@ -530,15 +536,6 @@ fn delta_fits_within(stream: &[u8], budget: u64) -> bool {
     delta_decoded_len(stream, true).saturating_add(delta_base_len(stream)) <= budget
 }
 
-/// The most bytes one sealed pack holds, header and trailer included: the
-/// limit the remote advertises, never above [`PACK_BODY_LIMIT`]. Every fetch
-/// refuses a pack over that, so a writer applies it even when the remote
-/// advertises no limit.
-#[must_use]
-pub fn serialized_limit(advertised: Option<u64>) -> u64 {
-    advertised.map_or(PACK_BODY_LIMIT, |limit| limit.min(PACK_BODY_LIMIT))
-}
-
 /// An upper bound on the length of a pack of `entries` entries whose wire
 /// payloads total `payload` bytes: the payloads, the frame of each entry, the
 /// header and the trailer.
@@ -546,7 +543,7 @@ pub fn serialized_limit(advertised: Option<u64>) -> u64 {
 pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
     payload
         .saturating_add((entries as u64).saturating_mul(ENTRY_FRAME_LEN as u64))
-        .saturating_add((HEADER_LEN + TRAILER_LEN) as u64)
+        .saturating_add(EMPTY_PACK_LEN as u64)
 }
 
 /// What a pack under construction holds, as far as the limits a reader
@@ -615,15 +612,17 @@ impl PackFill {
         }
     }
 
-    /// Would adding `add` exceed `payload_cap`, pass the serialized limit or
-    /// the decoded budget of a reader with [`DecodeLimits::default`], or does
-    /// the pack already hold `max_entries` entries? Never true for an empty pack: a single entry
+    /// Would adding `add` exceed `payload_cap`, make the pack longer than
+    /// `max_pack_bytes` or pass the decoded budget of a reader with
+    /// [`DecodeLimits::default`], or does the pack already hold `max_entries`
+    /// entries? Never true for an empty pack: a single entry
     /// over the cap (a blob between the cap and [`MAX_RAW_OBJECT_SIZE`], or a
     /// test-injected tiny cap) lands alone in its own pack rather than looping
     /// forever.
     ///
-    /// The serialized limit is `max_pack_bytes`, never above
-    /// [`PACK_BODY_LIMIT`], see [`serialized_limit`]. The decoded budget is
+    /// `max_pack_bytes` bounds the whole pack, header and trailer included. It
+    /// is a transport's limit, which the caller resolves, as
+    /// `kit_core::protocol::max_pack_bytes` does. The decoded budget is
     /// [`DecodeLimits::DEFAULT_MAX_DECODED_BYTES`], the smallest any kit reader
     /// applies. A reader charges it for the bytes of every compressed entry and
     /// delta result, and for each delta base while that base is needed. A
@@ -632,13 +631,15 @@ impl PackFill {
     /// comes back after other deltas is held across them, so the fill adds
     /// its length to the bases held (`held`) and counts the longest base
     /// beside those, whatever the order of the deltas.
-    /// `max_entries` is at most [`MAX_WRITE_ENTRIES`].
+    /// A pack holds at most `max_entries` entries, and never more than
+    /// [`MAX_WRITE_ENTRIES`], which this check applies itself: a caller with
+    /// no bound of its own passes `usize::MAX`.
     #[must_use]
     pub fn seals_before(
         self,
         add: Incoming,
         payload_cap: u64,
-        max_pack_bytes: Option<u64>,
+        max_pack_bytes: u64,
         max_entries: usize,
     ) -> bool {
         self.seals_within(
@@ -656,7 +657,7 @@ impl PackFill {
         self,
         add: Incoming,
         payload_cap: u64,
-        max_pack_bytes: Option<u64>,
+        max_pack_bytes: u64,
         max_entries: usize,
         decoded_budget: u64,
     ) -> bool {
@@ -664,8 +665,7 @@ impl PackFill {
         self.entries > 0
             && (self.entries >= max_entries.min(MAX_WRITE_ENTRIES)
                 || next_payload > payload_cap
-                || serialized_bound(next_payload, self.entries + 1)
-                    > serialized_limit(max_pack_bytes)
+                || serialized_bound(next_payload, self.entries + 1) > max_pack_bytes
                 || self
                     .decoded
                     .saturating_add(add.decoded)
@@ -704,8 +704,9 @@ impl PackFill {
 /// Would a writer seal a finished pack of `len` bytes that holds
 /// `entries` entries, decodes to `decoded` bytes and holds `resident_bases`
 /// bytes of delta bases at its peak ([`PackWriter::peak_resident_bases`])? The
-/// same limits as [`PackFill::seals_before`], for a writer that cannot seal
-/// early because it rewrites a pack it was given.
+/// same limits as [`PackFill::seals_before`], with `max_pack_bytes` the
+/// longest pack allowed, for a writer that cannot seal early because it
+/// rewrites a pack it was given.
 ///
 /// # Errors
 /// [`PackError::OverReadLimit`] naming the first limit the pack passes.
@@ -714,9 +715,10 @@ pub(crate) fn within_read_limits(
     decoded: u64,
     resident_bases: u64,
     entries: usize,
+    max_pack_bytes: u64,
 ) -> Result<(), PackError> {
-    let over = if len as u64 > PACK_BODY_LIMIT {
-        ReadLimit::BodyLimit
+    let over = if len as u64 > max_pack_bytes {
+        ReadLimit::BodyLimit(max_pack_bytes)
     } else if decoded.saturating_add(resident_bases) > DecodeLimits::DEFAULT_MAX_DECODED_BYTES {
         ReadLimit::DecodedBytes
     } else if entries > MAX_WRITE_ENTRIES {
@@ -1760,7 +1762,7 @@ fn zstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
 /// the preceding bounds checks; they `expect`-panic only if slice-bounds
 /// elision is wrong.
 pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     if &pack_bytes[..4] != MAGIC.as_slice() {
@@ -3122,7 +3124,7 @@ fn stage_decoded_raw<'b>(
 /// reorders, or changes behavior.
 fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackError> {
     // 1. Length sanity: must fit header + trailer at minimum.
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     // 2. Magic.
@@ -3590,6 +3592,7 @@ mod zstd_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::PACK_BODY_LIMIT;
     use tempfile::TempDir;
 
     /// Replay `entries` as one window and commit it.
@@ -4762,7 +4765,7 @@ mod tests {
     }
 
     fn seals(fill: PackFill, add: Incoming) -> bool {
-        fill.seals_before(add, u64::MAX, None, usize::MAX)
+        fill.seals_before(add, u64::MAX, PACK_BODY_LIMIT, usize::MAX)
     }
 
     #[test]
@@ -5011,7 +5014,7 @@ mod tests {
                 if PackFill::of(&w).seals_within(
                     entry.incoming(&w),
                     u64::MAX,
-                    None,
+                    PACK_BODY_LIMIT,
                     usize::MAX,
                     BUDGET,
                 ) {
@@ -5055,49 +5058,38 @@ mod tests {
             )
         };
         // An empty pack takes any entry.
-        assert!(!seals(fill(0, 0), u64::MAX, 1, Some(1), 1));
+        assert!(!seals(fill(0, 0), u64::MAX, 1, 1, 1));
         // Entry bound: the caller's, and never above the writer's.
-        assert!(seals(fill(3, 0), 0, u64::MAX, None, 3));
-        assert!(!seals(fill(2, 0), 0, u64::MAX, None, 3));
+        let body = PACK_BODY_LIMIT;
+        assert!(seals(fill(3, 0), 0, u64::MAX, body, 3));
+        assert!(!seals(fill(2, 0), 0, u64::MAX, body, 3));
         assert!(!seals(
             fill(MAX_WRITE_ENTRIES - 1, 0),
             0,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
         assert!(seals(
             fill(MAX_WRITE_ENTRIES, 0),
             0,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
         // Payload cap.
-        assert!(!seals(fill(1, 10), 5, 15, None, usize::MAX));
-        assert!(seals(fill(1, 10), 6, 15, None, usize::MAX));
-        // Serialized limit: the advertised one, or the body limit without one.
+        assert!(!seals(fill(1, 10), 5, 15, body, usize::MAX));
+        assert!(seals(fill(1, 10), 6, 15, body, usize::MAX));
+        // The pack's length, header, trailer and frames included.
         let room = serialized_bound(0, 2);
-        assert!(!seals(
-            fill(1, 10),
-            5,
-            u64::MAX,
-            Some(room + 15),
-            usize::MAX
-        ));
-        assert!(seals(fill(1, 10), 6, u64::MAX, Some(room + 15), usize::MAX));
-        assert!(!seals(
-            fill(1, 0),
-            PACK_BODY_LIMIT - room,
-            u64::MAX,
-            None,
-            usize::MAX
-        ));
+        assert!(!seals(fill(1, 10), 5, u64::MAX, room + 15, usize::MAX));
+        assert!(seals(fill(1, 10), 6, u64::MAX, room + 15, usize::MAX));
+        assert!(!seals(fill(1, 0), body - room, u64::MAX, body, usize::MAX));
         assert!(seals(
             fill(1, 0),
-            PACK_BODY_LIMIT - room + 1,
+            body - room + 1,
             u64::MAX,
-            None,
+            body,
             usize::MAX
         ));
     }
@@ -5177,12 +5169,17 @@ mod tests {
     #[test]
     fn a_finished_pack_is_within_the_read_limits_up_to_each_limit() {
         let budget = DecodeLimits::default().max_decoded_bytes;
-        let over =
-            |len, decoded, bases, entries| match within_read_limits(len, decoded, bases, entries) {
-                Ok(()) => None,
-                Err(PackError::OverReadLimit(limit)) => Some(limit),
-                Err(other) => panic!("{other}"),
-            };
+        let over = |len, decoded, bases, entries| match within_read_limits(
+            len,
+            decoded,
+            bases,
+            entries,
+            PACK_BODY_LIMIT,
+        ) {
+            Ok(()) => None,
+            Err(PackError::OverReadLimit(limit)) => Some(limit),
+            Err(other) => panic!("{other}"),
+        };
         assert_eq!(over(100, budget, 0, MAX_WRITE_ENTRIES), None);
         assert_eq!(over(100, budget + 1, 0, 1), Some(ReadLimit::DecodedBytes));
         // The bases a reader holds count beside the decoded bytes.
@@ -5202,11 +5199,14 @@ mod tests {
         {
             let limit = usize::try_from(PACK_BODY_LIMIT).unwrap();
             assert_eq!(over(limit, 0, 0, 1), None);
-            assert_eq!(over(limit + 1, 0, 0, 1), Some(ReadLimit::BodyLimit));
+            assert_eq!(
+                over(limit + 1, 0, 0, 1),
+                Some(ReadLimit::BodyLimit(PACK_BODY_LIMIT))
+            );
         }
         // Each error names its limit.
         for (limit, text) in [
-            (ReadLimit::BodyLimit, "body limit"),
+            (ReadLimit::BodyLimit(7), "the 7-byte body limit"),
             (ReadLimit::DecodedBytes, "decoded-byte budget"),
             (ReadLimit::Entries, "entries"),
         ] {
@@ -5237,17 +5237,10 @@ mod tests {
         let entries = w.entry_count();
         let decoded = w.total_decoded();
         assert!(matches!(
-            within_read_limits(100, decoded, bound, entries),
+            within_read_limits(100, decoded, bound, entries, PACK_BODY_LIMIT),
             Err(PackError::OverReadLimit(ReadLimit::DecodedBytes))
         ));
-        assert!(within_read_limits(100, decoded, peak, entries).is_ok());
-    }
-
-    #[test]
-    fn the_serialized_limit_is_the_advertised_one_never_above_the_body_limit() {
-        assert_eq!(serialized_limit(None), PACK_BODY_LIMIT);
-        assert_eq!(serialized_limit(Some(7)), 7);
-        assert_eq!(serialized_limit(Some(u64::MAX)), PACK_BODY_LIMIT);
+        assert!(within_read_limits(100, decoded, peak, entries, PACK_BODY_LIMIT).is_ok());
     }
 
     #[test]

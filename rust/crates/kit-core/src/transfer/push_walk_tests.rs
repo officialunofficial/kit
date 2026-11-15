@@ -933,7 +933,6 @@ fn a_parent_that_is_not_a_commit_is_its_own_root() {
         &s,
         c,
         &HeldCommits::default(),
-        &HashSet::new(),
         WalkLimits::default(),
         Some(&mut |root, id| {
             brought.push((*root, *id));
@@ -946,18 +945,11 @@ fn a_parent_that_is_not_a_commit_is_its_own_root() {
     assert!(brought.contains(&(second, second)));
 }
 
-fn one(s: &ObjectStore, id: Hash, shallow: &[Hash]) -> BTreeSet<Hash> {
-    let shallow: HashSet<Hash> = shallow.iter().copied().collect();
-    PushWalk::run_one(
-        s,
-        id,
-        &HeldCommits::default(),
-        &shallow,
-        WalkLimits::default(),
-    )
-    .unwrap()
-    .objects()
-    .clone()
+fn one(s: &ObjectStore, id: Hash) -> BTreeSet<Hash> {
+    PushWalk::run_one(s, id, &HeldCommits::default(), WalkLimits::default())
+        .unwrap()
+        .objects()
+        .clone()
 }
 
 #[test]
@@ -973,14 +965,12 @@ fn one_commit_is_sized_on_its_own_and_an_object_two_commits_bring_counts_for_bot
     // The same tree as the first commit, so only the commit itself differs.
     let c3 = commit(&s, t3, &[c2], "333");
     // Against its parent alone, the second commit brings its tree and one blob.
-    assert_eq!(one(&s, c2, &[]), BTreeSet::from([c2, t2, other]));
+    assert_eq!(one(&s, c2), BTreeSet::from([c2, t2, other]));
     // The third brings the returning blob again, though the first brought it.
-    assert_eq!(one(&s, c3, &[]), BTreeSet::from([c3, t3, back]));
-    assert!(one(&s, c1, &[]).contains(&back));
-    // A shallow commit has no parent to compare with.
-    assert_eq!(one(&s, c3, &[c3]), BTreeSet::from([c3, t3, back, first]));
+    assert_eq!(one(&s, c3), BTreeSet::from([c3, t3, back]));
+    assert!(one(&s, c1).contains(&back));
     // An object that is not a commit brings its closure.
-    assert_eq!(one(&s, t3, &[]), BTreeSet::from([t3, back, first]));
+    assert_eq!(one(&s, t3), BTreeSet::from([t3, back, first]));
 }
 
 #[test]
@@ -1173,7 +1163,6 @@ fn an_entry_equal_to_any_parents_entry_is_skipped() {
         &s,
         m,
         &HeldCommits::collect(&s, Some(p1), 100).unwrap(),
-        &HashSet::new(),
         WalkLimits::default(),
         None,
     )
@@ -1242,7 +1231,7 @@ fn a_tree_equal_to_a_parents_tree_keeps_only_the_commit() {
     let c1 = commit(&s, t, &[], "1");
     let c2 = commit(&s, t, &[c1], "22");
     let held = HeldCommits::collect(&s, Some(c1), 100).unwrap();
-    let walk = PushWalk::run(&s, c2, &held, &HashSet::new(), WalkLimits::default(), None).unwrap();
+    let walk = PushWalk::run(&s, c2, &held, WalkLimits::default(), None).unwrap();
     assert_eq!(walk.objects(), &BTreeSet::from([c2]));
     assert!(walk.manifests().is_empty());
 }
@@ -1261,8 +1250,7 @@ fn a_wide_tree_keeps_only_the_entries_that_changed() {
         let t = tree_of(&s, &after);
         let c2 = commit(&s, t, &[c1], &format!("edit {index}"));
         let held = HeldCommits::collect(&s, Some(c1), 100).unwrap();
-        let walk =
-            PushWalk::run(&s, c2, &held, &HashSet::new(), WalkLimits::default(), None).unwrap();
+        let walk = PushWalk::run(&s, c2, &held, WalkLimits::default(), None).unwrap();
         assert_eq!(walk.objects(), &BTreeSet::from([c2, t, edited]), "{index}");
     }
 }
@@ -1278,15 +1266,7 @@ fn a_manifest_is_paired_with_the_manifest_at_its_path_in_a_parent() {
     let t = tree_of(&s, &[("f", m2)]);
     let merge = commit(&s, t, &[p1, p2], "merge");
     let held = HeldCommits::collect(&s, Some(p1), 100).unwrap();
-    let walk = PushWalk::run(
-        &s,
-        merge,
-        &held,
-        &HashSet::new(),
-        WalkLimits::default(),
-        None,
-    )
-    .unwrap();
+    let walk = PushWalk::run(&s, merge, &held, WalkLimits::default(), None).unwrap();
     let paired: Vec<_> = walk
         .manifests()
         .iter()
@@ -1348,7 +1328,6 @@ fn new_commits_are_walked_parents_first_and_once() {
         &s,
         merge,
         &HeldCommits::default(),
-        &HashSet::new(),
         WalkLimits::default(),
         Some(&mut |commit, id| {
             if commit == id {
@@ -1362,36 +1341,6 @@ fn new_commits_are_walked_parents_first_and_once() {
     let at = |h: &Hash| brought.iter().position(|x| x == h).unwrap();
     assert!(at(&root) < at(&left) && at(&root) < at(&right));
     assert!(at(&left) < at(&merge) && at(&right) < at(&merge));
-}
-
-#[test]
-fn a_shallow_commit_is_a_root() {
-    let (_d, s) = store();
-    let t = tree_of(&s, &[("f", put_blob(&s, b"x".to_vec()))]);
-    let old = commit(&s, t, &[], "old");
-    let boundary = commit(&s, t, &[old], "boundary");
-    remove(&s, &old);
-    let walk = PushWalk::run(
-        &s,
-        boundary,
-        &HeldCommits::default(),
-        &HashSet::from([boundary]),
-        WalkLimits::default(),
-        None,
-    )
-    .unwrap();
-    assert!(walk.objects().contains(&boundary));
-    assert!(matches!(
-        PushWalk::run(
-            &s,
-            boundary,
-            &HeldCommits::default(),
-            &HashSet::new(),
-            WalkLimits::default(),
-            None,
-        ),
-        Err(StoreError::ObjectNotFound(_))
-    ));
 }
 
 #[test]
