@@ -6,6 +6,8 @@
 //! order. The ~5s lock-timeout test lives in the serial `#[ignore]`
 //! lane per the test-suite policy.
 
+#![allow(clippy::unwrap_used)] // unwrap is the assertion in tests
+
 mod common;
 
 use std::path::PathBuf;
@@ -82,6 +84,105 @@ fn gc_keeps_sibling_in_progress_merge_state() {
         String::from_utf8_lossy(&out.stderr)
     );
     common::check_invariants(repo.path(), "after gc + sibling merge").unwrap();
+}
+
+fn exists_in(repo: &Repo, hex: &str) -> bool {
+    repo.run(&["cat", hex]).status.success()
+}
+
+/// A blob nothing references, stored by `kit hash`. Returns its id.
+fn orphan_blob(repo: &Repo, name: &str, body: &[u8]) -> String {
+    repo.write(name, body);
+    let out = repo.ok(&["hash", name]);
+    std::fs::remove_file(repo.path().join(name)).unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// What a linked tree alone reaches survives gc: a commit only its detached
+/// HEAD names and a blob only its index names. Garbage goes.
+#[test]
+fn gc_keeps_what_only_a_linked_trees_head_and_index_reach() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "seed");
+    let (_host, tree, out) = wt_add(&repo, &["HEAD"], "detached");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A commit on the linked tree's detached HEAD: no branch names it.
+    std::fs::write(tree.join("head.txt"), b"head only\n").unwrap();
+    assert!(
+        kit(&tree, repo.xdg(), &["add", "head.txt"])
+            .status
+            .success()
+    );
+    let out = kit(&tree, repo.xdg(), &["commit", "-m", "linked head"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let head = std::fs::read_to_string(repo.kit_dir().join("worktrees/detached/HEAD"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(head.len(), 64, "a detached HEAD holds a commit id: {head}");
+
+    // A blob staged in the linked tree and committed nowhere.
+    std::fs::write(tree.join("staged.txt"), b"index only\n").unwrap();
+    assert!(
+        kit(&tree, repo.xdg(), &["add", "staged.txt"])
+            .status
+            .success()
+    );
+    let staged = String::from_utf8(kit(&tree, repo.xdg(), &["hash", "staged.txt"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let garbage = orphan_blob(&repo, "garbage.bin", b"reachable from nothing\n");
+    assert!(exists_in(&repo, &head) && exists_in(&repo, &staged) && exists_in(&repo, &garbage));
+
+    repo.ok(&["gc", "--grace-secs", "0"]);
+
+    assert!(exists_in(&repo, &head), "the linked HEAD's commit survives");
+    assert!(
+        exists_in(&repo, &staged),
+        "the linked index's blob survives"
+    );
+    assert!(
+        !exists_in(&repo, &garbage),
+        "unreachable garbage is collected"
+    );
+    common::check_invariants(repo.path(), "after gc with a linked tree").unwrap();
+}
+
+/// A linked tree whose state cannot be read stops gc before it removes
+/// anything, and the message names that tree.
+#[test]
+fn gc_refuses_and_names_a_linked_tree_it_cannot_read() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "seed");
+    let (_host, tree, out) = wt_add(&repo, &[], "broken");
+    assert!(out.status.success());
+    let garbage = orphan_blob(&repo, "garbage.bin", b"kept while gc refuses\n");
+
+    std::fs::write(
+        repo.kit_dir().join("worktrees/broken/index"),
+        b"not an index",
+    )
+    .unwrap();
+    let out = repo.run(&["gc", "--grace-secs", "0"]);
+
+    assert!(!out.status.success(), "gc must refuse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&tree.display().to_string()),
+        "the message names the tree: {stderr}"
+    );
+    assert!(exists_in(&repo, &garbage), "nothing was removed");
 }
 
 #[test]

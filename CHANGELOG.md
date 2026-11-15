@@ -7,6 +7,22 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A clone, pull or checkout waits out the racy window (at most about 10 ms)
+  before it writes the index, so the first `kit status` afterwards does not
+  hash the files it just wrote again. The first `status` after a clone of a
+  16 GiB file took 14 s, and 97 s or more with a cold page cache, when the
+  index landed within 10 ms of the newest file.
+- `kit gc` now names the linked worktree whose state it cannot read when it
+  refuses to run.
+
+### Changed
+
+- On Linux with glibc, `kit` fixes glibc's malloc thresholds at 128 KiB when
+  it starts. The peak memory of a clone no longer grows with the size of the
+  file: a 64 GiB clone peaked at 431 MB and now peaks at about 349 MB.
+
 ## [0.8.0] - 2026-11-14
 
 kit 0.8.0 changes the repository format. A chunked file's id now commits the

@@ -828,9 +828,11 @@ impl ConnectTransport {
     ) -> TransportResult<Vec<Ref>> {
         self.with_client_source(|source| source.list_refs_with_page_limit(prefix, max_pages))
     }
-    /// Poll a ticket-consuming advance until it commits or `deadline` expires.
-    /// Callers do not pass the earliest consumed ticket expiry here yet. Until then,
-    /// the maximum seven-day ticket lifetime bounds calls with no deadline.
+    /// Poll an advance that consumes no upload ticket until it commits or
+    /// `deadline` expires. With no deadline the maximum seven-day ticket
+    /// lifetime bounds the call. An advance that does consume tickets,
+    /// `advance_refs_committing`, is bounded by the earliest expiry among
+    /// them instead.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn advance_refs_with_deadline(

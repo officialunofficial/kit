@@ -324,6 +324,43 @@ fn clone_materialises_the_branch_worktree_and_tracking_ref() {
     assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"hello\n");
 }
 
+/// What the first `status` after a command hashes again, and what it reports.
+fn status_after(target: &Path) -> (usize, usize) {
+    let layout = RepoLayout::single(target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    let head_tree = kit_sync::worktree::current_head_tree(&layout, &store).unwrap();
+    let index = kit_core::index::read_index(&layout).unwrap();
+    let (entries, hashed) =
+        kit_core::ops::diff::status_diff_observed(&store, head_tree.as_ref(), target, Some(&index))
+            .unwrap();
+    (hashed.len(), entries.len())
+}
+
+#[test]
+fn a_clone_leaves_a_stat_cache_the_first_status_trusts() {
+    let remote = Remote::new();
+    remote.publish(
+        None,
+        &[("a.txt", &[b'a'; 4096]), ("b.txt", &[b'b'; 4096])],
+        true,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The index used to land a few milliseconds after the newest file, inside
+    // the racy window, in most runs but not all of them.
+    for round in 0..20 {
+        let target = dir.path().join(format!("work{round}"));
+        clone_into(&remote, &target);
+
+        assert_eq!(status_after(&target), (0, 0), "round {round}");
+
+        // An edit made after the clone returned is still found.
+        std::fs::write(target.join("a.txt"), [b'x'; 4096]).unwrap();
+        // The changed file is hashed and reported; only a file whose content
+        // matches the index is recorded as an observation.
+        assert_eq!(status_after(&target), (0, 1), "round {round}");
+    }
+}
+
 #[test]
 fn clone_refuses_values_that_would_inject_config_lines() {
     let dir = tempfile::tempdir().unwrap();

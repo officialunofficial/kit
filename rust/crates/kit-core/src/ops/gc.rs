@@ -133,6 +133,16 @@ pub enum GcRootsError {
     /// a partial view would let a sibling's staged work be pruned.
     #[error("worktree registry: {0}")]
     Worktrees(#[from] crate::layout::DiscoverError),
+    /// A linked worktree's state could not be read. Collection stops: a
+    /// partial view of its roots could prune what it still needs.
+    #[error("worktree {}: {source}", path.display())]
+    Worktree {
+        /// Root of the linked worktree whose state failed.
+        path: PathBuf,
+        /// The failure.
+        #[source]
+        source: Box<GcRootsError>,
+    },
 }
 
 /// Collect the complete set of GC retention roots for the repo at
@@ -189,8 +199,22 @@ fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoo
     // pinned until `worktree prune` explicitly reaps it. Fail closed:
     // a registry error or an unreadable sibling state aborts
     // collection entirely.
-    for tree in crate::layout::all_state_layouts(layout)? {
-        collect_tree_roots(&tree, &add, &mut roots, &mut soft)?;
+    // The first layout is the main tree; the rest are linked, and name
+    // themselves in a failure.
+    for (i, tree) in crate::layout::all_state_layouts(layout)?
+        .into_iter()
+        .enumerate()
+    {
+        collect_tree_roots(&tree, &add, &mut roots, &mut soft).map_err(|e| {
+            if i == 0 {
+                e
+            } else {
+                GcRootsError::Worktree {
+                    path: tree.worktree_root().to_path_buf(),
+                    source: Box::new(e),
+                }
+            }
+        })?;
     }
 
     // Attested commits — pinned so an attestation never dangles.
