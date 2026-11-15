@@ -23,9 +23,10 @@ Public Rust APIs that changed are marked **Breaking** below.
 
 ### Security
 
-- The `kit+file://` transport opens its repository lock and stripe lock files
-  without following a link. A link planted at a lock path fails the write and
-  leaves its target as it was. The files were opened through a link before.
+- The `kit+file://` transport opens its repository lock file, and the new
+  stripe lock files, without following a link. A link planted at a lock path
+  fails the write and leaves its target as it was. The repository lock was
+  opened through a link before.
 - File-transport writes never follow or truncate an existing temporary file,
   and do not leave one behind. A write creates its temporary file exclusively
   and takes the next name when one is taken, so a link planted at a temporary
@@ -71,8 +72,8 @@ Public Rust APIs that changed are marked **Breaking** below.
   and their tip objects as that fetch left them, makes no other request.
   `FetchReport::remote_unchanged` reports it. A fetch writes its record only
   when each ref it published still holds its tip. `Transport::repo_cursor` and
-  `RemoteSource::repo_cursor` return an `Option<RepoCursor>` of at most
-  `REPO_CURSOR_MAX_LEN` (64) bytes, and both default to `None`. The memory
+  `RemoteSource::repo_cursor` return an optional `RepoCursor` of at most
+  `REPO_CURSOR_MAX_LEN` (64) bytes, and both return `Ok(None)` by default. The memory
   transport offers a cursor. The file transport offers one on Linux: it keeps a write count in
   each stripe lock file and also reads the times of the ref directories, so
   that a write by kit 0.7.3 or earlier, which keeps no count, changes the
@@ -310,8 +311,9 @@ Public Rust APIs that changed are marked **Breaking** below.
   length against its span only when the caller answers `Blob(len)`. A
   manifest with a chunk answered `Yes` is reported corrupt, so a caller with
   no length for a known chunk fails closed. The walk also holds a known blob
-  to the types that the edge into it allows: a directory entry, the tree of a
-  commit or the target of a tag whose type is not a blob, when it names an id
+  to the types that the edge into it allows: a directory entry of mode `Tree`, the
+  tree of a commit or the target of a tag whose type is not a blob, when it
+  names an id
   answered `Known::Blob`, is reported corrupt, as it is for a blob the walk
   reads.
 - **Breaking, kit-wasm:** `verify_chunk` takes `start` and `end` after the
@@ -364,7 +366,7 @@ Public Rust APIs that changed are marked **Breaking** below.
   than the ticket allowance. The sync client takes the value from
   `data_pack_budget`. The unticketed fallback of six is gone, and
   `plan_push_steps` with no ticket allowance returns one step. Code that builds
-  a `Limits` with a struct literal adds the field or ends the literal with
+  a `kit_client::Limits` with a struct literal adds the field or ends the literal with
   `..Limits::default()`. The field `max_tickets_per_advance` is also public on
   `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and
   `GetServerInfoResponseView`, so a struct literal that names every field
@@ -436,8 +438,8 @@ Public Rust APIs that changed are marked **Breaking** below.
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
   `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from its header fields
   and its entries, one at a time or as the raw entry bytes of a manifest, so a
-  caller need not decode the manifest. `ChunkedIdFold::new` takes the chunk
-  count and returns a `Result`, `push` takes the chunk and its end,
+  caller need not decode the manifest. `ChunkedIdFold::new` takes the header
+  fields (total size, chunk size and chunk count) and returns a `Result`, `push` takes the chunk and its end,
   `push_entries` takes raw entry bytes, and `finish` returns the id. A partial
   entry is `KitError::ChunkedBlobLength`. `serialize::check_chunked_header`
   takes the total size and the chunk count and checks the header first, with
@@ -726,7 +728,7 @@ Public Rust APIs that changed are marked **Breaking** below.
   full closure of the tip again and every clone downloaded it again, and a
   chain on any other transport grew by one node with each push. The node
   holds everything the chain held, so every transport and every head
-  condition allows it. A node lists at most 4,096 packs
+  condition allows it. A node lists at most 4,096 packs,
   131,080 bytes: a chain that holds more keeps appending. The limit is the
   public constant `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS`. A reader
   accepts the node as before. A fresh clone downloads every pack of the branch.
