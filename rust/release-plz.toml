@@ -3,8 +3,8 @@
 #
 # release-plz does not publish, tag or create a GitHub release. A maintainer
 # cuts the signed `vX.Y.Z` tag by hand, because release.yml verifies that the
-# tag is annotated and GPG-signed by an allowlisted fingerprint. A maintainer
-# then runs `cargo publish --workspace --locked` from that tag. See
+# tag is annotated and GPG-signed by an allowlisted fingerprint. The tag then
+# runs release.yml, whose `publish-crates` job publishes the crates. See
 # docs/RELEASE.md.
 
 [workspace]
