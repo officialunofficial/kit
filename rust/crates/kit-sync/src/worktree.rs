@@ -15,7 +15,9 @@ use kit_core::index::{EntryStatus, Index, IndexEntry};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, Object};
 use kit_core::ops::diff::{DiffEntry, DiffKind, diff_trees};
-use kit_core::ops::restore::{RestoreOptions, matches_sparse, restore_tree_to_worktree_observed};
+use kit_core::ops::restore::{
+    RestoreOptions, matches_sparse, nested_repository, restore_tree_to_worktree_observed,
+};
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -374,6 +376,24 @@ pub(crate) fn check_restore_safe(
             })
     }) {
         return Err((expected.refusals.overwrite_untracked)(path));
+    }
+    // A target path is a file or a symlink: the diff lists no directories. One
+    // written where the worktree has a directory replaces the directory,
+    // tracked or not. The walk above leaves out `.kit` and `.git`, so a nested
+    // repository in it is refused here. An untracked path, and so a symlink, on
+    // the way to a written path was refused above.
+    for path in &target_writes {
+        let dir = root.join(path);
+        if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if let Some(entry) =
+            nested_repository(&dir).map_err(|e| format!("check untracked paths: {e}"))?
+        {
+            return Err((expected.refusals.overwrite_untracked)(&format!(
+                "{path}/{entry}"
+            )));
+        }
     }
 
     if options.clean

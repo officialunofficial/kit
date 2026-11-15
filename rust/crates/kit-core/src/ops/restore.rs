@@ -4,7 +4,8 @@
 //! directory: writes blobs as files, recurses into subtrees as
 //! directories, creates symlinks for symlink entries, and (when
 //! `clean=true`) deletes anything in the target dir that is not in the
-//! tree (preserving `.kit/` and `.git/`).
+//! tree (preserving `.kit/` and `.git/`, and leaving a directory the tree
+//! does not list whole when it holds a nested repository).
 //!
 //! ### Symlink invariant
 //!
@@ -97,6 +98,13 @@ pub enum RestoreError {
     /// [`restore_tree_to_worktree_with`].
     #[error("clean restore would leave untracked path '{0}' in a directory it does not change")]
     UnsweptPath(String),
+    /// The restore writes a file or symlink where the worktree holds a
+    /// directory with a nested repository in it, at any depth. The path is
+    /// the repository's `.kit` or `.git` entry, relative to the restore
+    /// root. The restore refuses rather than remove the repository; a
+    /// caller's safety gate refuses the same case before the restore starts.
+    #[error("restore would remove untracked path '{0}'; move or remove it first")]
+    NestedRepository(String),
 }
 
 /// Result alias.
@@ -114,7 +122,8 @@ pub struct SparsePattern {
 #[derive(Debug, Clone)]
 pub struct RestoreOptions {
     /// If `true`, delete anything in the target dir that is not in the
-    /// tree (preserving `.kit/` and `.git/`). Default `true`.
+    /// tree (preserving `.kit/` and `.git/`, and every directory the tree
+    /// does not list that holds a `.kit` or `.git` entry). Default `true`.
     pub clean: bool,
     /// If `Some`, only restore entries whose path matches the patterns.
     pub sparse_patterns: Option<Vec<SparsePattern>>,
@@ -357,7 +366,9 @@ pub fn restore_tree_to_worktree(
 /// third-party `hash_chunks` already could on the write side.
 /// `kit-core` has no thread-pool dependency of its own — it stays
 /// usable from wasm targets, which have no OS threads — so the fan-out
-/// decision lives with the caller instead of living in this function.
+/// decision lives with the caller instead of living in this function. (The
+/// check of skipped subtrees below spreads its directory reads over a few
+/// scoped threads of its own where the target has them.)
 /// Reading each chunk (open + integrity-verify + decode) is independent
 /// of every other chunk in a batch, so `kit-bin`'s native
 /// checkout/clone/reset/restore paths pass a rayon-backed `read_chunks`,
@@ -477,7 +488,9 @@ where
     if opts.clean
         && let Some(base) = base_tree
     {
-        check_skipped_subtrees(store, *tree, base, root, "", &ignore_list, 0)?;
+        let mut skipped = Vec::new();
+        skipped_subtrees(store, *tree, base, root, "", 0, &mut skipped)?;
+        check_unswept(store, skipped, &ignore_list)?;
     }
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
@@ -551,7 +564,7 @@ where
         // Identical to what the worktree already holds (see
         // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
         // A clean restore checked the subtree it does not sweep before it
-        // started ([`check_skipped_subtrees`]).
+        // started ([`check_unswept`]).
         if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
             continue;
         }
@@ -648,6 +661,8 @@ where
 /// - [`RestoreError::NotATree`] if `tree_hash` is not a tree object.
 /// - [`RestoreError::InvalidSymlinkTarget`] if a symlink entry's target
 ///   is absolute or contains `..`.
+/// - [`RestoreError::NestedRepository`] if a file or symlink would replace a
+///   directory that holds a nested repository.
 pub fn restore_tree(
     store: &ObjectStore,
     tree_hash: Hash,
@@ -1213,13 +1228,59 @@ fn ensure_directory(parent: &Path, name: &str) -> io::Result<()> {
     }
 }
 
+/// Clear `final_path` for a rename: remove a directory there, unless it
+/// holds a nested repository ([`nested_repository`]), which fails with a
+/// [`HoldsRepository`] error that [`at_path`] reports as
+/// [`RestoreError::NestedRepository`]. A repository made between the check
+/// and the removal is removed with the directory.
 fn prepare_path_for_rename(final_path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(final_path) {
-        Ok(meta) if meta.is_dir() => fs::remove_dir_all(final_path),
+        Ok(meta) if meta.is_dir() => {
+            if let Some(entry) = nested_repository(final_path)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::DirectoryNotEmpty,
+                    HoldsRepository(entry),
+                ));
+            }
+            fs::remove_dir_all(final_path)
+        }
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// A directory a restore would replace holds a nested repository, whose
+/// `.kit` or `.git` entry is at this path under the directory.
+#[derive(Debug, thiserror::Error)]
+#[error("directory holds a nested repository at '{0}'")]
+struct HoldsRepository(String);
+
+/// The first `.kit` or `.git` entry, of any type, found in `dir` or a
+/// directory under it, as a `/`-separated path relative to `dir`: the mark
+/// of a nested repository that a restore must not remove. Symlinks are not
+/// followed.
+///
+/// # Errors
+/// An I/O error reading `dir` or a directory under it.
+pub fn nested_repository(dir: &Path) -> io::Result<Option<String>> {
+    // Breadth first, so the shallowest repository is named.
+    let mut dirs = std::collections::VecDeque::from([(dir.to_path_buf(), String::new())]);
+    while let Some((dir, prefix)) = dirs.pop_front() {
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let path = name_path(&prefix, &name);
+            if is_repository_name(&name) {
+                return Ok(Some(path));
+            }
+            if entry.file_type()?.is_dir() {
+                dirs.push_back((entry.path(), path));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Prefix of every restore temporary name, `<prefix>.<pid>.<counter>`.
@@ -1236,17 +1297,16 @@ fn make_tmp_name() -> String {
 }
 
 /// The subtrees a clean restore of `tree_hash` over `base_tree` skips, as
-/// [`restore_tree_to_worktree_inner`] skips them, each checked with
-/// [`check_unswept`] before the restore touches the worktree. `dir` is the
-/// worktree directory of `tree_hash`.
-fn check_skipped_subtrees(
+/// [`restore_tree_to_worktree_inner`] skips them, pushed onto `skipped` for
+/// [`check_unswept`]. `dir` is the worktree directory of `tree_hash`.
+fn skipped_subtrees(
     store: &ObjectStore,
     tree_hash: Hash,
     base_tree: Hash,
     dir: &Path,
     path_prefix: &str,
-    ignore: &IgnoreList,
     depth: usize,
+    skipped: &mut Vec<Unswept>,
 ) -> RestoreResult<()> {
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -1258,18 +1318,11 @@ fn check_skipped_subtrees(
     let Ok(Object::Tree(base)) = store.read_object(&base_tree) else {
         return Ok(());
     };
-    let base_entries: std::collections::HashMap<&[u8], &TreeEntry> = base
-        .entries
-        .iter()
-        .map(|entry| (entry.name.as_slice(), entry))
-        .collect();
     for entry in &tree.entries {
         if entry.mode != EntryMode::Tree || !TreeEntry::validate_name(&entry.name) {
             continue;
         }
-        let Some(base_entry) = base_entries
-            .get(entry.name.as_slice())
-            .filter(|b| b.mode == EntryMode::Tree)
+        let Some(base_entry) = tree_entry(&base, &entry.name).filter(|b| b.mode == EntryMode::Tree)
         else {
             continue;
         };
@@ -1277,77 +1330,177 @@ fn check_skipped_subtrees(
         let full_path = name_path(path_prefix, name);
         // Only a real directory holds anything the sweep would visit; the
         // walk never follows a symlink out of the worktree.
-        if !fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.is_dir()) {
+        let sub_dir = dir.join(name);
+        if !fs::symlink_metadata(&sub_dir).is_ok_and(|meta| meta.is_dir()) {
             continue;
         }
         if base_entry.object_hash == entry.object_hash {
-            check_unswept(
-                store,
-                entry.object_hash,
-                &dir.join(name),
-                &full_path,
-                ignore,
-                depth + 1,
-            )?;
+            skipped.push(Unswept {
+                tree: entry.object_hash,
+                dir: sub_dir,
+                path: full_path,
+                depth: depth + 1,
+            });
         } else {
-            check_skipped_subtrees(
+            skipped_subtrees(
                 store,
                 entry.object_hash,
                 base_entry.object_hash,
-                &dir.join(name),
+                &sub_dir,
                 &full_path,
-                ignore,
                 depth + 1,
+                skipped,
             )?;
         }
     }
     Ok(())
 }
 
+/// The entry of `tree` named `name`. A decoded tree's entries are sorted by
+/// name with no duplicates.
+fn tree_entry<'t>(tree: &'t crate::object::Tree, name: &[u8]) -> Option<&'t TreeEntry> {
+    tree.entries
+        .binary_search_by(|entry| entry.name.as_slice().cmp(name))
+        .ok()
+        .map(|i| &tree.entries[i])
+}
+
+/// A tracked directory a clean restore skips: the worktree directory `dir`
+/// of the tree `tree`, at the repository-relative `path` and tree `depth`.
+struct Unswept {
+    tree: Hash,
+    dir: PathBuf,
+    path: String,
+    depth: usize,
+}
+
+/// Upper bound on the threads [`check_unswept`] reads directories with.
+const MAX_WALK_THREADS: usize = 8;
+
 /// Refuse when the ignore-aware sweep of a clean restore would remove a path
-/// under `dir`, the worktree directory of the tree `tree_hash` that the
-/// restore skips: an untracked file or symlink outside the ignore rules,
-/// at any depth. A directory is judged by what it holds, as the sweep keeps
-/// one that holds ignored files.
+/// under one of the `skipped` directories: an untracked file or symlink
+/// outside the ignore rules, at any depth. A directory is judged by what it
+/// holds, as the sweep keeps one that holds ignored files, and one that
+/// holds a nested repository is left whole, as the sweep leaves it.
+///
+/// The walk goes one tree level at a time, each level's directories spread
+/// over up to [`MAX_WALK_THREADS`] threads, the calling thread among them; a
+/// target without threads (wasm32) walks on the calling thread alone. The
+/// refusal names the first path found in the first directory, in level
+/// order, that holds one.
 fn check_unswept(
     store: &ObjectStore,
-    tree_hash: Hash,
-    dir: &Path,
-    path_prefix: &str,
+    skipped: Vec<Unswept>,
     ignore: &IgnoreList,
-    depth: usize,
 ) -> RestoreResult<()> {
-    if depth > MAX_TREE_DEPTH {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WALK_THREADS);
+    let mut level = skipped;
+    while !level.is_empty() {
+        let workers = threads.min(level.len());
+        let results: Vec<RestoreResult<Vec<Unswept>>> = if workers <= 1 {
+            let mut results = Vec::with_capacity(level.len());
+            for dir in &level {
+                let result = check_unswept_dir(store, dir, ignore);
+                let failed = result.is_err();
+                results.push(result);
+                if failed {
+                    break;
+                }
+            }
+            results
+        } else {
+            check_level_in_parallel(store, &level, ignore, workers)
+        };
+        let mut next = Vec::new();
+        for result in results {
+            next.extend(result?);
+        }
+        level = next;
+    }
+    Ok(())
+}
+
+/// [`check_unswept_dir`] of each of `level` on `workers` threads, the
+/// calling thread one of them, the results in `level` order. After an error
+/// the threads take no more directories, so every directory before the
+/// first error has its result.
+fn check_level_in_parallel(
+    store: &ObjectStore,
+    level: &[Unswept],
+    ignore: &IgnoreList,
+    workers: usize,
+) -> Vec<RestoreResult<Vec<Unswept>>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let work = || {
+        let mut done = Vec::new();
+        while !failed.load(Ordering::Relaxed) {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(dir) = level.get(i) else {
+                break;
+            };
+            let result = check_unswept_dir(store, dir, ignore);
+            if result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            done.push((i, result));
+        }
+        done
+    };
+    let mut done: Vec<(usize, RestoreResult<Vec<Unswept>>)> = std::thread::scope(|scope| {
+        // A thread that cannot be spawned leaves its share to the others;
+        // the calling thread works too, so the level is always finished.
+        let handles: Vec<_> = (1..workers)
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        let mut done = work();
+        for handle in handles {
+            done.extend(
+                handle
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            );
+        }
+        done
+    });
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+/// Check one skipped directory: refuse with [`RestoreError::UnsweptPath`]
+/// on an untracked path the sweep would remove from it or from an untracked
+/// directory under it, and return its tracked subdirectories to check next.
+fn check_unswept_dir(
+    store: &ObjectStore,
+    unswept: &Unswept,
+    ignore: &IgnoreList,
+) -> RestoreResult<Vec<Unswept>> {
+    if unswept.depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
-    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+    let Object::Tree(tree) = store.read_object(&unswept.tree)? else {
         return Err(RestoreError::NotATree);
     };
-    let tracked: std::collections::HashMap<&[u8], &TreeEntry> = tree
-        .entries
-        .iter()
-        .map(|entry| (entry.name.as_slice(), entry))
-        .collect();
+    let mut subdirs = Vec::new();
     // Untracked directories, walked without recursion: an untracked
     // directory can nest deeper than any tree.
     let mut untracked: Vec<(PathBuf, String, bool)> = Vec::new();
-    for (path, name, is_dir) in read_names(dir, true)? {
-        let full_path = name_path(path_prefix, &name);
-        match tracked.get(name.as_bytes()) {
-            Some(entry) if entry.mode == EntryMode::Tree && is_dir => {
-                check_unswept(
-                    store,
-                    entry.object_hash,
-                    &path,
-                    &full_path,
-                    ignore,
-                    depth + 1,
-                )?;
+    for_each_name(&unswept.dir, true, |entry, name, is_dir| {
+        match tree_entry(&tree, name.as_bytes()) {
+            Some(tracked) if tracked.mode == EntryMode::Tree && is_dir => {
+                subdirs.push(Unswept {
+                    tree: tracked.object_hash,
+                    dir: entry.path(),
+                    path: name_path(&unswept.path, name),
+                    depth: unswept.depth + 1,
+                });
             }
             Some(_) => {}
-            None => untracked.push((path, full_path, is_dir)),
+            None => untracked.push((entry.path(), name_path(&unswept.path, name), is_dir)),
         }
-    }
+    })?;
     while let Some((path, full_path, is_dir)) = untracked.pop() {
         if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
@@ -1355,44 +1508,56 @@ fn check_unswept(
         if !is_dir {
             return Err(RestoreError::UnsweptPath(full_path));
         }
-        for (child, name, child_is_dir) in read_names(&path, false)? {
-            untracked.push((child, name_path(&full_path, &name), child_is_dir));
+        let mut children = Vec::new();
+        let holds_repository = for_each_name(&path, false, |entry, name, child_is_dir| {
+            children.push((entry.path(), name_path(&full_path, name), child_is_dir));
+        })?;
+        // The sweep leaves a nested repository whole ([`sweep_unlisted_dir`]).
+        if !holds_repository {
+            untracked.append(&mut children);
         }
     }
-    Ok(())
+    Ok(subdirs)
 }
 
-/// The entries of `dir` the walk considers, with whether each is a real
-/// directory: every UTF-8 name but `.kit` and `.git`, which the safety gate
-/// leaves out at any depth. In a directory the
-/// tree lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
+/// Call `each` with every entry of `dir` the walk considers, its name, and
+/// whether it is a real directory: every UTF-8 name but `.kit` and `.git`,
+/// which the safety gate leaves out at any depth. In a directory the tree
+/// lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
 /// ([`clean_directory`]); in one it does not, it keeps neither
-/// ([`sweep_unlisted_dir`]). A missing `dir` has none.
-fn read_names(dir: &Path, listed: bool) -> RestoreResult<Vec<(PathBuf, String, bool)>> {
+/// ([`sweep_unlisted_dir`]). A missing `dir` has none. Returns whether `dir`
+/// holds a `.kit` or `.git` entry.
+fn for_each_name(
+    dir: &Path,
+    listed: bool,
+    mut each: impl FnMut(&fs::DirEntry, &str, bool),
+) -> RestoreResult<bool> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(RestoreError::Io(e)),
     };
-    let mut names = Vec::new();
+    let mut holds_repository = false;
     for entry in read {
         let entry = entry?;
+        let file_name = entry.file_name();
         // The safety gate and `sweep_unlisted_dir` skip a name that is not
         // UTF-8. `clean_directory` refuses one, but only in a directory the
         // restore enters, and the walk is of directories it skips.
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        let Some(name) = file_name.to_str() else {
             continue;
         };
-        if name.eq_ignore_ascii_case(".kit")
-            || name.eq_ignore_ascii_case(".git")
-            || (listed && (name == ".kitignore" || name == ".gitignore"))
-        {
+        if is_repository_name(name) {
+            holds_repository = true;
+            continue;
+        }
+        if listed && (name == ".kitignore" || name == ".gitignore") {
             continue;
         }
         let is_dir = entry.file_type()?.is_dir();
-        names.push((entry.path(), name, is_dir));
+        each(&entry, name, is_dir);
     }
-    Ok(names)
+    Ok(holds_repository)
 }
 
 /// `name` under the repository-relative directory `prefix`.
@@ -1427,9 +1592,17 @@ pub fn is_restore_temp_name(name: &str) -> bool {
 /// Attach `path` to an I/O error from `result`.
 fn at_path<T>(result: RestoreResult<T>, path: &str) -> RestoreResult<T> {
     result.map_err(|e| match e {
-        RestoreError::Io(source) => RestoreError::File {
-            path: path.to_string(),
-            source,
+        RestoreError::Io(source) => match source
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<HoldsRepository>())
+        {
+            Some(HoldsRepository(entry)) => {
+                RestoreError::NestedRepository(format!("{path}/{entry}"))
+            }
+            None => RestoreError::File {
+                path: path.to_string(),
+                source,
+            },
         },
         other => other,
     })
@@ -1445,6 +1618,9 @@ fn at_path<T>(result: RestoreResult<T>, path: &str) -> RestoreResult<T> {
 /// matching the ignore list are additionally preserved (ancestor-aware,
 /// so an untracked file *under* an ignored directory survives too), and
 /// `.gitignore` is preserved as well.
+///
+/// An untracked directory is swept by [`sweep_unlisted_dir`], which leaves a
+/// nested repository inside it.
 fn clean_directory(
     target_dir: &Path,
     tree_entries: &[TreeEntry],
@@ -1470,7 +1646,7 @@ fn clean_directory(
             .to_str()
             .ok_or(RestoreError::InvalidUtf8)?
             .to_string();
-        if name_str.eq_ignore_ascii_case(".kit") || name_str.eq_ignore_ascii_case(".git") {
+        if is_repository_name(&name_str) {
             continue;
         }
         if name_str == ".kitignore" {
@@ -1519,20 +1695,18 @@ fn clean_directory(
         });
     }
 
+    let no_ignore_rules = IgnoreList::new();
     for item in to_delete {
         let path = target_dir.join(&item.name);
-        if item.is_dir
-            && let Some(ignore) = ignore
-        {
-            // Keep ignored descendants and the directories that hold them.
+        if item.is_dir {
+            // Keep ignored descendants, nested repositories and the
+            // directories that hold them.
             let prefix = if path_prefix.is_empty() {
                 item.name.clone()
             } else {
                 format!("{path_prefix}/{}", item.name)
             };
-            sweep_unlisted_dir(&path, &prefix, ignore);
-        } else if item.is_dir {
-            let _ = fs::remove_dir_all(&path);
+            sweep_unlisted_dir(&path, &prefix, ignore.unwrap_or(&no_ignore_rules));
         } else {
             let _ = fs::remove_file(&path);
         }
@@ -1540,14 +1714,34 @@ fn clean_directory(
     Ok(())
 }
 
+/// Whether `name` is a repository's metadata directory or file, `.kit` or
+/// `.git`, ASCII case-insensitively. A `.git` file is a worktree's or a
+/// submodule's link to its repository.
+fn is_repository_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git")
+}
+
 /// Remove everything under `dir` (repo-relative `prefix`) that the ignore
 /// rules do not match, then `dir` itself if nothing is left. A symlink is
 /// removed, never followed.
+///
+/// A directory that holds a `.kit` or `.git` entry of any type is a nested
+/// repository, and the sweep leaves it and everything in it, as `git clean
+/// -d` does without a second `-f`.
 fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
-    for entry in read.flatten() {
+    let Ok(entries) = read.collect::<io::Result<Vec<_>>>() else {
+        return;
+    };
+    if entries
+        .iter()
+        .any(|entry| entry.file_name().to_str().is_some_and(is_repository_name))
+    {
+        return;
+    }
+    for entry in entries {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -2394,6 +2588,72 @@ mod tests {
             restore(&target, None).unwrap();
             assert!(!path.exists(), "{untracked}");
         }
+    }
+
+    /// With many skipped directories the walk spreads each tree level over
+    /// threads. It finds an untracked file in any of them, and names the
+    /// first one in level order: a shallower level first, then tree order.
+    #[test]
+    fn a_clean_restore_checks_many_skipped_subtrees_in_level_order() {
+        let (_d, store) = fresh_store();
+        let blob = |name: &str, h| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let x = put_blob(&store, b"x");
+        let inner = put_tree_with(&store, vec![blob("x", x)]);
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let subtree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"sub".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: inner,
+                },
+                blob("x", x),
+            ],
+        );
+        let with_a = |a: &[u8]| {
+            let mut entries = vec![blob("a", put_blob(&store, a))];
+            entries.extend(names.iter().map(|name| TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: subtree,
+            }));
+            put_tree_with(&store, entries)
+        };
+        let (base, next) = (with_a(b"a-old"), with_a(b"a-new"));
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        for (untracked, named) in [
+            (vec!["d29/notes.txt"], "d29/notes.txt"),
+            (vec!["d31/sub/new/notes.txt"], "d31/sub/new/notes.txt"),
+            (vec!["d33/notes.txt", "d07/notes.txt"], "d07/notes.txt"),
+            (vec!["d02/sub/notes.txt", "d38/notes.txt"], "d38/notes.txt"),
+        ] {
+            let target = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+            for path in &untracked {
+                let path = target.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"mine").unwrap();
+            }
+            let err =
+                restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+                    .unwrap_err();
+            assert!(
+                matches!(&err, RestoreError::UnsweptPath(p) if p == named),
+                "{untracked:?}: {err:?}"
+            );
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+        }
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
     }
 
     /// Without `observe`, a restored file reports no stat fields, chunked
@@ -3318,6 +3578,252 @@ mod tests {
         );
         assert!(!target.path().join("build/plain.txt").exists());
         assert!(!target.path().join("gone").exists());
+    }
+
+    /// The clean sweep leaves a directory the tree does not list whole when
+    /// it holds a nested repository: a `.git` or `.kit` directory, a `.git`
+    /// file (a worktree's or a submodule's link), any case, at any depth.
+    /// It still removes what lies outside the nested repository.
+    #[test]
+    fn a_clean_restore_leaves_nested_repositories_in_untracked_directories() {
+        let (_d, store) = fresh_store();
+        let root = put_tree_with(&store, Vec::new());
+        let kept = [
+            "vendor/lib/.git/HEAD",
+            "vendor/lib/.git/objects/ab/cdef",
+            "vendor/lib/README",
+            "linked/.git",
+            "linked/src.rs",
+            "deep/a/b/.kit/config",
+            "deep/a/b/notes.txt",
+            "caps/.GIT/HEAD",
+            "caps/.Kit/config",
+        ];
+        let removed = ["vendor/top.txt", "deep/a/plain.txt", "gone/f.txt"];
+        let ignore_aware = |target: &Path| {
+            restore_tree_to_worktree(&store, &root, target, &RestoreOptions::default()).map(drop)
+        };
+        let plain = |target: &Path| restore_tree(&store, root, target, &RestoreOptions::default());
+        let mut lost = Vec::new();
+        for (mode, sweep) in [
+            (
+                "ignore-aware",
+                &ignore_aware as &dyn Fn(&Path) -> RestoreResult<()>,
+            ),
+            ("plain", &plain),
+        ] {
+            let target = TempDir::new().unwrap();
+            for path in kept.iter().chain(&removed) {
+                let path = target.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"mine").unwrap();
+            }
+            sweep(target.path()).unwrap();
+            lost.extend(
+                kept.into_iter()
+                    .filter(|path| {
+                        fs::read(target.path().join(path)).ok().as_deref() != Some(b"mine")
+                    })
+                    .map(|path| format!("{mode}: {path}")),
+            );
+            for path in removed {
+                assert!(!target.path().join(path).exists(), "{mode}: {path}");
+            }
+            assert!(!target.path().join("gone").exists());
+        }
+        assert!(lost.is_empty(), "the sweep removed {lost:#?}");
+    }
+
+    /// A symlink named `.git` marks a nested repository too; the sweep
+    /// leaves it and never follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_restore_leaves_a_directory_with_a_git_symlink() {
+        let (_d, store) = fresh_store();
+        let root = put_tree_with(&store, Vec::new());
+        for ignore_aware in [true, false] {
+            let outside = TempDir::new().unwrap();
+            fs::write(outside.path().join("HEAD"), b"ref").unwrap();
+            let target = TempDir::new().unwrap();
+            fs::create_dir(target.path().join("sub")).unwrap();
+            std::os::unix::fs::symlink(outside.path(), target.path().join("sub/.git")).unwrap();
+            fs::write(target.path().join("sub/file"), b"mine").unwrap();
+            if ignore_aware {
+                restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default())
+                    .unwrap();
+            } else {
+                restore_tree(&store, root, target.path(), &RestoreOptions::default()).unwrap();
+            }
+            let link = fs::symlink_metadata(target.path().join("sub/.git")).unwrap();
+            assert!(link.is_symlink(), "ignore-aware: {ignore_aware}");
+            assert_eq!(fs::read(target.path().join("sub/file")).unwrap(), b"mine");
+            assert_eq!(fs::read(outside.path().join("HEAD")).unwrap(), b"ref");
+        }
+    }
+
+    /// In a directory the tree lists, the sweep keeps the `.git` and removes
+    /// the untracked paths beside it, as it does at the root.
+    #[test]
+    fn a_clean_restore_keeps_a_git_in_a_listed_directory() {
+        let (_d, store) = fresh_store();
+        let x = put_blob(&store, b"x");
+        let listed = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"x".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: x,
+            }],
+        );
+        let root = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"listed".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: listed,
+            }],
+        );
+        let target = TempDir::new().unwrap();
+        fs::create_dir_all(target.path().join("listed/.git")).unwrap();
+        fs::write(target.path().join("listed/.git/HEAD"), b"ref").unwrap();
+        fs::write(target.path().join("listed/extra"), b"drop").unwrap();
+        restore_tree_to_worktree(&store, &root, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read(target.path().join("listed/.git/HEAD")).unwrap(),
+            b"ref"
+        );
+        assert_eq!(fs::read(target.path().join("listed/x")).unwrap(), b"x");
+        assert!(!target.path().join("listed/extra").exists());
+    }
+
+    /// A restore that writes a file or symlink where the worktree holds a
+    /// directory removes the directory, but refuses when it holds a nested
+    /// repository at any depth, and leaves the repository as it was.
+    #[test]
+    fn a_restore_refuses_to_write_over_a_nested_repository() {
+        let (_d, store) = fresh_store();
+        let blob = put_blob(&store, b"tracked");
+        let link = put_blob(&store, b"target");
+        let opts = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        for mode in [EntryMode::Blob, EntryMode::Symlink] {
+            if cfg!(not(unix)) && mode == EntryMode::Symlink {
+                continue;
+            }
+            let root = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"vendor".to_vec(),
+                    mode,
+                    object_hash: if mode == EntryMode::Blob { blob } else { link },
+                }],
+            );
+            for (repo, named) in [
+                ("vendor/.git/HEAD", "vendor/.git"),
+                ("vendor/lib/.kit/config", "vendor/lib/.kit"),
+                ("vendor/wt/.git", "vendor/wt/.git"),
+            ] {
+                for ignore_aware in [true, false] {
+                    let target = TempDir::new().unwrap();
+                    let path = target.path().join(repo);
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, b"mine").unwrap();
+                    fs::write(target.path().join("vendor/README"), b"mine").unwrap();
+                    let err = if ignore_aware {
+                        restore_tree_to_worktree(&store, &root, target.path(), &opts).map(drop)
+                    } else {
+                        restore_tree(&store, root, target.path(), &opts)
+                    }
+                    .unwrap_err();
+                    assert!(
+                        matches!(&err, RestoreError::NestedRepository(p) if p == named),
+                        "{repo} {mode:?} ignore-aware {ignore_aware}: {err:?}"
+                    );
+                    assert!(
+                        err.to_string()
+                            .starts_with("restore would remove untracked path '")
+                    );
+                    assert_eq!(fs::read(&path).unwrap(), b"mine", "{repo}");
+                    assert_eq!(
+                        fs::read(target.path().join("vendor/README")).unwrap(),
+                        b"mine"
+                    );
+                }
+            }
+            // A directory with no repository in it is replaced.
+            let target = TempDir::new().unwrap();
+            fs::create_dir_all(target.path().join("vendor/lib")).unwrap();
+            fs::write(target.path().join("vendor/lib/x"), b"mine").unwrap();
+            restore_tree_to_worktree(&store, &root, target.path(), &opts).unwrap();
+            assert!(
+                !fs::symlink_metadata(target.path().join("vendor"))
+                    .unwrap()
+                    .is_dir()
+            );
+        }
+    }
+
+    /// A clean restore with a base takes a nested repository in a subtree it
+    /// skips, with the files beside its `.git`: the sweep would leave it whole.
+    #[test]
+    fn a_clean_restore_takes_a_nested_repository_in_a_subtree_it_skips() {
+        let (_d, store) = fresh_store();
+        let blob = |name: &str, h| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let kept = put_tree_with(&store, vec![blob("x", put_blob(&store, b"x"))]);
+        let with_a = |a: &[u8]| {
+            put_tree_with(
+                &store,
+                vec![
+                    blob("a", put_blob(&store, a)),
+                    TreeEntry {
+                        name: b"kept".to_vec(),
+                        mode: EntryMode::Tree,
+                        object_hash: kept,
+                    },
+                ],
+            )
+        };
+        let (base, next) = (with_a(b"a-old"), with_a(b"a-new"));
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        let nested = [
+            "kept/clone/.git/HEAD",
+            "kept/clone/README",
+            "kept/deep/wt/.git",
+        ];
+        for path in nested {
+            let path = target.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"mine").unwrap();
+        }
+        fs::write(target.path().join("kept/deep/wt/src.rs"), b"mine").unwrap();
+        restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        for path in nested.iter().chain(&["kept/deep/wt/src.rs"]) {
+            assert_eq!(
+                fs::read(target.path().join(path)).unwrap(),
+                b"mine",
+                "{path}"
+            );
+        }
+        // A file beside the nested repository, outside it, is refused.
+        fs::write(target.path().join("kept/deep/notes.txt"), b"mine").unwrap();
+        let err =
+            restore_tree_to_worktree_with(&store, &base, Some(next), target.path(), &opts, &rd)
+                .unwrap_err();
+        assert!(
+            matches!(&err, RestoreError::UnsweptPath(p) if p == "kept/deep/notes.txt"),
+            "{err:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -2766,6 +2766,59 @@ fn a_pull_refuses_an_untracked_ignore_file_in_a_directory_it_deletes() {
     );
 }
 
+/// A pull that turns a tracked directory into a file refuses when the
+/// directory holds a nested repository, at any depth, before it changes
+/// anything: the restore would remove the directory with the repository.
+/// The refusal names the repository's `.kit` or `.git` entry, or the
+/// untracked directory that holds it.
+#[test]
+fn a_pull_refuses_to_write_a_file_over_a_nested_repository() {
+    for (repo, named) in [
+        ("vendor/.git/HEAD", "vendor/.git"),
+        ("vendor/lib/.kit/config", "vendor/lib/.kit"),
+        ("vendor/lib/wt/.git", "vendor/lib/wt"),
+    ] {
+        let remote = Remote::new();
+        let first = remote.publish_paths(
+            None,
+            &[
+                ("a.txt", EntryMode::Blob, b"one\n"),
+                ("vendor/lib/y", EntryMode::Blob, b"y\n"),
+                ("vendor/x", EntryMode::Blob, b"x\n"),
+            ],
+        );
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("a.txt", EntryMode::Blob, b"two\n"),
+                ("vendor", EntryMode::Blob, b"now a file\n"),
+            ],
+        );
+        let path = dir.path().join(repo);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"mine\n").unwrap();
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        let Err(SyncError::RestoreSafety(message)) = result else {
+            panic!("{repo}: expected a refusal, got {result:?}");
+        };
+        assert_eq!(
+            message,
+            format!("restore would overwrite untracked path '{named}'; move or remove it first")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"mine\n", "{repo}");
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+        assert_eq!(std::fs::read(dir.path().join("vendor/x")).unwrap(), b"x\n");
+    }
+}
+
 /// Recovery reads the index as it is: one emptied after the interruption is
 /// staged work, not the target that HEAD would seed it with.
 #[test]
@@ -2815,6 +2868,42 @@ fn pending_paths(
     );
     assert!(matches!(result, Err(SyncError::Interrupted)));
     (remote, dir, layout)
+}
+
+/// Recovery refuses, as a pull does, to write a file over a directory that
+/// holds a nested repository.
+#[test]
+fn recovery_refuses_to_write_a_file_over_a_nested_repository() {
+    let (remote, dir, layout) = pending_paths(
+        &[
+            ("a.txt", EntryMode::Blob, b"one\n"),
+            ("vendor/x", EntryMode::Blob, b"x\n"),
+        ],
+        &[
+            ("a.txt", EntryMode::Blob, b"two\n"),
+            ("vendor", EntryMode::Blob, b"now a file\n"),
+        ],
+    );
+    let head = dir.path().join("vendor/.git/HEAD");
+    std::fs::create_dir_all(head.parent().unwrap()).unwrap();
+    std::fs::write(&head, b"mine\n").unwrap();
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    let Err(SyncError::RestoreSafety(message)) = result else {
+        panic!("expected a refusal, got {result:?}");
+    };
+    assert!(
+        message.starts_with("pull recovery would remove untracked path 'vendor/.git'; "),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(&head).unwrap(), b"mine\n");
+    assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
+    assert!(layout.pull_head_file().exists());
 }
 
 /// A file where the target or the tree from before the pull has a directory
