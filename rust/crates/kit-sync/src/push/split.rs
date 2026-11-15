@@ -310,12 +310,12 @@ fn cumulative_weights_capped(
 }
 
 /// The largest total weight (payload plus frames) after which a pack must
-/// seal: either the payload cap, or the serialized limit net of header and
-/// trailer. A search heuristic only: the decoded-byte and entry seals can close
+/// seal: either the payload cap, or the serialized limit net of the
+/// overhead of a pack of no entries. A search heuristic only: the decoded-byte and entry seals can close
 /// a lighter pack, so the real plan is always checked, never this weight.
 fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
     let serialized = kit_core::protocol::max_pack_bytes(max_pack_bytes)
-        .saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64);
+        .saturating_sub(pack::serialized_bound(0, 0));
     payload_cap.min(serialized).max(1)
 }
 

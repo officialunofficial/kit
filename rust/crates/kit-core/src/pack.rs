@@ -183,6 +183,10 @@ pub const TRAILER_LEN: usize = 32;
 
 /// Header is `[4B magic][4B version][4B entry_count]`.
 pub const HEADER_LEN: usize = 4 + 4 + 4;
+
+/// The length of a pack of no entries: its header and its trailer, the
+/// overhead every pack carries beside its entries.
+pub(crate) const EMPTY_PACK_LEN: usize = HEADER_LEN + TRAILER_LEN;
 /// Per-entry framing overhead is `[1B type][4B payload_len]`.
 pub const ENTRY_FRAME_LEN: usize = 1 + 4;
 /// Byte offset of the 4-byte `version` field within the header —
@@ -539,7 +543,7 @@ fn delta_fits_within(stream: &[u8], budget: u64) -> bool {
 pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
     payload
         .saturating_add((entries as u64).saturating_mul(ENTRY_FRAME_LEN as u64))
-        .saturating_add((HEADER_LEN + TRAILER_LEN) as u64)
+        .saturating_add(EMPTY_PACK_LEN as u64)
 }
 
 /// What a pack under construction holds, as far as the limits a reader
@@ -627,7 +631,9 @@ impl PackFill {
     /// comes back after other deltas is held across them, so the fill adds
     /// its length to the bases held (`held`) and counts the longest base
     /// beside those, whatever the order of the deltas.
-    /// `max_entries` is at most [`MAX_WRITE_ENTRIES`].
+    /// A pack holds at most `max_entries` entries, and never more than
+    /// [`MAX_WRITE_ENTRIES`], which this check applies itself: a caller with
+    /// no bound of its own passes `usize::MAX`.
     #[must_use]
     pub fn seals_before(
         self,
@@ -1756,7 +1762,7 @@ fn zstd_sequence_modes(block: &[u8]) -> Result<u8, &'static str> {
 /// the preceding bounds checks; they `expect`-panic only if slice-bounds
 /// elision is wrong.
 pub fn delta_base_hashes(pack_bytes: &[u8]) -> Result<Vec<Hash>, PackError> {
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     if &pack_bytes[..4] != MAGIC.as_slice() {
@@ -3118,7 +3124,7 @@ fn stage_decoded_raw<'b>(
 /// reorders, or changes behavior.
 fn validate_pack_header(pack_bytes: &[u8]) -> Result<(u32, usize, u32), PackError> {
     // 1. Length sanity: must fit header + trailer at minimum.
-    if pack_bytes.len() < HEADER_LEN + TRAILER_LEN {
+    if pack_bytes.len() < EMPTY_PACK_LEN {
         return Err(PackError::PackfileTooShort);
     }
     // 2. Magic.

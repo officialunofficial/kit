@@ -17,11 +17,11 @@
 use super::spool::VerifiedPack;
 use super::window::WindowSource;
 use super::{
-    BaseUses, DELTA_BASE_LEN, ENTRY_FRAME_LEN, EncodedPayload, Entry, HEADER_LEN, MAGIC,
-    MAX_ENTRIES, MAX_RAW_OBJECT_SIZE, MAX_TOTAL_PAYLOAD, MEMORY_FLOOR, PACK_ENTRY_RESIDENT_COST,
-    PackError, PackReader, ResidentBudget, STAGE_WINDOW, TRAILER_LEN, UnpackReport, VERSION,
-    VERSION_V2, ZSTD_LEN_PREFIX, decoded_bytes_cap, encoded_payload, replay_window,
-    stage_raw_entries, zstd_entry_len,
+    BaseUses, DELTA_BASE_LEN, EMPTY_PACK_LEN, ENTRY_FRAME_LEN, EncodedPayload, Entry, HEADER_LEN,
+    MAGIC, MAX_ENTRIES, MAX_RAW_OBJECT_SIZE, MAX_TOTAL_PAYLOAD, MEMORY_FLOOR,
+    PACK_ENTRY_RESIDENT_COST, PackError, PackReader, ResidentBudget, STAGE_WINDOW, TRAILER_LEN,
+    UnpackReport, VERSION, VERSION_V2, ZSTD_LEN_PREFIX, decoded_bytes_cap, encoded_payload,
+    replay_window, stage_raw_entries, zstd_entry_len,
 };
 use crate::store::ObjectStore;
 use std::collections::HashMap;
@@ -210,7 +210,7 @@ fn scan_error(error: std::io::Error) -> PackError {
 /// entry count.
 fn read_header(pack: &VerifiedPack) -> Result<(u32, u32), PackError> {
     let len = pack.len();
-    if len < (HEADER_LEN + TRAILER_LEN) as u64 {
+    if len < EMPTY_PACK_LEN as u64 {
         return Err(PackError::PackfileTooShort);
     }
     let mut header = [0u8; HEADER_LEN];
@@ -226,7 +226,7 @@ fn read_header(pack: &VerifiedPack) -> Result<(u32, u32), PackError> {
     if count > MAX_ENTRIES {
         return Err(PackError::TooManyObjects(count));
     }
-    let body_after_header = len - (HEADER_LEN + TRAILER_LEN) as u64;
+    let body_after_header = len - EMPTY_PACK_LEN as u64;
     if u64::from(count) * ENTRY_FRAME_LEN as u64 > body_after_header {
         return Err(PackError::TooManyObjects(count));
     }
