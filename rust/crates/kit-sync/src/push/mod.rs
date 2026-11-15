@@ -141,7 +141,7 @@ pub struct PushOptions<'a> {
     /// single commit cannot fit a ticketed advance otherwise, and then only as
     /// large as that commit needs, up to what the format and the remote allow.
     pub pack_payload_cap: u64,
-    /// Observer, split bounds, shallow boundaries and host authority hook.
+    /// Observer, split bounds and host authority hook.
     pub control: PushControl<'a>,
 }
 
@@ -224,7 +224,6 @@ fn push_refs(
     match &options.target {
         PushTarget::All { force } => {
             let refs_list = refs::list_refs_with(layout, crate::worktree::fanout_read_batch)?;
-            let control = repository_control(layout, options)?;
             let mut tracking = refs::RemoteRefBatch::new(layout, options.remote_name)?;
             let mut report = PushReport {
                 refs: 0,
@@ -255,7 +254,7 @@ fn push_refs(
                         condition,
                         options.rebaseline_threshold,
                         options.pack_payload_cap,
-                        &control,
+                        &options.control,
                         &mut |published| Ok(tracking.write(&r.name, &published)?),
                     )?;
                     report.refs += 1;
@@ -286,7 +285,6 @@ fn push_refs(
             } else {
                 lease(layout, options.remote_name, remote)?
             };
-            let control = repository_control(layout, options)?;
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
             });
@@ -298,7 +296,7 @@ fn push_refs(
                 condition,
                 options.rebaseline_threshold,
                 options.pack_payload_cap,
-                &control,
+                &options.control,
                 &mut |published| {
                     Ok(refs::write_remote_ref(
                         layout,
@@ -354,24 +352,6 @@ fn push_tag_report(
         deleted: None,
     })
 }
-fn repository_control<'a>(
-    layout: &kit_core::layout::RepoLayout,
-    options: &PushOptions<'a>,
-) -> Result<PushControl<'a>, PushError> {
-    let mut control = PushControl {
-        authority: options.control.authority,
-        max_steps: options.control.max_steps,
-        max_chain: options.control.max_chain,
-        shallow: refs::load_shallow_boundaries(layout)?
-            .unwrap_or_default()
-            .into_iter()
-            .collect(),
-        observer: options.control.observer,
-    };
-    control.shallow.extend(&options.control.shallow);
-    Ok(control)
-}
-
 fn lease(
     layout: &kit_core::layout::RepoLayout,
     remote: &str,

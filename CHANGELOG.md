@@ -165,6 +165,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same bytes.
 - `kit_core::serialize::CHUNKED_HEADER_LEN`. Only a test used it; the
   22-byte manifest header is in the `CHUNKED_ENTRY_LEN` docs.
+- `kit_sync::push::PushControl::shallow` and the `shallow` argument of
+  `kit_core::transfer::walk::PushWalk::run`, `run_tips` and `run_one`.
+  Nothing writes a shallow boundary (`kit clone` has no `--depth`), so the
+  set was always empty, and a push no longer reads `.kit/shallow`.
+  `refs::load_shallow_boundaries`, `write_shallow_boundaries` and the file's
+  format (SPEC-REFS) stay.
 
 ### Fixed
 

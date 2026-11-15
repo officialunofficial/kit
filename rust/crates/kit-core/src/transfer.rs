@@ -878,7 +878,7 @@ fn plan_tips_capped(
     // What the remote holds is decided from its head alone. A head this store
     // lacks leaves nothing held, and the plan is the whole closure.
     let held = HeldCommits::collect(store, old_tip, limits.objects)?;
-    let walk = PushWalk::run_tips(store, new_tips, &held, &HashSet::new(), limits, None)?;
+    let walk = PushWalk::run_tips(store, new_tips, &held, limits, None)?;
     let mut base_map = HashMap::new();
     if let Some(old) = held.tip() {
         for &tip in new_tips {

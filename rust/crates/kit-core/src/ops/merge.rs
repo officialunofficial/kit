@@ -15,7 +15,7 @@
 //! (depth in A's ancestor tree) + (depth in B's BFS).
 //!
 //! `find_merge_base` and `is_ancestor` end a path at a missing object, for
-//! push and its shallow boundaries. `find_merge_base_strict` and
+//! push, whose store may hold only part of a history. `find_merge_base_strict` and
 //! `is_ancestor_strict` give the same answers on a healthy store and fail
 //! with an error that names the commit where a commit cannot be read.
 
@@ -132,8 +132,8 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
 /// multiple times, but it is the behaviour the tests pin.
 ///
 /// This walk is lenient on purpose: a missing object, or an object that
-/// is not a commit, ends its path. Push walks histories whose shallow
-/// boundaries the caller supplies, and it relies on that. Everywhere else a
+/// is not a commit, ends its path. Push walks histories its store may hold
+/// only part of, and it relies on that. Everywhere else a
 /// missing commit is corruption, and the answer would come from part of the
 /// history: use [`find_merge_base_strict`], which fails instead.
 ///
@@ -191,8 +191,8 @@ pub fn find_merge_base<S: ObjectSource + ?Sized>(
 ///
 /// This walk is lenient on purpose, like [`find_merge_base`]: a missing
 /// object, or an object that is not a commit, ends its path, so a missing
-/// commit can turn `true` into `false`. Push relies on that for shallow
-/// boundaries. Everywhere else use [`is_ancestor_strict`], which fails
+/// commit can turn `true` into `false`. Push relies on that for history its
+/// store lacks. Everywhere else use [`is_ancestor_strict`], which fails
 /// instead.
 ///
 /// # Errors
