@@ -35,7 +35,6 @@ use crate::delta;
 use crate::hash::{self, Hash};
 use crate::list_decode::read_list;
 use crate::object::{Object, ObjectType};
-use crate::ops::graph::chunk_blob_len;
 use crate::pack::delta_fits_reader;
 use crate::store::{ObjectStore, StoreError};
 
@@ -756,11 +755,9 @@ fn plan_pack_capped(
     // Then the chunks of every kept manifest, which the walk never counted.
     // They follow the other blobs, in manifest order.
     let mut memory = ChunkMemory::new(limits.chunk_memory);
-    // Each chunk is checked as a fetch checks it: a `Blob` whose length is its
-    // span. A bad chunk fails the plan before anything is uploaded.
-    walk.for_each_chunk(store, &mut memory, |_, manifest, index, chunk| {
-        let len = chunk_blob_len(store, &chunk, index)?;
-        manifest.check_chunk_length(index, len)?;
+    // The walk checks each chunk as a fetch checks it, so a bad chunk fails
+    // the plan before anything is uploaded.
+    walk.for_each_chunk(store, &mut memory, |_, _, _, chunk| {
         blobs.push(chunk);
         Ok(())
     })?;

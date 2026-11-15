@@ -151,6 +151,115 @@ fn a_push_does_not_plan_a_chunk_that_every_fetch_refuses() {
     );
 }
 
+/// The plan checks a chunk against the span of the manifest that names it,
+/// also when it listed the chunk before for another manifest. Two files share
+/// their chunks; the second manifest gives the first chunk a span it does not
+/// fill. A fetch of the commit is refused, so the plan is refused too.
+#[test]
+fn a_push_does_not_plan_a_wrong_span_of_a_chunk_it_listed_before() {
+    let (_d, s) = store();
+    let first = put_blob(&s, chunk_content(1, 300));
+    let second = put_blob(&s, chunk_content(2, 400));
+    let manifest = |ends: [u64; 2]| {
+        put(
+            &s,
+            &Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(ends[1], 0, [(first, ends[0]), (second, ends[1])])
+                    .unwrap(),
+            ),
+        )
+    };
+    let right = manifest([300, 700]);
+    // The first chunk holds 300 bytes. This manifest says 400.
+    let wrong = manifest([400, 800]);
+    // The plan meets the two manifests in one order or the other, so the
+    // wrong one comes second in one of the two histories.
+    for (first_file, second_file) in [(right, wrong), (wrong, right)] {
+        let base = commit(&s, tree_of(&s, &[("a", first_file)]), &[], "first");
+        let c = commit(
+            &s,
+            tree_of(&s, &[("a", first_file), ("b", second_file)]),
+            &[base],
+            "one chunk under two spans",
+        );
+        assert!(
+            check_closure_present(&s, [&c]).is_err(),
+            "a fetch of this closure is refused"
+        );
+        let plan = plan_pack(&s, c, None);
+        assert!(
+            plan.is_err(),
+            "the push planned {} objects of a closure that every fetch refuses",
+            plan.map_or(0, |p| p.object_count())
+        );
+    }
+}
+
+/// The same, when the chunk is one the manifest at the same path in the
+/// parent already lists, so the plan sends no chunk at all for the new
+/// manifest.
+#[test]
+fn a_push_does_not_plan_a_wrong_span_of_a_chunk_the_parent_lists() {
+    let (_d, s) = store();
+    let first = put_blob(&s, chunk_content(1, 300));
+    let second = put_blob(&s, chunk_content(2, 400));
+    let manifest = |ends: [u64; 2]| {
+        put(
+            &s,
+            &Object::ChunkedBlob(
+                crate::object::ChunkedBlob::new(ends[1], 0, [(first, ends[0]), (second, ends[1])])
+                    .unwrap(),
+            ),
+        )
+    };
+    let right = manifest([300, 700]);
+    let wrong = manifest([400, 800]);
+    let base = commit(&s, tree_of(&s, &[("f", right)]), &[], "right");
+    let c = commit(&s, tree_of(&s, &[("f", wrong)]), &[base], "wrong span");
+    assert!(
+        check_closure_present(&s, [&c]).is_err(),
+        "a fetch of this closure is refused"
+    );
+    let plan = plan_pack(&s, c, Some(base));
+    assert!(
+        plan.is_err(),
+        "the push planned {} objects of a closure that every fetch refuses",
+        plan.map_or(0, |p| p.object_count())
+    );
+}
+
+/// The same, when the walk keeps the chunk as an ordinary object because a
+/// tree names it as a file.
+#[test]
+fn a_push_does_not_plan_a_wrong_span_of_a_chunk_the_walk_keeps_as_a_blob() {
+    let (_d, s) = store();
+    let first = put_blob(&s, chunk_content(1, 300));
+    let second = put_blob(&s, chunk_content(2, 400));
+    // This manifest gives the first chunk 400 bytes. It holds 300.
+    let wrong = put(
+        &s,
+        &Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(800, 0, [(first, 400), (second, 800)]).unwrap(),
+        ),
+    );
+    let c = commit(
+        &s,
+        tree_of(&s, &[("chunk", first), ("wrong", wrong)]),
+        &[],
+        "a chunk that is also a file",
+    );
+    assert!(
+        check_closure_present(&s, [&c]).is_err(),
+        "a fetch of this closure is refused"
+    );
+    let plan = plan_pack(&s, c, None);
+    assert!(
+        plan.is_err(),
+        "the push planned {} objects of a closure that every fetch refuses",
+        plan.map_or(0, |p| p.object_count())
+    );
+}
+
 #[test]
 fn a_first_push_sends_the_whole_closure_and_is_self_contained() {
     let (_d, s) = store();

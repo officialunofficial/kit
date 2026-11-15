@@ -985,8 +985,8 @@ mod tests {
     #[test]
     fn a_chunk_weighs_once_and_a_renamed_chunked_file_weighs_as_if_sent() {
         let (_dir, store) = store();
-        let chunk = blob(&store, 7, 1000);
-        let other = blob(&store, 8, 1000);
+        let chunk = blob(&store, 7, 100);
+        let other = blob(&store, 8, 100);
         let big = chunked(&store, &[chunk, other]);
         let tree = |name: &[u8], file: Hash| {
             put(
@@ -1001,14 +1001,21 @@ mod tests {
             )
         };
         let remote = commit_tree(&store, tree(b"a", big), Vec::new(), 1);
-        let renamed = commit_tree(&store, tree(b"b", big), vec![remote], 2);
+        let tree_b = tree(b"b", big);
+        let renamed = commit_tree(&store, tree_b, vec![remote], 2);
         let ctl = PushControl::default();
         let chain = walk_chain(&store, renamed, Some(remote), &ctl).unwrap();
         let weights = cumulative_weights(&store, &chain, &ctl).unwrap();
         // Sized against its parents alone, the renamed file weighs what a step
         // that starts in front of the rename would have to send. The plan of
         // the push itself, which sees the remote's snapshot, sends none of it.
-        assert!(weights.cumulative[1] >= 2000, "{:?}", weights.cumulative);
+        let weigh = |hash| weight_of(&store, &hash).unwrap();
+        assert_eq!(
+            weights.cumulative[1],
+            weigh(renamed) + weigh(tree_b) + weigh(big) + weigh(chunk) + weigh(other),
+            "{:?}",
+            weights.cumulative
+        );
         let plan = transfer::plan_pack_with(&store, renamed, Some(remote), |_, candidates| {
             Ok(vec![None; candidates.len()])
         })

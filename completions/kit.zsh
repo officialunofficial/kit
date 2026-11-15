@@ -179,6 +179,7 @@ _kit() {
                     _arguments \
                         '(-b -B)-b[create a branch and switch to it]:new:' \
                         '(-b -B)-B[create-or-reset a branch and switch to it]:new:' \
+                        '(-f --force)'{-f,--force}'[discard local changes that block the switch]' \
                         '--help[show help]'
                     ;;
                 merge-base)

@@ -22,20 +22,22 @@
 //! in the remote head's own snapshot, and a chunk is skipped only when the
 //! manifest at the same path in a parent lists it or the plan already sends it.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
 use crate::object::{ChunkedBlob, EntryMode, Object, ObjectType, Tree, TreeEntry};
-use crate::ops::graph::{ClosureMode, children};
+use crate::ops::graph::{ClosureMode, children, chunk_blob_len};
 use crate::store::{ObjectStore, StoreError};
 
 /// Most trees the held filter reads from the remote head's snapshot. Past
 /// it the filter stops, which only makes the plan send more.
 pub const MAX_HELD_SCAN: usize = 2_097_152;
 
-/// Most chunk ids the plan remembers as already sent. Past it a chunk that
-/// several files share may be listed twice, and a pack reader accepts that.
+/// Most chunk ids the plan remembers, with their lengths and whether it
+/// listed them. Past it a chunk that several files share may be listed twice,
+/// and a pack reader accepts that. A length that is not remembered is read
+/// again.
 pub const MAX_CHUNK_MEMORY: usize = 2_097_152;
 
 fn limit_error() -> StoreError {
@@ -137,10 +139,11 @@ pub struct ChunkList {
     pub old: Option<Hash>,
 }
 
-/// The chunk ids a plan has listed, up to a bound.
+/// The chunk ids a plan has met, each with the length of its blob and whether
+/// the plan listed it, up to a bound.
 #[derive(Debug)]
 pub struct ChunkMemory {
-    seen: HashSet<Hash>,
+    seen: HashMap<Hash, (u64, bool)>,
     limit: usize,
 }
 
@@ -149,21 +152,39 @@ impl ChunkMemory {
     #[must_use]
     pub fn new(limit: usize) -> Self {
         Self {
-            seen: HashSet::new(),
+            seen: HashMap::new(),
             limit,
         }
+    }
+
+    /// The length of a chunk's blob, read once while it stays in memory.
+    fn blob_len(
+        &mut self,
+        store: &ObjectStore,
+        chunk: &Hash,
+        index: u32,
+    ) -> Result<u64, StoreError> {
+        if let Some(&(len, _)) = self.seen.get(chunk) {
+            return Ok(len);
+        }
+        let len = chunk_blob_len(store, chunk, index)?;
+        if self.seen.len() < self.limit {
+            self.seen.insert(*chunk, (len, false));
+        }
+        Ok(len)
     }
 
     /// `true` the first time a chunk is seen. Past the bound a chunk is
     /// reported as new again.
     fn first_sight(&mut self, chunk: &Hash) -> bool {
-        if self.seen.contains(chunk) {
-            return false;
+        match self.seen.get_mut(chunk) {
+            Some((_, listed)) if *listed => false,
+            Some((_, listed)) => {
+                *listed = true;
+                true
+            }
+            None => true,
         }
-        if self.seen.len() < self.limit {
-            self.seen.insert(*chunk);
-        }
-        true
     }
 }
 
@@ -302,16 +323,18 @@ impl PushWalk {
 
     /// Stream the chunks the plan has to send, manifest by manifest.
     ///
-    /// A chunk is skipped when the manifest it replaces lists it, when the
-    /// walk keeps it as an object, or when `memory` has seen it. The callback
-    /// gets the commit that brought the manifest, the manifest, the index of
-    /// the chunk in it and the chunk.
+    /// Every chunk of every manifest is checked as a fetch checks it: a
+    /// `Blob` whose length is its span in that manifest. A chunk is then
+    /// skipped when the manifest it replaces lists it, when the walk keeps it
+    /// as an object, or when `memory` has seen it. The callback gets the
+    /// commit that brought the manifest, the manifest, the index of the chunk
+    /// in it and the chunk.
     ///
     /// # Errors
     ///
     /// Any [`StoreError`] from reading a manifest, except a missing replaced
-    /// manifest, which only means no chunk is skipped for it, and the callback's
-    /// own error.
+    /// manifest, which only means no chunk is skipped for it, a chunk that is
+    /// not a blob or does not fill its span, and the callback's own error.
     pub fn for_each_chunk(
         &self,
         store: &ObjectStore,
@@ -328,6 +351,8 @@ impl PushWalk {
                 Some(Err(error)) => return Err(error),
             };
             for (index, chunk) in (0u32..).zip(blob.chunks().iter().copied()) {
+                let len = memory.blob_len(store, &chunk, index)?;
+                blob.check_chunk_length(index, len)?;
                 if replaced.contains(&chunk)
                     || self.objects.contains(&chunk)
                     || !memory.first_sight(&chunk)
