@@ -67,13 +67,21 @@
 
 pub mod window;
 
+mod file_read;
 pub mod rewrite;
+mod spool;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
 use crate::protocol::PACK_BODY_LIMIT;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
+pub use file_read::{
+    MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
+    STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
+};
 pub use rewrite::{Rewritten, rewrite_excluding};
+pub use spool::{PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack};
+pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -282,6 +290,10 @@ pub enum PackError {
     TrailingData,
     #[error("store I/O failure: {0}")]
     Store(#[from] crate::store::StoreError),
+    /// A local read or write of a pack file failed: a spool, or a pack read
+    /// back from one. The pack itself may be fine.
+    #[error("pack file I/O failure: {0}")]
+    Io(#[from] std::io::Error),
     /// `0x03`/`0x04` payload shorter than its `[uncompressed_len]`
     /// length-prefix header (SPEC-PACKFILE §3.3, §3.4) — distinct from
     /// `DeltaEntryTruncated`, which covers the 32-byte `base_hash`
@@ -308,6 +320,25 @@ pub enum PackError {
     /// rejected on the raw path.
     #[error("pack writer is in raw-only mode and does not accept delta entries")]
     RawOnly,
+    /// The bytes of a downloaded pack do not hash to the key it was asked
+    /// for (SPEC-PACKFILE §7).
+    #[error("pack bytes do not hash to the requested pack key")]
+    KeyMismatch,
+}
+
+/// Count `n` bytes hashed by the code that seals and checks packs. Tests read
+/// the count to show each pack is hashed once.
+#[cfg(test)]
+fn note_hashed(n: usize) {
+    HASHED_BYTES.with(|count| count.set(count.get() + n as u64));
+}
+
+#[cfg(not(test))]
+fn note_hashed(_n: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    static HASHED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// Result of an unpack: which entries were stored, plus a count of
@@ -316,8 +347,47 @@ pub enum PackError {
 pub struct UnpackReport {
     pub raw_count: u32,
     pub delta_count: u32,
-    /// Hashes inserted into the store this unpack call.
+    /// Hashes inserted into the store this unpack call, one per entry in pack
+    /// order. [`PackReader::read_verified`] leaves it empty: a pack read from a
+    /// file may hold millions of entries, and its callers need only the counts
+    /// and [`Self::signed`].
     pub stored: Vec<Hash>,
+    /// The commits, remixes and tags stored, one per entry in pack order, with
+    /// the length of each object's bytes: the objects whose signatures a
+    /// fetch checks.
+    pub signed: Vec<(Hash, u32)>,
+}
+
+impl UnpackReport {
+    /// Count one stored entry. `keep_stored` lists its hash in
+    /// [`Self::stored`].
+    fn note(&mut self, staged: Staged, keep_stored: bool) {
+        if keep_stored {
+            self.stored.push(staged.hash);
+        }
+        if let Some(len) = staged.signed {
+            self.signed.push((staged.hash, len));
+        }
+    }
+}
+
+/// An object one entry stored: its id, and its length when it is a signed
+/// object (a commit, remix or tag).
+#[derive(Debug, Clone, Copy)]
+struct Staged {
+    hash: Hash,
+    signed: Option<u32>,
+}
+
+impl Staged {
+    fn of(hash: Hash, object: &Object, bytes: &[u8]) -> Self {
+        let signed = matches!(
+            object,
+            Object::Commit(_) | Object::Remix(_) | Object::Tag(_)
+        )
+        .then(|| u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+        Self { hash, signed }
+    }
 }
 
 /// A raw entry whose pack-compression decision has already been made by
@@ -408,7 +478,7 @@ impl PreparedDelta {
     /// This entry as [`PackFill::seals_before`] sees it, for the pack `w` is
     /// building.
     #[must_use]
-    pub fn incoming(&self, w: &PackWriter) -> Incoming {
+    pub fn incoming<W>(&self, w: &PackWriter<W>) -> Incoming {
         Incoming::delta(
             self.conservative_len() as u64,
             &self.stream,
@@ -532,7 +602,7 @@ impl Incoming {
 impl PackFill {
     /// The fill of the pack `w` is building.
     #[must_use]
-    pub fn of(w: &PackWriter) -> Self {
+    pub fn of<W>(w: &PackWriter<W>) -> Self {
         Self {
             entries: w.entry_count(),
             payload: w.total_payload(),
@@ -666,20 +736,25 @@ struct BaseSpan {
 }
 
 /// Builds a packfile, enforcing entry/payload caps and streaming each
-/// pushed entry's frame directly into the final output buffer as it
-/// arrives. [`Self::finish`] only patches the header's entry count
-/// (unknown up front from a streaming writer) and appends the trailer —
-/// it never re-copies the pushed entries into a second, same-sized
-/// buffer.
+/// pushed entry's frame straight into its output as it arrives: a `Vec<u8>`
+/// for a pack held in memory ([`Self::new`]), or a buffered unnamed file
+/// for a pack spooled to disk ([`Self::spool`]). Finishing only patches the
+/// header's version and entry count (unknown up front from a streaming
+/// writer) and appends the trailer. It never re-copies the pushed entries
+/// into a second, same-sized buffer.
 #[derive(Debug)]
-pub struct PackWriter {
-    // The final packfile bytes, built incrementally: `new` writes the
-    // header with a zero entry-count placeholder (patched by `finish`
-    // once the final count is known); `push_raw`/`push_delta` append
-    // each entry's `[type][len][payload]` frame directly here. There is
-    // no separate per-entry collection copied a second time at
-    // `finish`.
-    buf: Vec<u8>,
+pub struct PackWriter<W = Vec<u8>> {
+    // Where the pack goes: `new` writes the header with a zero entry-count
+    // placeholder (patched when the pack is finished, once the final count
+    // is known); `push_raw`/`push_delta` append each entry's
+    // `[type][len][payload]` frame directly here. There is no separate
+    // per-entry collection copied a second time at the end.
+    out: W,
+    // Bytes written to `out` so far, header included.
+    len: u64,
+    // Set when a write to `out` failed, perhaps partway through a frame: the
+    // writer then refuses every later entry and refuses to finish.
+    failed: bool,
     entry_count: u32,
     total_payload: u64,
     // Bytes a reader decodes from the entries pushed so far, as it charges
@@ -697,15 +772,24 @@ pub struct PackWriter {
     max_base_len: u64,
     multi_run_base_sum: u64,
     // Set the first time `push_raw`/`push_delta` emits a `0x03`/`0x04`
-    // entry. `finish` reads this to decide the header's `version`
+    // entry. Finishing reads this to decide the header's `version`
     // field (SPEC-PACKFILE §1's writer version-selection rule) — v2
     // the moment ANY entry ended up compressed, v1 otherwise.
     has_compressed_entry: bool,
     // When true, `push_raw` never compresses, `push_delta` /
-    // `push_prepared_delta` return [`PackError::RawOnly`], and `finish`
+    // `push_prepared_delta` return [`PackError::RawOnly`], and finishing
     // always emits a v1 pack of `0x00` entries. The closure profile
     // (SPEC-DISCLOSURE) is the consumer: a wasm verifier has no zstd.
     raw_only: bool,
+}
+
+/// The header a writer starts with: magic, version 1 and a zero entry count.
+/// Finishing patches the version and the count.
+fn initial_header() -> [u8; HEADER_LEN] {
+    let mut header = [0u8; HEADER_LEN];
+    header[..4].copy_from_slice(MAGIC);
+    header[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&VERSION.to_le_bytes());
+    header
 }
 
 impl Default for PackWriter {
@@ -714,16 +798,12 @@ impl Default for PackWriter {
     }
 }
 
-impl PackWriter {
-    /// Create an empty writer.
-    #[must_use]
-    pub fn new() -> Self {
-        let mut buf = Vec::with_capacity(HEADER_LEN);
-        buf.extend_from_slice(MAGIC);
-        buf.extend_from_slice(&VERSION.to_le_bytes());
-        buf.extend_from_slice(&0u32.to_le_bytes()); // entry_count placeholder; `finish` patches it in.
+impl<W> PackWriter<W> {
+    fn over(out: W) -> Self {
         Self {
-            buf,
+            out,
+            len: HEADER_LEN as u64,
+            failed: false,
             entry_count: 0,
             total_payload: 0,
             total_decoded: 0,
@@ -734,6 +814,34 @@ impl PackWriter {
             has_compressed_entry: false,
             raw_only: false,
         }
+    }
+
+    /// The header fields finishing patches: the version (v2 iff at least one
+    /// entry ended up compressed, SPEC-PACKFILE §1) and the entry count.
+    fn patched_header(&self) -> Result<[u8; 8], PackError> {
+        self.check_failed()?;
+        if self.entry_count > MAX_ENTRIES {
+            return Err(PackError::TooManyObjects(self.entry_count));
+        }
+        let version = if self.has_compressed_entry {
+            VERSION_V2
+        } else {
+            VERSION
+        };
+        let mut fields = [0u8; 8];
+        fields[..4].copy_from_slice(&version.to_le_bytes());
+        fields[4..].copy_from_slice(&self.entry_count.to_le_bytes());
+        Ok(fields)
+    }
+}
+
+impl PackWriter {
+    /// Create an empty writer.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut buf = Vec::with_capacity(HEADER_LEN);
+        buf.extend_from_slice(&initial_header());
+        Self::over(buf)
     }
 
     /// A writer that never compresses and never accepts deltas.
@@ -749,30 +857,6 @@ impl PackWriter {
         let mut w = Self::new();
         w.raw_only = true;
         w
-    }
-
-    /// Append a raw object entry. `bytes` is the fully serialised object
-    /// payload; `hash_of_bytes` is the BLAKE3 of those same bytes —
-    /// callers usually have it on hand from the object store, so we take
-    /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
-    /// Takes `bytes` by reference (not by value): the streaming writer
-    /// copies it straight into the output buffer as it's pushed, so it
-    /// never needs to own the caller's copy. Returns the
-    /// same hash for chaining.
-    ///
-    /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
-    /// if `bytes` compresses under zstd strictly smaller on the wire
-    /// (and is long enough to bother, see `MIN_COMPRESS_LEN`), this
-    /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
-    /// never need to opt in. Either way the returned/stored identity
-    /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
-    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
-        let frame = if self.raw_only {
-            None
-        } else {
-            maybe_compress(bytes, 0)
-        };
-        self.append_raw_frame(hash_of_bytes, bytes, frame)
     }
 
     /// Pure (no `&self`) compression step for a raw entry, split out of
@@ -799,6 +883,100 @@ impl PackWriter {
         }
     }
 
+    /// Pure (no `&self`) compression step for a delta entry — the
+    /// delta-entry counterpart of [`Self::prepare_raw`]; see its doc
+    /// comment for why this exists and how it's meant to be used (fan
+    /// out `prepare_delta` across a thread pool, then replay results in
+    /// order via [`Self::push_prepared_delta`]).
+    #[must_use]
+    pub fn prepare_delta(base_hash: Hash, delta_stream: Vec<u8>) -> PreparedDelta {
+        let frame = maybe_compress(&delta_stream, DELTA_BASE_LEN);
+        PreparedDelta {
+            base: base_hash,
+            stream: delta_stream,
+            frame,
+        }
+    }
+
+    /// Serialise the pack: header + entries + trailer. Entries are
+    /// already in the buffer (streamed in by `push_raw`/`push_delta`);
+    /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
+    /// iff at least one entry ended up compressed, v1 otherwise) and
+    /// `entry_count`, then appends the trailer,
+    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
+    /// the on-disk pack key — see [`pack_key`], or [`Self::finish_with_key`],
+    /// which computes both in one pass.
+    pub fn finish(self) -> Result<Vec<u8>, PackError> {
+        self.finish_inner(None).map(|(pack, _)| pack)
+    }
+
+    /// [`Self::finish`], also returning the pack key ([`pack_key`] of the
+    /// returned bytes). One BLAKE3 pass over the pack yields both the trailer
+    /// and the key: the key's input is the trailer's input followed by the
+    /// trailer, so the hasher continues from where the trailer was taken.
+    pub fn finish_with_key(self) -> Result<(Vec<u8>, Hash), PackError> {
+        self.finish_inner(None)
+    }
+
+    /// Test-only variant of [`Self::finish`] that also reports, via
+    /// `bytes_copied`, how many payload bytes it copies WHILE finishing
+    /// (as opposed to while entries were pushed). Proves `finish`
+    /// streams rather than double-buffers: the unpatched
+    /// writer re-copied every pushed entry's payload into a fresh
+    /// same-size buffer inside `finish`, so this counter would track
+    /// the whole pack; the streaming writer only ever appends the
+    /// 32-byte trailer here.
+    #[cfg(test)]
+    pub(crate) fn finish_tracking_bytes_copied(
+        self,
+        bytes_copied: &AtomicU64,
+    ) -> Result<Vec<u8>, PackError> {
+        self.finish_inner(Some(bytes_copied)).map(|(pack, _)| pack)
+    }
+
+    fn finish_inner(self, bytes_copied: Option<&AtomicU64>) -> Result<(Vec<u8>, Hash), PackError> {
+        let fields = self.patched_header()?;
+        let mut buf = self.out;
+        buf[VERSION_OFFSET..ENTRY_COUNT_OFFSET + 4].copy_from_slice(&fields);
+        let mut hasher = hash::Hasher::new();
+        hasher.update(&buf);
+        note_hashed(buf.len());
+        let trailer = hasher.finalize();
+        if let Some(c) = bytes_copied {
+            c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
+        }
+        hasher.update(&trailer);
+        note_hashed(TRAILER_LEN);
+        buf.extend_from_slice(&trailer);
+        Ok((buf, hasher.finalize()))
+    }
+}
+
+impl<W: std::io::Write> PackWriter<W> {
+    /// Append a raw object entry. `bytes` is the fully serialised object
+    /// payload; `hash_of_bytes` is the BLAKE3 of those same bytes —
+    /// callers usually have it on hand from the object store, so we take
+    /// it explicitly to avoid an extra BLAKE3 pass over the same buffer.
+    /// Takes `bytes` by reference (not by value): the streaming writer
+    /// copies it straight into the output buffer as it's pushed, so it
+    /// never needs to own the caller's copy. Returns the
+    /// same hash for chaining.
+    ///
+    /// Applies the SPEC-PACKFILE §3.3 compression policy transparently:
+    /// if `bytes` compresses under zstd strictly smaller on the wire
+    /// (and is long enough to bother, see `MIN_COMPRESS_LEN`), this
+    /// emits a `0x03` zstd-raw entry instead of `0x00` raw — callers
+    /// never need to opt in. Either way the returned/stored identity
+    /// (`hash_of_bytes`) is unchanged; only the wire encoding differs.
+    pub fn push_raw(&mut self, hash_of_bytes: Hash, bytes: &[u8]) -> Result<Hash, PackError> {
+        let frame = if self.raw_only {
+            None
+        } else {
+            maybe_compress(bytes, 0)
+        };
+        self.append_raw_frame(hash_of_bytes, bytes, frame)
+    }
+
     /// Append a [`PreparedRaw`] produced by [`Self::prepare_raw`].
     /// Identical wire result and cap-check semantics to `push_raw`
     /// called on the same bytes — compression already happened, so
@@ -819,19 +997,20 @@ impl PackWriter {
         bytes: &[u8],
         frame: Option<Vec<u8>>,
     ) -> Result<Hash, PackError> {
+        self.check_failed()?;
         if let Some(frame) = frame {
             let uncompressed_len: u32 = bytes
                 .len()
                 .try_into()
                 .map_err(|_| PackError::PackfileTooLarge)?;
             let payload_len = ZSTD_LEN_PREFIX + frame.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x03, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self.total_decoded.saturating_add(bytes.len() as u64);
             self.append_entry(0x03, &[&uncompressed_len.to_le_bytes(), &frame])?;
             self.has_compressed_entry = true;
         } else {
-            self.check_caps_for(bytes.len())?;
+            self.check_caps_for(0x00, bytes.len())?;
             self.total_payload += bytes.len() as u64;
             self.append_entry(0x00, &[bytes])?;
         }
@@ -858,21 +1037,6 @@ impl PackWriter {
         self.append_delta_frame(base_hash, delta_stream, frame)
     }
 
-    /// Pure (no `&self`) compression step for a delta entry — the
-    /// delta-entry counterpart of [`Self::prepare_raw`]; see its doc
-    /// comment for why this exists and how it's meant to be used (fan
-    /// out `prepare_delta` across a thread pool, then replay results in
-    /// order via [`Self::push_prepared_delta`]).
-    #[must_use]
-    pub fn prepare_delta(base_hash: Hash, delta_stream: Vec<u8>) -> PreparedDelta {
-        let frame = maybe_compress(&delta_stream, DELTA_BASE_LEN);
-        PreparedDelta {
-            base: base_hash,
-            stream: delta_stream,
-            frame,
-        }
-    }
-
     /// Append a [`PreparedDelta`] produced by [`Self::prepare_delta`].
     /// Identical wire result and cap-check semantics to `push_delta`
     /// called on the same base/stream.
@@ -892,13 +1056,14 @@ impl PackWriter {
         delta_stream: &[u8],
         frame: Option<Vec<u8>>,
     ) -> Result<(), PackError> {
+        self.check_failed()?;
         if let Some(frame) = frame {
             let uncompressed_len: u32 = delta_stream
                 .len()
                 .try_into()
                 .map_err(|_| PackError::PackfileTooLarge)?;
             let payload_len = hash::HASH_LEN + ZSTD_LEN_PREFIX + frame.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x04, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self
                 .total_decoded
@@ -914,7 +1079,7 @@ impl PackWriter {
             self.has_compressed_entry = true;
         } else {
             let payload_len = hash::HASH_LEN + delta_stream.len();
-            self.check_caps_for(payload_len)?;
+            self.check_caps_for(0x02, payload_len)?;
             self.total_payload += payload_len as u64;
             self.total_decoded = self
                 .total_decoded
@@ -923,6 +1088,51 @@ impl PackWriter {
         }
         self.note_base(base_hash, delta_stream);
         self.entry_count += 1;
+        Ok(())
+    }
+
+    /// Append one entry's frame — `[1B type][4B payload_len][payload]`
+    /// — straight onto the output. `parts` is the payload split into its
+    /// logical pieces (a delta entry is `[base_hash][stream]`) so no
+    /// intermediate concatenated buffer is ever built just to hand a single
+    /// contiguous slice to the output.
+    fn append_entry(&mut self, etype: u8, parts: &[&[u8]]) -> Result<(), PackError> {
+        let payload_len: usize = parts.iter().map(|p| p.len()).sum();
+        let plen: u32 = payload_len
+            .try_into()
+            .map_err(|_| PackError::PackfileTooLarge)?;
+        self.check_failed()?;
+        if let Err(error) = write_frame(&mut self.out, etype, plen, parts) {
+            self.failed = true;
+            return Err(error.into());
+        }
+        self.len += (ENTRY_FRAME_LEN + payload_len) as u64;
+        Ok(())
+    }
+}
+
+/// Write one `[type][len][payload]` frame to `out`.
+fn write_frame<W: std::io::Write>(
+    out: &mut W,
+    etype: u8,
+    plen: u32,
+    parts: &[&[u8]],
+) -> std::io::Result<()> {
+    out.write_all(&[etype])?;
+    out.write_all(&plen.to_le_bytes())?;
+    for p in parts {
+        out.write_all(p)?;
+    }
+    Ok(())
+}
+
+impl<W> PackWriter<W> {
+    fn check_failed(&self) -> Result<(), PackError> {
+        if self.failed {
+            return Err(PackError::Io(std::io::Error::other(
+                "an earlier write of this pack failed",
+            )));
+        }
         Ok(())
     }
 
@@ -984,25 +1194,13 @@ impl PackWriter {
         peak
     }
 
-    /// Append one entry's frame — `[1B type][4B payload_len][payload]`
-    /// — straight onto the output buffer. `parts` is the payload split
-    /// into its logical pieces (a delta entry is `[base_hash][stream]`)
-    /// so no intermediate concatenated buffer is ever built just to
-    /// hand a single contiguous slice to `finish`.
-    fn append_entry(&mut self, etype: u8, parts: &[&[u8]]) -> Result<(), PackError> {
-        let payload_len: usize = parts.iter().map(|p| p.len()).sum();
-        let plen: u32 = payload_len
-            .try_into()
-            .map_err(|_| PackError::PackfileTooLarge)?;
-        self.buf.push(etype);
-        self.buf.extend_from_slice(&plen.to_le_bytes());
-        for p in parts {
-            self.buf.extend_from_slice(p);
+    /// Can an entry of type `etype` with a payload of `add_len` bytes join the
+    /// pack? The entry and payload caps of the format, and the frame limit a
+    /// file-backed reader applies ([`max_frame_payload`]).
+    fn check_caps_for(&self, etype: u8, add_len: usize) -> Result<(), PackError> {
+        if add_len as u64 > max_frame_payload(etype) {
+            return Err(PackError::PackfileTooLarge);
         }
-        Ok(())
-    }
-
-    fn check_caps_for(&self, add_len: usize) -> Result<(), PackError> {
         let next_count = u64::from(self.entry_count) + 1;
         if next_count > u64::from(MAX_ENTRIES) {
             return Err(PackError::TooManyObjects(MAX_ENTRIES + 1));
@@ -1045,58 +1243,11 @@ impl PackWriter {
         self.total_decoded
     }
 
-    /// Length in bytes of the pack [`Self::finish`] would return now: the
+    /// Length in bytes of the pack finishing would produce now: the
     /// header, every entry and the trailer.
     #[must_use]
     pub fn serialized_len(&self) -> usize {
-        self.buf.len() + TRAILER_LEN
-    }
-
-    /// Serialise the pack: header + entries + trailer. Entries are
-    /// already in `self.buf` (streamed in by `push_raw`/`push_delta`);
-    /// `finish` patches the header's `version` (SPEC-PACKFILE §1: v2
-    /// iff at least one entry ended up compressed, v1 otherwise) and
-    /// `entry_count`, then appends the trailer,
-    /// `BLAKE3(everything_before_trailer)`. The whole pack's BLAKE3 is
-    /// the on-disk pack key — see [`pack_key`].
-    pub fn finish(self) -> Result<Vec<u8>, PackError> {
-        self.finish_inner(None)
-    }
-
-    /// Test-only variant of [`Self::finish`] that also reports, via
-    /// `bytes_copied`, how many payload bytes it copies WHILE finishing
-    /// (as opposed to while entries were pushed). Proves `finish`
-    /// streams rather than double-buffers: the unpatched
-    /// writer re-copied every pushed entry's payload into a fresh
-    /// same-size buffer inside `finish`, so this counter would track
-    /// the whole pack; the streaming writer only ever appends the
-    /// 32-byte trailer here.
-    #[cfg(test)]
-    pub(crate) fn finish_tracking_bytes_copied(
-        self,
-        bytes_copied: &AtomicU64,
-    ) -> Result<Vec<u8>, PackError> {
-        self.finish_inner(Some(bytes_copied))
-    }
-
-    fn finish_inner(mut self, bytes_copied: Option<&AtomicU64>) -> Result<Vec<u8>, PackError> {
-        if self.entry_count > MAX_ENTRIES {
-            return Err(PackError::TooManyObjects(self.entry_count));
-        }
-        let version = if self.has_compressed_entry {
-            VERSION_V2
-        } else {
-            VERSION
-        };
-        self.buf[VERSION_OFFSET..VERSION_OFFSET + 4].copy_from_slice(&version.to_le_bytes());
-        self.buf[ENTRY_COUNT_OFFSET..ENTRY_COUNT_OFFSET + 4]
-            .copy_from_slice(&self.entry_count.to_le_bytes());
-        let trailer = hash::hash(&self.buf);
-        if let Some(c) = bytes_copied {
-            c.fetch_add(trailer.len() as u64, Ordering::Relaxed);
-        }
-        self.buf.extend_from_slice(&trailer);
-        Ok(self.buf)
+        usize::try_from(self.len).unwrap_or(usize::MAX) + TRAILER_LEN
     }
 }
 
@@ -1105,6 +1256,7 @@ impl PackWriter {
 /// callers prepend `packs/` and lower-hex-encode for the storage path.
 #[must_use]
 pub fn pack_key(pack_bytes: &[u8]) -> Hash {
+    note_hashed(pack_bytes.len());
     hash::hash(pack_bytes)
 }
 
@@ -1804,6 +1956,7 @@ impl PackReader {
                 budget,
                 &mut bases,
                 &batch,
+                true,
             )?;
             batch.commit()?;
         }
@@ -2564,6 +2717,7 @@ fn replay_window<'p, 'b>(
     budget: &'b ResidentBudget<'_>,
     bases: &mut &ObjectStore,
     batch: &crate::batch::WriteBatch<'_>,
+    keep_stored: bool,
 ) -> Result<(), PackError> {
     let mut raw_results = raw_results.into_iter();
     // Step 3 exposes bases only at their pack position and releases
@@ -2572,12 +2726,13 @@ fn replay_window<'p, 'b>(
         let position = first_position + offset;
         match entry {
             Entry::Raw(payload) => {
-                let (stored_hash, retained) = raw_results
+                let (staged, retained) = raw_results
                     .next()
                     .expect("raw frame result")
                     .unwrap_or_else(|| {
                         prepare_and_stage_raw(batch, position, payload, uses, budget)
                     })?;
+                let stored_hash = staged.hash;
                 if has_remaining_uses(uses, &stored_hash) {
                     if let Some(bytes) = retained {
                         in_pack.insert(stored_hash, ResidentBytes::Owned(bytes));
@@ -2586,14 +2741,14 @@ fn replay_window<'p, 'b>(
                     }
                 }
                 report.raw_count += 1;
-                report.stored.push(stored_hash);
+                report.note(staged, keep_stored);
             }
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
-                let stored_hash =
+                let staged =
                     stage_delta_target(bases, batch, in_pack, uses, budget, base, stream.as_ref())?;
                 report.delta_count += 1;
-                report.stored.push(stored_hash);
+                report.note(staged, keep_stored);
             }
         }
     }
@@ -2662,6 +2817,12 @@ impl<'a> ResidentBudget<'a> {
         let len = count
             .checked_mul(self.entry_cost)
             .ok_or(PackError::PackfileTooLarge)?;
+        self.reserve_bookkeeping(len)
+    }
+
+    /// Charge `len` bytes of bookkeeping for the whole read. Like
+    /// [`Self::reserve_entries`], it is never released.
+    fn reserve_bookkeeping(&self, len: usize) -> Result<(), PackError> {
         let used = self.used.load(Ordering::Relaxed);
         let total = used.checked_add(len).filter(|&total| total <= self.cap);
         if total.is_none() {
@@ -2819,7 +2980,7 @@ fn has_remaining_uses(uses: &std::collections::HashMap<Hash, BaseUses>, hash: &H
 }
 
 // None marks deferred admission or work skipped after an earlier failure.
-type RawStageResult<'b> = Option<Result<(Hash, Option<OwnedBytes<'b>>), PackError>>;
+type RawStageResult<'b> = Option<Result<(Staged, Option<OwnedBytes<'b>>), PackError>>;
 type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 
 /// Validate, hash and stage independent raw frames, preserving result order.
@@ -2914,7 +3075,7 @@ fn prepare_and_stage_raw<'b>(
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
-) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+) -> Result<(Staged, Option<OwnedBytes<'b>>), PackError> {
     stage_decoded_raw(batch, position, payload.decode(budget)?, uses, budget)
 }
 
@@ -2924,9 +3085,10 @@ fn stage_decoded_raw<'b>(
     payload: ResidentBytes<'_, 'b>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
-) -> Result<(Hash, Option<OwnedBytes<'b>>), PackError> {
+) -> Result<(Staged, Option<OwnedBytes<'b>>), PackError> {
     let obj = validate_storable_object(payload.as_ref())?;
     let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
+    let staged = Staged::of(stored_hash, &obj, payload.as_ref());
     batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
     let retained = if let ResidentBytes::Owned(bytes) = payload {
         budget.record_owned(bytes.bytes.len());
@@ -2941,7 +3103,7 @@ fn stage_decoded_raw<'b>(
     } else {
         None
     };
-    Ok((stored_hash, retained))
+    Ok((staged, retained))
 }
 
 /// SPEC-PACKFILE §1/§5/§8 steps 1-5: length sanity, magic, version,
@@ -3286,7 +3448,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     budget: &'b ResidentBudget<'_>,
     base_hash: Hash,
     stream: &[u8],
-) -> Result<Hash, PackError> {
+) -> Result<Staged, PackError> {
     if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
         let mut reservation = None;
         let bytes = bases
@@ -3310,6 +3472,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
         delta::decode_preallocated(in_pack[&base_hash].as_ref(), stream, resolved.bytes)?;
     let obj = validate_storable_object(&resolved.bytes)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved.bytes);
+    let staged = Staged::of(stored_hash, &obj, &resolved.bytes);
     batch.write_prehashed(stored_hash, &[&resolved.bytes])?;
     budget.record_owned(resolved.bytes.len());
     let usage = uses.get_mut(&base_hash).expect("counted delta base");
@@ -3320,7 +3483,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     if has_remaining_uses(uses, &stored_hash) {
         in_pack.insert(stored_hash, ResidentBytes::Owned(resolved));
     }
-    Ok(stored_hash)
+    Ok(staged)
 }
 
 /// Resolve a delta's base (in-pack first, then the external
@@ -3414,6 +3577,8 @@ fn validate_delta_result_size(stream: &[u8]) -> Result<usize, PackError> {
 // =========================================================================
 
 #[cfg(test)]
+mod file_tests;
+#[cfg(test)]
 mod zstd_tests;
 
 #[cfg(test)]
@@ -3441,6 +3606,7 @@ mod tests {
             budget,
             &mut &*store,
             &batch,
+            true,
         )?;
         batch.commit()?;
         Ok(report)
@@ -4293,7 +4459,8 @@ mod tests {
                     base_hash,
                     &stream
                 )
-                .unwrap(),
+                .unwrap()
+                .hash,
                 target_hash
             );
             assert_eq!(uses[&base_hash].remaining, remaining);

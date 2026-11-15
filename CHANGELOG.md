@@ -7,6 +7,31 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Packs on disk in `kit-core`. `PackWriter::spool` builds a pack in an
+  unnamed file and `finish_spool` seals it, hashing it once for both the
+  trailer and the key. `PackSpool` takes a downloaded pack as it arrives and
+  checks its length, key and trailer in one pass. Only it makes the
+  `VerifiedPack` that `PackReader::read_verified` unpacks one window at a
+  time, with memory bounded by constants rather than by the pack's length
+  (SPEC-PACKFILE §11.1). `UnpackReport::signed` lists the commits, remixes
+  and tags a read stored; a file-backed read leaves `stored` empty. The new
+  constants `PACK_ENTRY_READ_COST`, `RESIDENT_ENTRY_MAX`, `UNPACK_MEMORY_CAP`,
+  `STAGE_WINDOW_BYTES`, `MAX_FRAME_PAYLOAD`, `MAX_RAW_FRAME_PAYLOAD` and
+  `SPOOL_BUFFER` name its bounds. `transfer::DeltaSpool` keeps a push's
+  delta streams in a file and encodes each pair of target and base once
+  across plans.
+
+### Changed
+
+- A pack writer refuses a frame over `MAX_FRAME_PAYLOAD` (SPEC-PACKFILE §5).
+  No kit writer made one.
+- `PackWriter` takes its output as a type parameter, `Vec<u8>` by default.
+  `PlannedDelta::stream` is a `DeltaBytes`. `PackError` has the new variants
+  `Io` and `KeyMismatch`. A push seals each pack with one BLAKE3 pass instead
+  of two (`PackWriter::finish_with_key`).
+
 ## [0.8.1] - 2026-11-15
 
 ### Security

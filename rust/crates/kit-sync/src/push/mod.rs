@@ -772,14 +772,18 @@ fn estimate_pack_sizes_with(
     // stream as compressed, so it never counts fewer packs than a real seal
     // needs. It may count more. The plan lists the deltas of one base next to
     // each other, so none of them brings a base back.
-    let deltas = plan.deltas.iter().map(|delta| {
-        Incoming::delta(
-            (HASH_LEN + delta.stream.len()) as u64,
-            &delta.stream,
-            true,
-            0,
-        )
-    });
+    let deltas = plan
+        .deltas
+        .iter()
+        .map(|delta| {
+            Ok(Incoming::delta(
+                (HASH_LEN + delta.stream.len()) as u64,
+                &delta.stream.bytes().map_err(StoreError::Io)?,
+                true,
+                0,
+            ))
+        })
+        .collect::<Result<Vec<_>, PushError>>()?;
     for add in raw.into_iter().chain(deltas) {
         if fill.seals_before(add, payload_cap, max_pack_bytes, max_entries) {
             packs.push(fill.serialized_bound());
@@ -902,7 +906,7 @@ fn build_and_upload_packs(
         .collect();
     for len in size_capped_batch_lens(&delta_sizes, payload_cap, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
-        for entry in prepare_delta_batch(chunk) {
+        for entry in prepare_delta_batch(chunk)? {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -1026,17 +1030,19 @@ fn prepare_raw_batch(store: &ObjectStore, chunk: &[Hash]) -> Result<Vec<Prepared
 /// `build_and_upload_packs` drains it straight out of `plan.deltas` —
 /// so `PackWriter::prepare_delta` can take each stream by move instead
 /// of cloning it.
-fn prepare_delta_batch(chunk: Vec<transfer::PlannedDelta>) -> Vec<PreparedDelta> {
+fn prepare_delta_batch(
+    chunk: Vec<transfer::PlannedDelta>,
+) -> Result<Vec<PreparedDelta>, PushError> {
+    let prepare = |d: transfer::PlannedDelta| {
+        Ok(PackWriter::prepare_delta(
+            d.base,
+            d.stream.into_vec().map_err(StoreError::Io)?,
+        ))
+    };
     if chunk.len() < pack_fanout_threshold() {
-        return chunk
-            .into_iter()
-            .map(|d| PackWriter::prepare_delta(d.base, d.stream))
-            .collect();
+        return chunk.into_iter().map(prepare).collect();
     }
-    chunk
-        .into_par_iter()
-        .map(|d| PackWriter::prepare_delta(d.base, d.stream))
-        .collect()
+    chunk.into_par_iter().map(prepare).collect()
 }
 
 /// Entries-per-thread budget below which [`encode_delta_candidates_batch`]
@@ -1174,7 +1180,7 @@ fn seal_pack(
         return Err(PushError::Sync(SyncError::Interrupted));
     }
     let sealed = std::mem::replace(w, PackWriter::new());
-    let pack = sealed.finish()?;
+    let (pack, pack_key) = sealed.finish_with_key()?;
     let is_ticketed = ticketed_pack(limits, pack.len() as u64);
     if let Some(budget) = limits.data_packs_per_advance
         && is_ticketed
@@ -1190,7 +1196,6 @@ fn seal_pack(
     if pack.len() as u64 > serialized_limit(limits.max_pack_bytes) {
         return Err(PushError::from(SourceError::PayloadTooLarge(pack.len())));
     }
-    let pack_key = pack::pack_key(&pack);
     if let PackSink::Upload { tx, head_ref } = sink {
         tx.upload_pack_via_ref(&pack, &PackKey::from_hash(pack_key), head_ref)
             .map_err(|error| repository_operation_error(tx, error))?;
@@ -1523,7 +1528,7 @@ mod tests {
         transfer::PlannedDelta {
             target: [salt; 32],
             base,
-            stream,
+            stream: stream.into(),
         }
     }
 
@@ -1772,11 +1777,11 @@ mod tests {
                 .map(|i| PlannedDelta {
                     target: kit_core::hash::hash(format!("target #{i}").as_bytes()),
                     base: kit_core::hash::hash(format!("base #{i}").as_bytes()),
-                    stream: format!("delta stream #{i}").into_bytes(),
+                    stream: format!("delta stream #{i}").into_bytes().into(),
                 })
                 .collect();
             let expected_bases: Vec<_> = deltas.iter().map(|d| d.base).collect();
-            let prepared = super::prepare_delta_batch(deltas);
+            let prepared = super::prepare_delta_batch(deltas).unwrap();
             assert_eq!(
                 prepared.iter().map(PreparedDelta::base).collect::<Vec<_>>(),
                 expected_bases,
@@ -1821,7 +1826,7 @@ mod tests {
                 .map(|&c| {
                     transfer::encode_delta_candidate(&store, c)
                         .expect("encode delta candidate")
-                        .map(|p| p.stream)
+                        .map(|p| p.stream.into_vec().unwrap())
                 })
                 .collect();
             assert!(
@@ -1833,7 +1838,7 @@ mod tests {
                 super::encode_delta_candidates_batch(&store, &candidates)
                     .expect("encode delta candidates batch")
                     .into_iter()
-                    .map(|r| r.map(|p| p.stream))
+                    .map(|r| r.map(|p| p.stream.into_vec().unwrap()))
                     .collect();
             assert_eq!(
                 actual, expected,

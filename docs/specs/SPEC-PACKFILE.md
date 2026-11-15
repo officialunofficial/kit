@@ -324,6 +324,16 @@ Normative, for both v1 and v2 packs:
 - `entry_count <= 10_000_000`.
 - Sum of all `payload_len` <= **4 GiB**.
 - Single entry `payload_len` must fit in a `u32` (≤ ~4 GiB).
+- A frame's payload is at most `MAX_RAW_OBJECT_SIZE` (1 GiB) for a `0x00`
+  entry, and at most the zstd compress bound of 1 GiB plus the 32-byte base
+  and the 4-byte length prefix, 1,077,936,164 bytes, for a `0x02`, `0x03` or
+  `0x04` entry (`MAX_FRAME_PAYLOAD`). A writer refuses to emit a larger frame;
+  no writer needs one, as it keeps a compressed frame only when it is smaller
+  than the object, and a delta only when it is smaller than its target. The
+  file-backed reader (§11.1) refuses a larger frame from its header, having
+  read no more than a 4 KiB scan buffer of the payload. The slice reader
+  does not check this limit; the payload sum and its decoded budget bound
+  what it holds.
 
 These are policy caps, not wire limits. Implementations MUST fail with
 `TooManyObjects`/`PackfileTooLarge` on violation rather than
@@ -406,9 +416,12 @@ bump.
 
 ## 6. Parsing model
 
-kit packfiles (v1 and v2 alike) are **buffered**, not streamed. The
-reader reads the entire packfile into memory and then walks entries.
-This is a deliberate simplification. Consequences:
+kit packfiles (v1 and v2 alike) have no index, and a reader knows a pack is
+whole only once it has checked the trailer, which comes last. The slice
+reader (`PackReader::read`) takes the entire packfile in memory and then
+walks entries. The file-backed reader (`PackReader::read_verified`, §11.1)
+takes a pack already verified in a file and reads it one window at a time.
+Consequences for the slice reader:
 
 - In addition to the buffered packfile, owned resident payloads are capped at
   `max(2 × MAX_RAW_OBJECT_SIZE, 16 × pack_len)`, charged before allocation.
@@ -703,6 +716,66 @@ Streaming implementations MUST still verify the trailer at end-of-stream
 and retroactively reject partially-stored objects if trailer
 verification fails.
 
+### 11.1 Unpacking from a file
+
+`PackReader::read_verified` unpacks a pack held in an unnamed file, one
+window at a time, so its memory does not grow with the pack's length.
+
+- **Only a verified pack is read.** The pack reaches the reader as a
+  `VerifiedPack`, which only a `PackSpool` makes. The spool takes the bytes
+  of a download as they arrive. It refuses a declared length over its limit
+  before any byte, and any byte past the declared length or the limit. Its
+  one BLAKE3 pass lags the input by the trailer's 32 bytes, so it gives both
+  the trailer of the body and the key of the whole pack. The spool yields the
+  pack only when the length is the declared one, the bytes hash to the
+  requested key (§7) and the trailer matches (§8). The file is unnamed, so
+  nothing else can change it after the check. The reader does not hash the
+  trailer again.
+- **Header.** The checks of §1 and §5 apply: magic, version, at most
+  10,000,000 entries, and at most one entry per 5 body bytes, so a small file
+  cannot claim millions of entries.
+- **Budget.** Before it allocates anything for the entries, the reader
+  reserves `320 × N` bytes (`PACK_ENTRY_READ_COST`) for a pack of `N`
+  entries. It also reserves, for each of `min(N, 65,536)` window slots, 896
+  bytes plus 2 per character of the store's path. Decoded bytes held at once
+  get a share of `min(3 GiB, max(2 GiB, 16 × pack_len))` beside that. The
+  most one entry decodes is a 1 GiB base, a 1 GiB decompressed delta stream
+  and a 1 GiB target (`RESIDENT_ENTRY_MAX`). The largest budget, for a short
+  store path, is about 6.04 GiB (`UNPACK_MEMORY_CAP`). The cumulative
+  decoded cap of the slice reader applies unchanged.
+- **Header scan.** The reader walks the frame headers through a small
+  buffer and skips each payload. It checks each frame's type, the payload
+  sum (§5), the frame limit (§5) and the frame's end against the trailer. It
+  cuts the entries into windows of at most 65,536 entries and 64 MiB of
+  frames (`STAGE_WINDOW_BYTES`); a larger frame gets a window of its own. It
+  keeps only where each window starts and ends.
+- **Windows.** Each window's frames are read into one buffer, charged
+  before decompression, staged and committed, as the slice reader does per
+  window. A base or delta target is kept only while a later entry of the same
+  window names it. No decoded byte is held across a window boundary. A delta
+  whose base an earlier window stored reads it back from the store, so a base
+  shared across windows is read once per window that uses it. That reading is
+  charged to the decoded share while the base is held, but not counted
+  against the cumulative decoded cap: it costs at most one read of each base
+  per window. A window closes when the next frame would take it past 64 MiB,
+  so two windows in a row hold more than 64 MiB of frames: there are at most
+  the entry count over 65,536, plus twice the frame bytes over 64 MiB, plus
+  one windows.
+- **Report.** The report counts raw and delta entries and lists the
+  commits, remixes and tags stored, with their lengths, for the signature
+  check. It does not list every stored hash.
+
+The reader refuses two kinds of pack that the slice reader may read, and no
+kit writer produces either: a frame over the frame limit, and a window that
+keeps more decoded bases alive than the decoded share. It reads every other
+pack the slice reader reads, refusing what it refuses, though perhaps with
+another error. It also reads short packs with millions of entries, which the
+slice reader's charge of 896 bytes per entry refuses. A failure leaves the
+windows committed before it in the store; they hold verified,
+content-addressed objects.
+
+### 11.2 The window reader
+
 The core window reader keeps a live incremental BLAKE3 digest of the consumed
 current-window prefix. Checkpoints finalize it; cold resume authenticates that
 prefix once and rebuilds it. Completed ranges use explicit subtree commitments,
@@ -750,3 +823,13 @@ chain metadata: one million packs and 100,000 pack-list nodes. Application
 uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
+
+A caller that unpacks a pack from a verified file (§11.1) instead holds no
+pack payload buffer. The reader holds one window of at most 64 MiB of
+frames, or one frame of at most `MAX_FRAME_PAYLOAD`, and the budget of
+§11.1: 320 bytes per entry, the window slots' charge and a decoded share of
+at most 3 GiB. The budget is about 6.04 GiB for any pack, and about
+7.04 GiB with a window of one largest frame. A pack of small objects peaks
+near the window, about 42 MB of window state, and under 320 bytes per
+entry. The spool that holds the pack takes a 1 MiB buffer and one pack of
+disk.

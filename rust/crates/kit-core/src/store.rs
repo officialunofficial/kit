@@ -431,6 +431,12 @@ impl ObjectStore {
         &self.objects_root
     }
 
+    /// Length of the path of the objects directory, which every staged and
+    /// stored object path starts with.
+    pub(crate) fn objects_root_len(&self) -> usize {
+        self.objects_root.as_os_str().len()
+    }
+
     /// Compute the on-disk path for `hash`, joined under `objects/`.
     /// `pub(crate)` so [`WriteBatch`] shares the single layout rule.
     pub(crate) fn path_for(&self, h: &Hash) -> PathBuf {

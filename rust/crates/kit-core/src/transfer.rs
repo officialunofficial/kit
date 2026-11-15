@@ -26,8 +26,11 @@
 //! BMT root for a `Tree`/`ChunkedBlob` — see `crate::merkle`) is
 //! re-verified by `PackReader` before storing.
 
+mod delta_spool;
 pub mod packmap;
 pub mod walk;
+
+pub use delta_spool::DeltaSpool;
 
 use std::collections::{HashMap, HashSet};
 
@@ -519,7 +522,72 @@ pub struct PlannedDelta {
     /// BLAKE3 of the base object the delta is applied against.
     pub base: Hash,
     /// SPEC-DELTA instruction stream.
-    pub stream: Vec<u8>,
+    pub stream: DeltaBytes,
+}
+
+/// The SPEC-DELTA stream of a [`PlannedDelta`]: held in memory, or a range
+/// of a [`DeltaSpool`]'s file that is read back when its pack is built.
+#[derive(Debug, Clone)]
+pub enum DeltaBytes {
+    /// The stream itself.
+    Inline(Vec<u8>),
+    /// `len` bytes at `offset` in a spool file.
+    Spooled {
+        file: std::sync::Arc<std::fs::File>,
+        offset: u64,
+        len: u64,
+    },
+}
+
+impl DeltaBytes {
+    /// Length of the stream in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Inline(bytes) => bytes.len(),
+            Self::Spooled { len, .. } => usize::try_from(*len).unwrap_or(usize::MAX),
+        }
+    }
+
+    /// Whether the stream is empty. A valid stream never is.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The stream's bytes: borrowed when inline, read back when spooled.
+    ///
+    /// # Errors
+    /// An I/O error reading a spooled stream back.
+    pub fn bytes(&self) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+        match self {
+            Self::Inline(bytes) => Ok(std::borrow::Cow::Borrowed(bytes)),
+            Self::Spooled { .. } => self.clone().into_vec().map(std::borrow::Cow::Owned),
+        }
+    }
+
+    /// The stream's bytes, owned.
+    ///
+    /// # Errors
+    /// An I/O error reading a spooled stream back.
+    pub fn into_vec(self) -> std::io::Result<Vec<u8>> {
+        match self {
+            Self::Inline(bytes) => Ok(bytes),
+            Self::Spooled { file, offset, len } => {
+                let len = usize::try_from(len)
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+                let mut bytes = vec![0u8; len];
+                crate::pack::read_spooled(&file, offset, &mut bytes)?;
+                Ok(bytes)
+            }
+        }
+    }
+}
+
+impl From<Vec<u8>> for DeltaBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Inline(bytes)
+    }
 }
 
 /// A deterministic plan for the pack(s) a push uploads for one ref —
@@ -854,7 +922,7 @@ fn try_delta_with(
         Some(PlannedDelta {
             target,
             base,
-            stream,
+            stream: DeltaBytes::Inline(stream),
         })
     } else {
         None
@@ -1256,7 +1324,7 @@ mod tests {
             w.push_raw(*h, &bytes).unwrap();
         }
         for d in &plan.deltas {
-            w.push_delta(&d.base, &d.stream).unwrap();
+            w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
         }
         let pack = w.finish().unwrap();
 
@@ -1588,6 +1656,52 @@ mod tests {
         );
 
         assert_pack_reconstructs(&s, &plan, c1, c2);
+    }
+
+    /// Split probing plans several ranges of one chain. Through one delta
+    /// spool, a `(target, base)` pair the probes share is encoded once, and
+    /// every plan gets the same stream, read back from the spool's file.
+    #[test]
+    fn probes_that_share_a_delta_encode_it_once_through_a_delta_spool() {
+        let (d, s) = store();
+        let mut v1 = Vec::new();
+        for i in 0..40 {
+            v1.extend_from_slice(format!("unchanged line number {i:02}\n").as_bytes());
+        }
+        let mut v2 = v1.clone();
+        v2.extend_from_slice(b"one more line\n");
+        let blob1 = put_blob(&s, v1);
+        let blob2 = put_blob(&s, v2);
+        let c1 = commit_with_named_file(&s, b"small.txt", blob1, vec![], "v1");
+        let c2 = commit_with_named_file(&s, b"small.txt", blob2, vec![c1], "v2");
+        let c3 = commit_with_named_file(&s, b"small.txt", blob2, vec![c2], "v3");
+
+        let inline = plan_pack(&s, c2, Some(c1)).unwrap();
+        let mut spool = DeltaSpool::create(&d.path().join("tmp")).unwrap();
+        let mut encoded = Vec::new();
+        let mut probe = |tip| {
+            plan_pack_with(&s, tip, Some(c1), |store, candidates| {
+                spool.encode(store, candidates, |store, fresh| {
+                    encoded.extend(fresh.iter().map(|c| (c.target, c.base)));
+                    fresh
+                        .iter()
+                        .map(|&c| encode_delta_candidate(store, c))
+                        .collect()
+                })
+            })
+            .unwrap()
+        };
+        let probes = [probe(c2), probe(c3), probe(c2)];
+        assert_eq!(encoded, vec![(blob2, blob1)], "one encode for three probes");
+        for plan in probes {
+            assert_eq!(plan.deltas.len(), 1);
+            assert!(matches!(plan.deltas[0].stream, DeltaBytes::Spooled { .. }));
+            assert_eq!(
+                plan.deltas[0].stream.bytes().unwrap(),
+                inline.deltas[0].stream.bytes().unwrap()
+            );
+            assert_eq!(plan.raw.contains(&blob2), inline.raw.contains(&blob2));
+        }
     }
 
     /// The deltas of a plan are ordered by base and then target, so a reader
