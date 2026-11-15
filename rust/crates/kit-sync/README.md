@@ -7,7 +7,8 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 downloads the packs it does not already have, and unpacks and records each one
 as it arrives, with no repository lock held and nothing staged on disk. It
 verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete, publishes the remote-tracking ref under the
+the tip's closure is complete, verifies the signature of every commit, remix
+and tag in the tip's history, publishes the remote-tracking ref under the
 repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
 with rollback on failure. A `PruneGuard` keeps gc from deleting the fetch's
 objects before a ref names them. The wait for the repository lock has no
@@ -56,8 +57,11 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 `SyncOptions`:
 
 * `verify_signatures` (default `true`): verify every commit, remix and tag the
-  call introduces and fail closed with `SyncError::UnsignedOrInvalidObject`.
-  Setting it to `false` is the explicit opt-out.
+  call introduces, and every one in the history of each tip it publishes, and
+  fail closed with `SyncError::UnsignedOrInvalidObject`. A tip is checked even
+  when no pack of this call carried it, for example when a refused pack, another
+  remote or a fetch with the opt-out left its objects in the store. Setting it
+  to `false` is the explicit opt-out.
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).

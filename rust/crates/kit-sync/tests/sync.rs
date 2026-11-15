@@ -905,6 +905,185 @@ fn the_explicit_opt_out_accepts_an_unsigned_commit() {
     ));
 }
 
+impl Remote {
+    /// Point `main` at `tip` with a fresh single-node chain whose one pack
+    /// carries no object, so the fetch downloads nothing that names `tip`.
+    /// A hostile remote does this once the closure of `tip` is local.
+    fn repoint(&self, tip: Hash) {
+        self.publish_pack(&PackWriter::new().finish().unwrap(), tip, true);
+    }
+}
+
+fn signed_fetch(target: &Path, remote: &Remote) -> Result<kit_sync::FetchReport, SyncError> {
+    fetch(
+        target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+}
+
+/// A fetch and a pull that verify signatures both refuse `forged`, and
+/// neither the tracking ref nor the local branch moves from `held`.
+fn assert_refused(target: &Path, remote: &Remote, forged: Hash, tracking: Hash, held: Hash) {
+    let refused = |error: SyncError| {
+        assert!(
+            matches!(&error, SyncError::UnsignedOrInvalidObject { hash, .. } if *hash == hash::to_hex(&forged)),
+            "{error:?}"
+        );
+    };
+    refused(signed_fetch(target, remote).unwrap_err());
+    let layout = RepoLayout::single(target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tracking)
+    );
+    refused(
+        pull(
+            target,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap_err(),
+    );
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(held));
+}
+
+/// A refused pack leaves its objects in the store. A remote that then points
+/// the branch at the refused commit with a chain that no longer carries it
+/// is refused again: the tip is checked, not only the packs this run applied.
+#[test]
+fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let forged = remote.publish(Some(first), &[("a.txt", b"forged\n")], false);
+    let error = signed_fetch(&target, &remote).unwrap_err();
+    assert!(
+        matches!(error, SyncError::UnsignedOrInvalidObject { .. }),
+        "{error:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(
+        store.contains(&forged),
+        "the refused objects stay in the store"
+    );
+
+    remote.repoint(forged);
+    assert_refused(&target, &remote, forged, first, first);
+
+    // A signed descendant does not carry the unsigned commit below it.
+    let tip = remote.publish(Some(forged), &[("a.txt", b"signed on top\n")], true);
+    let error = signed_fetch(&target, &remote).unwrap_err();
+    assert!(
+        matches!(&error, SyncError::UnsignedOrInvalidObject { hash, .. } if *hash == hash::to_hex(&forged)),
+        "{error:?}"
+    );
+    assert_ne!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+/// An unsigned commit another remote wrote, with verification turned off for
+/// that remote, is checked before a remote that verifies publishes it.
+#[test]
+fn a_commit_another_remote_left_unverified_is_checked_before_it_is_published() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let other = Remote::new();
+    let unsigned = other.publish(Some(first), &[("a.txt", b"unsigned\n")], false);
+    fetch(
+        &target,
+        &other.source(),
+        "other",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "other", "main").unwrap(),
+        Some(unsigned)
+    );
+
+    remote.repoint(unsigned);
+    assert_refused(&target, &remote, unsigned, first, first);
+}
+
+/// A fetch that turned verification off records the packs it applied. A
+/// later fetch of the same remote that verifies skips those packs, and still
+/// checks the history its ref names.
+#[test]
+fn a_fetch_that_verifies_checks_history_an_opted_out_fetch_applied() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let unsigned = remote.publish(Some(first), &[("a.txt", b"unsigned\n")], false);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    assert_refused(&target, &remote, unsigned, unsigned, first);
+}
+
+/// A pull that verifies checks the tip it moves the branch to, even when its
+/// fetch did not publish that tip: here a fetch with the opt-out wrote it, and
+/// the remote's listing no longer names the branch.
+#[test]
+fn a_pull_checks_a_tracking_tip_its_fetch_did_not_publish() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let unsigned = remote.publish(Some(first), &[("a.txt", b"unsigned\n")], false);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    let silent = StaleListing {
+        inner: remote.source(),
+        listing: Vec::new(),
+    };
+
+    let error = pull(
+        &target,
+        &silent,
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, SyncError::UnsignedOrInvalidObject { hash, .. } if *hash == hash::to_hex(&unsigned)),
+        "{error:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(first));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"one\n");
+}
+
 #[test]
 fn a_missing_target_branch_is_an_error_not_a_fallback() {
     let remote = Remote::new();

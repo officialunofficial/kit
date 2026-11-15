@@ -34,6 +34,7 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
+use crate::verify::verify_history_signatures;
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -152,7 +153,9 @@ pub(crate) struct Applied {
 ///
 /// When `require_signed` is `true` every commit, remix and tag in each
 /// freshly unpacked pack is verified before the pack is recorded as applied.
-/// On the self-heal path every re-downloaded object is re-verified.
+/// On the self-heal path every re-downloaded object is re-verified. This
+/// covers only the packs a run applies: [`fetch_objects`] checks the history
+/// of the tip itself before it publishes it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_and_verify_chain(
     store: &ObjectStore,
@@ -291,7 +294,9 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// 2. walk its chain oldest-first, then download, check, unpack and record
 ///    each pack the applied-pack record does not already have, one at a time,
 ///    with no repo lock held, and assert the tip's closure is fully present,
-/// 3. acquire the repo lock, publish the remote-tracking ref and its
+/// 3. when signatures are required, verify every commit, remix and tag in
+///    the tip's history, whether or not this run downloaded it,
+/// 4. acquire the repo lock, publish the remote-tracking ref and its
 ///    checkpoint, and release the lock.
 ///
 /// Step 2's unpack and closure check are one call so a closure failure
@@ -510,7 +515,15 @@ fn fetch_objects_inner(
                 Err(e) => return Err(e),
             };
 
-            // Step 3: publish under a repo lock acquired fresh for this
+            // Step 3: the signatures checked so far cover only the packs this
+            // run applied. The tip can name history no such pack carried, for
+            // example objects a refused pack left in the store, so its
+            // history is checked here, whatever path it took into the store.
+            if require_signed {
+                verify_history_signatures(store, &completed.tip)?;
+            }
+
+            // Step 4: publish under a repo lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
             // has a deadline only when `lock_wait` sets one: the work above
             // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune
