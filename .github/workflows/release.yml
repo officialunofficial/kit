@@ -538,13 +538,14 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [validate-release-tag, build, sbom, third-party-notices]
+    needs: [validate-release-tag, build, sbom, third-party-notices, verify-crates]
     if: >-
       ${{ !cancelled()
       && needs.validate-release-tag.result == 'success'
       && needs.build.result == 'success'
       && needs.sbom.result == 'success'
-      && needs.third-party-notices.result == 'success' }}
+      && needs.third-party-notices.result == 'success'
+      && needs.verify-crates.result == 'success' }}
     permissions:
       contents: write       # create the GitHub Release + upload assets
       id-token: write       # cosign keyless OIDC + SLSA provenance OIDC
@@ -852,8 +853,8 @@ jobs:
   # Packs and builds every crate that publishes, the way cargo publish does,
   # without uploading. The job holds no id-token and runs in no environment, so
   # the build scripts and proc macros of the dependencies run with no way to
-  # get a crates.io token. A build problem stops the release here, before the
-  # first upload. A crate that is already on crates.io only makes cargo warn.
+  # get a crates.io token. The GitHub Release waits for this job, so a build
+  # problem stops the release before anything is published. A crate that is already on crates.io only makes cargo warn.
   verify-crates:
     name: Verify the crates build for crates.io
     runs-on: ubuntu-latest

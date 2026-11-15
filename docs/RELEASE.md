@@ -145,8 +145,8 @@ Run top to bottom. Do not skip steps.
 
 ### Wait for the release workflows
 
-- [ ] `release.yml` succeeded through `validate-release-tag` and all four
-      platform builds.
+- [ ] `release.yml` succeeded through `validate-release-tag`, `verify-crates`
+      and all four platform builds.
 - [ ] GitHub Release created as a non-draft.
 - [ ] Archives present:
       `kit-X.Y.Z-aarch64-apple-darwin.tar.gz`,
@@ -258,8 +258,9 @@ disagree, fix the script:
    strict `vX.Y.Z[-prerelease]` form, and tag targets not reachable from
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
-   `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
-   `release` → `publish-npm` and `publish-crates` (the last two run in parallel).
+   `validate-release-tag` → `build` (× 4 archs) / `verify-crates` (parallel) →
+   `sbom` / `third-party-notices` (parallel) → `release` → `publish-npm` and
+   `publish-crates` (the last two run in parallel).
 6. Run the [smoke test](#smoke-test).
 
 ### The release PR
@@ -292,8 +293,8 @@ a crate that is on crates.io.
 Two jobs do the work, both on the commit that `validate-release-tag` checked.
 
 The `verify-crates` job runs `cargo publish --workspace --dry-run --locked`.
-It packs and builds every crate to publish, so a build failure stops the
-release before the first upload. It has no `id-token` permission and no
+It packs and builds every crate to publish. The GitHub Release waits for it,
+so a build failure stops the release before anything is published. It has no `id-token` permission and no
 environment. The build scripts and proc macros of the dependencies run there,
 and they have no way to get a crates.io token. A crate that is already on
 crates.io only makes the dry run warn.
