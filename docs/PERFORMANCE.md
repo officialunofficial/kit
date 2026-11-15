@@ -179,3 +179,103 @@ chunk proof, and at 263,980 kB, the size of the manifest alone, after the
 change. A multi proof of two positions gave the same two numbers. Each ran
 once as a release build on one 32-CPU machine, and each took about 1.9
 seconds.
+
+## Pack transfer: memory and time
+
+A push or a clone moves one pack. 0.8.0 held the pack in memory. 0.9 spools it
+to a file and streams it on every transport. This section compares the two.
+
+### Method
+
+- 0.8.0 is the `v0.8.0` tag. 0.9 is `main` at commit `58afb7d`. Both are
+  release builds from one machine.
+- The machine is a shared 32-CPU arm64 Linux VM (Neoverse-V2, 125 GiB, ext4)
+  with other jobs on it. The last column of each table is the 1-minute load
+  average at the end of each run: the median and the highest.
+- Two packs. The small one is 1,024 files of 256 KiB, a 268,509,029-byte pack
+  (256 MiB). The large one is 15,360 files of 256 KiB, a 4,027,365,827-byte
+  pack (3.75 GiB). The format caps a pack at 4 GiB. The bytes are random, so
+  they do not compress.
+- `kit+file` and `kit+ssh` run the `kit` command. Each is one new process under
+  `/usr/bin/time -v`. A clone includes the checkout of the work tree.
+  `kit+ssh` uses `kit serve` behind an `sshd` that the run started on a high
+  port on 127.0.0.1. Each build served its own runs.
+- Connect runs a test program that calls the push and fetch code of each build
+  against the loopback server of the Connect tests. Its clone is a fetch with no
+  checkout. That server is the `main` build for both clients, and it does not
+  offer a pack location, so a clone streams.
+- Each row is four runs of each build. The two builds alternate, and the order
+  flips each round, so 0.8.0 goes first in rounds 1 and 3 and last in rounds 2
+  and 4. Before every run the script syncs the disk and waits 8 s, and a push
+  copies its source repository and syncs before the timer starts. The page
+  cache was not dropped. The tables show the median and, in brackets, the range.
+  A first pass ran 0.8.0 first every time and did not sync after the copy.
+  Its 3.75 GiB push gaps were +18% for `kit+ssh` and +3% for `kit+file`. Later
+  passes that synced gave +8% and +9% for `kit+file`. The `kit+ssh` gap moved
+  with the order: +24% with 0.8.0 first and -9% with 0.9 first. The tables do
+  not use the first pass. The text quotes it where it says so. The two 256 MiB `kit+ssh` rows were run again alone, because in the
+  balanced run they overlapped a load spike.
+- A push sends one pack. The preferred pack size, 256 MiB, was raised to 4 GiB
+  for `kit+file` and `kit+ssh` with a build-time change to
+  `DEFAULT_PACK_PAYLOAD_CAP` in both builds. No command-line setting reaches it.
+  The Connect program sets the size in code.
+- `kit serve` ends a session after 1 GiB of upload or download. A pack larger
+  than that cannot cross `kit+ssh` in either version. Both builds were changed
+  to allow 8 GiB (`MAX_BYTES_PER_CONN`). Only the large pack needs it.
+
+### 256 MiB pack
+
+| Transfer | 0.8.0 RSS | 0.9 RSS | 0.8.0 time | 0.9 time | Change | Load |
+|---|---|---|---|---|---|---|
+| push `kit+file` | 332 MiB [330 to 340] | 104 MiB [104 to 104] | 1.02 s [1.02 to 1.02] | 1.06 s [1.06 to 1.06] | +3.9% | 32, 57 |
+| push `kit+ssh` | 332 MiB [326 to 336] | 105 MiB [105 to 105] | 1.64 s [1.61 to 1.67] | 1.65 s [1.64 to 1.72] | +0.6% | 9, 15 |
+| push Connect | 331 MiB [321 to 345] | 102 MiB [102 to 103] | 1.52 s [1.52 to 1.53] | 1.58 s [1.57 to 1.58] | +3.9% | 80, 155 |
+| clone `kit+file` | 285 MiB [285 to 286] | 76 MiB [76 to 76] | 1.38 s [1.37 to 1.91] | 1.16 s [1.14 to 1.23] | -16% | 11, 15 |
+| clone `kit+ssh` | 286 MiB [286 to 286] | 78 MiB [76 to 78] | 2.63 s [2.44 to 4.83] | 2.29 s [2.19 to 2.55] | -13% | 26, 33 |
+| clone Connect | 284 MiB [284 to 284] | 75 MiB [74 to 75] | 1.21 s [1.19 to 1.68] | 0.90 s [0.89 to 0.90] | -25% | 21, 38 |
+
+No push or clone is more than 5% slower than 0.8.0. The pushes take up to 4%
+longer, and the clones take 13 to 25% less. The times are read to 10 ms, so
+1.02 s against 1.06 s is between +2.9% and +4.9%. The first pass, at a load
+of 3 to 10, gave a similar result: +2.9% for `kit+file`, +1.2% for
+`kit+ssh` and +2.6% for Connect.
+
+### 3.75 GiB pack
+
+| Transfer | 0.8.0 RSS | 0.9 RSS | 0.8.0 time | 0.9 time | Change | Load |
+|---|---|---|---|---|---|---|
+| push `kit+file` | 3,926 MiB [3,910 to 3,937] | 114 MiB [112 to 117] | 16.2 s [15.7 to 16.5] | 17.6 s [17.1 to 20.1] | +9% | 165, 450 |
+| push `kit+ssh` | 3,924 MiB [3,906 to 3,930] | 115 MiB [113 to 117] | 23.1 s [21.9 to 25.0] | 24.2 s [23.6 to 32.5] | +5% | 198, 525 |
+| push Connect | 3,921 MiB [3,907 to 3,930] | 111 MiB [111 to 118] | 22.8 s [22.5 to 24.0] | 25.9 s [25.7 to 26.7] | +13% | 11, 58 |
+| clone `kit+file` | 3,879 MiB [3,879 to 3,880] | 77 MiB [76 to 78] | 18.9 s [18.7 to 26.1] | 17.3 s [16.8 to 25.8] | -8% | 46, 110 |
+| clone `kit+ssh` | 3,882 MiB [3,881 to 3,882] | 76 MiB [76 to 77] | 31.3 s [25.9 to 35.3] | 22.1 s [21.4 to 22.3] | -29% | 30, 89 |
+| clone Connect | 3,881 MiB [3,880 to 3,881] | 75 MiB [75 to 76] | 19.6 s [17.8 to 39.6] | 15.3 s [13.6 to 24.8] | -22% | 41, 212 |
+
+The machine was busier for these rows, and some runs are much slower than the
+rest of their row. The medians are less sensitive to them. The `kit+ssh` clone
+gap was -19% in the first pass and -29% here.
+
+A 0.9 clone from a pack location, which the Connect test server can offer, used
+73 to 75 MiB at both sizes. Its time was not compared, because the machine was
+at a load of 390 to 540 for those runs.
+
+`kit serve` peaked at 7 to 9 MiB in both versions. The Connect test server, the
+`main` build in every run, peaked at 8 to 11 MiB, and at 6 MiB when it served a
+location.
+
+### Reading the numbers
+
+- The memory of a push or clone no longer follows the pack. It is 74 to 118
+  MiB for 256 MiB and for 3.75 GiB. 0.8.0 needed the pack plus 30 to 90 MiB:
+  about 3.8 GiB for the 3.75 GiB pack.
+- No clone is slower. Clones take 8 to 29% less on 0.9. The likely reason is
+  that 0.9 does not hold the pack and hashes it once on a fetch. That was not
+  timed.
+- At 256 MiB a 0.9 push takes up to 4% longer. At 3.75 GiB it took 5 to 13%
+  longer in the balanced run, where the `kit+file` and `kit+ssh` rows ran at a
+  median load near 200. `kit+file` gave +8% and +9% in the two synced passes.
+  `kit+ssh` ranged from -9% to +24% across passes. Only Connect gave the same
+  gap in every pass, 12 to 14%. The cause is
+  not measured. 0.8.0 also hashed the whole pack before the upload, twice, in
+  memory. What 0.9 adds is writing the pack to a spool file, reading it back
+  to hash it, and sending it from that file.
