@@ -272,6 +272,10 @@ struct Wire<'a> {
     /// Head refs whose uploads are refused, as a grant that does not cover
     /// them refuses them.
     refused: RefCell<HashSet<String>>,
+    /// Head refs whose next advance lands and then reports a tag map
+    /// conflict, as a retried write whose first response was lost does:
+    /// `true` when both refs land, `false` when only the tag map does.
+    replayed: RefCell<std::collections::HashMap<String, bool>>,
 }
 
 impl<'a> Wire<'a> {
@@ -289,6 +293,7 @@ impl<'a> Wire<'a> {
             between: RefCell::default(),
             on_read: RefCell::default(),
             refused: RefCell::default(),
+            replayed: RefCell::default(),
         }
     }
 
@@ -399,6 +404,16 @@ impl RemoteSource for Wire<'_> {
             && let Some(answer) = hook(head)
         {
             return answer;
+        }
+        let replay = self.replayed.borrow_mut().remove(head);
+        if let Some(both) = replay {
+            self.inner.update_ref(map, map_condition, node)?;
+            if both {
+                self.inner.update_ref(head, head_condition, tip)?;
+            }
+            return Ok(CommitOutcome::Advanced(
+                kit_core::protocol::AdvanceOutcome::PackmapConflict,
+            ));
         }
         if head.starts_with("refs/heads/") {
             return self.inner.advance_refs_committing(
@@ -1382,6 +1397,123 @@ fn ticketed_tags_that_always_lose_are_contended_after_a_bounded_upload_count() {
     // One first upload per round, and at most eight more across the push.
     assert!(uploads <= 2 * 8, "{uploads} uploads");
     assert_eq!(wire.read("refs/tags/t00"), None);
+}
+
+/// A write that landed and was sent again reports a tag map conflict. The
+/// push reads both refs: with only its own tag map there, it writes the tag
+/// alone; with both there, the tag has landed.
+#[test]
+fn a_replayed_tag_write_that_landed_is_finished_not_retried() {
+    for both in [false, true] {
+        let (tx, _root) = transport(Kind::Memory);
+        let wire = Wire::new(&*tx);
+        let work = Work::new();
+        let c = work.commits(None, 2);
+        work.branch("main", c[0]);
+        work.push_branch(&wire, "main");
+        wire.take_objects();
+        let v1 = work.tag("v1", c[1]);
+        wire.replayed
+            .borrow_mut()
+            .insert("refs/tags/v1".to_owned(), both);
+
+        let results = work.push_tags(&wire, false);
+
+        assert_created(&results, "v1");
+        assert_eq!(wire.uploaded_for(), ["refs/tags/v1"], "uploaded once");
+        assert_eq!(wire.read("refs/tags/v1"), Some(v1));
+        let (_dir, report, _) = clone_of(&wire);
+        assert_eq!(report.tags_fetched, ["v1"]);
+    }
+}
+
+/// A branch whose stable read gives no base is passed over for another
+/// branch that holds the tag's commit: one at the same tip, or one further
+/// from it.
+#[test]
+fn a_branch_that_gives_no_base_falls_to_another_that_holds_the_commit() {
+    let foreign = kit_core::hash::hash(b"a commit this repository lacks");
+    // Two branches at one tip; the first by name moved to a foreign head.
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 3);
+    for branch in ["a-feature", "main"] {
+        work.branch(branch, c[2]);
+        work.push_branch(&wire, branch);
+    }
+    tx.update_ref("refs/heads/a-feature", RefWriteCondition::Any, &foreign)
+        .unwrap();
+    wire.take_objects();
+    let v1 = work.tag("v1", c[1]);
+    work.push_tags(&wire, false);
+    assert_eq!(wire.take_objects(), [v1]);
+    assert_eq!(
+        wire.node(wire.read("refs/kit/tagmap/v1").unwrap()).prev,
+        wire.read("refs/kit/packmap/main")
+    );
+
+    // The nearer branch moved to a foreign head; a further one holds it.
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 4);
+    work.branch("main", c[1]);
+    work.push_branch(&wire, "main");
+    work.branch("release", c[3]);
+    work.push_branch(&wire, "release");
+    tx.update_ref("refs/heads/main", RefWriteCondition::Any, &foreign)
+        .unwrap();
+    wire.take_objects();
+    let v0 = work.tag("v0", c[0]);
+    work.push_tags(&wire, false);
+    assert_eq!(wire.take_objects(), [v0]);
+    assert_eq!(
+        wire.node(wire.read("refs/kit/tagmap/v0").unwrap()).prev,
+        wire.read("refs/kit/packmap/release")
+    );
+}
+
+/// Ticketed Connect: a forced update over a tag map sends its append again
+/// once after expired tickets, and plans it again self-contained after a
+/// lost delta base.
+#[test]
+fn a_ticketed_forced_append_is_sent_again_once() {
+    for answer in [
+        CommitOutcome::TicketRejected,
+        CommitOutcome::DeltaBaseUnavailable,
+    ] {
+        let once = Cell::new(false);
+        let (tx, _root) = transport(Kind::Memory);
+        let wire = Wire::new(&*tx);
+        let work = Work::new();
+        let c = work.commits(None, 2);
+        work.branch("main", c[0]);
+        work.push_branch(&wire, "main");
+        work.tag("v1", c[1]);
+        work.push_tags(&wire, false);
+        let new = work.tag_object("v1", c[0], true);
+        refs::write_tag(&work.layout, "v1", &new).unwrap();
+        wire.take_objects();
+        wire.limits.set(UploadLimits {
+            max_pack_bytes: None,
+            data_packs_per_advance: Some(6),
+            ticket_threshold_bytes: Some(0),
+        });
+        let once = &once;
+        *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
+            (head == "refs/tags/v1" && !once.replace(true)).then_some(Ok(answer))
+        }));
+
+        let results = work.push_tags(&wire, true);
+
+        assert!(
+            matches!(outcome(&results, "v1"), TagPushOutcome::Forced { value, .. } if *value == new),
+            "{results:?}"
+        );
+        assert_eq!(wire.uploaded_for(), ["refs/tags/v1", "refs/tags/v1"]);
+        assert_eq!(wire.read("refs/tags/v1"), Some(new));
+    }
 }
 
 /// Ticketed Connect: a server that refuses the ticket-carrying advance (a

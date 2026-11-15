@@ -126,10 +126,11 @@ fn the_base_memo_answers_a_later_search() {
     let base = commits(&store, None, 1, "base");
     let above = commits(&store, Some(base[0]), 10, "above");
     let mut search = BaseSearch {
-        candidates: HashMap::from([(base[0], "main".to_owned())]),
+        candidates: HashMap::from([(base[0], vec!["main".to_owned()])]),
         excluded: HashSet::new(),
         memo: HashMap::new(),
         seeded: false,
+        seeds: 0,
         reads: HashMap::new(),
         budget: 11,
     };
@@ -163,10 +164,11 @@ fn a_seeded_search_finds_the_branch_above_a_commit() {
     let main = commits(&store, None, 10, "main");
     let fork = commits(&store, Some(main[3]), 1, "fork");
     let mut search = BaseSearch {
-        candidates: HashMap::from([(main[9], "main".to_owned())]),
+        candidates: HashMap::from([(main[9], vec!["main".to_owned()])]),
         excluded: HashSet::new(),
         memo: HashMap::new(),
         seeded: false,
+        seeds: 0,
         reads: HashMap::new(),
         budget: 100,
     };

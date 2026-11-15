@@ -316,16 +316,19 @@ struct Base {
 /// refs, a memo of where earlier searches led, and the stable read of each
 /// candidate.
 struct BaseSearch {
-    /// Each tracked tip this store holds, and one branch at it.
-    candidates: HashMap<Hash, String>,
+    /// Each tracked tip this store holds, and the branches at it.
+    candidates: HashMap<Hash, Vec<String>>,
     /// Candidates whose stable read gave no base.
     excluded: HashSet<Hash>,
     /// A commit, and a candidate whose head serves as its base: one an
     /// earlier search reached below it, or, once seeded, one whose history
     /// holds it. `None` when no candidate serves it.
     memo: HashMap<Hash, Option<Hash>>,
-    /// Whether the ancestries of the candidates are in the memo.
+    /// Whether the ancestries of the usable candidates are in the memo.
     seeded: bool,
+    /// How many times the memo was seeded: at most
+    /// [`PACKMAP_CAS_ATTEMPTS`] per push.
+    seeds: u32,
     /// The stable read of each candidate, once per push.
     reads: HashMap<Hash, Option<Base>>,
     budget: usize,
@@ -344,7 +347,10 @@ impl BaseSearch {
                 && store.contains(&tip)
                 && refs::check_pushable_branch(&tracked.name).is_ok()
             {
-                candidates.entry(tip).or_insert(tracked.name);
+                candidates
+                    .entry(tip)
+                    .or_insert_with(Vec::new)
+                    .push(tracked.name);
             }
         }
         Ok(Self {
@@ -352,6 +358,7 @@ impl BaseSearch {
             excluded: HashSet::new(),
             memo: HashMap::new(),
             seeded: false,
+            seeds: 0,
             reads: HashMap::new(),
             budget,
         })
@@ -367,8 +374,11 @@ impl BaseSearch {
     /// only a tip below it that way, or none: unless `target` is itself a
     /// candidate, the candidates' own ancestries are added to the memo first,
     /// once per push, so the walk stops at the first commit a branch holds.
-    /// Each walk visits at most `budget` commits the memo does not answer,
-    /// and a walk that finds nothing before seeding runs once more after it.
+    /// A candidate whose stable read gives no base is excluded, and the
+    /// commits seeded for it are seeded again from the other candidates, so a
+    /// branch that also holds them is tried next. Each walk visits at most
+    /// `budget` commits the memo does not answer, and the memo is seeded at
+    /// most [`PACKMAP_CAS_ATTEMPTS`] times per push.
     fn base_of(
         &mut self,
         tx: &PushContext<'_>,
@@ -384,12 +394,23 @@ impl BaseSearch {
                 if let Some(base) = self.stable_read(tx, store, candidate)? {
                     return Ok(Some(base));
                 }
-                self.excluded.insert(candidate);
+                self.exclude(candidate);
             }
-            if self.seeded {
+            if self.seeded || self.seeds == PACKMAP_CAS_ATTEMPTS {
                 return Ok(None);
             }
             self.seed(store)?;
+        }
+    }
+
+    /// Pass over `candidate` from now on, and forget what the memo credits
+    /// to it; the memo then needs seeding again when it credited any.
+    fn exclude(&mut self, candidate: Hash) {
+        self.excluded.insert(candidate);
+        let before = self.memo.len();
+        self.memo.retain(|_, served| *served != Some(candidate));
+        if self.memo.len() != before {
+            self.seeded = false;
         }
     }
 
@@ -399,6 +420,7 @@ impl BaseSearch {
     /// commit are dropped: a seeded commit may lie below them.
     fn seed(&mut self, store: &ObjectStore) -> Result<(), PushError> {
         self.seeded = true;
+        self.seeds += 1;
         self.memo.retain(|_, candidate| candidate.is_some());
         if self.memo.len().saturating_add(self.budget) > MAX_REACHABLE {
             self.memo.clear();
@@ -502,30 +524,43 @@ impl BaseSearch {
         if let Some(read) = self.reads.get(&candidate) {
             return Ok(*read);
         }
-        let branch = &self.candidates[&candidate];
-        let head_ref = format!("{}{branch}", refs::BRANCH_REF_PREFIX);
-        let map_ref = packmap_ref(branch);
-        let read = |name: &str| {
-            tx.read_ref(name)
-                .map_err(|error| repository_operation_error(tx, error))
-        };
         let mut base = None;
-        for _ in 0..PACKMAP_CAS_ATTEMPTS {
-            let first = read(&head_ref)?;
-            let packmap = read(&map_ref)?;
-            if read(&head_ref)? != first {
-                continue;
+        for branch in &self.candidates[&candidate] {
+            base = stable_read_branch(tx, store, branch)?;
+            if base.is_some() {
+                break;
             }
-            if let (Some(head), Some(packmap)) = (first, packmap)
-                && store.contains(&head)
-            {
-                base = Some(Base { head, packmap });
-            }
-            break;
         }
         self.reads.insert(candidate, base);
         Ok(base)
     }
+}
+
+/// The stable read of one branch: its head, its packmap, then its head
+/// again, up to [`PACKMAP_CAS_ATTEMPTS`] times.
+fn stable_read_branch(
+    tx: &PushContext<'_>,
+    store: &ObjectStore,
+    branch: &str,
+) -> Result<Option<Base>, PushError> {
+    let head_ref = format!("{}{branch}", refs::BRANCH_REF_PREFIX);
+    let map_ref = packmap_ref(branch);
+    let read = |name: &str| {
+        tx.read_ref(name)
+            .map_err(|error| repository_operation_error(tx, error))
+    };
+    for _ in 0..PACKMAP_CAS_ATTEMPTS {
+        let first = read(&head_ref)?;
+        let packmap = read(&map_ref)?;
+        if read(&head_ref)? != first {
+            continue;
+        }
+        return Ok(match (first, packmap) {
+            (Some(head), Some(packmap)) if store.contains(&head) => Some(Base { head, packmap }),
+            _ => None,
+        });
+    }
+    Ok(None)
 }
 
 /// The parents of a commit or remix, or none for anything else and for an
@@ -623,9 +658,10 @@ fn local_refusal(
 
 /// How one tag's two-ref write ended.
 enum Advance {
-    /// The remote tag holds the pushed value: `committed` when this write
-    /// put it there, and not when a re-read found it there after a refusal.
-    Landed { committed: bool },
+    /// The remote tag holds the pushed value. `members` when its tag map
+    /// holds this write's node, which a committed advance makes members of
+    /// the repository with its packs; not when another push placed the tag.
+    Landed { members: bool },
     /// A condition failed; the tag is read again and placed anew.
     Conflict,
     /// The remote refused the write: `scope` when it refused this caller's
@@ -806,7 +842,7 @@ impl TagPush<'_, '_> {
         };
         let refused = match outcome {
             CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
-                return Ok(Advance::Landed { committed: true });
+                return Ok(Advance::Landed { members: true });
             }
             // The tag map's condition failed: this write may have landed
             // already, through the retry ladder, or another push may have
@@ -814,7 +850,9 @@ impl TagPush<'_, '_> {
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
                 let state = self.read_state(local)?;
                 if state.tag == Some(local.value) {
-                    return Ok(Advance::Landed { committed: false });
+                    return Ok(Advance::Landed {
+                        members: state.map == Some(map),
+                    });
                 }
                 if state.map == Some(map) && state.tag.is_none() {
                     return self.place_tag(local, tag_condition);
@@ -829,8 +867,11 @@ impl TagPush<'_, '_> {
         };
         // The retry ladder may have re-sent a write that landed, or another
         // push placed the same value.
-        if self.read(&tag_ref)? == Some(local.value) {
-            return Ok(Advance::Landed { committed: false });
+        let state = self.read_state(local)?;
+        if state.tag == Some(local.value) {
+            return Ok(Advance::Landed {
+                members: state.map == Some(map),
+            });
         }
         Ok(match refused {
             None => Advance::Conflict,
@@ -848,7 +889,7 @@ impl TagPush<'_, '_> {
             .tx
             .update_ref(&local.tag_ref(), condition, &local.value)
         {
-            Ok(()) => Ok(Advance::Landed { committed: false }),
+            Ok(()) => Ok(Advance::Landed { members: true }),
             Err(SourceError::RefConflict) => Ok(Advance::Conflict),
             Err(error) if refusal(&error) => Ok(Advance::Refused {
                 message: error.to_string(),
@@ -865,10 +906,10 @@ impl TagPush<'_, '_> {
             RefWriteCondition::Match(old),
             &local.value,
         ) {
-            Ok(()) => Ok(Advance::Landed { committed: true }),
+            Ok(()) => Ok(Advance::Landed { members: true }),
             Err(SourceError::RefConflict) => {
                 if self.read(&local.tag_ref())? == Some(local.value) {
-                    Ok(Advance::Landed { committed: false })
+                    Ok(Advance::Landed { members: false })
                 } else {
                     Ok(Advance::Conflict)
                 }
@@ -906,11 +947,36 @@ impl TagPush<'_, '_> {
         }
     }
 
-    /// Refuse `local` and every member after it with `message`.
-    fn refuse_group(&mut self, local: &Local, members: &mut VecDeque<(Local, Row)>, message: &str) {
-        self.reject(local, TagPushRejection::Refused(message.to_owned()));
+    /// Refuse `local` and every member after it for `rejection`.
+    fn reject_rest(
+        &mut self,
+        local: &Local,
+        members: &mut VecDeque<(Local, Row)>,
+        rejection: &TagPushRejection,
+    ) {
+        self.reject(local, rejection.clone());
         while let Some((local, _)) = members.pop_front() {
-            self.reject(&local, TagPushRejection::Refused(message.to_owned()));
+            self.reject(&local, rejection.clone());
+        }
+    }
+
+    /// The tag map value and keys of a group planned as `plan` on `graft`:
+    /// the branch's own node when nothing is new, or an upload under
+    /// `local`'s tag ref.
+    fn group_chain(
+        &self,
+        local: &Local,
+        plan: &PackPlan,
+        graft: Option<Base>,
+    ) -> Result<(Hash, Vec<PackKey>), PushError> {
+        match graft {
+            Some(base) if plan.is_empty() => Ok((base.packmap, Vec::new())),
+            _ => {
+                let state = graft.map_or(ChainState::Missing, |base| ChainState::Graft {
+                    tail: base.packmap,
+                });
+                self.upload(&local.tag_ref(), plan.clone(), state)
+            }
         }
     }
 
@@ -951,6 +1017,9 @@ impl TagPush<'_, '_> {
         let mut lost = false;
         // Whether expired tickets were already uploaded again once.
         let mut renewed = false;
+        // The branch the group grafts on; none once it is planned
+        // self-contained.
+        let mut graft = base;
         let mut members = VecDeque::from(members);
         while let Some((local, row)) = members.pop_front() {
             if self.tx.observer.cancelled() {
@@ -959,7 +1028,7 @@ impl TagPush<'_, '_> {
             // A ticket binds an upload to its head ref, so until an advance
             // commits, each ticket-carrying tag uploads the group again.
             if chain.is_none() || (ticketed && !landed) {
-                let uploads = base.is_none() || !plan.is_empty();
+                let uploads = graft.is_none() || !plan.is_empty();
                 if lost && uploads {
                     if self.reuploads == PACKMAP_CAS_ATTEMPTS {
                         self.reject(&local, TagPushRejection::Contended);
@@ -968,31 +1037,24 @@ impl TagPush<'_, '_> {
                     self.reuploads += 1;
                 }
                 lost = false;
-                chain = Some(match base {
-                    Some(base) if plan.is_empty() => (base.packmap, Vec::new()),
-                    _ => {
-                        let state = base.map_or(ChainState::Missing, |base| ChainState::Graft {
-                            tail: base.packmap,
-                        });
-                        match self.upload(&local.tag_ref(), plan.clone(), state) {
-                            Ok(uploaded) => uploaded,
-                            Err(error) => match refused_upload(&error) {
-                                // A ticket names this tag's ref, which the
-                                // remote may refuse to this caller alone:
-                                // the next tag uploads the group again.
-                                Some((message, true)) => {
-                                    self.reject(&local, TagPushRejection::Refused(message));
-                                    continue;
-                                }
-                                Some((message, false)) => {
-                                    self.refuse_group(&local, &mut members, &message);
-                                    return Ok(());
-                                }
-                                None => return Err(error),
-                            },
+                match self.group_chain(&local, &plan, graft) {
+                    Ok(uploaded) => chain = Some(uploaded),
+                    Err(error) => match refused_upload(&error) {
+                        // A ticket names this tag's ref, which the remote may
+                        // refuse to this caller alone: the next tag uploads
+                        // the group again.
+                        Some((message, true)) if ticketed => {
+                            self.reject(&local, TagPushRejection::Refused(message));
+                            continue;
                         }
-                    }
-                });
+                        Some((message, _)) => {
+                            let refused = TagPushRejection::Refused(message);
+                            self.reject_rest(&local, &mut members, &refused);
+                            return Ok(());
+                        }
+                        None => return Err(error),
+                    },
+                }
             }
             let (map, keys) = chain.as_ref().expect("the group was uploaded");
             let advance = self.advance(&local, row, *map, keys)?;
@@ -1000,7 +1062,10 @@ impl TagPush<'_, '_> {
                 match &advance {
                     // Only this group's own commit makes its packs members;
                     // a value another push placed does not.
-                    Advance::Landed { committed } => landed = *committed,
+                    Advance::Landed { members } => {
+                        landed = *members;
+                        lost = !*members;
+                    }
                     Advance::Conflict => lost = true,
                     // A refusal of this caller's access to the tag refuses
                     // that tag; the next one uploads again.
@@ -1015,12 +1080,10 @@ impl TagPush<'_, '_> {
                     // self-contained, and the same tag uploads it.
                     Advance::LostBase(_) if !renewed => {
                         renewed = true;
+                        graft = None;
                         plan = self.tx.deltas.plan_tips(self.store, &tips, None)?;
                         if !self.fits_one_advance(&plan)? {
-                            self.reject(&local, TagPushRejection::TooLarge);
-                            while let Some((local, _)) = members.pop_front() {
-                                self.reject(&local, TagPushRejection::TooLarge);
-                            }
+                            self.reject_rest(&local, &mut members, &TagPushRejection::TooLarge);
                             return Ok(());
                         }
                         members.push_front((local, row));
@@ -1031,8 +1094,8 @@ impl TagPush<'_, '_> {
                     Advance::Refused { message, .. }
                     | Advance::Stale(message)
                     | Advance::LostBase(message) => {
-                        let message = message.clone();
-                        self.refuse_group(&local, &mut members, &message);
+                        let refused = TagPushRejection::Refused(message.clone());
+                        self.reject_rest(&local, &mut members, &refused);
                         return Ok(());
                     }
                 }

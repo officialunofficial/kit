@@ -997,7 +997,10 @@ branch holds: a tag below a branch tip, or on a fork of that branch's
 history, grafts on that branch. It reads that branch stably: its
 head, then its packmap `p`, then its head again, up to eight times, and
 uses the base only when both head reads agree on a commit the local store
-holds. Two equal head reads do not rule out a head that moved away and back
+holds. A branch whose read gives no base is passed over for the next
+branch at the same tip or below the tag, and the tips' histories are walked
+again without it, at most eight times per push. Two equal head reads do not
+rule out a head that moved away and back
 around a reset of its chain: a fetch then refuses a tag grafted in that
 window, and loses nothing. Tags that share a base form one group. A group is planned once,
 against that head, under one node `{prev: p, packs}` that every tag of the
@@ -1018,7 +1021,10 @@ For each tag with local value `v`, from the remote tag `T` and tag map
 | other, forced | present | Append to `M` a node planned against `T` when the local store holds `T`'s whole closure, else the full closure of `v`, under `Match(M)`; then tag `Match(T)`. When that plan is empty, `T`'s history holds all of `v`'s and `M` already rebuilds `v`, so the tag moves alone under `Match(T)`. |
 | other, forced | absent | Tag map `Missing` on a node whose plan includes `T`, then tag `Match(T)`. Refused when the local store lacks `T` or its closure. |
 
-A forced update conditions on the value it read, never `Any`. A push
+A forced update conditions on the value it read, never `Any`. When a tag
+map write reports a conflict and a read shows the tag map already holds the
+push's own node with the tag absent, as after a retried write whose answer
+was lost, the push writes the tag alone under `Missing`. A push
 refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
 would not be a valid ref name, an annotated tag whose object names
 another tag, and an unsigned annotated tag. On a remote whose tag listing
