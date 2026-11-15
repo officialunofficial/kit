@@ -142,7 +142,18 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `protocol::max_pack_bytes(advertised)`. `pack::rewrite_excluding` takes a
   fifth argument, the longest pack it may write (`protocol::PACK_BODY_LIMIT`
   for the old behaviour), and `pack::ReadLimit::BodyLimit` carries that
-  limit as `BodyLimit(u64)`. The error text is the same.
+  limit as `BodyLimit(u64)`. Its text names the limit it carries, so it
+  reads as before for `PACK_BODY_LIMIT`.
+- A restore and a pull recovery run one safety check in kit-sync, where
+  each had its own. Recovery keeps its refusal texts and its stricter
+  rules: the index, never seeded from HEAD, must equal the tree from before
+  the pull or the target as a whole, and an untracked directory no ignore
+  rule matches is refused whatever it holds. It now takes an ignored path in
+  a directory the target deletes, as a pull does: the sweep keeps it.
+- A clean restore with a base checks the directories it will skip as
+  unchanged before it sweeps or writes anything, and refuses with the new
+  `RestoreError::UnsweptPath` when one holds an untracked path the sweep
+  would remove, where it trusted its caller's check.
 
 ### Removed
 

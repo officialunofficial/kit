@@ -91,6 +91,12 @@ pub enum RestoreError {
     /// on the ingest side), never a normal runtime condition.
     #[error("read_chunks callback returned {actual} buffers for a {expected}-chunk batch")]
     ChunkBatchLengthMismatch { expected: usize, actual: usize },
+    /// A clean restore with a base tree skipped a subtree, and so did not
+    /// sweep it, where the sweep would have removed this untracked path. The
+    /// path is relative to the restore root. See
+    /// [`restore_tree_to_worktree_with`].
+    #[error("clean restore would leave untracked path '{0}' in a directory it does not change")]
+    UnsweptPath(String),
 }
 
 /// Result alias.
@@ -371,9 +377,12 @@ pub fn restore_tree_to_worktree(
 /// necessarily mirror `base_tree`).
 ///
 /// With `opts.clean`, the sweep visits only the directories the restore
-/// enters, so a skipped subtree is not swept. The caller must also have
-/// proved that the worktree holds no untracked path outside the ignore rules,
-/// as the safety gate of a destructive restore does.
+/// enters, so a skipped subtree is not swept. Before it sweeps or writes
+/// anything, the restore walks each subtree it will skip and refuses with
+/// [`RestoreError::UnsweptPath`] when the sweep would have removed a path
+/// there: an untracked file or symlink outside the ignore rules. The safety
+/// gate of a destructive restore refuses such a path first, so after it the
+/// walk finds none.
 ///
 /// # Errors
 /// Same variants as [`restore_tree_to_worktree`], plus
@@ -465,6 +474,11 @@ where
         Ok(il) => il,
         Err(_) => IgnoreList::new(),
     };
+    if opts.clean
+        && let Some(base) = base_tree
+    {
+        check_skipped_subtrees(store, *tree, base, root, "", &ignore_list, 0)?;
+    }
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
     restore_tree_to_worktree_inner(
@@ -536,6 +550,8 @@ where
         let base_entry = base_entries.get(entry.name.as_slice());
         // Identical to what the worktree already holds (see
         // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
+        // A clean restore checked the subtree it does not sweep before it
+        // started ([`check_skipped_subtrees`]).
         if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
             continue;
         }
@@ -1217,6 +1233,175 @@ fn make_tmp_name() -> String {
     let pid = process::id();
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{TMP_PREFIX}.{pid}.{counter}")
+}
+
+/// The subtrees a clean restore of `tree_hash` over `base_tree` skips, as
+/// [`restore_tree_to_worktree_inner`] skips them, each checked with
+/// [`check_unswept`] before the restore touches the worktree. `dir` is the
+/// worktree directory of `tree_hash`.
+fn check_skipped_subtrees(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Hash,
+    dir: &Path,
+    path_prefix: &str,
+    ignore: &IgnoreList,
+    depth: usize,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+        return Err(RestoreError::NotATree);
+    };
+    // As the restore does, an unreadable or non-tree base skips nothing.
+    let Ok(Object::Tree(base)) = store.read_object(&base_tree) else {
+        return Ok(());
+    };
+    let base_entries: std::collections::HashMap<&[u8], &TreeEntry> = base
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_slice(), entry))
+        .collect();
+    for entry in &tree.entries {
+        if entry.mode != EntryMode::Tree || !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let Some(base_entry) = base_entries
+            .get(entry.name.as_slice())
+            .filter(|b| b.mode == EntryMode::Tree)
+        else {
+            continue;
+        };
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let full_path = name_path(path_prefix, name);
+        // Only a real directory holds anything the sweep would visit; the
+        // walk never follows a symlink out of the worktree.
+        if !fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if base_entry.object_hash == entry.object_hash {
+            check_unswept(
+                store,
+                entry.object_hash,
+                &dir.join(name),
+                &full_path,
+                ignore,
+                depth + 1,
+            )?;
+        } else {
+            check_skipped_subtrees(
+                store,
+                entry.object_hash,
+                base_entry.object_hash,
+                &dir.join(name),
+                &full_path,
+                ignore,
+                depth + 1,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse when the ignore-aware sweep of a clean restore would remove a path
+/// under `dir`, the worktree directory of the tree `tree_hash` that the
+/// restore skips: an untracked file or symlink outside the ignore rules,
+/// at any depth. A directory is judged by what it holds, as the sweep keeps
+/// one that holds ignored files.
+fn check_unswept(
+    store: &ObjectStore,
+    tree_hash: Hash,
+    dir: &Path,
+    path_prefix: &str,
+    ignore: &IgnoreList,
+    depth: usize,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+        return Err(RestoreError::NotATree);
+    };
+    let tracked: std::collections::HashMap<&[u8], &TreeEntry> = tree
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_slice(), entry))
+        .collect();
+    // Untracked directories, walked without recursion: an untracked
+    // directory can nest deeper than any tree.
+    let mut untracked: Vec<(PathBuf, String, bool)> = Vec::new();
+    for (path, name, is_dir) in read_names(dir, true)? {
+        let full_path = name_path(path_prefix, &name);
+        match tracked.get(name.as_bytes()) {
+            Some(entry) if entry.mode == EntryMode::Tree && is_dir => {
+                check_unswept(
+                    store,
+                    entry.object_hash,
+                    &path,
+                    &full_path,
+                    ignore,
+                    depth + 1,
+                )?;
+            }
+            Some(_) => {}
+            None => untracked.push((path, full_path, is_dir)),
+        }
+    }
+    while let Some((path, full_path, is_dir)) = untracked.pop() {
+        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
+            continue;
+        }
+        if !is_dir {
+            return Err(RestoreError::UnsweptPath(full_path));
+        }
+        for (child, name, child_is_dir) in read_names(&path, false)? {
+            untracked.push((child, name_path(&full_path, &name), child_is_dir));
+        }
+    }
+    Ok(())
+}
+
+/// The entries of `dir` the walk considers, with whether each is a real
+/// directory: every UTF-8 name but `.kit` and `.git`, which the safety gate
+/// leaves out at any depth. In a directory the
+/// tree lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
+/// ([`clean_directory`]); in one it does not, it keeps neither
+/// ([`sweep_unlisted_dir`]). A missing `dir` has none.
+fn read_names(dir: &Path, listed: bool) -> RestoreResult<Vec<(PathBuf, String, bool)>> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(RestoreError::Io(e)),
+    };
+    let mut names = Vec::new();
+    for entry in read {
+        let entry = entry?;
+        // The safety gate and `sweep_unlisted_dir` skip a name that is not
+        // UTF-8. `clean_directory` refuses one, but only in a directory the
+        // restore enters, and the walk is of directories it skips.
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(".kit")
+            || name.eq_ignore_ascii_case(".git")
+            || (listed && (name == ".kitignore" || name == ".gitignore"))
+        {
+            continue;
+        }
+        let is_dir = entry.file_type()?.is_dir();
+        names.push((entry.path(), name, is_dir));
+    }
+    Ok(names)
+}
+
+/// `name` under the repository-relative directory `prefix`.
+fn name_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
 }
 
 /// Whether `name` is exactly a restore temporary name: the prefix, then
@@ -2120,6 +2305,95 @@ mod tests {
         assert_eq!(fs::read(target.path().join("kept/x")).unwrap(), b"sentinel");
         assert!(!target.path().join("gone").exists());
         assert!(!target.path().join("doomed").exists());
+    }
+
+    /// A clean restore does not sweep a subtree it skips, so it refuses one
+    /// that holds a path the sweep would have removed, and takes one that
+    /// holds only what the sweep keeps: ignored paths, ignore files and
+    /// directories that hold nothing else.
+    #[test]
+    fn a_clean_restore_refuses_an_untracked_file_in_a_subtree_it_skips() {
+        let (_d, store) = fresh_store();
+        let entry = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let dir = |n: &str, h| TreeEntry {
+            name: n.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: h,
+        };
+        let (a1, a2) = (put_blob(&store, b"a-old"), put_blob(&store, b"a-new"));
+        let ignore = put_blob(&store, b"*.log\n");
+        let inner = put_tree_with(&store, vec![entry("x", put_blob(&store, b"x"))]);
+        let kept = put_tree_with(&store, vec![dir("inner", inner)]);
+        let base = put_tree_with(
+            &store,
+            vec![
+                entry(".kitignore", ignore),
+                entry("a", a1),
+                dir("kept", kept),
+            ],
+        );
+        let next = put_tree_with(
+            &store,
+            vec![
+                entry(".kitignore", ignore),
+                entry("a", a2),
+                dir("kept", kept),
+            ],
+        );
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        let fresh = || {
+            let target = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+            target
+        };
+        let restore = |target: &TempDir, base_tree| {
+            restore_tree_to_worktree_with(&store, &next, base_tree, target.path(), &opts, &rd)
+        };
+
+        for kept_path in [
+            "kept/inner/build.log",
+            "kept/logs/old.log",
+            "kept/.gitignore",
+            "kept/inner/.kitignore",
+        ] {
+            let target = fresh();
+            let path = target.path().join(kept_path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"kept").unwrap();
+            fs::create_dir_all(target.path().join("kept/empty")).unwrap();
+            restore(&target, Some(base)).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"kept", "{kept_path}");
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
+        }
+
+        for (untracked, named) in [
+            ("kept/inner/notes.txt", "kept/inner/notes.txt"),
+            ("kept/new/deep/notes.txt", "kept/new/deep/notes.txt"),
+            // The sweep keeps an ignore file by name only in a listed
+            // directory, and `new` is not one.
+            ("kept/new/.kitignore", "kept/new/.kitignore"),
+        ] {
+            let target = fresh();
+            let path = target.path().join(untracked);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"mine").unwrap();
+            let err = restore(&target, Some(base)).unwrap_err();
+            assert!(
+                matches!(&err, RestoreError::UnsweptPath(p) if p == named),
+                "{untracked}: {err:?}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), b"mine");
+            // The refusal comes before the restore writes anything.
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+            // Without a base the restore enters the subtree and sweeps it.
+            restore(&target, None).unwrap();
+            assert!(!path.exists(), "{untracked}");
+        }
     }
 
     /// Without `observe`, a restored file reports no stat fields, chunked
