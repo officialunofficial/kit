@@ -192,26 +192,13 @@ pub fn matches_sparse(patterns: &[SparsePattern], path: &str, is_dir: bool) -> b
 /// descendants. Used to short-circuit recursion under sparse mode.
 #[must_use]
 pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> bool {
-    for pat in patterns {
-        if pat.negated {
-            continue;
-        }
-        if pat.pattern.starts_with(dir_prefix) {
-            return true;
-        }
-        if dir_prefix.starts_with(&pat.pattern) {
-            return true;
-        }
-        if !dir_prefix.is_empty()
-            && !dir_prefix.ends_with('/')
-            && pat.pattern.len() > dir_prefix.len()
-            && pat.pattern.starts_with(dir_prefix)
-            && pat.pattern.as_bytes()[dir_prefix.len()] == b'/'
-        {
-            return true;
-        }
-    }
-    false
+    patterns.iter().filter(|pat| !pat.negated).any(|pat| {
+        path_matches_pattern(&pat.pattern, dir_prefix)
+            || pat
+                .pattern
+                .strip_prefix(dir_prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// Load patterns from `<repo_root>/.kit/sparse-checkout`. Returns
@@ -1706,7 +1693,7 @@ fn clean_directory(
             } else {
                 format!("{path_prefix}/{}", item.name)
             };
-            sweep_unlisted_dir(&path, &prefix, ignore.unwrap_or(&no_ignore_rules));
+            sweep_unlisted_dir(&path, &prefix, ignore.unwrap_or(&no_ignore_rules), sparse_patterns);
         } else {
             let _ = fs::remove_file(&path);
         }
@@ -1728,7 +1715,12 @@ fn is_repository_name(name: &str) -> bool {
 /// A directory that holds a `.kit` or `.git` entry of any type is a nested
 /// repository, and the sweep leaves it and everything in it, as `git clean
 /// -d` does without a second `-f`.
-fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
+fn sweep_unlisted_dir(
+    dir: &Path,
+    prefix: &str,
+    ignore: &IgnoreList,
+    sparse_patterns: Option<&[SparsePattern]>,
+) {
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
@@ -1752,8 +1744,14 @@ fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
         if ignore.is_ignored_with_ancestors(&rel, meta.is_dir()) {
             continue;
         }
+        if sparse_patterns.is_some_and(|patterns| {
+            !(matches_sparse(patterns, &rel, meta.is_dir())
+                || (meta.is_dir() && could_match_descendant(patterns, &rel)))
+        }) {
+            continue;
+        }
         if meta.is_dir() {
-            sweep_unlisted_dir(&entry.path(), &rel, ignore);
+            sweep_unlisted_dir(&entry.path(), &rel, ignore, sparse_patterns);
         } else {
             let _ = fs::remove_file(entry.path());
         }
@@ -2325,6 +2323,8 @@ mod tests {
         assert!(could_match_descendant(&p, "src"));
         assert!(could_match_descendant(&p, "src/lib"));
         assert!(!could_match_descendant(&p, "tests"));
+        assert!(!could_match_descendant(&p, "src/library"));
+        assert!(!could_match_descendant(&p, "src3"));
     }
 
     #[test]

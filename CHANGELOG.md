@@ -179,6 +179,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Sparse checkout preserves untracked files outside its selected paths, including
+  files beneath directories that contain selected descendants.
+
 - A restore no longer removes a nested repository, which is a `.kit` or
   `.git` entry of any type (a `.git` file included) and the directory that
   holds it. The clean sweep leaves an untracked directory that holds one
