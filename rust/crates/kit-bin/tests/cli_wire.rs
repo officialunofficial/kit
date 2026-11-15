@@ -2023,6 +2023,29 @@ fn sparse_checkout_roundtrips_patterns() {
     );
 }
 
+/// The sparse sweep enters an untracked directory that a pattern could match
+/// under, here `vendor3` for the pattern `vendor`, whose plain prefix test
+/// in `could_match_descendant` matches it. It leaves a nested repository
+/// there whole, its files beside `.git` included.
+#[test]
+fn sparse_checkout_set_leaves_a_nested_repository() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    fs::create_dir(td.path().join("vendor")).unwrap();
+    make_commit(td.path(), "vendor/a", b"a\n", "c1");
+    let nested = ["vendor3/.git/HEAD", "vendor3/README", "vendor3/src/lib.rs"];
+    for path in nested {
+        let path = td.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"mine\n").unwrap();
+    }
+    let out = run_in(td.path(), &["sparse-checkout", "set", "vendor"]);
+    assert!(out.status.success(), "sparse set failed: {out:?}");
+    for path in nested {
+        assert_eq!(fs::read(td.path().join(path)).unwrap(), b"mine\n", "{path}");
+    }
+}
+
 #[test]
 fn sparse_checkout_set_refuses_dirty_tracked_file_inside_sparse_set() {
     let td = tempfile::tempdir().unwrap();

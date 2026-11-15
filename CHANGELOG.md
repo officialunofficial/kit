@@ -179,6 +179,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A restore no longer removes a nested repository, which is a `.kit` or
+  `.git` entry of any type (a `.git` file included) and the directory that
+  holds it. The clean sweep leaves an untracked directory that holds one
+  whole, as `git clean -d` does: `kit sparse-checkout` removed the files
+  beside its `.git`, and `restore_tree` removed all of it. A pull or a
+  checkout that writes a tracked file over a directory with one in it, at
+  any depth, used to remove the directory; its safety check now refuses
+  first with its untracked-overwrite text, naming the `.kit` or `.git`
+  entry or the untracked directory that holds it. A restore without that check refuses with the new
+  `RestoreError::NestedRepository`. kit-core's new
+  `ops::restore::nested_repository` finds the entry.
 - The S3 transport no longer reads an error answer's body. A missing ref's
   `404` from a store that names the key, request and host in its error
   document (MinIO does, in about 350 bytes) failed `read_ref` with
