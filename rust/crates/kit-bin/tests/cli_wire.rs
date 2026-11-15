@@ -2308,3 +2308,47 @@ fn tag_create_collision_is_rejected() {
         "expected collision diagnostic, got: {stderr}"
     );
 }
+
+#[test]
+fn repository_conflict_refuses_before_files_index_or_head_change() {
+    for args in [
+        vec!["checkout", "-f", "HEAD~1"],
+        vec!["reset", "--hard", "-f", "HEAD~1"],
+        vec!["stash", "push"],
+    ] {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        init_repo(root);
+        make_commit(root, "vendor", b"file\n", "base");
+        make_commit(root, "a", b"before\n", "next");
+        fs::write(root.join("a"), b"local\n").unwrap();
+        fs::remove_file(root.join("vendor")).unwrap();
+        fs::create_dir_all(root.join("vendor/deep/.git")).unwrap();
+        fs::write(root.join("vendor/deep/.git/HEAD"), b"ref\n").unwrap();
+        fs::write(root.join("vendor/README"), b"mine\n").unwrap();
+        let head = fs::read(root.join(".kit/HEAD")).unwrap();
+        let branch = head_hash(root);
+        let index = fs::read(root.join(".kit/index")).unwrap();
+        let out = run_in(root, &args);
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("vendor/deep/.git"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("move or delete 'vendor/deep'"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("run the command again"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(fs::read(root.join("a")).unwrap(), b"local\n");
+        assert_eq!(fs::read(root.join("vendor/README")).unwrap(), b"mine\n");
+        assert_eq!(
+            fs::read(root.join("vendor/deep/.git/HEAD")).unwrap(),
+            b"ref\n"
+        );
+        assert_eq!(fs::read(root.join(".kit/HEAD")).unwrap(), head);
+        assert_eq!(head_hash(root), branch);
+        assert_eq!(fs::read(root.join(".kit/index")).unwrap(), index);
+    }
+}

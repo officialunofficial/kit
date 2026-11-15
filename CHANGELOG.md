@@ -179,6 +179,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Forced checkout, hard reset and stash save refuse repository conflicts before
+  changing files, the index or HEAD, and explain how to resolve the conflict.
+
 - Sparse checkout preserves untracked files outside its selected paths, including
   files beneath directories that contain selected descendants.
 

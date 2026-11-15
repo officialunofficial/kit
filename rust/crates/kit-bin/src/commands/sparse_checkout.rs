@@ -156,6 +156,11 @@ where
     if let Err(e) = super::ensure_restore_safe_with_options(layout, &store, tree_hash, opts) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
+    if let Err(e) =
+        restore::check_nested_repositories(&store, tree_hash, layout.worktree_root(), opts, None)
+    {
+        return emit_err(&format!("restore: {e}"), exit::GENERAL_ERROR);
+    }
     if let Err((msg, code)) = mutate_config() {
         return emit_err(&msg, code);
     }

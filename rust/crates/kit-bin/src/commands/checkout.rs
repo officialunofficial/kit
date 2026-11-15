@@ -304,6 +304,20 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
 
+    if let Err(e) = kit_core::ops::restore::check_nested_repositories(
+        &store,
+        tree_hash,
+        &cwd,
+        &sparse_opts,
+        if sparse_opts.sparse_patterns.is_some() {
+            None
+        } else {
+            base_tree
+        },
+    ) {
+        return emit_err(&format!("restore: {e}"), exit::CANTCREAT);
+    }
+
     // Safety gate passed — NOW create the `-b`/`-B` branch ref. Deferring
     // it to here means a refused switch above leaves no orphan branch
     // behind (git creates nothing when it refuses the operation).
