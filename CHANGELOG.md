@@ -9,6 +9,50 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.0] - 2026-11-14
 
+kit 0.8.0 changes the repository format. A chunked file's id now commits the
+byte span of each chunk, so `.kit/format` is `bmt-v2`. kit 0.8.0 refuses every
+repository written by 0.7.3 or earlier (`bmt-v1`), even one with no chunked
+file, and there is no in-place migration. To move a repository, export it to
+git with kit 0.7.3 (`kit git export <dest>`) and then run `kit git import`
+with 0.8.0. You can also commit a checkout into a new repository made with
+`kit init`. Rebuild every remote the same way before 0.8.0 clients fetch from
+it. Commits and tags that reach a chunked file get new ids, so their old
+signatures do not carry over. Disclosure bundles, span containers, proof
+bundles and import attestations made by earlier versions no longer verify.
+Public Rust APIs that changed are marked **Breaking** below.
+
+### Security
+
+- The `kit+file://` transport opens its repository lock file, and the new
+  stripe lock files, without following a link. A link planted at a lock path
+  fails the write and leaves its target as it was. The repository lock was
+  opened through a link before.
+- File-transport writes never follow or truncate an existing temporary file,
+  and do not leave one behind. A write creates its temporary file exclusively
+  and takes the next name when one is taken, so a link planted at a temporary
+  name can no longer redirect a push to another file. A write that fails
+  after it created the temporary file removes it.
+- The closure verifier now checks that the objects fit together as a
+  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
+  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
+  chunk must name a blob. The chunk lengths of a chunked blob must add up to
+  its `total_size`, and in a fixed-size layout each chunk must hold the
+  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
+  was complete. Bytes that decode to no object are now `unreferenced`
+  instead of `corrupt`, so an extra object that does not decode no longer
+  makes a map-based or pack-based verdict incomplete.
+- The closure verifier now also checks the type of the tree of a commit or a
+  remix, which must be a tree, and of the target of a tag, which must have the
+  type that the tag records. A mismatch is `corrupt`.
+- Disclosure verification now checks that an `Object` payload has the type
+  that the mode of the final step names: a tree for mode `Tree`, a blob or a
+  chunked blob for every other mode. Before, a step of mode `Blob` could name
+  a tree and return that tree's bytes under a path that reports a blob.
+  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
+- Disclosure verification now rejects a `Chunk` or `Range` payload when the
+  final step has mode `Tree`, or when there is no step. Both payloads are blob
+  data, so the final step must name a blob, an executable or a symlink.
+
 ### Added
 
 - `find_merge_base_strict` and `is_ancestor_strict` in kit-core read every
@@ -26,8 +70,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whenever a ref changes (SPEC-TRANSPORT §1.2). A fetch whose remote cursor
   equals the one its last complete fetch saw, with its remote-tracking refs
   and their tip objects as that fetch left them, makes no other request.
-  `FetchReport::remote_unchanged` reports it. The memory transport offers a
-  cursor. The file transport offers one on Linux: it keeps a write count in
+  `FetchReport::remote_unchanged` reports it. A fetch writes its record only
+  when each ref it published still holds its tip. `Transport::repo_cursor` and
+  `RemoteSource::repo_cursor` return an optional `RepoCursor` of at most
+  `REPO_CURSOR_MAX_LEN` (64) bytes, and both return `Ok(None)` by default. The memory
+  transport offers a cursor. The file transport offers one on Linux: it keeps a write count in
   each stripe lock file and also reads the times of the ref directories, so
   that a write by kit 0.7.3 or earlier, which keeps no count, changes the
   cursor too (SPEC-REFS §5.1.2). It offers none while a ref directory was
@@ -68,7 +115,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directories (`.<name>.tmp.*` and `.kit.tmp.*`) once they are older than the
   grace window. It deletes each one under the same exclusive lock as an
   object, so a running fetch keeps its files. `GcReport::temp_files_pruned`
-  counts them, and `bytes_reclaimed` includes their bytes.
+  counts them, and `bytes_reclaimed` includes their bytes. `kit gc` prints
+  ` and N temp file(s)` after the object count when it removed some.
 - `SyncOptions::lock_wait` (`with_lock_wait`) bounds the total waiting time
   of one clone, fetch or pull for `worktree.lock`, summed over every wait of
   the call. Work between two waits is not charged. The default, `None`, waits
@@ -173,21 +221,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetch, re-reads each candidate from the remote, and never deletes a local
   branch or a tag. `SyncOptions::prune` and `FetchReport::branches_pruned`
   carry it; `libkit::transfer::fetch_with_source` takes a `prune` argument.
+  `kit fetch --prune` prints ` - [deleted]         (none) -> <remote>/<branch>`
+  on stderr for each tracking ref it removes, and `--format=json` adds a
+  `pruned` array.
 - `kit branch -r` lists the remote-tracking branches as `<remote>/<branch>`,
   and `kit branch -a` lists the local branches and then the tracking branches
   as `remotes/<remote>/<branch>`. `libkit::branch::Query::scope` selects them,
   and `libkit::branch::Branch` has a `remote` field.
 - `GetServerInfoResponse` has a field `max_tickets_per_advance` (field 22).
   A server advertises the most upload tickets one `AdvanceRefs` request may
-  name. The sync client (the CLI and `libkit`) uses it in place of the fixed
-  seven, for the split of a push and for the check of an advance. An absent
-  field or a value below two means seven, and a value above 1,024 is cut to
-  1,024. A server rejects a longer `ticket_ids` list with `invalid_argument`.
-  The `kit-client` crate reads it too, as described under Changed.
-  **Breaking:** the field is public on
-  `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and
-  `GetServerInfoResponseView`, so a struct literal that names every field no longer compiles.
-  Add the field, or end the literal with `..Default::default()`.
+  name. An absent field or a value below two means seven, and a value above
+  1,024 is cut to 1,024. A server rejects a longer `ticket_ids` list with
+  `invalid_argument`. The sync client and `kit-client` use it, as described
+  under Changed.
 
 ### Changed
 
@@ -196,7 +242,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunked file id changes. A repository written before this change is
   refused with `IncompatibleRepoFormat` (`.kit/format` is now `bmt-v2`, and
   `kit_core::store::FORMAT_VALUE` is `"bmt-v2"`), and
-  there is no migration. Trees, blobs, commits and tags keep their ids.
+  there is no migration. The id scheme of trees, blobs, commits and tags is
+  unchanged, but a tree that holds a chunked file has a new id, and so does
+  every tree, commit and tag above it.
   - The manifest is schema `0x02` of type `0x05`, `22 + 40 * n` bytes: the
     22-byte header, then per chunk a 32-byte id and the `u64` offset one
     past its last byte (`end`). `serialize::CHUNKED_ENTRY_LEN` (40) and
@@ -223,12 +271,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `ChunkedBlob::new(total_size, chunk_size, chunks)` takes `(Hash, end)`
     pairs. It has the new readers `ends()`, `span(index)`, `chunk_at(offset)`
     and `entries()`. `check_chunk_length` checks a chunk's length against its span.
-  - `merkle::ChunkedIdFold::new` takes the chunk count and returns a `Result`,
-    `push` takes the chunk and its end, `push_entries` takes raw entry bytes,
-    and `finish` returns the id. `serialize::check_chunked_header`
-    takes the total size and the chunk count, and checks no layout.
-    A partial entry is `KitError::ChunkedBlobLength`. `merkle::SpannedChunk`
-    pairs a chunk id with its span. `verify_chunk` takes the span with the chunk id.
+  - `merkle::SpannedChunk` pairs a chunk id with its span. `verify_chunk`
+    takes the span with the chunk id.
 - **Breaking, format:** the disclosure bundle is version 3. A chunk payload
   and a chunk range header carry `start` and `end`, and a bundle of version 2
   is refused with `UnsupportedBundleVersion`. The length proofs are gone:
@@ -237,8 +281,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   removed. `VerifyError::IncompleteLengthProofSet`,
   `UnexpectedLengthProofs` and `InvalidBlobPrologue` are gone, and the span rules take their place:
   `SpanOutsideFile`, `SpanAboveObjectLimit`, `FirstChunkStart`,
-  `LastChunkEnd`, `ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan` and
-  `RangePastSpan`. `FixedChunkLength` is a span that the fixed-size
+  `LastChunkEnd`, `ChunkBytesNotBlob`, `ChunkLengthDiffersFromSpan`,
+  `RangePastSpan` and the new `FixedChunkLength`, a span that the fixed-size
   layout does not give. `VerifyError` is not `#[non_exhaustive]`, so a `match`
   with no wildcard arm has to name the new variants. The absolute offset of a
   range is always known, and the proof of a byte has the same size at any
@@ -266,7 +310,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Blob(content_len)`) instead of a `bool`. The walk checks a known chunk's
   length against its span only when the caller answers `Blob(len)`. A
   manifest with a chunk answered `Yes` is reported corrupt, so a caller with
-  no length for a known chunk fails closed.
+  no length for a known chunk fails closed. The walk also holds a known blob
+  to the types that the edge into it allows: a directory entry of mode `Tree`, the
+  tree of a commit or the target of a tag whose type is not a blob, when it
+  names an id
+  answered `Known::Blob`, is reported corrupt, as it is for a blob the walk
+  reads.
 - **Breaking, kit-wasm:** `verify_chunk` takes `start` and `end` after the
   chunk id. `chunked_blob_decode` returns `ends` with the existing keys. A
   chunk disclosure and a range disclosure carry `start` and `end`, and
@@ -296,22 +345,33 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   destructuring and field reads no longer compile. The leaf layout of a manifest's tree
   (the metadata leaf, then the chunks) is stated once, and the leaf count,
   the id fold, the proofs and the chunk positions derive from it.
-- **Breaking:** `kit_client::Limits` has a new field `max_tickets`, the most
-  tickets one advance may name, the packlist node's included.
-  `Limits::from_server_info` fills it from `max_tickets_per_advance`: seven
-  when the field is absent or below two, and at most 1,024.
-  `Limits::default()` holds seven. `Plan::prepare` refuses a plan with more
-  ticketed data packs than `max_tickets - 1`, where it refused more than six,
-  and `Push::run` refuses a plan whose `max_tickets` is above the limit of the
-  server it reaches. The public function `kit_client::advance_ticket_limit`
-  holds the rule, with the constants `DEFAULT_TICKETS_PER_ADVANCE` and
-  `MAX_TICKETS_PER_ADVANCE`, and the sync client uses it too.
-  `kit_client::data_pack_budget` returns `max_tickets - 1` with no floor, so a
-  `max_tickets` below two gives a budget of zero. `Plan::prepare` then fails
-  with the limit error at the first ticketed data pack, and prepares any plan
-  that holds none. Code that builds
-  a `Limits` with a struct literal adds the field or ends the literal with
-  `..Limits::default()`. No trait or signature of the crate changes.
+- **Breaking:** the upload ticket allowance follows the server.
+  `kit_client::Limits` has a new field `max_tickets`, the most tickets one
+  advance may name, the packlist node's included. `Limits::from_server_info`
+  fills it from `max_tickets_per_advance`: seven when the field is absent or
+  below two, and at most 1,024. `Limits::default()` holds seven. The sync
+  client (the CLI and `libkit`) uses the advertised value in place of the
+  fixed seven, for the split of a push and for the check of an advance.
+  `Plan::prepare` refuses a plan with more ticketed data packs than
+  `max_tickets - 1`, where it refused more than six, and `Push::run` refuses a
+  plan whose `max_tickets` is above the limit of the server it reaches. The
+  public function `kit_client::advance_ticket_limit` holds the rule, with the
+  constants `DEFAULT_TICKETS_PER_ADVANCE` and `MAX_TICKETS_PER_ADVANCE`, and
+  the sync client uses it too. `kit_client::data_pack_budget` returns
+  `max_tickets - 1` with no floor, so a `max_tickets` below two gives a budget
+  of zero; `Plan::prepare` then fails with the limit error at the first
+  ticketed data pack, and prepares any plan that holds none.
+  `kit_core::protocol::UploadLimits::tickets_per_advance` is now
+  `data_packs_per_advance`, the data packs one advance may carry: one fewer
+  than the ticket allowance. The sync client takes the value from
+  `data_pack_budget`. The unticketed fallback of six is gone, and
+  `plan_push_steps` with no ticket allowance returns one step. Code that builds
+  a `kit_client::Limits` with a struct literal adds the field or ends the literal with
+  `..Limits::default()`. The field `max_tickets_per_advance` is also public on
+  `kit_rpc::transport::kit::transport::v1::GetServerInfoResponse` and
+  `GetServerInfoResponseView`, so a struct literal that names every field
+  there no longer compiles. Add the field, or end the literal with
+  `..Default::default()`. No trait of `kit-client` changes.
 - **Breaking:** a fetch holds no repository lock while it downloads and
   applies packs. It downloads, checks, applies and records each pack as it
   arrives, in chain order, and stages nothing on disk, so `add`, `commit` and
@@ -323,12 +383,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cannot be written still warns once for the fetch, as before); the next fetch
   skips them, and heals if a gc pruned them meanwhile. A delta base missing
   after a skipped pack now clears the record and retries once, as a missing
-  closure object already did. `SyncOptions::staging_dir`,
-  `SyncOptions::max_staged_bytes` and their builders
-  `SyncOptions::with_staging_dir` and `SyncOptions::with_max_staged_bytes` are
-  removed, so a field read or a call no longer compiles. Remove them; a fetch
-  stages nothing and needs no replacement. (`max_staged_bytes` and its builder
-  were never in a release: they came after 0.7.3.) The publish step no longer fails with `SyncError::RepoLock`
+  closure object already did. `SyncOptions::staging_dir`
+  and its builder `SyncOptions::with_staging_dir` are removed, so a field read
+  or a call no longer compiles. Remove them; a fetch stages nothing and needs
+  no replacement. The publish step no longer fails with `SyncError::RepoLock`
   when another process holds `worktree.lock`: it waits, unless `SyncOptions::lock_wait` bounds the wait. A caller
   with an observer that never cancels waits as long as the holder does, and a fetch
   that waits holds its prune guard, so gc prunes nothing meanwhile.
@@ -359,6 +417,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restore of a file above 4 GiB passes the check on a 32-bit target.
   `kit-sync` no longer exports `warn_if_served`, `WORKTREE_LOCK` and
   `SERVE_LOCK`; `kit_core::repo_lock` has the lock names and `is_served`.
+- `kit clone --depth` says that a clone holds the full history so that every
+  commit verifies with its ancestors. It still exits `64`.
 - A fast-forward pull rewrites only the files the new tip changed. It wrote
   every tracked file again, and read each chunk of a large file again. An
   unchanged file keeps its inode, its mtime and its stat cache. The safety
@@ -368,35 +428,29 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses with the usual message and does not fail the check. A resumed pull still writes
   every file.
   **Breaking:** `restore_tree_to_worktree_with` skips
-  entries equal to `base_tree` when `clean` is set too, and so does
-  `restore_tree_to_worktree_observed`. It skipped only when it was not. A caller that passes both must have proved that the worktree
-  holds no untracked path outside the ignore rules.
+  entries equal to `base_tree` when `clean` is set too, where it skipped only
+  when `clean` was not set, and so does the new
+  `restore_tree_to_worktree_observed`. A caller that passes both must have
+  proved that the worktree holds no untracked path outside the ignore rules.
   The new `kit_sync::worktree::restore_worktree_and_index_from` takes the
   base tree.
 - `Tree` and `ChunkedBlob` ids come from a streaming fold that holds one node
   per level, so an id costs O(log n) memory, not about 96 bytes per chunk.
   `merkle::ChunkedIdFold` computes a `ChunkedBlob` id from its header fields
   and its entries, one at a time or as the raw entry bytes of a manifest, so a
-  caller need not decode the manifest. `serialize::check_chunked_header` checks
-  the header first, with the decoder's rules. **Breaking:** `MerkleError` gains
+  caller need not decode the manifest. `ChunkedIdFold::new` takes the header
+  fields (total size, chunk size and chunk count) and returns a `Result`, `push` takes the chunk and its end,
+  `push_entries` takes raw entry bytes, and `finish` returns the id. A partial
+  entry is `KitError::ChunkedBlobLength`. `serialize::check_chunked_header`
+  takes the total size and the chunk count and checks the header first, with
+  the decoder's rules and no layout. **Breaking:** `MerkleError` gains
   `TooManyLeaves`.
-- **Breaking:** `kit_core::protocol::UploadLimits::tickets_per_advance` is
-  now `data_packs_per_advance`, the data packs one advance may carry: one
-  fewer than the ticket allowance. `kit_client::data_pack_budget` holds the
-  rule beside `advance_ticket_limit`, and the sync client takes the value
-  from it. The unticketed fallback of six is gone. `plan_push_steps` with no
-  ticket allowance returns one step. `Plan::prepare` is unchanged for
-  `max_tickets` of two or more.
 - **Breaking:** `kit_core` no longer exports `ops::graph::MAX_ANCESTORS`,
-  `ops::graph::ANCESTOR_LIMIT` (the limit name `"10,000-commit ancestor walk"`,
-  added after 0.7.3; nothing replaces it, because each capped history walk now
-  takes the cap and the limit name of its caller and reports it in
-  `AncestorError::Limit`),
-  `collect_ancestor_set`,
-  `reachable_closure`, `reachable_closure_checked` and `ops::live_objects`,
-  and `transfer::plan_pack` are gone. Only tests
-  used them. Use `reachable_objects`, `reachable_snapshot`, `plan_pack_with`
-  and the walks the commands run.
+  `collect_ancestor_set`, `reachable_closure`, `reachable_closure_checked`,
+  `ops::live_objects` and `transfer::plan_pack`. Only tests used them. Use
+  `reachable_objects`, `reachable_snapshot`, `plan_pack_with` and the walks the
+  commands run. Each capped history walk takes the cap and the limit name of
+  its caller and reports it in `AncestorError::Limit`.
 - `kit gc` keeps the result tree of an unfinished merge, cherry-pick, revert
   or rebase, and the commits of an unfinished bisect. A gc after the grace
   period could prune them while the operation was waiting to resume. The
@@ -407,7 +461,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gc skips that root instead of failing, and `GcReport::skipped_state_files`
   lists the state file that named it. `kit gc` prints one warning for each
   such file. **Breaking:** `GcReport` is no longer `Copy`, and has the field
-  `skipped_state_files`. `conflict_state::result_tree_path` is public. A
+  `skipped_state_files`. `conflict_state::result_tree_path` is new and public. A
   missing object that a ref or any other root reaches still fails gc. The
   objects of a skipped root's closure that the store still holds are not kept
   for that root, so a gc prunes them like any other unreachable object.
@@ -416,7 +470,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   budget. `PackError` has a new variant, `OverReadLimit(ReadLimit)`, which
   names the body limit, the decoded-byte budget or the entry bound.
   `rewrite_excluding` returns it, where it returned `PackfileTooLarge`, for a
-  rewritten pack a writer would not seal: a changed rewrite of a pack that an
+  rewritten pack a writer would not seal (above the fetch body limit, the
+  decoded-byte budget or `MAX_WRITE_ENTRIES` entries): a changed rewrite of a pack that an
   older writer sealed above the 1 GiB budget (it could decode up to 16 GiB)
   is refused, whatever limits the caller decodes with, and an unchanged pack
   is still returned as it is. `ReadLimit` is `#[non_exhaustive]`.
@@ -425,8 +480,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had no caller. `verify::verify_disclosure` verifies a chunk with the span
   rules, and `merkle::verify_chunk` says in its first line that it checks the
   fold only.
-- **Breaking:** `SyncError` has a new variant, `RemoteObject`, and so does
-  `libkit::transfer::Error`. A fetch whose history has a chunk of another
+- **Breaking:** `SyncError` has a new variant, `RemoteObject`.
+  `libkit::transfer::Error`, which is `#[non_exhaustive]`, has it too. A fetch whose history has a chunk of another
   length than its span, or a chunk that is not a blob, fails with it. The
   check reads the whole closure of the fetched tip in the local store, so the
   text says "fetched history has a chunk that does not fit its manifest" and
@@ -434,7 +489,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuild the applied-pack record. A caller that matches `SyncError` with no
   wildcard has to name it.
 - **Breaking:** the closure walk fetches each chunked-file manifest a second
-  time, to check its chunk lengths after the walk. An `ObjectSource` has to
+  time, to check its chunk lengths after the walk. It keeps only the ids of
+  the manifests it reads, so a history with many versions of a large file does
+  not hold all their manifests at once. An `ObjectSource` has to
   serve a manifest again; with a source that serves each id only once, the walk
   reports the manifest corrupt ("manifest absent when its chunks were checked").
 - **Breaking:** the text of `KitError::TooManyChunks` reads
@@ -448,9 +505,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking, CLI:** `kit diff`, `kit show` and `kit format-patch` print `Binary files differ`
   for a binary pair of stored blobs after a read of the first bytes of each
   side. They read both sides whole before. A stored text blob or a worktree
-  file above the in-memory limit now fails `kit diff`, `kit show` and
-  `kit status` with exit `66` (`NOINPUT`), as `kit add` does, where they
-  exited `1`. `kit diff` prints no header line for a file whose patch it
+  file above the in-memory limit now fails `kit diff` and `kit show` with
+  exit `66` (`NOINPUT`), as `kit add` does, where they exited `1`. `kit status`
+  exits `66` for a worktree file above 128 GiB. `kit diff` prints no header line for a file whose patch it
   cannot read.
 - **Breaking:** `AppliedPacks::insert` is removed. `AppliedPacks::record_applied`
   replaces it.
@@ -467,6 +524,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rebase::Request` (`upstream`, `branch`), `log::Query` (`all`),
   `branch::Query` (`scope`), `branch::Branch` (`remote`) and `linked::Entry`
   (`locked`).
+- **Breaking:** the generated SSH frame enum `Body` in `kit-rpc`, and its view,
+  gain `ReadRepoCursor` and `ReadRepoCursorResponse`, so a `match` with no
+  wildcard arm has to name them.
 - **Breaking:** `kit_transport_file::temp_path` is private. `create_temp`
   replaces it: it creates the temporary file next to a destination with
   `create_new`, takes the next name when one is taken, and returns the path
@@ -549,9 +609,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A `ChunkedBlob` holds up to 128 GiB and 8,388,608 chunks (SPEC-OBJECTS §7).
   It held 1 GiB and 1,000,000 chunks before, and an earlier reader refuses a
   larger manifest. Writers now refuse any manifest a reader refuses. Readers
-  that hold a whole file in memory (`read_blob`, blame, byte-range
-  disclosure and the git export) refuse content above 1 GiB with a typed
-  error before they read a chunk.
+  that hold a whole file in memory (`read_blob`, blame and the git export)
+  refuse content above 1 GiB with a typed error before they read a chunk.
 - A push prefers packs of at most 256 MiB (`DEFAULT_PACK_PAYLOAD_CAP`), down
   from 4 GiB, so a push holds one pack of that size and one prepared batch in
   memory. `PushOptions::pack_payload_cap` is the preferred size and still takes
@@ -561,8 +620,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   size for that push, once, to what that commit needs, never past the format
   limit, the body limit every fetch applies (4 GiB, header and trailer
   included) or the largest pack the remote accepts. Against a server that does not
-  advertise `max_tickets_per_advance`, one commit can then carry about 24 GiB
-  of objects, where it carries about 1.5 GiB at the preferred size. A commit
+  advertise `max_tickets_per_advance`, one commit of content that does not
+  compress can then carry about 24 GiB, where it carries about 1.5 GiB at the
+  preferred size. Content that compresses is limited to 6 GiB decoded (see the
+  decoded-byte budget entry). A commit
   that does not fit even then is refused before any upload, with
   `PushSplitLimit` when its weight passes what the largest packs hold and
   with `PushTooLarge` when packing leaves it just over. A push that raises
@@ -579,8 +640,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pack::serialized_limit` and `pack::serialized_bound`. The push, the
   planning of its split, `kit_client::Plan::prepare` and the closure export
   all use it, and `pack::rewrite_excluding` refuses a rewritten pack that
-  a writer would not seal (above the fetch body limit, the decoded-byte
-  budget or `MAX_WRITE_ENTRIES` entries) with `PackError::OverReadLimit`. When the remote issues
+  a writer would not seal (see the `PackError` entry above). When the remote issues
   upload tickets, a single commit that adds more than the data-pack budget
   (one fewer than the ticket allowance) times `MAX_WRITE_ENTRIES` new objects,
   about 7.2 million at seven tickets, is now refused with `PushTooLarge` when
@@ -595,16 +655,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunks (about 4 GiB) by content when an edit changes its chunk count. It
   read every chunk of both versions for that. Its changed chunks are sent
   raw.
-- `kit gc` prints ` and N temp file(s)` after the object count when it removed
-  temp files.
 - A pack a kit writer seals decodes under `DecodeLimits::default()`, the
   1 GiB budget of the smallest reader (`kit_client::unpack`,
   `rewrite_excluding` and the window reader), where it was bounded by the
   cap of `PackReader::read` (2 to 16 GiB). `PackFill::seals_before` counts
   the bytes a pack decodes and the longest delta base a reader holds at once
   against that budget, and a push and `Plan::prepare` use it. The closure
-  export writes raw entries only, and `rewrite_excluding` checks its output
-  against the same budget. `DecodeLimits::default()` and the cap of
+  export writes raw entries only, and a rewritten pack is held to the same
+  budget (see the `PackError` entry above). `DecodeLimits::default()` and the cap of
   `PackReader::read` are unchanged. A push that sealed one pack of compressible
   content of up to 16 GiB decoded now seals one pack for each 1 GiB.
   - The deltas that share an external base are written next to each other,
@@ -618,7 +676,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     its whole wire payload fit that budget. The window reader charges both
     for an entry that straddles windows, so a 1 GiB object that compresses to
     64 MiB was refused by it. Such an entry is stored plain now.
-  - The largest commit a 7-ticket remote takes, six data packs, is still
+  - The largest commit a 7-ticket remote takes, six data packs, is
     6 × 1,198,372 = 7,190,232 objects. By bytes, content that compresses is
     now limited to 6 GiB decoded (it was 6 × 16 GiB), and content that does
     not compress is limited by the 4 GiB body limit of each pack, about
@@ -670,14 +728,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   full closure of the tip again and every clone downloaded it again, and a
   chain on any other transport grew by one node with each push. The node
   holds everything the chain held, so every transport and every head
-  condition allows it. A node lists at most 4,096 packs
-  (`ROLLOVER_MAX_PACKS`), 131,080 bytes: a chain that holds more keeps
-  appending. **Breaking:** the public constant
-  `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS` is 4,096, up from 1,024
-  (the constant itself was added after 0.7.3), so code that derives a size or
-  a bound from it changes. A reader accepts
-  the node as before. A server that limits a node to 1,024 packs must accept 4,096
-  before it is used with this client. A fresh clone downloads every pack of the branch.
+  condition allows it. A node lists at most 4,096 packs,
+  131,080 bytes: a chain that holds more keeps appending. The limit is the
+  public constant `kit_core::transfer::packmap::ROLLOVER_MAX_PACKS`. A reader
+  accepts the node as before. A fresh clone downloads every pack of the branch.
   With the `fetch-grow` row of the multi-writer benchmark, the largest
   upload of one push among 1,000 pushes of a 1 KiB change went from 740,447
   bytes to 32,120 bytes, and a clone after them from 41 packs and 84 requests
@@ -716,53 +770,22 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires a blob and compares its length with the span of the manifest, as a
   fetch does, and fails before anything is uploaded. `kit gc` takes a blob
   only as a chunk, as every other reader does.
-- The closure walk holds a known blob to the types that the edge into it
-  allows. A directory entry, the tree of a commit or the target of a tag whose
-  type is not a blob, when it names an id answered `Known::Blob`, is reported
-  corrupt, as it is for a blob the walk reads.
-- The closure walk keeps only the ids of the manifests it reads and checks each
-  manifest's chunk lengths in turn after the walk, so a history with many
-  versions of a large file no longer holds all their manifests at once.
+- `kit restore --staged --worktree` restores a clean file. It refused every
+  clean file, because the check for unstaged edits compared the worktree with
+  the index after the staged step had rewritten it.
 - `kit prove --range` with an offset and length that overflow exits 65, like
   every other bad range. A `.kit/format` longer than 64 bytes or not UTF-8 is
   an incompatible repository format.
-- Two fetches of one clone no longer leave a record that makes every later
-  fetch report the remote unchanged. A fetch that listed the remote earlier
-  can publish an older tip after a later fetch published the new one. A fetch
-  now writes its record only when each ref it published still holds its tip.
 - `kit add -p` skips a binary file after a read of its first bytes, and
   refuses a text file above the in-memory limit, or a staged blob above it,
   with exit `66`. It read the whole file and the whole staged blob first.
 - `kit merge --continue` and `kit rebase --continue` hash a resolved file one
   chunk at a time, and no longer read it whole to hash it. The scan for
   conflict markers skips a file above 1 GiB, where it failed on one.
-- The `kit+file://` transport opens its repository lock and stripe lock files
-  without following a link. A link planted at a lock path fails the write and
-  leaves its target as it was. The files were opened through a link before.
 - `reachable_objects` and `reachable_snapshot` return
   `OperationLimitExceeded` at the 10,000,000-object cap instead of a cut set.
   A push no longer sends a pack without the objects past a cut and then moves
   the branch: its walk fails at its own cap.
-- The closure verifier now checks that the objects fit together as a
-  checkout. A tree entry of mode `Tree` must name a tree. An entry of mode
-  `Blob`, `Executable` or `Symlink` must name a blob or a chunked blob. A
-  chunk must name a blob. The chunk lengths of a chunked blob must add up to
-  its `total_size`, and in a fixed-size layout each chunk must hold the
-  length the layout requires. A mismatch is `corrupt`. Before, a set with such objects
-  was complete. Bytes that decode to no object are now `unreferenced`
-  instead of `corrupt`, so an extra object that does not decode no longer
-  makes a map-based or pack-based verdict incomplete.
-- Disclosure verification now checks that an `Object` payload has the type
-  that the mode of the final step names: a tree for mode `Tree`, a blob or a
-  chunked blob for every other mode. Before, a step of mode `Blob` could name
-  a tree and return that tree's bytes under a path that reports a blob.
-  `verify::VerifyError` has a `PayloadTypeMismatch` variant.
-- The closure verifier now also checks the type of the tree of a commit or a
-  remix, which must be a tree, and of the target of a tag, which must have the
-  type that the tag records. A mismatch is `corrupt`.
-- Disclosure verification now rejects a `Chunk` or `Range` payload when the
-  final step has mode `Tree`, or when there is no step. Both payloads are blob
-  data, so the final step must name a blob, an executable or a symlink.
 - `kit stash` removed ignored files from the working tree and did not save
   them, so `stash pop` could not bring them back. A stash now removes only
   the paths it saved. It refuses, before it changes anything, when HEAD needs
@@ -775,12 +798,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A closure of exactly the walk cap is complete. The walk reported it cut when
   an object it had already seen was still queued, so a repository of exactly
   10,000,000 objects failed a fetch with `ClosureTooLarge`.
-- The restore safety check hashes a file that grows past 1 MiB while it is
-  read, as 0.7.3 did. Three inputs that ended in a check error (`check working
-  tree changes: ...` or `working tree: ...`) now pass it: an untracked file
-  that grows and is not in the way, a tracked file outside the sparse scope
-  that grows, and a removed entry whose file grows. None of them is a path the
-  restore writes. The eight restore-safety messages are unchanged.
 - A file above 1 MiB at stat time that is at most 1 MiB when it is read is
   stored as one blob, as the same bytes are in a file of that length. The
   stored form depends only on the bytes read, whether the file grew or shrank
@@ -798,11 +815,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replaces. Before, a ref name segment of 236 bytes or more failed with
   `ENAMETOOLONG`, so one such branch on a remote made every `kit fetch` and
   `kit clone` of it fail. `kit serve` sweeps crashed uploads by the new name.
-- File-transport writes never follow or truncate an existing temporary file,
-  and do not leave one behind. A write creates its temporary file exclusively
-  and takes the next name when one is taken, so a link planted at a temporary
-  name can no longer redirect a push to another file. A write that fails
-  after it created the temporary file removes it.
 - Restore writes a file through a temporary name of fixed length,
   `.kit-restore-tmp.<pid>.<counter>`, so a file name of up to 255 bytes
   checks out, clones and pulls. Before, a name of 240 bytes or more failed
