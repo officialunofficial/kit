@@ -388,10 +388,8 @@ independently at decode time; it is not folded into `MAX_TOTAL_PAYLOAD`
 or `entry_count`.
 
 **The per-pack cap is a format choice, not a transport ceiling.**
-S3 multipart upload is a purely transport-layer concern
-&mdash; `CreateMultipartUpload`/`UploadPart` against each backend's own
-single-`PUT` ceiling, resolved entirely inside the transport
-implementations, never touching this spec. The 4 GiB figure is the
+How a transport moves a pack, in one S3 `PUT` or in SSH chunk frames, is
+its own concern and never touches this spec. The 4 GiB figure is the
 bound this version chose to keep pack construction and
 verification bounded in memory and time; it does not track any
 transport's own object-size limits.

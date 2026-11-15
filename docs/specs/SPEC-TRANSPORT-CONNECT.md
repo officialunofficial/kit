@@ -29,7 +29,7 @@ proto shape, verb-to-trait mapping, CAS semantics, error-code mapping,
 pack-transfer streaming design, repository addressing, write
 authorization policy, upload tickets, admission challenges, and read
 consistency &mdash; and how
-servers and the native CLI client consume one generated codebase. It does not cover S3 multipart,
+servers and the native CLI client consume one generated codebase. It does not cover
 the `WatchRefs` live feed, pricing or admission verification,
 or any server/client implementation; those are separate changes (§8).
 Write and read grants, epochs, signed reads, and private repositories
@@ -1927,8 +1927,6 @@ Explicitly deferred to later work:
 - ~~The native CLI Connect client.~~ Implemented &mdash; see §7.3.
 - ~~The shared retry/backoff Connect interceptor.~~ Implemented
   directly in `ConnectTransport` &mdash; see §7.3.
-- S3 multipart upload (unrelated transport; not superseded by this
-  document at all).
 - Generated TypeScript (`connect-es`) clients for this service.
 - Implementing version 2: multi-repository routing, the namespace
   and write policies, sharded server metadata, `GetServerInfo`, upload

@@ -22,13 +22,12 @@
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
 //!
-//! Packs whose byte length exceeds [`S3_SINGLE_PUT_MAX`] go through true
-//! S3 multipart upload (`CreateMultipartUpload` -> `UploadPart` per
-//! fixed-size part, each independently retried -> `CompleteMultipartUpload`)
-//! instead of a single `PUT`. Any terminal failure aborts the multipart
-//! upload so a transient error can't leak orphaned parts in the bucket.
-//! See SPEC-TRANSPORT §6.4/§6.7 and §7.1 for the wire contract and the
-//! resulting CAS-guarantee downgrade for large packs.
+//! A pack streams both ways (SPEC-TRANSPORT §6.7). `upload_pack` hashes
+//! the body once for the SigV4 payload hash, then sends it in one sized
+//! `PUT`, reading it again from offset 0 on every attempt. `download_pack`
+//! writes only a `200` answer's body to the sink, as it arrives. Neither
+//! holds the pack in memory. Every pack fits one `PUT`: S3 takes up to
+//! 5 GiB, and a pack is at most [`PACK_BODY_LIMIT`].
 
 // This crate contains zero `unsafe` — enforce that it stays that way.
 #![forbid(unsafe_code)]
@@ -40,7 +39,8 @@
 pub mod sigv4;
 
 use std::env;
-use std::io::Read as _;
+use std::io::{self, Read as _};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,47 +52,15 @@ use kit_core::protocol::{
 use kit_core::refs::{
     Ref, RefWriteCondition, parse_lowercase_hash, validate_ref_name, validate_ref_prefix,
 };
-use md5::{Digest as _, Md5};
+use md5::Md5;
 use reqwest::Method;
-use reqwest::blocking::{Client, Response};
+use reqwest::blocking::{Body, Client, RequestBuilder, Response};
+use sha2::{Digest as _, Sha256};
 
-use crate::sigv4::{Credentials, SignedRequest, sign_request};
-
-/// Per SPEC-TRANSPORT §6.4, a single `PUT` is capped at 5 GiB; anything
-/// larger goes through multipart upload (§6.7).
-///
-/// Test-only override: under the `test-small-multipart-caps` feature this
-/// shrinks to a few MiB so the multipart integration test
-/// (`tests/transport_multipart.rs`) doesn't need to move a multi-GiB
-/// buffer through a mockito server. That shrunk value is NOT a valid S3
-/// API limit — the feature must never be enabled in a production build
-/// (see the feature's doc comment in `Cargo.toml`).
-#[cfg(not(feature = "test-small-multipart-caps"))]
-pub const S3_SINGLE_PUT_MAX: u64 = 5 * 1024 * 1024 * 1024;
-#[cfg(feature = "test-small-multipart-caps")]
-pub const S3_SINGLE_PUT_MAX: u64 = 8 * 1024 * 1024;
-
-/// Fixed size of every multipart part except the last, which carries the
-/// remainder. S3 requires every non-last part to be at least 5 MiB;
-/// 64 MiB keeps retry granularity and peak per-part memory bounded while
-/// staying well under the 10,000-parts-per-upload ceiling for any pack
-/// under [`kit_core::protocol::PACK_BODY_LIMIT`].
-///
-/// Test-only override: shrinks to the S3-mandated minimum (5 MiB) so
-/// the multipart integration test moves single-digit-MiB bodies instead
-/// of tens of MiB. See [`S3_SINGLE_PUT_MAX`]'s doc comment.
-#[cfg(not(feature = "test-small-multipart-caps"))]
-const MULTIPART_PART_SIZE: usize = 64 * 1024 * 1024;
-// `pub` only under the test feature: `tests/transport_multipart.rs` needs
-// the exact value to build its mocks' expected part counts and query
-// strings. Not part of the crate's real public API surface.
-#[cfg(feature = "test-small-multipart-caps")]
-pub const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
+use crate::sigv4::{Credentials, SignedRequest, sha256_hex, sign_request_with_payload_hash};
 
 // Body-size cap for a pack download. Canonical value lives in kit-core.
-use kit_core::protocol::{
-    PACK_BODY_LIMIT, PackBody, PackSink, read_body, saturating_usize, write_body,
-};
+use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
 use kit_core::ref_listing::{MAX_PAGES, RefListing};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
@@ -101,6 +69,23 @@ const REF_LIST_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 /// HTTP `PUT`-return body cap when we don't care about the response.
 const SMALL_RESPONSE_LIMIT: usize = 4 * 1024;
+
+/// Bytes of a pack read at a time: by the hash pass, by the thread that
+/// feeds an upload, and from a download's response.
+const PACK_IO_CHUNK: usize = 256 * 1024;
+
+/// Chunks of [`PACK_IO_CHUNK`] the thread that reads a pack for an upload
+/// may queue ahead of the request that sends them.
+const PACK_FEED_DEPTH: usize = 2;
+
+/// The client's timeout for one request, up to its response headers, and
+/// for each read of a response body.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The slowest upload a pack `PUT` waits for, in bytes per second. The
+/// request's timeout is [`REQUEST_TIMEOUT`] plus the pack's length at this
+/// rate, since its body is sent before its response is awaited.
+const PACK_PUT_MIN_RATE: u64 = 1024 * 1024;
 
 /// Environment variable names for credentials.
 pub const ENV_ACCESS_KEY: &str = "KIT_S3_ACCESS_KEY_ID";
@@ -178,7 +163,7 @@ impl S3Transport {
         let region = env::var(ENV_REGION).unwrap_or_else(|_| DEFAULT_REGION.into());
 
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
@@ -210,7 +195,7 @@ impl S3Transport {
         creds: Credentials,
     ) -> Result<Self, TransportError> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
@@ -344,9 +329,21 @@ impl S3Transport {
         extra_headers: &[(&'static str, String)],
         body_limit: Option<usize>,
     ) -> TransportResult<HttpResponse> {
+        self.retrying(|| {
+            self.http_request_once(method, key, query, payload, extra_headers, body_limit)
+        })
+    }
+
+    /// Run `attempt` on the SPEC-TRANSPORT §7 ladder: again after a 5xx, a
+    /// 429 or a connection failure, until the ladder runs out. Any other
+    /// error returns at once.
+    fn retrying(
+        &self,
+        mut attempt: impl FnMut() -> TransportResult<HttpResponse>,
+    ) -> TransportResult<HttpResponse> {
         let mut iter = (self.backoff)();
         loop {
-            match self.http_request_once(method, key, query, payload, extra_headers, body_limit) {
+            match attempt() {
                 Ok(resp) => {
                     let status = resp.status;
                     // Retry on 5xx / 429.
@@ -370,28 +367,25 @@ impl S3Transport {
         }
     }
 
-    fn http_request_once(
+    /// A request for `key` signed over `payload_sha256`, the lowercase hex
+    /// SHA-256 of the exact body the caller attaches.
+    fn signed_request(
         &self,
         method: &Method,
         key: &str,
         query: &str,
-        payload: Option<&[u8]>,
+        payload_sha256: &str,
         extra_headers: &[(&'static str, String)],
-        body_limit: Option<usize>,
-    ) -> TransportResult<HttpResponse> {
+    ) -> RequestBuilder {
         let path = self.build_path(key);
-        let method_str = method_to_str(method);
-        let ts = (self.clock)();
-        let payload_bytes: &[u8] = payload.unwrap_or(&[]);
-
-        let signed: SignedRequest = sign_request(
+        let signed: SignedRequest = sign_request_with_payload_hash(
             &self.creds,
-            method_str,
+            method_to_str(method),
             &path,
             query,
-            payload_bytes,
+            payload_sha256,
             &self.endpoint,
-            ts,
+            (self.clock)(),
         );
 
         let url = if query.is_empty() {
@@ -409,6 +403,26 @@ impl S3Transport {
         for (name, value) in extra_headers {
             builder = builder.header(*name, value);
         }
+        builder
+    }
+
+    fn http_request_once(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload: Option<&[u8]>,
+        extra_headers: &[(&'static str, String)],
+        body_limit: Option<usize>,
+    ) -> TransportResult<HttpResponse> {
+        let payload_bytes: &[u8] = payload.unwrap_or(&[]);
+        let mut builder = self.signed_request(
+            method,
+            key,
+            query,
+            &sha256_hex(payload_bytes),
+            extra_headers,
+        );
         if let Some(bytes) = payload {
             builder = builder
                 .header("Content-Length", bytes.len().to_string())
@@ -420,30 +434,229 @@ impl S3Transport {
             .map_err(|_| TransportError::ConnectionFailed)?;
         extract_response(resp, body_limit, method == Method::HEAD)
     }
+
+    /// `PUT` `pack` at `object_key` in one request whose body streams from
+    /// `pack`. The request is signed over the SHA-256 of one pass over
+    /// `pack.len()` bytes from offset 0, and every attempt sends those
+    /// bytes, read again from offset 0. Each attempt may take
+    /// [`REQUEST_TIMEOUT`] plus the pack's length at [`PACK_PUT_MIN_RATE`].
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when `pack` cannot be read or holds
+    /// fewer bytes than its length, before or during a send: a local
+    /// failure, never retried. Otherwise as [`Self::http_request`].
+    fn put_pack(&self, pack: &dyn PackBody, object_key: &str) -> TransportResult<HttpResponse> {
+        let payload_sha256 = pack_sha256(pack)?;
+        let timeout = REQUEST_TIMEOUT + Duration::from_secs(pack.len() / PACK_PUT_MIN_RATE);
+        self.retrying(|| {
+            let builder = self
+                .signed_request(&Method::PUT, object_key, "", &payload_sha256, &[])
+                .timeout(timeout);
+            let resp = send_streamed(builder, pack)?;
+            extract_response(resp, Some(SMALL_RESPONSE_LIMIT), false)
+        })
+    }
+
+    /// `GET` the pack at `object_key` into `sink`. Only a `200` answer's body
+    /// reaches the sink (see [`copy_to_sink`]). Any other answer's body is
+    /// never read: the status alone maps to the error. A retried attempt
+    /// begins the sink again.
+    fn get_pack(&self, object_key: &str, sink: &mut dyn PackSink) -> TransportResult<()> {
+        let empty_sha256 = sha256_hex(&[]);
+        let resp = self.retrying(|| {
+            let resp = self
+                .signed_request(&Method::GET, object_key, "", &empty_sha256, &[])
+                .send()
+                .map_err(|_| TransportError::ConnectionFailed)?;
+            let status = resp.status().as_u16();
+            if status == 200 {
+                copy_to_sink(resp, sink)?;
+            }
+            Ok(HttpResponse {
+                status,
+                body: Vec::new(),
+            })
+        })?;
+        match resp.status {
+            200 => Ok(()),
+            404 => Err(TransportError::PackNotFound),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+}
+
+/// The lowercase hex SHA-256 of `pack`'s `len()` bytes, read once from
+/// offset 0.
+///
+/// # Errors
+/// [`TransportError::ProtocolError`] when `pack` cannot be read or ends
+/// early: a local failure, never retried.
+fn pack_sha256(pack: &dyn PackBody) -> TransportResult<String> {
+    let mut reader = pack
+        .read_from(0)
+        .map_err(|_| TransportError::ProtocolError)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; PACK_IO_CHUNK];
+    let mut left = pack.len();
+    while left > 0 {
+        let want = saturating_usize(left).min(buf.len());
+        reader
+            .read_exact(&mut buf[..want])
+            .map_err(|_| TransportError::ProtocolError)?;
+        hasher.update(&buf[..want]);
+        left -= want as u64;
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Send `builder` with a body of `pack.len()` bytes read from `pack` at
+/// offset 0.
+///
+/// reqwest's blocking client takes only a `'static` reader. It reads that
+/// reader on this thread while `send` runs, and drops it before `send`
+/// returns. A scoped thread reads `pack` and hands its bytes over in chunks
+/// of [`PACK_IO_CHUNK`], at most [`PACK_FEED_DEPTH`] ahead, so the upload
+/// holds a few chunks, never the pack. Once `send` returns, the dropped
+/// reader ends the thread's sends, and the thread is joined.
+///
+/// # Errors
+/// [`TransportError::ProtocolError`] when `pack` cannot be read or ends
+/// early: a local failure, never retried. [`TransportError::ConnectionFailed`]
+/// for any other failure to send, a thread that cannot start included.
+fn send_streamed(builder: RequestBuilder, pack: &dyn PackBody) -> TransportResult<Response> {
+    let len = pack.len();
+    thread::scope(|scope| {
+        let (tx, rx) = mpsc::sync_channel(PACK_FEED_DEPTH);
+        let feeder = thread::Builder::new()
+            .spawn_scoped(scope, move || feed(pack, len, &tx))
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        let sent = builder.body(Body::sized(FedBody::new(rx), len)).send();
+        match feeder.join() {
+            Ok(Ok(())) => sent.map_err(|_| TransportError::ConnectionFailed),
+            Ok(Err(_)) | Err(_) => Err(TransportError::ProtocolError),
+        }
+    })
+}
+
+/// Read `len` bytes of `pack` from offset 0 into `tx`, a chunk at a time.
+/// It stops without error when the receiver is gone: the request ended,
+/// whatever its outcome. A read failure, a short body included, goes to the
+/// receiver too, so the request ends, and is returned.
+fn feed(
+    pack: &dyn PackBody,
+    len: u64,
+    tx: &mpsc::SyncSender<io::Result<Vec<u8>>>,
+) -> Result<(), io::ErrorKind> {
+    let fail = |err: io::Error| {
+        let kind = err.kind();
+        let _ = tx.send(Err(err));
+        Err(kind)
+    };
+    let mut reader = match pack.read_from(0) {
+        Ok(reader) => reader,
+        Err(err) => return fail(err),
+    };
+    let mut left = len;
+    while left > 0 {
+        let mut chunk = vec![0u8; saturating_usize(left).min(PACK_IO_CHUNK)];
+        if let Err(err) = reader.read_exact(&mut chunk) {
+            return fail(err);
+        }
+        left -= chunk.len() as u64;
+        if tx.send(Ok(chunk)).is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The `'static` reader reqwest sends: the chunks [`feed`] queues, in
+/// order, then end of file once the feeder is done.
+struct FedBody {
+    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
+    chunk: Vec<u8>,
+    at: usize,
+}
+
+impl FedBody {
+    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
+        Self {
+            rx,
+            chunk: Vec::new(),
+            at: 0,
+        }
+    }
+}
+
+impl io::Read for FedBody {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        while self.at == self.chunk.len() {
+            match self.rx.recv() {
+                Ok(Ok(chunk)) => {
+                    self.chunk = chunk;
+                    self.at = 0;
+                }
+                Ok(Err(err)) => return Err(err),
+                Err(mpsc::RecvError) => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.at);
+        buf[..n].copy_from_slice(&self.chunk[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// Write a `200` answer's body to `sink` as it arrives, a chunk at a time.
+///
+/// Its `Content-Length`, when present, goes to [`PackSink::begin`] before
+/// any byte is read, so a body over [`PACK_BODY_LIMIT`] or the sink's limit
+/// is refused unread, and the sink refuses bytes past it. Without one, the
+/// sink's limit and [`PACK_BODY_LIMIT`] bound the body.
+///
+/// # Errors
+/// [`TransportError::PayloadTooLarge`] past a limit; the sink's error;
+/// [`TransportError::ConnectionFailed`] when the body cannot be read.
+fn copy_to_sink(mut resp: Response, sink: &mut dyn PackSink) -> TransportResult<()> {
+    let declared = resp.content_length();
+    if let Some(len) = declared.filter(|&len| len > PACK_BODY_LIMIT) {
+        return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
+    }
+    sink.begin(declared)?;
+    let mut buf = vec![0u8; PACK_IO_CHUNK];
+    let mut taken = 0u64;
+    loop {
+        let n = resp
+            .read(&mut buf)
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        if n == 0 {
+            return Ok(());
+        }
+        taken += n as u64;
+        if taken > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(taken)));
+        }
+        sink.write(&buf[..n])?;
+    }
 }
 
 struct HttpResponse {
     status: u16,
     body: Vec<u8>,
-    /// The `ETag` response header, if present. Only consulted by the
-    /// multipart-upload path (`UploadPart` needs each part's ETag to
-    /// build the `CompleteMultipartUpload` manifest); every other call
-    /// site ignores it.
-    etag: Option<String>,
 }
 
+/// The status of `resp`, and its body when it is a success. An error
+/// answer's body is never read: callers map the status alone, and a store's
+/// error document (S3 `NoSuchKey` names the key, request and host) may be
+/// longer than the limit of the body a success would carry.
 fn extract_response(
     resp: Response,
     body_limit: Option<usize>,
     is_head: bool,
 ) -> TransportResult<HttpResponse> {
     let status = resp.status().as_u16();
-    let etag = resp
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    let body = if is_head {
+    let body = if is_head || !(200..300).contains(&status) {
         Vec::new()
     } else if let Some(limit) = body_limit {
         // Read at most `limit + 1` bytes. The extra byte shows that the
@@ -466,7 +679,7 @@ fn extract_response(
         // the status is retryable and the caller discards).
         Vec::new()
     };
-    Ok(HttpResponse { status, body, etag })
+    Ok(HttpResponse { status, body })
 }
 
 fn method_to_str(m: &Method) -> &'static str {
@@ -576,237 +789,8 @@ fn quoted_md5(wire: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Multipart upload (SPEC-TRANSPORT §6.7) — packs above S3_SINGLE_PUT_MAX
-// ---------------------------------------------------------------------------
-
-/// Build the canonical query string that initiates a multipart upload:
-/// `POST <key>?uploads`.
-fn multipart_init_query() -> String {
-    sigv4::canonical_query_string(&[("uploads", "")])
-}
-
-/// Build the canonical query string for one `UploadPart` call.
-fn multipart_part_query(part_number: u32, upload_id: &str) -> String {
-    sigv4::canonical_query_string(&[
-        ("partNumber", &part_number.to_string()),
-        ("uploadId", upload_id),
-    ])
-}
-
-/// Build the canonical query string for `CompleteMultipartUpload` /
-/// `AbortMultipartUpload`: both address the upload solely by `uploadId`.
-fn multipart_upload_id_query(upload_id: &str) -> String {
-    sigv4::canonical_query_string(&[("uploadId", upload_id)])
-}
-
-/// Build the `CompleteMultipartUpload` request body from the parts
-/// collected during upload, in ascending part-number order.
-///
-/// Each `etag` is the verbatim `ETag` header value the server returned
-/// for that part (typically already double-quoted, e.g. `"<md5-hex>"`);
-/// callers MUST reject any value containing `<` or `&` before calling
-/// this (see [`S3Transport::upload_one_part`]) so a malicious or buggy
-/// server can't inject XML through the ETag.
-fn build_complete_multipart_body(parts: &[(u32, String)]) -> Vec<u8> {
-    use std::fmt::Write as _;
-
-    let mut out = String::from("<CompleteMultipartUpload>");
-    for (part_number, etag) in parts {
-        // `String::write_fmt` never fails.
-        let _ = write!(
-            out,
-            "<Part><PartNumber>{part_number}</PartNumber><ETag>{etag}</ETag></Part>"
-        );
-    }
-    out.push_str("</CompleteMultipartUpload>");
-    out.into_bytes()
-}
-
-impl S3Transport {
-    /// Upload `bytes` (already confirmed `> S3_SINGLE_PUT_MAX`) as a
-    /// multipart object: `CreateMultipartUpload` -> `UploadPart` per
-    /// [`MULTIPART_PART_SIZE`]-sized chunk (each independently retried
-    /// through the existing [`Self::http_request`] backoff ladder) ->
-    /// `CompleteMultipartUpload`. Any terminal failure aborts the
-    /// multipart upload so a partial attempt doesn't leak orphaned parts
-    /// in the bucket (SPEC-TRANSPORT §6.7).
-    fn upload_pack_multipart(&self, bytes: &[u8], object_key: &str) -> TransportResult<()> {
-        let upload_id = self.create_multipart_upload(object_key)?;
-
-        let mut parts: Vec<(u32, String)> = Vec::new();
-        for (i, chunk) in bytes.chunks(MULTIPART_PART_SIZE).enumerate() {
-            // Bounded by PACK_BODY_LIMIT / MULTIPART_PART_SIZE, always
-            // far under both `u32::MAX` and S3's 10,000-parts-per-upload
-            // ceiling; the fallback is defensive, not expected to fire.
-            let part_number = u32::try_from(i + 1).unwrap_or(u32::MAX);
-            match self.upload_one_part(object_key, &upload_id, part_number, chunk) {
-                Ok(etag) => parts.push((part_number, etag)),
-                Err(e) => {
-                    self.abort_multipart_upload(object_key, &upload_id);
-                    return Err(e);
-                }
-            }
-        }
-
-        match self.complete_multipart_upload(object_key, &upload_id, &parts) {
-            Ok(()) => Ok(()),
-            // 412: an object already exists at this content-addressed
-            // key. Packs are immutable and addressed by the hash of
-            // their bytes, so an existing object at this exact key is
-            // guaranteed to hold identical content — treat this as the
-            // idempotent no-op SPEC-TRANSPORT §7 requires of
-            // `upload_pack`, matching the unconditional-overwrite
-            // single-PUT path's idempotent behaviour. The multipart
-            // upload itself was never materialized (the conditional
-            // failed before the object was created), so it still needs
-            // an explicit abort.
-            Err(TransportError::ServerError { status: 412 }) => {
-                self.abort_multipart_upload(object_key, &upload_id);
-                Ok(())
-            }
-            Err(e) => {
-                self.abort_multipart_upload(object_key, &upload_id);
-                Err(e)
-            }
-        }
-    }
-
-    /// `POST <key>?uploads` — initiate a multipart upload and return the
-    /// server-assigned `UploadId`.
-    fn create_multipart_upload(&self, object_key: &str) -> TransportResult<String> {
-        let query = multipart_init_query();
-        let resp = self.http_request(
-            &Method::POST,
-            object_key,
-            &query,
-            None,
-            &[],
-            Some(SMALL_RESPONSE_LIMIT),
-        )?;
-        match resp.status {
-            200 => {
-                let body =
-                    std::str::from_utf8(&resp.body).map_err(|_| TransportError::InvalidResponse)?;
-                extract_element(body, "UploadId").ok_or(TransportError::InvalidResponse)
-            }
-            403 | 401 => Err(TransportError::AccessDenied),
-            s => Err(TransportError::ServerError { status: s }),
-        }
-    }
-
-    /// `PUT <key>?partNumber=<n>&uploadId=<id>` — upload one part and
-    /// return its `ETag`. Retried transparently by
-    /// [`Self::http_request`]'s backoff ladder on 5xx/429/connection
-    /// failure, so a transient failure on one part never requires
-    /// restarting the whole multipart upload from part one.
-    fn upload_one_part(
-        &self,
-        object_key: &str,
-        upload_id: &str,
-        part_number: u32,
-        chunk: &[u8],
-    ) -> TransportResult<String> {
-        let query = multipart_part_query(part_number, upload_id);
-        let resp = self.http_request(
-            &Method::PUT,
-            object_key,
-            &query,
-            Some(chunk),
-            &[],
-            Some(SMALL_RESPONSE_LIMIT),
-        )?;
-        match resp.status {
-            200 | 201 => {
-                let etag = resp.etag.ok_or(TransportError::InvalidResponse)?;
-                if etag.is_empty() || etag.contains(['<', '&']) {
-                    return Err(TransportError::InvalidResponse);
-                }
-                Ok(etag)
-            }
-            403 | 401 => Err(TransportError::AccessDenied),
-            s => Err(TransportError::ServerError { status: s }),
-        }
-    }
-
-    /// `POST <key>?uploadId=<id>` with the part manifest as the body —
-    /// commit the multipart upload into a single object.
-    ///
-    /// Carries `If-None-Match: *` (`PutIfAbsent` semantics) rather than
-    /// the single-PUT path's `Match(h)`-via-`If-Match` CAS trick: a
-    /// multipart `ETag` is not the body MD5 (it's derived from the parts'
-    /// ETags), so [`quoted_md5`]'s equivalence does not hold for
-    /// multipart objects. See SPEC-TRANSPORT §6.3/§7.1 for the resulting
-    /// CAS-guarantee note.
-    fn complete_multipart_upload(
-        &self,
-        object_key: &str,
-        upload_id: &str,
-        parts: &[(u32, String)],
-    ) -> TransportResult<()> {
-        let query = multipart_upload_id_query(upload_id);
-        let body = build_complete_multipart_body(parts);
-        let resp = self.http_request(
-            &Method::POST,
-            object_key,
-            &query,
-            Some(&body),
-            &[("If-None-Match", "*".to_owned())],
-            Some(SMALL_RESPONSE_LIMIT),
-        )?;
-        match resp.status {
-            200 | 201 => Ok(()),
-            409 | 412 => Err(TransportError::ServerError { status: 412 }),
-            403 | 401 => Err(TransportError::AccessDenied),
-            s => Err(TransportError::ServerError { status: s }),
-        }
-    }
-
-    /// `DELETE <key>?uploadId=<id>` — best-effort cleanup after any
-    /// terminal multipart failure, so a transient error or a lost CAS
-    /// race doesn't leave orphaned parts (and their storage cost)
-    /// sitting in the bucket forever. Deliberately swallows its own
-    /// error: this crate has no logging facility, and a failed abort
-    /// must never mask the real error that triggered it (S3 stores also
-    /// garbage-collect incomplete multipart uploads after a bucket
-    /// lifecycle policy window, so a failed abort here is not the only
-    /// backstop).
-    fn abort_multipart_upload(&self, object_key: &str, upload_id: &str) {
-        let query = multipart_upload_id_query(upload_id);
-        let _ = self.http_request(
-            &Method::DELETE,
-            object_key,
-            &query,
-            None,
-            &[],
-            Some(SMALL_RESPONSE_LIMIT),
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Transport impl
 // ---------------------------------------------------------------------------
-
-impl S3Transport {
-    /// GET the object of `key`, reading at most `limit` bytes of its body.
-    fn get_pack(&self, key: &PackKey, limit: u64) -> TransportResult<Vec<u8>> {
-        let object_key = Self::pack_object_key(key.as_bytes());
-        let resp = self.http_request(
-            &Method::GET,
-            &object_key,
-            "",
-            None,
-            &[],
-            Some(saturating_usize(limit)),
-        )?;
-        match resp.status {
-            200 => Ok(resp.body),
-            404 => Err(TransportError::PackNotFound),
-            403 | 401 => Err(TransportError::AccessDenied),
-            s => Err(TransportError::ServerError { status: s }),
-        }
-    }
-}
 
 impl Transport for S3Transport {
     /// The cursor of SPEC-TRANSPORT §6.8: a digest of the key, `ETag` and
@@ -860,38 +844,21 @@ impl Transport for S3Transport {
         RepoCursor::new(&digest.finalize()).map(Some)
     }
 
-    /// Buffers the body: a single PUT or the multipart parts slice one
-    /// in-memory pack.
+    /// Streams the body: one pass hashes it for the SigV4 payload hash,
+    /// then one sized `PUT` sends it, read again from offset 0 on every
+    /// attempt. A body over [`PACK_BODY_LIMIT`] is refused before any read.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
         key: &PackKey,
         _head_ref: Option<&str>,
     ) -> TransportResult<()> {
-        // PACK_BODY_LIMIT is the absolute pack-body ceiling enforced on
-        // every transport (it bounds `download_pack`'s in-memory buffer
-        // too — see kit-core::protocol's doc comment); multipart upload
-        // does not touch it, so an oversized pack still fails closed
-        // here rather than uploading something that can never be read
-        // back. This is unconditional and independent of
-        // S3_SINGLE_PUT_MAX below.
         if pack.len() > PACK_BODY_LIMIT {
-            return Err(TransportError::ServerError { status: 413 });
+            return Err(TransportError::PayloadTooLarge(saturating_usize(
+                pack.len(),
+            )));
         }
-        let bytes = read_body(pack)?;
-        let bytes = bytes.as_slice();
-        let object_key = Self::pack_object_key(key.as_bytes());
-        if bytes.len() as u64 > S3_SINGLE_PUT_MAX {
-            return self.upload_pack_multipart(bytes, &object_key);
-        }
-        let resp = self.http_request(
-            &Method::PUT,
-            &object_key,
-            "",
-            Some(bytes),
-            &[],
-            Some(SMALL_RESPONSE_LIMIT),
-        )?;
+        let resp = self.put_pack(pack, &Self::pack_object_key(key.as_bytes()))?;
         match resp.status {
             200 | 201 => Ok(()),
             403 | 401 => Err(TransportError::AccessDenied),
@@ -899,25 +866,15 @@ impl Transport for S3Transport {
         }
     }
 
-    /// Buffers the body: the response is read whole, then written to `sink`.
+    /// Streams a `200` answer's body into `sink` as it arrives, its
+    /// `Content-Length` declared first. No other answer's body reaches it.
     fn download_pack(
         &self,
         key: &PackKey,
         _ref_hint: Option<&str>,
         sink: &mut dyn PackSink,
     ) -> TransportResult<()> {
-        write_body(sink, &self.get_pack(key, PACK_BODY_LIMIT)?)
-    }
-
-    /// Reads at most `max` bytes of the response, so a blob over the bound is
-    /// refused without the client holding more than `max`.
-    fn download_blob(
-        &self,
-        key: &PackKey,
-        _ref_hint: Option<&str>,
-        max: u64,
-    ) -> TransportResult<Vec<u8>> {
-        self.get_pack(key, max.min(PACK_BODY_LIMIT))
+        self.get_pack(&Self::pack_object_key(key.as_bytes()), sink)
     }
 
     fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {

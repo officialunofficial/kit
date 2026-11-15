@@ -11,11 +11,14 @@
 //! loop correctness.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use kit_core::hash::{Hash, to_hex};
-use kit_core::protocol::{BackoffIterator, PACK_BODY_LIMIT, PackKey, Transport, TransportError};
+use kit_core::protocol::{
+    BackoffIterator, PACK_BODY_LIMIT, PackBody, PackKey, PackSink, Transport, TransportError,
+};
 use kit_core::refs::RefWriteCondition;
 use kit_transport_s3::S3Transport;
 use kit_transport_s3::sigv4::Credentials;
@@ -163,43 +166,104 @@ fn upload_pack_5xx_then_200_succeeds() {
         .unwrap();
 }
 
+/// A body over `PACK_BODY_LIMIT` is refused before any byte of it is read
+/// and before any request.
 #[test]
-fn upload_pack_rejects_over_pack_body_limit() {
-    // PACK_BODY_LIMIT (the absolute pack-body ceiling shared with
-    // `download_pack`, per kit-core::protocol's doc comment) is
-    // unconditional and independent of the multipart path. It is
-    // deliberately probed via PACK_BODY_LIMIT rather than
-    // S3_SINGLE_PUT_MAX so this test's outcome doesn't depend on
-    // whether the `test-small-multipart-caps` feature (which shrinks
-    // S3_SINGLE_PUT_MAX) is enabled for this build.
-    //
-    // A REAL over-cap body: `vec![0u8; PACK_BODY_LIMIT + 1]` is
-    // allocated with `alloc_zeroed`, so the > 4 GiB body costs lazily
-    // mapped zero pages (virtual address space), not RSS — and the
-    // size guard fires before anything reads the bytes.
-    //
-    // The guard sits BEFORE any network call, so NO mocks are
-    // installed: reaching the server would return mockito's 501 and
-    // fail the exact-status assertion below.
+fn upload_pack_refuses_a_body_over_the_limit_before_reading_it() {
     let server = mockito::Server::new();
     let t = build_transport(&server.url());
-    let over_cap = usize::try_from(PACK_BODY_LIMIT).unwrap() + 1;
-    let body = vec![0u8; over_cap];
-    match t.upload_pack(&kit_core::protocol::SliceBody(&body), &sample_key(), None) {
-        Err(TransportError::ServerError { status: 413 }) => {}
-        other => panic!("expected the 413 oversize guard, got {other:?}"),
-    }
+    let body = Recorded::new(Vec::new()).claiming(PACK_BODY_LIMIT + 1);
+    assert!(matches!(
+        t.upload_pack(&body, &sample_key(), None),
+        Err(TransportError::PayloadTooLarge(_))
+    ));
+    assert!(body.reads().is_empty());
 }
 
-// The branch decision (above S3_SINGLE_PUT_MAX -> multipart), the
-// byte-exact round-trip, the abort-on-part-failure cleanup, and the
-// idempotent-412-on-complete behaviour are all covered by the dedicated
-// `tests/transport_multipart.rs` integration test. That file requires
-// the `test-small-multipart-caps` feature specifically so it can drive
-// the real multipart flow with single-digit-MiB bodies; duplicating an
-// multipart-path test here (in a file compiled without that feature by
-// default) would otherwise move a real multi-GiB body through mockito
-// on every plain `cargo test` run.
+/// The request is signed over the SHA-256 of exactly the bytes it streams,
+/// with their length as `Content-Length`. The body spans several chunks.
+#[test]
+fn upload_pack_signs_the_sha256_of_the_streamed_bytes() {
+    let bytes = pattern(600 * 1024 + 7);
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("PUT", mockito::Matcher::Any)
+        .match_header("x-amz-content-sha256", sha256_hex(&bytes).as_str())
+        .match_header("content-length", bytes.len().to_string().as_str())
+        .match_body(bytes.clone())
+        .with_status(200)
+        .create();
+    let t = build_transport(&server.url());
+    let body = Recorded::new(bytes);
+    t.upload_pack(&body, &sample_key(), None).unwrap();
+    m.assert();
+    assert_eq!(body.reads(), [0, 0], "one hash pass, then one send");
+}
+
+/// A retried `PUT` reads the body again from offset 0 and sends the same
+/// bytes under the same payload hash.
+#[test]
+fn upload_pack_retry_sends_the_body_again_from_offset_zero() {
+    let bytes = pattern(300 * 1024);
+    let mut server = mockito::Server::new();
+    let failed = server
+        .mock("PUT", mockito::Matcher::Any)
+        .match_header("x-amz-content-sha256", sha256_hex(&bytes).as_str())
+        .match_body(bytes.clone())
+        .with_status(503)
+        .create();
+    let ok = server
+        .mock("PUT", mockito::Matcher::Any)
+        .match_header("x-amz-content-sha256", sha256_hex(&bytes).as_str())
+        .match_body(bytes.clone())
+        .with_status(200)
+        .create();
+    let t = build_transport(&server.url());
+    let body = Recorded::new(bytes);
+    t.upload_pack(&body, &sample_key(), None).unwrap();
+    failed.assert();
+    ok.assert();
+    assert_eq!(body.reads(), [0, 0, 0], "a hash pass, then one per attempt");
+}
+
+/// A body that holds fewer bytes than its length is refused by the hash
+/// pass, before any request.
+#[test]
+fn upload_pack_refuses_a_short_body_before_any_request() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("PUT", mockito::Matcher::Any)
+        .with_status(200)
+        .expect(0)
+        .create();
+    let t = build_transport(&server.url());
+    let body = Recorded::new(pattern(10)).claiming(11);
+    assert!(matches!(
+        t.upload_pack(&body, &sample_key(), None),
+        Err(TransportError::ProtocolError)
+    ));
+    m.assert();
+}
+
+/// A body that ends early while it is sent is a local error: the request
+/// ends and is not retried.
+#[test]
+fn upload_pack_body_cut_while_sending_is_not_retried() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("PUT", mockito::Matcher::Any)
+        .with_status(200)
+        .expect_at_most(1)
+        .create();
+    let t = build_transport(&server.url());
+    let body = Recorded::new(pattern(700 * 1024)).cut_after_first_read(400 * 1024);
+    assert!(matches!(
+        t.upload_pack(&body, &sample_key(), None),
+        Err(TransportError::ProtocolError)
+    ));
+    assert_eq!(body.reads(), [0, 0], "the hash pass and one send, no retry");
+    m.assert();
+}
 
 // -- downloadPack ------------------------------------------------------------
 
@@ -216,7 +280,7 @@ fn download_pack_200_returns_body() {
     assert_eq!(got, b"pack-body");
 }
 
-/// A blob longer than the caller's bound is refused after one byte past it.
+/// A blob longer than the caller's bound is refused at its declared length.
 #[test]
 fn download_blob_refuses_a_body_over_its_bound() {
     let mut server = mockito::Server::new();
@@ -228,7 +292,7 @@ fn download_blob_refuses_a_body_over_its_bound() {
     let t = build_transport(&server.url());
     assert!(matches!(
         t.download_blob(&sample_key(), None, 100),
-        Err(TransportError::PayloadTooLarge(101))
+        Err(TransportError::PayloadTooLarge(4096))
     ));
     assert_eq!(
         t.download_blob(&sample_key(), None, 4096).unwrap().len(),
@@ -262,6 +326,178 @@ fn download_pack_403_access_denied() {
         t.download_blob(&sample_key(), None, u64::MAX),
         Err(TransportError::AccessDenied)
     ));
+}
+
+/// A `200` body reaches the sink with its length declared first, a chunk
+/// at a time.
+#[test]
+fn download_pack_streams_a_200_body_into_the_sink() {
+    let bytes = pattern(700 * 1024 + 3);
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(bytes.clone())
+        .create();
+    let t = build_transport(&server.url());
+    let mut sink = Sink::new(u64::MAX);
+    t.download_pack(&sample_key(), None, &mut sink).unwrap();
+    assert_eq!(sink.begins, [Some(bytes.len() as u64)]);
+    assert!(sink.writes > 1, "{} writes", sink.writes);
+    assert_eq!(sink.bytes, bytes);
+}
+
+/// No error answer's body reaches the sink, whether the error is final or
+/// retried.
+#[test]
+fn download_pack_error_bodies_never_reach_the_sink() {
+    for (status, expected) in [(404, 1), (403, 1), (400, 1), (500, 6), (503, 6)] {
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(status)
+            .with_body(vec![b'e'; 64 * 1024])
+            .expect(expected)
+            .create();
+        let t = build_transport(&server.url());
+        let mut sink = Sink::new(u64::MAX);
+        let result = t.download_pack(&sample_key(), None, &mut sink);
+        assert!(result.is_err(), "{status}: {result:?}");
+        m.assert();
+        assert!(sink.begins.is_empty(), "{status}: {:?}", sink.begins);
+        assert_eq!(sink.writes, 0, "{status}");
+    }
+}
+
+/// A declared length over the sink's limit is refused before any byte is
+/// written.
+#[test]
+fn download_pack_refuses_a_declared_length_over_the_limit_before_any_write() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(vec![7u8; 4096])
+        .create();
+    let t = build_transport(&server.url());
+    let mut sink = Sink::new(4095);
+    assert!(matches!(
+        t.download_pack(&sample_key(), None, &mut sink),
+        Err(TransportError::PayloadTooLarge(4096))
+    ));
+    assert_eq!(sink.begins, [Some(4096)]);
+    assert_eq!(sink.writes, 0);
+}
+
+/// A `200` that declares a body over [`PACK_BODY_LIMIT`] is refused before
+/// the sink begins, whatever the sink's own limit.
+#[test]
+fn download_pack_refuses_a_declared_length_over_the_body_limit_before_begin() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let answers = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0u8; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut head);
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            PACK_BODY_LIMIT + 1
+        );
+        // The client may close first; a failed write is fine.
+        let _ = std::io::Write::write_all(&mut stream, answer.as_bytes());
+        let _ = std::io::Write::write_all(&mut stream, &[7u8; 4096]);
+    });
+    let t = build_transport(&endpoint);
+    let mut sink = Sink::new(u64::MAX);
+    assert!(matches!(
+        t.download_pack(&sample_key(), None, &mut sink),
+        Err(TransportError::PayloadTooLarge(_))
+    ));
+    answers.join().unwrap();
+    assert!(sink.begins.is_empty(), "{:?}", sink.begins);
+    assert_eq!(sink.writes, 0);
+}
+
+/// A `200` whose body is cut part way is retried, and the retry begins the
+/// sink again, so the sink ends with the whole body only.
+#[test]
+fn download_pack_cut_mid_body_begins_the_sink_again() {
+    let bytes = pattern(600 * 1024);
+    let mut server = mockito::Server::new();
+    let half = bytes[..300 * 1024].to_vec();
+    let cut = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_chunked_body(move |w| {
+            w.write_all(&half)?;
+            Err(std::io::Error::other("cut"))
+        })
+        .expect(1)
+        .create();
+    let whole = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(bytes.clone())
+        .expect(1)
+        .create();
+    let t = build_transport(&server.url());
+    let mut sink = Sink::new(u64::MAX);
+    t.download_pack(&sample_key(), None, &mut sink).unwrap();
+    cut.assert();
+    whole.assert();
+    assert_eq!(sink.begins, [None, Some(bytes.len() as u64)]);
+    assert_eq!(sink.bytes, bytes);
+}
+
+/// A store that drops every connection after the request headers ends the
+/// upload as a connection failure after the retries. Each attempt reads
+/// the body again from offset 0, and none hangs on the thread that reads
+/// it.
+#[test]
+fn upload_pack_to_a_store_that_drops_the_connection_ends_after_the_retries() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let accepts = std::thread::spawn(move || {
+        let mut connections = 0;
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut head = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut head);
+            drop(stream);
+            connections += 1;
+            if connections == 6 {
+                return connections;
+            }
+        }
+        connections
+    });
+    let t = build_transport(&endpoint);
+    let body = Recorded::new(pattern(2 * 1024 * 1024));
+    assert!(matches!(
+        t.upload_pack(&body, &sample_key(), None),
+        Err(TransportError::ConnectionFailed)
+    ));
+    assert_eq!(accepts.join().unwrap(), 6, "the attempt and 5 retries");
+    assert_eq!(body.reads(), [0; 7], "the hash pass, then one per attempt");
+}
+
+/// A sink that failed on a local write ends the download with an error no
+/// retry takes.
+#[test]
+fn download_pack_sink_failure_is_not_retried() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(vec![7u8; 4096])
+        .expect(1)
+        .create();
+    let t = build_transport(&server.url());
+    let mut sink = Sink::new(u64::MAX);
+    sink.fail_writes = true;
+    let err = t.download_pack(&sample_key(), None, &mut sink).unwrap_err();
+    assert!(!kit_core::protocol::is_retryable(&err), "{err:?}");
+    m.assert();
 }
 
 // -- packExists --------------------------------------------------------------
@@ -463,6 +699,23 @@ fn read_ref_404_returns_none() {
         .create();
     let t = build_transport(&server.url());
     assert!(t.read_ref("refs/heads/missing").unwrap().is_none());
+}
+
+/// A missing ref's error document can be longer than a ref body: a store
+/// names the key, the request and the host in it. Its body is not read.
+#[test]
+fn read_ref_404_with_a_long_error_document_returns_none() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", "/bucket/refs/heads/main")
+        .with_status(404)
+        .with_body(format!(
+            "<Error><Code>NoSuchKey</Code><Key>refs/heads/main</Key><HostId>{}</HostId></Error>",
+            "a".repeat(1024)
+        ))
+        .create();
+    let t = build_transport(&server.url());
+    assert_eq!(t.read_ref("refs/heads/main").unwrap(), None);
 }
 
 #[test]
@@ -1132,4 +1385,119 @@ fn list_refs_skips_a_ref_deleted_after_the_listing() {
     let refs = t.list_refs("refs/heads/").unwrap();
     assert_eq!(refs.len(), 1);
     assert_eq!(refs[0].name, "a");
+}
+
+// -- pack bodies and sinks ---------------------------------------------------
+
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    kit_transport_s3::sigv4::sha256_hex(bytes)
+}
+
+/// A pack body that records the offset of every read it starts. It can
+/// claim a length other than its bytes', and end early after its first
+/// read.
+struct Recorded {
+    bytes: Vec<u8>,
+    len: u64,
+    cut_after_first: Option<usize>,
+    reads: Mutex<Vec<u64>>,
+}
+
+impl Recorded {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            len: bytes.len() as u64,
+            bytes,
+            cut_after_first: None,
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn claiming(mut self, len: u64) -> Self {
+        self.len = len;
+        self
+    }
+
+    fn cut_after_first_read(mut self, at: usize) -> Self {
+        self.cut_after_first = Some(at);
+        self
+    }
+
+    fn reads(&self) -> Vec<u64> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+impl PackBody for Recorded {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_from(&self, offset: u64) -> std::io::Result<Box<dyn std::io::Read + Send + '_>> {
+        let mut reads = self.reads.lock().unwrap();
+        reads.push(offset);
+        let end = match self.cut_after_first {
+            Some(at) if reads.len() > 1 => at,
+            _ => self.bytes.len(),
+        };
+        let start = usize::try_from(offset).unwrap();
+        Ok(Box::new(&self.bytes[start..end]))
+    }
+}
+
+/// A sink that keeps what it is sent and records each call.
+struct Sink {
+    limit: u64,
+    begins: Vec<Option<u64>>,
+    writes: usize,
+    bytes: Vec<u8>,
+    fail_writes: bool,
+    failed: Option<std::io::ErrorKind>,
+}
+
+impl Sink {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            begins: Vec::new(),
+            writes: 0,
+            bytes: Vec::new(),
+            fail_writes: false,
+            failed: None,
+        }
+    }
+}
+
+impl PackSink for Sink {
+    fn begin(&mut self, declared: Option<u64>) -> Result<(), TransportError> {
+        self.begins.push(declared);
+        if self.failed.is_some() {
+            return Err(TransportError::ProtocolError);
+        }
+        self.bytes.clear();
+        match declared {
+            Some(len) if len > self.limit => Err(TransportError::PayloadTooLarge(
+                usize::try_from(len).unwrap(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
+        self.writes += 1;
+        if self.fail_writes {
+            self.failed = Some(std::io::ErrorKind::StorageFull);
+            return Err(TransportError::ProtocolError);
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.failed
+    }
 }
