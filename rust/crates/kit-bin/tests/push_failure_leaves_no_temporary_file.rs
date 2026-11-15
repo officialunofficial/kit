@@ -1,5 +1,7 @@
-//! A push whose pack cannot be written to a `kit+file://` remote must not
-//! leave the temporary file in the remote's `packs/` directory.
+//! A push whose pack cannot be written must not leave a file behind. A push
+//! seals each pack in an unnamed spool in `.kit/tmp/` before it uploads it,
+//! so a file size limit stops it there: it fails as a local I/O error, and
+//! neither the spool directory nor the remote keeps a file.
 #![cfg(unix)]
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
@@ -79,19 +81,27 @@ fn push_that_cannot_write_its_pack_leaves_no_temporary_file() {
     let out = run_with_file_size_limit(root, x, &["push", "origin", "--all"]);
 
     assert!(!out.status.success(), "the push should fail: {out:?}");
-    // The push must fail at the pack upload, not earlier. A push that failed
-    // before it made the `packs` directory would pass the checks below too.
+    // The push must fail writing its pack, not earlier: it made the spool
+    // directory, and the error is the file size limit's.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("upload_pack I/O error"),
-        "the failure should name the pack upload: {stderr}"
+        stderr.contains("File too large"),
+        "the failure should be the pack's write: {stderr}"
     );
+    let spools = root.join(".kit").join("tmp");
+    assert!(spools.is_dir(), "the push should have made {spools:?}");
+    let spooled: Vec<_> = fs::read_dir(&spools).unwrap().collect();
+    assert!(spooled.is_empty(), "spool files left: {spooled:?}");
     let packs = bare.path().join("packs");
-    assert!(packs.is_dir(), "the upload should have made {packs:?}");
     let leftovers: Vec<_> = fs::read_dir(&packs)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.contains(".tmp."))
-        .collect();
-    assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        leftovers.is_empty(),
+        "files left on the remote: {leftovers:?}"
+    );
 }

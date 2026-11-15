@@ -46,14 +46,24 @@ impl DeltaEncoder {
         base: Option<Hash>,
     ) -> Result<PackPlan, StoreError> {
         transfer::plan_pack_with(store, tip, base, |store, candidates| {
-            let mut slot = self.spool.borrow_mut();
-            if slot.is_none() {
-                *slot = Some(DeltaSpool::create(&self.dir)?);
-            }
-            let spool = slot.as_mut().expect("the spool was just created");
-            encode_in_runs(store, candidates, |run, bases| {
-                spool.encode(store, run, |store, fresh| encode_run(store, fresh, bases))
-            })
+            self.encode(store, candidates)
+        })
+    }
+
+    /// The `encode_deltas` callback of a planner: one result per candidate,
+    /// in order, each stream in the push's spool.
+    pub(crate) fn encode(
+        &self,
+        store: &ObjectStore,
+        candidates: &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError> {
+        let mut slot = self.spool.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(DeltaSpool::create(&self.dir)?);
+        }
+        let spool = slot.as_mut().expect("the spool was just created");
+        encode_in_runs(store, candidates, |run, bases| {
+            spool.encode(store, run, |store, fresh| encode_run(store, fresh, bases))
         })
     }
 }

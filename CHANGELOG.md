@@ -42,15 +42,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uploads it from there, with its delta streams in the push's delta spool.
   The memory and file transports copy in 1 MiB chunks; ssh, S3 and Connect
   hold one pack in memory on upload, and S3 and Connect on download
-  (SPEC-TRANSPORT §1.1). A push and a fetch of one 1 GiB pack each hold
-  under 96 MiB of heap.
+  (SPEC-TRANSPORT §1.1). Over the file transport, a push and a fetch of
+  one 1 GiB pack each hold under 96 MiB of heap and a few hundred bytes per
+  entry.
 - A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
   a sink that failed refuses every later attempt (`PackSink::failed`).
-  `SyncError` maps `PackError::Io` and store I/O errors to `SyncError::Io`.
+  `SyncError` maps `PackError::Io` and `PackError::Store(StoreError::Io)`
+  to `SyncError::Io`, and a push maps a store or delta-spool I/O error the
+  same way.
 - The signature check after an unpack reads only the commits, remixes and
   tags the pack stored, in runs whose objects stay within 256 MiB.
 - Delta encoders of a push start in runs whose memory stays within 256 MiB.
-- Fetch, push and gc remove files left in `.kit/tmp/` when they start.
+- Fetch, push and gc remove spool files left in `.kit/tmp/` when they
+  start.
+- A zstd frame in a pack writer keeps only its bytes, not the compressor's
+  worst-case reservation.
 
 - A pack writer refuses a frame over `MAX_FRAME_PAYLOAD` (SPEC-PACKFILE §5).
   No kit writer made one.

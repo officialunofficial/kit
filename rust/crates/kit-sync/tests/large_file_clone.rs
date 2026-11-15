@@ -264,7 +264,11 @@ impl RemoteSource for MeasuredSource<'_> {
         let seen = staging_entries(self.work) + staging_entries(&self.work.join(".kit"));
         self.staging_seen.set(self.staging_seen.get() + seen);
         self.packs.set(self.packs.get() + 1);
-        self.inner.download_pack(key, ref_name, sink)
+        self.inner.download_pack(key, ref_name, sink)?;
+        // The spool holds the whole pack now, and has no name.
+        self.staging_seen
+            .set(self.staging_seen.get() + spool_entries(self.work));
+        Ok(())
     }
 }
 
@@ -360,8 +364,9 @@ fn noise_into(seed: u64, out: &mut [u8]) {
     }
 }
 
-/// A repository of `files` files of `len` incompressible bytes, in 256
-/// directories, committed on top of `parent` by `key`. With `edited`, each
+/// A repository of `files` files of `len` incompressible bytes, every
+/// fourth one ending in `zeros` zero bytes, in 256 directories, committed on top of `parent` by `key`.
+/// With `edited`, each
 /// file differs from the unedited one by two bytes, so a push of it against
 /// the unedited commit sends a delta per file. The objects go straight to
 /// the store, one file at a time; HEAD names `main`, which holds the new
@@ -372,6 +377,7 @@ fn commit_files(
     parent: Option<Hash>,
     files: usize,
     len: usize,
+    zeros: usize,
     edited: bool,
 ) -> Hash {
     let layout = RepoLayout::single(work);
@@ -382,7 +388,9 @@ fn commit_files(
     for dir in 0..256usize {
         let mut entries = Vec::new();
         for file in (dir..files).step_by(256) {
-            noise_into(file as u64, &mut data);
+            let tail = if file % 4 == 0 { zeros } else { 0 };
+            noise_into(file as u64, &mut data[..len - tail]);
+            data[len - tail..].fill(0);
             if edited {
                 data[len / 3] ^= 1;
                 data[2 * len / 3] ^= 1;
@@ -467,18 +475,22 @@ fn entries_of(files: usize) -> usize {
 }
 
 /// A push and a fetch of one 1 GiB pack over the file transport each hold
-/// one window of the pack and the per-entry charge, not the pack.
+/// one window of the pack and the per-entry charge, not the pack. Every
+/// fourth file ends in zeros, so a quarter of the entries are zstd frames;
+/// the frames' decoded bytes stay within the reader's budget, so the push
+/// makes one pack. zstd's own contexts are allocated in C and not counted.
 #[test]
 #[ignore = "pushes and fetches a 1 GiB pack; run in the ignored lane"]
 fn a_push_and_a_fetch_of_one_1_gib_pack_hold_under_96_mib_and_the_entry_charge() {
-    const FILES: usize = 16_384;
+    const FILES: usize = 17_000;
     const LEN: usize = 64 * KIB;
+    const ZEROS: usize = 8 * KIB;
     let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     let origin = dir.path().join("origin");
     init_clone_dir(&origin, &remote()).unwrap();
     let key = KeyPair::generate().unwrap();
-    let tip = commit_files(&origin, &key, None, FILES, LEN, false);
+    let tip = commit_files(&origin, &key, None, FILES, LEN, ZEROS, false);
     let tx = kit_transport_file::FileTransport::new(dir.path().join("remote"));
     let source = TransportSource::new(&tx);
     let bound = 96 * MIB + 320 * entries_of(FILES);
@@ -532,11 +544,11 @@ fn a_push_of_2_gib_of_small_file_deltas_holds_under_256_mib() {
     let origin = dir.path().join("origin");
     init_clone_dir(&origin, &remote()).unwrap();
     let key = KeyPair::generate().unwrap();
-    let base = commit_files(&origin, &key, None, FILES, LEN, false);
+    let base = commit_files(&origin, &key, None, FILES, LEN, 0, false);
     let tx = kit_transport_file::FileTransport::new(dir.path().join("remote"));
     let source = TransportSource::new(&tx);
     measured_push(&origin, &source, kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP);
-    let tip = commit_files(&origin, &key, Some(base), FILES, LEN, true);
+    let tip = commit_files(&origin, &key, Some(base), FILES, LEN, 0, true);
 
     let (packs, peak) = measured_push(&origin, &source, kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP);
     let sent: u64 = packs.iter().sum();

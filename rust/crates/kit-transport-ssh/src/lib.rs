@@ -600,15 +600,16 @@ enum ReplyError {
 ///
 /// The header's `total_bytes` goes to [`PackSink::begin`] before any chunk
 /// is read, so a sink refuses a body over its limit before the first byte,
-/// and a sink refuses bytes past the header's length. Each chunk is written
+/// and a sink refuses bytes past the header's length. A header without one
+/// declares none, and the sink's own limit bounds the body. Each chunk is written
 /// as it arrives: one chunk is held at a time.
 fn read_download_pack<F>(mut next_frame: F, sink: &mut dyn PackSink) -> Result<(), ReplyError>
 where
     F: FnMut() -> TransportResult<SshFrame>,
 {
     let header = next_frame().map_err(ReplyError::Cut)?;
-    let total = match header.body {
-        Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes.unwrap_or(0),
+    let declared = match header.body {
+        Some(ssh_frame::Body::DownloadPackHeader(h)) => h.total_bytes,
         Some(ssh_frame::Body::Error(e)) => {
             return Err(ReplyError::Answered(rpc_error_to_transport(*e, "ssh")));
         }
@@ -620,12 +621,12 @@ where
             )));
         }
     };
-    if total > PACK_BODY_LIMIT {
+    if declared.is_some_and(|total| total > PACK_BODY_LIMIT) {
         return Err(ReplyError::Cut(TransportError::RemoteError(
             "server-advertised pack size exceeds client cap".into(),
         )));
     }
-    sink.begin(Some(total)).map_err(ReplyError::Cut)?;
+    sink.begin(declared).map_err(ReplyError::Cut)?;
     loop {
         let frame = next_frame().map_err(ReplyError::Cut)?;
         match frame.body {
@@ -1096,6 +1097,32 @@ mod tests {
         result.unwrap();
         assert_eq!(reads, 7);
         assert_eq!(sink.into_bytes().unwrap(), payload);
+    }
+
+    /// A header without a length declares none: the sink's limit bounds the
+    /// body.
+    #[test]
+    fn download_pack_header_without_a_length_declares_none() {
+        let header = SshFrame {
+            body: Some(ssh_frame::Body::DownloadPackHeader(Box::default())),
+            ..Default::default()
+        };
+        let frames = [header.clone(), chunk_frame(0, &[1, 2, 3], true)];
+        let mut sink = MemorySink::new(3);
+        let (result, _) = read_reply(&frames, &mut sink);
+        result.unwrap();
+        assert_eq!(sink.into_bytes().unwrap(), [1, 2, 3]);
+
+        let frames = [header, chunk_frame(0, &[1, 2, 3, 4], true)];
+        let mut sink = MemorySink::new(3);
+        let (result, _) = read_reply(&frames, &mut sink);
+        assert!(
+            matches!(
+                result,
+                Err(ReplyError::Cut(TransportError::PayloadTooLarge(_)))
+            ),
+            "{result:?}"
+        );
     }
 
     /// A server that sends more than its header promised is cut off at the

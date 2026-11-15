@@ -2152,6 +2152,26 @@ mod tests {
 
     /// The download declares the pack's length before any byte, so a sink
     /// with a smaller limit refuses it with no byte read.
+    /// A pack whose write fails on the remote leaves no temporary file
+    /// there: here the rename fails, because a directory holds its name.
+    #[test]
+    fn upload_pack_that_cannot_land_leaves_no_temporary_file() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x5bu8; 32]);
+        let blocker = t.pack_path(&key);
+        fs::create_dir_all(blocker.join("occupied")).unwrap();
+        assert!(
+            t.upload_pack(&kit_core::protocol::SliceBody(&[7u8; 4096]), &key, None)
+                .is_err()
+        );
+        let names: Vec<String> = fs::read_dir(blocker.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "only the blocking directory: {names:?}");
+    }
+
     #[test]
     fn download_pack_declares_the_length_before_the_body() {
         let dir = tmp();

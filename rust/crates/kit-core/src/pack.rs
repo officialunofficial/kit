@@ -1304,10 +1304,13 @@ fn maybe_compress_within(data: &[u8], framing: usize, budget: u64) -> Option<Vec
     if !fits(0) {
         return None;
     }
-    let compressed = ZSTD_COMPRESSOR
+    let mut compressed = ZSTD_COMPRESSOR
         .with(|c| c.borrow_mut().compress(data))
         .ok()?;
     if ZSTD_LEN_PREFIX + compressed.len() < data.len() && fits(compressed.len() as u64) {
+        // The compressor reserves its worst case; a writer holds many frames
+        // at once, so each keeps only its bytes.
+        compressed.shrink_to_fit();
         Some(compressed)
     } else {
         None

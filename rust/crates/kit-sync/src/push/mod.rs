@@ -1089,7 +1089,7 @@ fn size_capped_batch_lens(sizes: &[u64], byte_cap: u64, max_entries: usize) -> V
 /// kit-benches --bench pack_build_fanout`.
 ///
 /// Also doubles as one of [`size_capped_batch_lens`]'s two caps: a
-/// batch that isn't cut short by `payload_cap` first comes out exactly
+/// batch that isn't cut short by [`PUSH_BATCH_BYTES`] first comes out exactly
 /// this many entries long (until the final, possibly-shorter
 /// remainder) — the same length `prepare_raw_batch`/
 /// `prepare_delta_batch` compare against to decide sequential vs.
@@ -1115,12 +1115,10 @@ fn prepare_raw_batch(store: &ObjectStore, chunk: &[Hash]) -> Result<Vec<Prepared
     })
 }
 
-/// The delta-entry counterpart of [`prepare_raw_batch`]. Delta streams
-/// are already resident in `chunk` (no store read needed), so this
-/// only fans out the zstd compression step. Takes `chunk` by value —
-/// `build_and_upload_packs` drains it straight out of `plan.deltas` —
-/// so `PackWriter::prepare_delta` can take each stream by move instead
-/// of cloning it.
+/// The delta-entry counterpart of [`prepare_raw_batch`]: reads each
+/// stream of `chunk` back from the push's delta spool and fans out the
+/// zstd compression step. Takes `chunk` by value — `build_packs` drains
+/// it straight out of `plan.deltas`.
 fn prepare_delta_batch(
     chunk: Vec<transfer::PlannedDelta>,
 ) -> Result<Vec<PreparedDelta>, PushError> {

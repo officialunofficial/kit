@@ -216,6 +216,26 @@ fn download_pack_200_returns_body() {
     assert_eq!(got, b"pack-body");
 }
 
+/// A blob longer than the caller's bound is refused after one byte past it.
+#[test]
+fn download_blob_refuses_a_body_over_its_bound() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("GET", mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(vec![7u8; 4096])
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.download_blob(&sample_key(), None, 100),
+        Err(TransportError::PayloadTooLarge(101))
+    ));
+    assert_eq!(
+        t.download_blob(&sample_key(), None, 4096).unwrap().len(),
+        4096
+    );
+}
+
 #[test]
 fn download_pack_404_pack_not_found() {
     let mut server = mockito::Server::new();

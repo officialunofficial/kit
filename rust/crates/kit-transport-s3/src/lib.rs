@@ -787,6 +787,27 @@ impl S3Transport {
 // Transport impl
 // ---------------------------------------------------------------------------
 
+impl S3Transport {
+    /// GET the object of `key`, reading at most `limit` bytes of its body.
+    fn get_pack(&self, key: &PackKey, limit: u64) -> TransportResult<Vec<u8>> {
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self.http_request(
+            &Method::GET,
+            &object_key,
+            "",
+            None,
+            &[],
+            Some(saturating_usize(limit)),
+        )?;
+        match resp.status {
+            200 => Ok(resp.body),
+            404 => Err(TransportError::PackNotFound),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+}
+
 impl Transport for S3Transport {
     /// The cursor of SPEC-TRANSPORT §6.8: a digest of the key, `ETag` and
     /// `LastModified` of every object under `refs/`, read from the listing
@@ -885,21 +906,18 @@ impl Transport for S3Transport {
         _ref_hint: Option<&str>,
         sink: &mut dyn PackSink,
     ) -> TransportResult<()> {
-        let object_key = Self::pack_object_key(key.as_bytes());
-        let resp = self.http_request(
-            &Method::GET,
-            &object_key,
-            "",
-            None,
-            &[],
-            Some(saturating_usize(PACK_BODY_LIMIT)),
-        )?;
-        match resp.status {
-            200 => write_body(sink, &resp.body),
-            404 => Err(TransportError::PackNotFound),
-            403 | 401 => Err(TransportError::AccessDenied),
-            s => Err(TransportError::ServerError { status: s }),
-        }
+        write_body(sink, &self.get_pack(key, PACK_BODY_LIMIT)?)
+    }
+
+    /// Reads at most `max` bytes of the response, so a blob over the bound is
+    /// refused without the client holding more than `max`.
+    fn download_blob(
+        &self,
+        key: &PackKey,
+        _ref_hint: Option<&str>,
+        max: u64,
+    ) -> TransportResult<Vec<u8>> {
+        self.get_pack(key, max.min(PACK_BODY_LIMIT))
     }
 
     fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {

@@ -34,7 +34,8 @@ fn unnamed_file(dir: &Path) -> io::Result<File> {
     tempfile::tempfile_in(dir)
 }
 
-/// Remove every file left in the spool directory `dir`.
+/// Remove every spool file left in the spool directory `dir`: the files
+/// named as `tempfile` names them, `.tmp` and a random suffix.
 ///
 /// Spools are unnamed, so on Unix nothing a spool wrote is ever listed here.
 /// On Windows a spool is deleted when its handle closes, which a power loss
@@ -50,7 +51,8 @@ pub fn sweep_spool_dir(dir: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+        let spool_name = entry.file_name().to_string_lossy().starts_with(".tmp");
+        if spool_name && entry.file_type().is_ok_and(|kind| kind.is_file()) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -514,11 +516,13 @@ impl PackSpool {
 /// [`TransportError::ProtocolError`], which no transport retries.
 impl PackSink for PackSpool {
     fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
-        Self::begin(self, declared).map_err(|error| self.transport_error(&error))
+        let len = declared.unwrap_or(0);
+        Self::begin(self, declared).map_err(|error| transport_error(&error, len))
     }
 
     fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
-        Self::write(self, bytes).map_err(|error| self.transport_error(&error))
+        let end = self.written.saturating_add(bytes.len() as u64);
+        Self::write(self, bytes).map_err(|error| transport_error(&error, end))
     }
 
     fn failed(&self) -> Option<io::ErrorKind> {
@@ -526,14 +530,14 @@ impl PackSink for PackSpool {
     }
 }
 
-impl PackSpool {
-    fn transport_error(&self, error: &PackError) -> TransportError {
-        match error {
-            PackError::PackfileTooLarge => TransportError::PayloadTooLarge(
-                crate::protocol::saturating_usize(self.limit.saturating_add(1)),
-            ),
-            _ => TransportError::ProtocolError,
+/// The transport's view of a spool error: a body too long, named by the
+/// length it reached, or a local failure no transport retries.
+fn transport_error(error: &PackError, len: u64) -> TransportError {
+    match error {
+        PackError::PackfileTooLarge => {
+            TransportError::PayloadTooLarge(crate::protocol::saturating_usize(len))
         }
+        _ => TransportError::ProtocolError,
     }
 }
 

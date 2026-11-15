@@ -75,9 +75,9 @@ A `PackSink` takes one body:
 - `begin(declared)` starts a body, or starts it again after a failed
   attempt; bytes taken earlier are discarded. A declared length over the
   sink's limit is refused with `PayloadTooLarge` before any byte. A
-  transport that learns the length before the body (a file's size, the SSH
-  `DownloadPackHeader.total_bytes`, an HTTP `Content-Length`) MUST pass it
-  to `begin` before it reads the body.
+  transport that writes the body to the sink as it arrives and learns the
+  length first (a file's size, the SSH `DownloadPackHeader.total_bytes`, an
+  HTTP `Content-Length`) MUST pass it to `begin` before it reads the body.
 - `write(bytes)` appends. A byte past the declared length or the limit is
   refused with `PayloadTooLarge`.
 - `failed()` names the local I/O error that ended the sink, a full disk say.
@@ -94,9 +94,10 @@ read the response whole, then write it to the sink.
 
 Spool files have no name: `O_TMPFILE` or unlinked on creation on Unix,
 deleted on close on Windows. Only the handle that wrote one reaches it, and
-a crash on Unix leaves nothing on disk. Fetch, push and gc remove every file
-in `.kit/tmp/` when they start, which clears what a power loss leaves on
-Windows. A spool that another process holds open is left alone.
+a crash on Unix leaves nothing on disk. Fetch, push and gc remove every
+spool file (named `.tmp` and a random suffix) in `.kit/tmp/` when they
+start, which clears what a power loss leaves on Windows. A spool that
+another process holds open is left alone.
 
 `update_ref`'s condition is one of:
 
@@ -1051,8 +1052,9 @@ checking its length, its digest and its trailer as the bytes arrive. Only a
 pack that passes all three is read: it is unpacked into the object store one
 window at a time, the signatures of the objects it wrote are checked, it is
 recorded as applied, and its file is closed before the next download. A
-partial spool is never read, and a killed fetch leaves nothing in
-`.kit/tmp/` (§1.1). No repository lock is held while the packs download and
+partial spool is never read. On Unix a killed fetch leaves nothing in
+`.kit/tmp/`; on Windows a power loss can leave a spool there until the
+next fetch, push or gc removes it (§1.1). No repository lock is held while the packs download and
 apply, so other commands run during a fetch of any size. The CLI limits chain packs to one million and
 pack-list nodes to 100,000.
 

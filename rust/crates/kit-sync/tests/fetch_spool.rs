@@ -185,24 +185,35 @@ fn remote_tip(work: &Path) -> Option<Hash> {
     refs::read_remote_ref(&RepoLayout::single(work), "origin", "main").unwrap()
 }
 
-/// Counts pack downloads and, when `cut` is set, writes the first half of
-/// the pack into the spool and panics, as a fetch killed mid-pack would
-/// stop.
+/// Counts pack downloads, and the entries of `.kit/tmp/` while the spool
+/// holds a pack, which an unnamed spool never adds to. When `cut` is set, it
+/// writes the first half of the pack into the spool and panics, as a fetch
+/// killed mid-pack would stop.
 struct Downloads<'a> {
     inner: TransportSource<'a>,
     remote: &'a Remote,
+    work: &'a Path,
     packs: Cell<usize>,
+    named_while_held: Cell<usize>,
     cut: bool,
 }
 
 impl<'a> Downloads<'a> {
-    fn new(remote: &'a Remote, cut: bool) -> Self {
+    fn new(remote: &'a Remote, work: &'a Path, cut: bool) -> Self {
         Self {
             inner: TransportSource::new(&remote.tx),
             remote,
+            work,
             packs: Cell::new(0),
+            named_while_held: Cell::new(0),
             cut,
         }
+    }
+
+    fn note_named_spools(&self) {
+        let named = entries(&spool_dir(self.work)).len();
+        self.named_while_held
+            .set(self.named_while_held.get() + named);
     }
 }
 
@@ -230,9 +241,12 @@ impl RemoteSource for Downloads<'_> {
             let bytes = self.remote.tx.download_blob(key, None, u64::MAX).unwrap();
             sink.begin(Some(bytes.len() as u64)).unwrap();
             sink.write(&bytes[..bytes.len() / 2]).unwrap();
+            self.note_named_spools();
             panic!("the fetch is killed mid-pack");
         }
-        self.inner.download_pack(key, ref_hint, sink)
+        self.inner.download_pack(key, ref_hint, sink)?;
+        self.note_named_spools();
+        Ok(())
     }
 }
 
@@ -242,17 +256,19 @@ fn a_fetch_killed_mid_pack_leaves_no_record_and_no_spool_and_the_next_one_applie
     let remote = remote();
     let (_dir, work) = target();
 
-    let killed = catch_unwind(AssertUnwindSafe(|| {
-        run_fetch(&work, &Downloads::new(&remote, true))
-    }));
+    let cut = Downloads::new(&remote, &work, true);
+    let killed = catch_unwind(AssertUnwindSafe(|| run_fetch(&work, &cut)));
 
     assert!(killed.is_err());
+    assert_eq!(cut.packs.get(), 1);
+    assert_eq!(cut.named_while_held.get(), 0, "the spool has no name");
     assert!(!recorded(&work, remote.pack));
     assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
     assert_eq!(remote_tip(&work), None);
 
-    let source = Downloads::new(&remote, false);
+    let source = Downloads::new(&remote, &work, false);
     run_fetch(&work, &source).unwrap();
+    assert_eq!(source.named_while_held.get(), 0, "the spool has no name");
     assert_eq!(source.packs.get(), 1);
     assert_eq!(remote_tip(&work), Some(remote.tip));
     assert!(recorded(&work, remote.pack));
@@ -268,7 +284,7 @@ fn a_full_disk_ends_the_fetch_as_an_io_error_without_a_retry_or_a_file() {
     let remote = remote();
     for site in [Site::Spool, Site::Store] {
         let (_dir, work) = target();
-        let source = Downloads::new(&remote, false);
+        let source = Downloads::new(&remote, &work, false);
 
         let failed = {
             let _full = fault::fail_writes(site);
@@ -339,8 +355,9 @@ fn a_failed_spool_refuses_every_later_begin() {
     assert_eq!(PackSink::failed(&spool), Some(ErrorKind::StorageFull));
 }
 
-/// The sweep at fetch start removes a file an earlier run left in
-/// `.kit/tmp/`, and a spool another transfer holds open there keeps working.
+/// The sweep at fetch start removes a spool file an earlier run left in
+/// `.kit/tmp/`, leaves a file it did not name, and a spool another transfer
+/// holds open there keeps working.
 #[test]
 fn the_sweep_at_fetch_start_removes_a_stale_file_and_leaves_an_open_spool() {
     let _guard = serial();
@@ -348,7 +365,8 @@ fn the_sweep_at_fetch_start_removes_a_stale_file_and_leaves_an_open_spool() {
     let (_dir, work) = target();
     let tmp = spool_dir(&work);
     std::fs::create_dir_all(&tmp).unwrap();
-    std::fs::write(tmp.join("stale"), b"left by a power loss").unwrap();
+    std::fs::write(tmp.join(".tmpStale1"), b"left by a power loss").unwrap();
+    std::fs::write(tmp.join("notes.txt"), b"not a spool").unwrap();
     let body = remote
         .tx
         .download_blob(&PackKey::from_hash(remote.pack), None, u64::MAX)
@@ -357,9 +375,90 @@ fn the_sweep_at_fetch_start_removes_a_stale_file_and_leaves_an_open_spool() {
     open.begin(Some(body.len() as u64)).unwrap();
     open.write(&body[..body.len() / 2]).unwrap();
 
-    run_fetch(&work, &Downloads::new(&remote, false)).unwrap();
+    run_fetch(&work, &Downloads::new(&remote, &work, false)).unwrap();
 
-    assert_eq!(entries(&tmp), Vec::<String>::new());
+    assert_eq!(entries(&tmp), vec!["notes.txt".to_owned()]);
     open.write(&body[body.len() / 2..]).unwrap();
     open.finish(&PackKey::from_hash(remote.pack)).unwrap();
+}
+
+/// Point `main` of `work` at `tip`, with HEAD on it.
+fn set_main(work: &Path, tip: Hash) {
+    let layout = RepoLayout::single(work);
+    refs::write_ref(&layout, "main", &tip).unwrap();
+    refs::write_head_branch(&layout, "main").unwrap();
+}
+
+/// A commit on `parent` whose one file differs from the remote's in a byte,
+/// written to the store of `work`.
+fn edit_commit(work: &Path, parent: Hash) -> Hash {
+    let store = kit_core::store::ObjectStore::open(&RepoLayout::single(work)).unwrap();
+    let write = |object: &Object| store.write(&serialize::serialize(object).unwrap()).unwrap();
+    let mut data = noise(3 << 20, 7);
+    data[1 << 20] ^= 1;
+    let tree = write(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"big.bin".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: write(&Object::Blob(Blob { data })),
+        }],
+    }));
+    write(&Object::Commit(Commit::new_unannotated(
+        tree,
+        vec![parent],
+        Identity::ed25519([5; 32]),
+        [5; 32],
+        b"edit".to_vec(),
+        1_700_000_001,
+        [0u8; 64],
+    )))
+}
+
+fn push_to(work: &Path, tx: &MemoryTransport) -> Result<(), kit_sync::PushError> {
+    let source = TransportSource::new(tx);
+    let options = kit_sync::PushOptions::default();
+    kit_sync::push(work, &source, &options).map(drop)
+}
+
+/// A full disk under a push's pack spool, or under its delta spool, ends the
+/// push as `SyncError::Io` before any upload, with no file left behind. The
+/// push after it, on a disk with room, sends the packs.
+#[test]
+fn a_full_disk_ends_a_push_as_an_io_error_before_any_upload() {
+    let _guard = serial();
+    let remote = remote();
+    let (_dir, work) = target();
+    run_fetch(&work, &Downloads::new(&remote, &work, false)).unwrap();
+    set_main(&work, remote.tip);
+    let to = MemoryTransport::new();
+
+    for delta in [false, true] {
+        let packs = to.pack_count();
+        let failed = {
+            let _full = fault::fail_writes(Site::Spool);
+            push_to(&work, &to)
+        };
+        match failed {
+            Err(kit_sync::PushError::Sync(SyncError::Io(error))) => {
+                assert_eq!(
+                    error.kind(),
+                    ErrorKind::StorageFull,
+                    "delta {delta}: {error}"
+                );
+            }
+            other => panic!("delta {delta}: expected SyncError::Io, got {other:?}"),
+        }
+        assert_eq!(
+            to.pack_count(),
+            packs,
+            "delta {delta}: nothing was uploaded"
+        );
+        assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+
+        push_to(&work, &to).unwrap();
+        assert!(to.pack_count() > packs, "delta {delta}");
+        if !delta {
+            set_main(&work, edit_commit(&work, remote.tip));
+        }
+    }
 }

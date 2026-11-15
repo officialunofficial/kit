@@ -109,9 +109,14 @@ impl From<kit_core::refs::RefError> for PushError {
     }
 }
 
+/// A local I/O error, on the store or on the push's delta spool, is
+/// [`crate::SyncError::Io`], as it is for a pack spool.
 impl From<kit_core::store::StoreError> for PushError {
     fn from(error: kit_core::store::StoreError) -> Self {
-        Self::Sync(crate::SyncError::Store(error))
+        match error {
+            kit_core::store::StoreError::Io(error) => Self::Sync(crate::SyncError::Io(error)),
+            error => Self::Sync(crate::SyncError::Store(error)),
+        }
     }
 }
 
