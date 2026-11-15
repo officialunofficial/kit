@@ -176,6 +176,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `reset --hard` now write the files before HEAD and the index, as git
   does, so a stopped one leaves them where they were; the next restore
   that writes into a directory removes the temp files it left there.
+- `kit gc` checks the chunks of large files 32 at a time, so its mark no
+  longer waits on a cold disk for one chunk after another.
 
 ### Removed
 
