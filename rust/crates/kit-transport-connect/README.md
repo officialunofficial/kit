@@ -73,7 +73,7 @@ checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 | Behavior | Detail |
 | --- | --- |
 | Uploads | Pull frames through a bounded channel. No producer thread. |
-| Downloads | Incremental bounded Connect and protobuf decoding into the final pack buffer. |
+| Downloads | Incremental bounded Connect and protobuf decoding into the caller's pack sink, one frame of at most 4 MiB at a time. This adapter does not opt in to pack locations. |
 | Runtime | Current-thread runtime, driven by the synchronous caller. |
 | Connections | One idle connection per origin, including streams, with a ten-second idle timeout. Hyper retries only untouched requests canceled before writing starts. |
 | HTTP and content coding | HTTP/1.1, gzip or identity. |
@@ -82,8 +82,8 @@ checkpoints. HTTP request budgets are clipped to the remaining advance deadline.
 | Gzip validation | The streaming decoder rejects trailing bytes and concatenated members. |
 | Shared adapter operations | A caller-owned session with short internal state locks. Callbacks may reenter the adapter. |
 
-Neither upload framing nor download decoding holds a complete framed transfer
-next to the final pack. Generic `HttpTransport` implementations can use the
+Uploads read the pack body as each frame is built, and downloads write each
+frame to the sink, so neither holds the pack. Generic `HttpTransport` implementations can use the
 buffered streaming fallback. The native adapter implements bounded streaming.
 
 Reads and signed writes both reuse connections on the same owned current-thread

@@ -1025,9 +1025,37 @@ impl ConnectTransport {
         }
     }
 }
+/// A blob download into memory that remembers a length over its bound, so
+/// the refusal reaches the caller as `PayloadTooLarge`.
+struct BlobSink {
+    inner: kit_core::protocol::MemorySink,
+    refused: Option<u64>,
+}
+
+impl PackSink for BlobSink {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        // A new attempt, such as the fallback after a location, starts over.
+        self.refused = None;
+        let begun = self.inner.begin(declared);
+        if let Err(TransportError::PayloadTooLarge(_)) = begun {
+            self.refused = declared;
+        }
+        begun
+    }
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        let written = self.inner.write(bytes);
+        if let Err(TransportError::PayloadTooLarge(len)) = written {
+            self.refused = Some(len as u64);
+        }
+        written
+    }
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.inner.failed()
+    }
+}
+
 impl Transport for ConnectTransport {
-    /// Reads the whole pack into memory before it is sent: the Connect
-    /// client takes a pack as one buffer.
+    /// Streams the pack from its body, one chunk at a time.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
@@ -1036,10 +1064,7 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         let uploaded = match head_ref {
             Some(name) => self.with_client_source(|source| source.upload_pack(pack, key, name)),
-            None => {
-                let bytes = kit_core::protocol::read_body(pack)?;
-                self.with_client_source(|source| source.upload_pack_unhinted(&bytes, key))
-            }
+            None => self.with_client_source(|source| source.upload_pack_unhinted(pack, key)),
         };
         uploaded.map_err(super::host::upload_error)
     }
@@ -1051,8 +1076,8 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         self.upload_pack(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
-    /// Receives the whole pack into memory, then writes it to `sink`: the
-    /// Connect client returns a pack as one buffer.
+    /// Streams the pack into `sink` as it arrives, holding one bounded
+    /// Connect frame.
     fn download_pack(
         &self,
         key: &PackKey,
@@ -1061,14 +1086,13 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         match ref_hint {
             Some(name) => self.with_client_source(|source| source.download_pack(key, name, sink)),
-            None => {
-                let bytes = self.with_client_source(|source| source.download_pack_unhinted(key))?;
-                kit_core::protocol::write_body(sink, &bytes)
-            }
+            None => self.with_client_source(|source| source.download_pack_unhinted(key, sink)),
         }
     }
     /// A hinted node download keeps the client's own node bound, which is
-    /// tighter than any `max` a caller passes.
+    /// tighter than any `max` a caller passes. An unhinted one is bounded by
+    /// `max`. The bytes are in memory, so they are checked against the key
+    /// here.
     fn download_blob(
         &self,
         key: &PackKey,
@@ -1077,11 +1101,26 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<Vec<u8>> {
         let bytes = match ref_hint {
             Some(name) => self.with_client_source(|source| source.download_blob(key, name))?,
-            None => self.with_client_source(|source| source.download_pack_unhinted(key))?,
+            None => {
+                let mut sink = BlobSink {
+                    inner: kit_core::protocol::MemorySink::new(max),
+                    refused: None,
+                };
+                let downloaded =
+                    self.with_client_source(|source| source.download_pack_unhinted(key, &mut sink));
+                if let Some(len) = sink.refused {
+                    return Err(TransportError::PayloadTooLarge(
+                        kit_core::protocol::saturating_usize(len),
+                    ));
+                }
+                downloaded?;
+                sink.inner.into_bytes()?
+            }
         };
         if bytes.len() as u64 > max {
             return Err(TransportError::PayloadTooLarge(bytes.len()));
         }
+        key.verify_bytes(&bytes)?;
         Ok(bytes)
     }
     fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool> {

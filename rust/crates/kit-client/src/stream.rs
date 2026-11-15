@@ -9,6 +9,7 @@ use crate::{FailureDiagnostic, FailureKind, FailureObserver};
 pub(crate) struct NoDiagnostics;
 impl FailureObserver for NoDiagnostics {}
 use crate::proto::{DownloadPackResponse, download_pack_response::Body};
+use kit_core::protocol::{PackBody, PackSink, TransportError};
 
 /// A request body pulled one owned chunk at a time. The caller may borrow its
 /// input; channels must not retain this source after the exchange returns.
@@ -191,7 +192,14 @@ impl<S: ResponseStream, D: FailureObserver + ?Sized> ResponseStream for Checked<
             .as_ref()
             .ok_or(Error::Invalid("missing HTTP response"))?;
         self.received = self.received.saturating_add(bytes.len());
-        if self.received > self.limit {
+        // An error body is held whole to decode it, so it gets the small
+        // bound whatever the success limit, a pack download's included.
+        let limit = if response.status().is_success() {
+            self.limit
+        } else {
+            self.limit.min(ERROR_BODY_LIMIT)
+        };
+        if self.received > limit {
             let failure = FailureDiagnostic {
                 procedure: "",
                 kind: FailureKind::WireLimit,
@@ -200,7 +208,7 @@ impl<S: ResponseStream, D: FailureObserver + ?Sized> ResponseStream for Checked<
                 body: None,
                 parsed_error: None,
                 cause: "RPC response exceeds limit",
-                limit: Some(self.limit),
+                limit: Some(limit),
             };
             return Err(self
                 .diagnostics
@@ -251,8 +259,9 @@ pub(crate) trait FrameSink {
 }
 
 /// Retain one frame, rather than a complete framed pack alongside its output.
-/// There is no protocol chunk-size ceiling: a frame is bounded by the same
-/// response cap as the complete exchange.
+/// A frame is bounded by the decoder's limit, read from its envelope before
+/// any of it: the response cap for a unary answer, and at most
+/// [`DOWNLOAD_FRAME_MAX`] for a `DownloadPack` stream.
 pub(crate) struct Decoder<S> {
     pub(crate) sink: S,
     limit: usize,
@@ -318,6 +327,10 @@ impl<S: FrameSink> Decoder<S> {
             }
             if !matches!(self.header[0], 0 | 2) {
                 return Err(Error::Invalid("Connect frame flags/order"));
+            }
+            if self.payload.is_empty() {
+                // Grow once to the checked size, not by doubling past it.
+                self.payload.reserve_exact(size);
             }
             let take = (size - self.payload.len()).min(bytes.len());
             self.payload.extend_from_slice(&bytes[..take]);
@@ -403,35 +416,59 @@ impl FrameSink for SingleFrame {
     }
 }
 
-pub(crate) struct Pack {
+/// The longest `DownloadPack` response frame a client takes. Servers send
+/// pack chunks of 800 KiB. The length is read from the frame's 5-byte Connect
+/// envelope, and a longer frame is refused before any of it is read.
+pub const DOWNLOAD_FRAME_MAX: usize = 4 * 1024 * 1024;
+
+/// The largest error response body a streamed call holds to decode it.
+const ERROR_BODY_LIMIT: usize = 1024 * 1024;
+
+/// A local failure of the caller's sink. The caller checks
+/// [`PackSink::failed`] and reports that error instead.
+pub(crate) fn sink_error(error: TransportError) -> Error {
+    match error {
+        TransportError::PayloadTooLarge(_) => Error::Limit("pack download"),
+        error => Error::Sink(format!("pack sink: {error}")),
+    }
+}
+
+/// Forwards a `DownloadPack` stream's chunks to the caller's sink as they
+/// arrive, checking their order, identity and declared length. It holds no
+/// pack bytes and does not hash them: the sink's owner verifies the key.
+pub(crate) struct Pack<'s> {
     key: Hash,
     cap: u64,
     expected: Option<u64>,
+    received: u64,
     last: bool,
-    pub(crate) bytes: Vec<u8>,
+    sink: &'s mut dyn PackSink,
     accept_location: bool,
     pub(crate) location: Option<crate::proto::DownloadPackLocation>,
 }
-impl Pack {
-    pub(crate) fn new(key: Hash, cap: u64) -> Self {
+impl<'s> Pack<'s> {
+    pub(crate) fn new(key: Hash, cap: u64, sink: &'s mut dyn PackSink) -> Self {
         Self {
             key,
             cap,
             expected: None,
+            received: 0,
             last: false,
+            sink,
             accept_location: false,
             location: None,
-            bytes: Vec::new(),
         }
     }
-}
-impl Pack {
     pub(crate) fn accept_locations(mut self, accept: bool) -> Self {
         self.accept_location = accept;
         self
     }
+    /// Bytes written to the sink.
+    pub(crate) fn received(&self) -> u64 {
+        self.received
+    }
 }
-impl FrameSink for Pack {
+impl FrameSink for Pack<'_> {
     fn frame(&mut self, bytes: &[u8]) -> Result<(), Error> {
         let response = DownloadPackResponse::decode_from_slice(bytes)
             .map_err(|_| Error::Invalid("download protobuf"))?;
@@ -442,21 +479,17 @@ impl FrameSink for Pack {
             Some(Body::Location(location)) if self.accept_location && self.expected.is_none() => {
                 self.location = Some(*location);
             }
-            Some(Body::Header(header)) if self.expected.is_none() && self.bytes.is_empty() => {
+            Some(Body::Header(header)) if self.expected.is_none() => {
                 let size = header.total_bytes.ok_or(Error::Invalid("download size"))?;
                 if size > self.cap {
                     return Err(Error::Limit("pack download"));
                 }
+                self.sink.begin(Some(size)).map_err(sink_error)?;
                 self.expected = Some(size);
-                self.bytes
-                    .try_reserve_exact(
-                        usize::try_from(size).map_err(|_| Error::Limit("pack download"))?,
-                    )
-                    .map_err(|_| Error::Limit("pack download allocation"))?;
             }
             Some(Body::Chunk(chunk)) if self.expected.is_some() && !self.last => {
                 if chunk.pack_id.as_deref() != Some(self.key.as_slice())
-                    || chunk.offset != Some(self.bytes.len() as u64)
+                    || chunk.offset != Some(self.received)
                 {
                     return Err(Error::Invalid("download chunk identity"));
                 }
@@ -464,12 +497,12 @@ impl FrameSink for Pack {
                     .data
                     .as_deref()
                     .ok_or(Error::Invalid("download chunk"))?;
-                if (self.bytes.len() as u64).saturating_add(data.len() as u64)
-                    > self.expected.unwrap_or(0)
-                {
+                let end = self.received.saturating_add(data.len() as u64);
+                if end > self.expected.unwrap_or(0) {
                     return Err(Error::Invalid("download exceeds declared size"));
                 }
-                self.bytes.extend_from_slice(data);
+                self.sink.write(data).map_err(sink_error)?;
+                self.received = end;
                 self.last = chunk.last.ok_or(Error::Invalid("download last marker"))?;
             }
             _ => return Err(Error::Invalid("download order")),
@@ -480,14 +513,64 @@ impl FrameSink for Pack {
         if self.location.is_some() {
             return Ok(());
         }
-        if !self.last
-            || self.expected != Some(self.bytes.len() as u64)
-            || kit_core::pack::pack_key(&self.bytes) != self.key
-        {
-            return Err(Error::Invalid("pack content commitment"));
+        if !self.last || self.expected != Some(self.received) {
+            return Err(Error::Invalid("download length"));
         }
         Ok(())
     }
+}
+
+/// Reads `len` bytes of a pack body from `offset`, one chunk at a time, so a
+/// request stream holds one chunk however long the body is. Each value is a
+/// fresh reader: a retried request reads the body again.
+pub(crate) struct BodyChunks<'a> {
+    body: &'a dyn PackBody,
+    offset: u64,
+    len: u64,
+    sent: u64,
+    reader: Option<Box<dyn std::io::Read + Send + 'a>>,
+}
+impl<'a> BodyChunks<'a> {
+    pub(crate) fn new(body: &'a dyn PackBody, offset: u64, len: u64) -> Self {
+        Self {
+            body,
+            offset,
+            len,
+            sent: 0,
+            reader: None,
+        }
+    }
+    /// Offset in the body of the next chunk.
+    pub(crate) fn position(&self) -> u64 {
+        self.offset + self.sent
+    }
+    /// Whether every byte has been read.
+    pub(crate) fn done(&self) -> bool {
+        self.sent == self.len
+    }
+    /// The next chunk of at most `max` bytes. It is empty only at the end.
+    pub(crate) fn next_chunk(&mut self, max: usize) -> Result<Vec<u8>, Error> {
+        let want = usize::try_from((self.len - self.sent).min(max as u64))
+            .map_err(|_| Error::Limit("pack chunk"))?;
+        if want == 0 {
+            return Ok(Vec::new());
+        }
+        let reader = match &mut self.reader {
+            Some(reader) => reader,
+            None => self
+                .reader
+                .insert(self.body.read_from(self.offset).map_err(body_error)?),
+        };
+        let mut chunk = vec![0; want];
+        std::io::Read::read_exact(reader, &mut chunk).map_err(body_error)?;
+        self.sent += want as u64;
+        Ok(chunk)
+    }
+}
+
+/// A local failure to read a pack body.
+pub(crate) fn body_error(error: std::io::Error) -> Error {
+    Error::Pack(kit_core::pack::PackError::Io(error))
 }
 
 #[cfg(test)]
@@ -540,6 +623,25 @@ mod tests {
         assert!(matches!(result, std::task::Poll::Ready(Ok(()))));
         assert_eq!(*channel.0.borrow(), b"firstsecond");
         assert_eq!(reply.sink.sink.0, [b"reply".to_vec()]);
+    }
+
+    /// A pack download's limit is the pack's; an error answer to it is held
+    /// whole, so it is refused past 1 MiB instead.
+    #[test]
+    fn an_error_body_is_refused_past_its_own_bound() {
+        let request = Request::post("https://example.invalid/")
+            .header("content-type", "application/connect+proto")
+            .body(())
+            .unwrap();
+        let mut reply = Checked::new(&request, Decoder::new(Frames::default(), 1024), 1 << 30);
+        let mut head = Response::new(());
+        *head.status_mut() = http::StatusCode::INTERNAL_SERVER_ERROR;
+        reply.start(head).unwrap();
+        reply.chunk(&vec![b' '; ERROR_BODY_LIMIT]).unwrap();
+        assert!(matches!(
+            reply.chunk(b" "),
+            Err(Error::Limit("RPC response"))
+        ));
     }
 
     #[test]
@@ -603,98 +705,146 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn incremental_pack_checks_chunk_identity_and_declared_size() {
-        let key = kit_core::pack::pack_key(b"pack bytes");
-        let header = DownloadPackResponse {
+    fn header(total: u64) -> Vec<u8> {
+        DownloadPackResponse {
             body: Some(
                 crate::proto::DownloadPackHeader {
-                    total_bytes: Some(10),
+                    total_bytes: Some(total),
                     ..Default::default()
                 }
                 .into(),
             ),
             ..Default::default()
         }
-        .encode_to_vec();
-        let chunk = DownloadPackResponse {
+        .encode_to_vec()
+    }
+
+    fn chunk(key: Hash, offset: u64, data: &[u8], last: bool) -> Vec<u8> {
+        DownloadPackResponse {
             body: Some(
                 crate::proto::PackChunk {
                     pack_id: Some(key.to_vec()),
-                    offset: Some(0),
-                    data: Some(b"pack bytes".to_vec()),
-                    last: Some(true),
+                    offset: Some(offset),
+                    data: Some(data.to_vec()),
+                    last: Some(last),
                     ..Default::default()
                 }
                 .into(),
             ),
             ..Default::default()
         }
-        .encode_to_vec();
-        let mut pack = Pack::new(key, 10);
-        pack.frame(&header).unwrap();
-        pack.frame(&chunk).unwrap();
+        .encode_to_vec()
+    }
+
+    fn taken(sink: kit_core::protocol::MemorySink) -> Vec<u8> {
+        sink.into_bytes().unwrap()
+    }
+
+    #[test]
+    fn incremental_pack_checks_chunk_identity_and_declared_size() {
+        let key = kit_core::pack::pack_key(b"pack bytes");
+        let mut sink = kit_core::protocol::MemorySink::new(1 << 20);
+        let mut pack = Pack::new(key, 10, &mut sink);
+        pack.frame(&header(10)).unwrap();
+        pack.frame(&chunk(key, 0, b"pack ", false)).unwrap();
+        pack.frame(&chunk(key, 5, b"bytes", true)).unwrap();
         pack.finish().unwrap();
-        assert_eq!(pack.bytes, b"pack bytes");
-        let mut pack = Pack::new(key, 9);
+        assert_eq!(pack.received(), 10);
+        assert_eq!(taken(sink), b"pack bytes");
+
+        let mut sink = kit_core::protocol::MemorySink::new(1 << 20);
+        let mut pack = Pack::new(key, 9, &mut sink);
         assert!(matches!(
-            pack.frame(&header),
+            pack.frame(&header(10)),
             Err(Error::Limit("pack download"))
         ));
-        let mut pack = Pack::new([1; 32], 10);
-        pack.frame(&header).unwrap();
+        let mut pack = Pack::new([1; 32], 10, &mut sink);
+        pack.frame(&header(10)).unwrap();
         assert!(matches!(
-            pack.frame(&chunk),
+            pack.frame(&chunk(key, 0, b"pack bytes", true)),
+            Err(Error::Invalid("download chunk identity"))
+        ));
+        let mut pack = Pack::new(key, 10, &mut sink);
+        pack.frame(&header(10)).unwrap();
+        assert!(matches!(
+            pack.frame(&chunk(key, 1, b"pack bytes", true)),
             Err(Error::Invalid("download chunk identity"))
         ));
     }
+
     #[test]
-    fn download_hash_is_always_verified() {
+    fn a_pack_stream_must_end_at_its_declared_length() {
         let key = [1; 32];
-        let header = DownloadPackResponse {
-            body: Some(
-                crate::proto::DownloadPackHeader {
-                    total_bytes: Some(4),
-                    ..Default::default()
-                }
-                .into(),
-            ),
-            ..Default::default()
-        }
-        .encode_to_vec();
-        let chunk = |offset| {
-            DownloadPackResponse {
-                body: Some(
-                    crate::proto::PackChunk {
-                        pack_id: Some(key.to_vec()),
-                        offset: Some(offset),
-                        data: Some(b"pack".to_vec()),
-                        last: Some(true),
-                        ..Default::default()
-                    }
-                    .into(),
-                ),
-                ..Default::default()
-            }
-            .encode_to_vec()
-        };
-        let mut strict = Pack::new(key, 4);
-        strict.frame(&header).unwrap();
-        strict.frame(&chunk(0)).unwrap();
+        let mut sink = kit_core::protocol::MemorySink::new(1 << 20);
+        let mut short = Pack::new(key, 8, &mut sink);
+        short.frame(&header(8)).unwrap();
+        short.frame(&chunk(key, 0, b"pack", true)).unwrap();
         assert!(matches!(
-            strict.finish(),
-            Err(Error::Invalid("pack content commitment"))
+            short.finish(),
+            Err(Error::Invalid("download length"))
         ));
-        let mut wrong_offset = Pack::new(key, 4);
-        wrong_offset.frame(&header).unwrap();
+        let mut long = Pack::new(key, 8, &mut sink);
+        long.frame(&header(3)).unwrap();
         assert!(matches!(
-            wrong_offset.frame(&chunk(1)),
-            Err(Error::Invalid("download chunk identity"))
+            long.frame(&chunk(key, 0, b"pack", true)),
+            Err(Error::Invalid("download exceeds declared size"))
         ));
-        let mut too_large = Pack::new(key, 3);
+        let mut open = Pack::new(key, 8, &mut sink);
+        open.frame(&header(4)).unwrap();
+        open.frame(&chunk(key, 0, b"pack", false)).unwrap();
         assert!(matches!(
-            too_large.frame(&header),
+            open.finish(),
+            Err(Error::Invalid("download length"))
+        ));
+    }
+
+    /// The sink is told the declared length before any chunk, and a sink
+    /// that refuses it ends the download before a byte is taken.
+    #[test]
+    fn the_sink_refuses_a_declared_length_before_any_chunk() {
+        let key = [1; 32];
+        let mut sink = kit_core::protocol::MemorySink::new(3);
+        let mut pack = Pack::new(key, 8, &mut sink);
+        assert!(matches!(
+            pack.frame(&header(4)),
             Err(Error::Limit("pack download"))
+        ));
+    }
+
+    /// A frame over [`DOWNLOAD_FRAME_MAX`] is refused from its envelope,
+    /// before any of its payload arrives.
+    #[test]
+    fn a_download_frame_over_the_maximum_is_refused_from_its_envelope() {
+        let key = [1; 32];
+        let mut sink = kit_core::protocol::MemorySink::new(1 << 30);
+        let mut decoder = Decoder::new(Pack::new(key, 1 << 30, &mut sink), DOWNLOAD_FRAME_MAX);
+        let over = u32::try_from(DOWNLOAD_FRAME_MAX + 1).unwrap().to_be_bytes();
+        assert!(matches!(
+            decoder.chunk(&[0, over[0], over[1], over[2], over[3]]),
+            Err(Error::Limit("Connect frame"))
+        ));
+        assert_eq!(decoder.payload.capacity(), 0);
+    }
+
+    #[test]
+    fn body_chunks_read_exactly_the_range_one_chunk_at_a_time() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let body = kit_core::protocol::SliceBody(&bytes);
+        let mut chunks = BodyChunks::new(&body, 10, 100);
+        let mut read = Vec::new();
+        while !chunks.done() {
+            let at = chunks.position();
+            let chunk = chunks.next_chunk(32).unwrap();
+            assert!(chunk.len() <= 32 && !chunk.is_empty());
+            assert_eq!(at, 10 + read.len() as u64);
+            read.extend_from_slice(&chunk);
+        }
+        assert_eq!(read, bytes[10..110]);
+        assert!(chunks.next_chunk(32).unwrap().is_empty());
+        let mut short = BodyChunks::new(&body, 200, 100);
+        assert!(matches!(
+            short.next_chunk(1024),
+            Err(Error::Pack(kit_core::pack::PackError::Io(_)))
         ));
     }
 }

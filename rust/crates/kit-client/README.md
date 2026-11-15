@@ -198,21 +198,28 @@ restarts (a golden test pins the ids of a fixed plan).
 
 ## Memory
 
-Request bodies are buffered. The seam is `Request<Vec<u8>>` because the
-transport must replay the exact request bytes after an ambiguous failure and
-because browser fetch cannot stream request bodies portably; a streaming body
-does not fit it, so the limit is documented rather than lifted. Each send clones
-the body once for the transport. A ticketed upload frames one part at a time
-(parts are at least 8 MiB), so the per-request buffer is bounded by the part
-size, not the pack; an un-ticketed upload is bounded by the server's
-`begin_upload_threshold_bytes`. `Plan` holds the sealed packs
+`upload_pack` and `upload_part` read the pack from a `PackBody` as they build
+each 800 KiB chunk. A part is read twice, once to hash its commitment and once
+to send it, so a host that resumes from stored receipts, as kit-sync's
+`ClientSource` does, reads only the parts it sends again.
+A channel that does not override `send_stream` buffers each request body: the
+seam is `Request<Vec<u8>>` because the transport must replay the exact request
+bytes after an ambiguous failure and because browser fetch cannot stream
+request bodies portably. Each such send clones the body once for the transport.
+A ticketed upload frames one part at a time (parts are at least 8 MiB), so that
+buffer is bounded by the part size, not the pack; an un-ticketed upload is
+bounded by the server's `begin_upload_threshold_bytes`. A streaming channel
+holds one chunk. `Plan` holds the sealed packs
 (`Limits::max_staged_bytes`, 64 MiB by default) and refuses a plan with more
 ticketed data packs than `Limits::max_tickets - 1`, where `max_tickets` comes
 from the server's `max_tickets_per_advance` (seven when it advertises none);
 `Push::run` checks the plan against the limit of the server it reaches.
-Responses are capped while received: 1 MiB by default, 2 MiB for a `ListRefs`
-page, and for `download_pack` the caller's `max_bytes` plus framing; the
-returned pack is a second copy, so a download peaks near twice `max_bytes`.
+Responses are capped while received: 1 MiB by default and 2 MiB for a
+`ListRefs` page. `download_pack` writes into the caller's `PackSink`, refusing a
+declared length over `max_bytes` before the first chunk and any response frame
+over `DOWNLOAD_FRAME_MAX` (4 MiB) from its envelope, so a streaming channel holds
+one frame. The client checks the chunks' order and length; the sink's owner
+checks the key. A channel that buffers responses holds the framed pack.
 
 Complete ref listings validate strict name ordering across pages, reject cursor
 cycles, and retain at most 128 MiB of charged state (names, entries, cursor
@@ -306,7 +313,9 @@ refuses dispatch. Recovery and scheduling remain in the host.
 
 Channels can implement `HttpTransport::supports_pack_locations` and
 `fetch_pack_location` to fetch external packs without credentials or redirects.
-The client negotiates support through discovery, checks the exact length and
-pack content address before returning bytes, and retries once through streaming
-if a location fails. `Client::with_pack_locations(false)` disables negotiation.
+The client negotiates support through discovery and streams the location's
+bytes into the caller's sink through a check of the exact length and pack
+content address. If either is wrong or the fetch fails, it retries once through
+streaming into the same sink, which starts over. A failure of the sink itself
+is not a location failure: the download ends with no fallback. `Client::with_pack_locations(false)` disables negotiation.
 Channels without that implementation and wasm clients keep streaming.

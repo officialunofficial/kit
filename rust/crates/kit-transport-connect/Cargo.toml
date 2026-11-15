@@ -97,6 +97,10 @@ rustls = { version = "0.23.46", features = ["ring"] }
 kit-test-util = { path = "../kit-test-util" }
 serde_json = "1.0.154"
 kit-transport-memory = { version = "=0.8.1", path = "../kit-transport-memory" }
+# `tests/connect_streaming*.rs`: a loopback server over a file remote, and
+# a full disk injected under the fetch's spool.
+kit-transport-file = { path = "../kit-transport-file" }
+kit-core = { path = "../kit-core", features = ["fault-injection"] }
 # Test-only: `envelope::tests::parity` independently re-verifies the write
 # envelope headers `EnvelopeTransport` produces against a from-scratch
 # implementation of the server-side envelope verification contract, so

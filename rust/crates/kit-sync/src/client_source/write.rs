@@ -12,7 +12,11 @@ use kit_client::{
     StoredPart, TicketMetadata, advance_ticket_limit, data_pack_budget,
 };
 use kit_core::hash::{Hash, to_hex};
-use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackKey, UploadLimits};
+use kit_core::pack::PackError;
+use kit_core::protocol::{
+    AdvanceOutcome, CommitOutcome, PACK_BODY_LIMIT, PackBody, PackKey, UploadLimits,
+    saturating_usize,
+};
 use kit_core::refs::RefWriteCondition;
 use kit_core::upload_parts::PartPlan;
 
@@ -391,6 +395,11 @@ impl<
                     return Ok(value);
                 }
                 Err(error) => {
+                    // A local failure (the caller's sink, or reading the
+                    // pack) is never the remote's, so no host retries it.
+                    if matches!(error, Error::Sink(_) | Error::Pack(PackError::Io(_))) {
+                        return Err(source_error(error));
+                    }
                     let mapped = source_error(error);
                     if matches!(mapped, SourceError::AdmissionRequired { .. })
                         && (ticketed
@@ -451,14 +460,18 @@ impl<
     /// # Errors
     /// The pack exceeds the transport bound, writes are disabled, or the
     /// host/server refuses the upload.
-    pub fn upload_pack_unhinted(&self, bytes: &[u8], key: &PackKey) -> Result<(), SourceError> {
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(SourceError::PayloadTooLarge(bytes.len()));
+    pub fn upload_pack_unhinted(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+    ) -> Result<(), SourceError> {
+        if pack.len() > PACK_BODY_LIMIT {
+            return Err(SourceError::PayloadTooLarge(saturating_usize(pack.len())));
         }
         self.write_call("UploadPack", false, None, |identity| {
             self.executor.block_on(
                 self.client
-                    .upload_pack(&key.into_hash(), bytes, None, identity),
+                    .upload_pack(&key.into_hash(), pack, None, identity),
             )
         })
         .map(|_| ())
@@ -510,26 +523,29 @@ impl<
         Ok(outcome)
     }
 
+    /// Upload `pack`, reading it from its body as each request is sent: a
+    /// retry, a restarted ticket and each part read the body again.
     pub(super) fn write_upload(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
     ) -> Result<(), SourceError> {
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(SourceError::PayloadTooLarge(bytes.len()));
+        let len = pack.len();
+        if len > PACK_BODY_LIMIT {
+            return Err(SourceError::PayloadTooLarge(saturating_usize(len)));
         }
         let info = self.write_info();
         let ticketless = (info.is_none() && self.client.public_key().is_none())
-            || info.as_ref().is_some_and(|info| {
-                (bytes.len() as u64) < info.begin_upload_threshold_bytes.unwrap_or(0)
-            });
+            || info
+                .as_ref()
+                .is_some_and(|info| len < info.begin_upload_threshold_bytes.unwrap_or(0));
         if ticketless {
             return self
                 .write_call("UploadPack", false, None, |identity| {
                     self.executor.block_on(self.client.upload_pack(
                         &key.into_hash(),
-                        bytes,
+                        pack,
                         None,
                         identity,
                     ))
@@ -546,7 +562,7 @@ impl<
                 self.executor.block_on(self.client.begin_upload(
                     head,
                     &key.into_hash(),
-                    bytes.len() as u64,
+                    len,
                     identity,
                 ))
             });
@@ -554,7 +570,7 @@ impl<
                 Err(SourceError::Remote(remote)) if remote.code == "unimplemented" => {
                     let message = if info
                         .as_ref()
-                        .is_some_and(|info| bytes.len() as u64 > info.part_size.unwrap_or(0))
+                        .is_some_and(|info| len > info.part_size.unwrap_or(0))
                     {
                         "server storage cannot accept packs over part_size"
                     } else {
@@ -589,7 +605,7 @@ impl<
                 _ => return Err(SourceError::InvalidResponse),
             };
             let id = self.cache_ticket(head, key, &ticket)?;
-            let result = self.upload_ticket_bytes(bytes, key, head, &ticket, info.as_ref(), id);
+            let result = self.upload_ticket_bytes(pack, key, head, &ticket, info.as_ref(), id);
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) if remote_is(&error, "failed_precondition") => {
@@ -607,25 +623,25 @@ impl<
 
     fn upload_ticket_bytes(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
         ticket: &UploadTicket,
         info: Option<&GetServerInfoResponse>,
         id: Hash,
     ) -> Result<(), SourceError> {
-        if bytes.len() as u64 <= ticket.part_size.ok_or(SourceError::InvalidResponse)? {
+        if pack.len() <= ticket.part_size.ok_or(SourceError::InvalidResponse)? {
             self.write_call("UploadPack", true, None, |identity| {
                 self.executor.block_on(self.client.upload_pack(
                     &key.into_hash(),
-                    bytes,
+                    pack,
                     ticket.token.as_deref(),
                     identity,
                 ))
             })
             .map(|_| ())
         } else {
-            self.write_parts(bytes, key, head, ticket, info, id)
+            self.write_parts(pack, key, head, ticket, info, id)
         }
     }
 
@@ -681,7 +697,7 @@ impl<
 
     fn write_parts(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         key: &PackKey,
         head: &str,
         ticket: &UploadTicket,
@@ -689,7 +705,7 @@ impl<
         id: Hash,
     ) -> Result<(), SourceError> {
         let plan = PartPlan::new(
-            bytes.len() as u64,
+            pack.len(),
             ticket.part_size.unwrap_or(0),
             info.map_or(u32::MAX, |info| info.max_parts.unwrap_or(0)),
         )
@@ -709,7 +725,7 @@ impl<
                 .map_or_else(String::new, |key| to_hex(&key)),
             head_ref: head.to_owned(),
             pack_key: *key,
-            bytes: bytes.len() as u64,
+            bytes: pack.len(),
             part_size: ticket.part_size.unwrap_or(0),
             expires_unix_ms: ticket.expires_unix_ms.unwrap_or(0),
         };
@@ -741,7 +757,7 @@ impl<
                     }
                 }
             }
-            self.send_missing_parts(bytes, ticket, &plan, &metadata, &mut parts)?;
+            self.send_missing_parts(pack, ticket, &plan, &metadata, &mut parts)?;
             let from_disk = parts.iter().flatten().any(|part| part.from_disk);
             let receipts = parts
                 .into_iter()
@@ -771,9 +787,11 @@ impl<
         Err(SourceError::InvalidResponse)
     }
 
+    /// Send each part without a stored receipt, reading only those parts
+    /// from `pack`: twice each, once for its commitment and once to send it.
     fn send_missing_parts(
         &self,
-        bytes: &[u8],
+        pack: &dyn PackBody,
         ticket: &UploadTicket,
         plan: &PartPlan,
         metadata: &TicketMetadata,
@@ -786,31 +804,19 @@ impl<
             parts: plan.count(),
             resumed,
             saved_bytes,
-            bytes: bytes.len() as u64,
+            bytes: pack.len(),
         })?;
         for index in 0..plan.count() {
             if parts[index as usize].is_some() {
                 continue;
             }
             self.write_upload_event(UploadEvent::BeforePart)?;
-            let offset = usize::try_from(
-                plan.offset(index)
-                    .map_err(|_| SourceError::InvalidResponse)?,
-            )
-            .map_err(|_| SourceError::InvalidResponse)?;
-            let len = usize::try_from(
-                plan.expected_len(index)
-                    .map_err(|_| SourceError::InvalidResponse)?,
-            )
-            .map_err(|_| SourceError::InvalidResponse)?;
-            let slice = bytes
-                .get(offset..offset + len)
-                .ok_or(SourceError::InvalidResponse)?;
+            let len = plan
+                .expected_len(index)
+                .map_err(|_| SourceError::InvalidResponse)?;
             let response = self.write_call("UploadPart", true, None, |identity| {
-                self.executor.block_on(
-                    self.client
-                        .upload_part(ticket, plan, index, slice, identity),
-                )
+                self.executor
+                    .block_on(self.client.upload_part(ticket, plan, index, pack, identity))
             })?;
             let receipt = response
                 .value
@@ -819,7 +825,7 @@ impl<
                 .ok_or(SourceError::InvalidResponse)?;
             let part = StoredPart {
                 index,
-                len: len as u64,
+                len,
                 receipt,
                 from_disk: false,
             };
@@ -833,7 +839,7 @@ impl<
                 index,
                 parts: plan.count(),
                 saved_bytes,
-                bytes: bytes.len() as u64,
+                bytes: pack.len(),
                 resumed,
             })?;
         }

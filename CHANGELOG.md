@@ -40,10 +40,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length it accepts. A fetch spools each pack into an unnamed file in
   `.kit/tmp/` and unpacks it by window; a push seals each pack into one and
   uploads it from there, with its delta streams in the push's delta spool.
-  The memory and file transports copy in 1 MiB chunks; Connect holds one
-  pack in memory on upload and on download (SPEC-TRANSPORT §1.1). Over the
-  file transport, a push and a fetch of one 1 GiB pack each hold under
-  96 MiB of heap and a few hundred bytes per entry.
+  The memory and file transports copy in 1 MiB chunks (SPEC-TRANSPORT
+  §1.1). Over the file transport, a push and a fetch of one 1 GiB pack each
+  hold under 96 MiB of heap and a few hundred bytes per entry.
 - The ssh and S3 transports stream packs both ways. ssh reads each 800 KiB
   chunk of an upload from the pack's body as it sends it (SPEC-TRANSPORT
   §4.2). S3 hashes the body once for the SigV4 payload hash, then sends it
@@ -54,6 +53,23 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   60 s plus one second per MiB of the pack to send it and get its answer,
   in place of 60 s. A push and a fetch of a pack of about 1 GiB each hold
   under 96 MiB of heap over ssh and S3 as well.
+- Connect streams packs both ways. In `kit-client`, `upload_pack` and
+  `upload_part` take a `&dyn PackBody` and read it as they send: a part
+  twice, once for its commitment and once to send it, and a resumed upload
+  only the parts without a stored receipt. `download_pack` writes into a
+  `PackSink` and returns the length; its caller checks the key.
+  `HttpTransport::fetch_pack_location` writes into a `PackSink` under a
+  `u64` limit. A location whose length or key is wrong, or whose fetch or
+  offering call fails, falls back to the RPC. A streamed pack with the wrong
+  key fails at the fetch's spool, with no fallback. A sink's own failure, a
+  full disk say, ends the download with no fallback and no retry. On a
+  streaming channel, an error answer to a streamed call is held only up to
+  1 MiB. The client refuses a `DownloadPack` frame over
+  `DOWNLOAD_FRAME_MAX` (4 MiB) from its envelope.
+  `ClientSource` and `ConnectTransport` pass bodies and sinks through. Over
+  a loopback Connect server, a multipart push and a fetch of one 1 GiB
+  pack, streamed or from a location, each hold under 96 MiB of heap and a
+  few hundred bytes per entry. The wire is unchanged.
 - A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
   a sink that failed refuses every later attempt (`PackSink::failed`).
   `SyncError` maps `PackError::Io` and `PackError::Store(StoreError::Io)`

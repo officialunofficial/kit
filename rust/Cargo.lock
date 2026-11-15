@@ -2570,6 +2570,7 @@ dependencies = [
  "kit-rpc",
  "kit-sync",
  "kit-test-util",
+ "kit-transport-file",
  "kit-transport-memory",
  "pin-project-lite",
  "rustls",
