@@ -48,7 +48,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the newest file.
 - `kit gc` names the linked worktree whose state it cannot read when it
   refuses to run. `docs/CLI.md` no longer says that gc refuses to run while a
-  linked worktree exists: it never did, and it keeps what every tree reaches.
+  linked worktree exists. gc runs and keeps what every tree reaches.
 
 ## [0.8.0] - 2026-11-14
 
