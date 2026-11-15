@@ -92,9 +92,14 @@ fn read_back(tx: &dyn Transport, store: &ObjectStore, packs: &[Hash]) -> usize {
         deltas += unpacked.delta_count;
 
         let mut bases = store;
-        let rewritten =
-            rewrite_excluding(&pack, &HashSet::new(), &mut bases, DecodeLimits::default())
-                .unwrap_or_else(|e| panic!("rewrite of a pack of {} bytes: {e}", pack.len()));
+        let rewritten = rewrite_excluding(
+            &pack,
+            &HashSet::new(),
+            &mut bases,
+            DecodeLimits::default(),
+            kit_core::protocol::PACK_BODY_LIMIT,
+        )
+        .unwrap_or_else(|e| panic!("rewrite of a pack of {} bytes: {e}", pack.len()));
         assert!(rewritten.unchanged);
     }
     deltas
@@ -234,12 +239,21 @@ fn object_reads_back(bytes: Vec<u8>, compressed: bool) {
     // The writer takes it into an empty pack. A compressed entry spends most
     // of the decoded budget, so the writer seals before a second one.
     let fill = PackFill::of(&PackWriter::new());
-    assert!(!fill.seals_before(entry.incoming(), u64::MAX, None, usize::MAX));
+    assert!(!fill.seals_before(
+        entry.incoming(),
+        u64::MAX,
+        kit_core::protocol::PACK_BODY_LIMIT,
+        usize::MAX
+    ));
     if compressed {
         let second = PackWriter::prepare_raw(id, compressible(3, 128 << 20)).incoming();
         assert!(
-            fill.with(entry.incoming())
-                .seals_before(second, u64::MAX, None, usize::MAX),
+            fill.with(entry.incoming()).seals_before(
+                second,
+                u64::MAX,
+                kit_core::protocol::PACK_BODY_LIMIT,
+                usize::MAX
+            ),
             "a compressed object of 900 MiB leaves no room for one of 128 MiB"
         );
     }
@@ -264,8 +278,14 @@ fn object_reads_back(bytes: Vec<u8>, compressed: bool) {
     assert_eq!(unpacked.ids, vec![id]);
 
     let mut bases = &store;
-    let rewritten = rewrite_excluding(&pack, &HashSet::new(), &mut bases, DecodeLimits::default())
-        .unwrap_or_else(|e| panic!("rewrite of a pack of {} bytes: {e}", pack.len()));
+    let rewritten = rewrite_excluding(
+        &pack,
+        &HashSet::new(),
+        &mut bases,
+        DecodeLimits::default(),
+        kit_core::protocol::PACK_BODY_LIMIT,
+    )
+    .unwrap_or_else(|e| panic!("rewrite of a pack of {} bytes: {e}", pack.len()));
     assert!(rewritten.unchanged);
 
     for window in [64_u64 << 10, 1 << 20, 64 << 20] {

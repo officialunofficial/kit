@@ -314,7 +314,7 @@ fn cumulative_weights_capped(
 /// trailer. A search heuristic only: the decoded-byte and entry seals can close
 /// a lighter pack, so the real plan is always checked, never this weight.
 fn pack_weight_cap(payload_cap: u64, max_pack_bytes: Option<u64>) -> u64 {
-    let serialized = pack::serialized_limit(max_pack_bytes)
+    let serialized = kit_core::protocol::max_pack_bytes(max_pack_bytes)
         .saturating_sub((pack::HEADER_LEN + pack::TRAILER_LEN) as u64);
     payload_cap.min(serialized).max(1)
 }

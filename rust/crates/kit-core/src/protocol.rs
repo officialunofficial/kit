@@ -388,6 +388,15 @@ pub const PACK_BODY_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "64"))]
 pub const PACK_BODY_LIMIT: u64 = usize::MAX as u64;
 
+/// The most bytes one pack may take on a remote that advertises `advertised`,
+/// header and trailer included: the advertised limit, never above
+/// [`PACK_BODY_LIMIT`]. Every fetch refuses a longer pack, so a writer seals
+/// under this even when the remote advertises no limit.
+#[must_use]
+pub fn max_pack_bytes(advertised: Option<u64>) -> u64 {
+    advertised.map_or(PACK_BODY_LIMIT, |limit| limit.min(PACK_BODY_LIMIT))
+}
+
 /// Exponential-backoff iterator used by all transports.
 ///
 /// Yields `[1s, 2s, 4s, 8s, 16s]` (5 attempts) for the default ladder,

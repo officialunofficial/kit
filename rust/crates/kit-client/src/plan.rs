@@ -1,7 +1,8 @@
 use crate::{Error, proto::GetServerInfoResponse};
 use kit_core::{
     hash::Hash,
-    pack::{self, PackFill, PackWriter, serialized_bound, serialized_limit},
+    pack::{self, PackFill, PackWriter, serialized_bound},
+    protocol::max_pack_bytes,
 };
 
 /// Ordered canonical input. Staging, closure selection, delta policy and
@@ -166,8 +167,8 @@ impl Plan {
             if PackFill::of(&writer).seals_before(
                 incoming,
                 cap,
-                Some(limits.max_pack_bytes),
-                pack::MAX_WRITE_ENTRIES,
+                max_pack_bytes(Some(limits.max_pack_bytes)),
+                usize::MAX,
             ) {
                 seal(
                     &mut writer,
@@ -184,7 +185,7 @@ impl Plan {
                 matches!(&entry, Entry::Delta { stream, .. } if !pack::delta_fits_reader(stream));
             if size > cap
                 || unreadable
-                || serialized_bound(size, 1) > serialized_limit(Some(limits.max_pack_bytes))
+                || serialized_bound(size, 1) > max_pack_bytes(Some(limits.max_pack_bytes))
             {
                 return Err(Error::Limit("one entry exceeds pack limit"));
             }
@@ -260,7 +261,7 @@ fn seal(
         return Ok(());
     }
     *staged = staged.saturating_add(bytes.len() as u64);
-    if bytes.len() as u64 > serialized_limit(Some(limits.max_pack_bytes))
+    if bytes.len() as u64 > max_pack_bytes(Some(limits.max_pack_bytes))
         || *staged > limits.max_staged_bytes
     {
         return Err(Error::Limit("sealed input limit"));

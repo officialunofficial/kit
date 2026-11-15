@@ -1,10 +1,8 @@
 //! Native repository push: bounded packs and conditioned ref publication.
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
-use kit_core::pack::{
-    self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw, serialized_limit,
-};
-use kit_core::protocol::{PackKey, UploadLimits};
+use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
+use kit_core::protocol::{self, PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
@@ -878,7 +876,12 @@ fn estimate_pack_sizes_with(
         })
         .collect::<Result<Vec<_>, PushError>>()?;
     for add in raw.into_iter().chain(deltas) {
-        if fill.seals_before(add, payload_cap, max_pack_bytes, max_entries) {
+        if fill.seals_before(
+            add,
+            payload_cap,
+            protocol::max_pack_bytes(max_pack_bytes),
+            max_entries,
+        ) {
             packs.push(fill.serialized_bound());
             fill = PackFill::default();
         }
@@ -1017,7 +1020,7 @@ fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool,
             holds_remote_head: false,
         });
     }
-    if len > serialized_limit(limits.max_pack_bytes) {
+    if len > protocol::max_pack_bytes(limits.max_pack_bytes) {
         return Err(PushError::from(SourceError::PayloadTooLarge(
             kit_core::protocol::saturating_usize(len),
         )));
@@ -1217,7 +1220,12 @@ fn should_seal<W>(
     max_pack_bytes: Option<u64>,
     max_entries: usize,
 ) -> bool {
-    PackFill::of(w).seals_before(add, payload_cap, max_pack_bytes, max_entries)
+    PackFill::of(w).seals_before(
+        add,
+        payload_cap,
+        protocol::max_pack_bytes(max_pack_bytes),
+        max_entries,
+    )
 }
 
 #[cfg(test)]
@@ -1289,7 +1297,7 @@ mod tests {
                 "a sealed pack of {} bytes: {read:?}",
                 pack.len()
             );
-            assert!(pack.len() as u64 <= serialized_limit(max_pack_bytes));
+            assert!(pack.len() as u64 <= protocol::max_pack_bytes(max_pack_bytes));
             packs += 1;
         };
         for (id, bytes) in entries {
@@ -1672,7 +1680,7 @@ mod tests {
             let mut count = 0;
             for &(len, actual) in entries {
                 let add = Incoming::raw(len, if real { actual } else { len });
-                if fill.seals_before(add, 3 << 30, None, 7) {
+                if fill.seals_before(add, 3 << 30, protocol::PACK_BODY_LIMIT, 7) {
                     count += 1;
                     fill = PackFill::default();
                 }

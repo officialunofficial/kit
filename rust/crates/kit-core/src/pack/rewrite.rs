@@ -41,7 +41,7 @@ pub struct Rewritten {
 /// [`PackError::DeltaBaseMissing`] when a required excluded base cannot be
 /// supplied. A changed output exceeding the writer's caps produces the
 /// writer's existing error. An output that a writer would not seal (longer
-/// than [`crate::protocol::PACK_BODY_LIMIT`], decoding to more than the budget
+/// than `max_pack_bytes`, decoding to more than the budget
 /// of [`DecodeLimits::default`] with the delta bases a reader holds at once, or
 /// holding more than [`super::MAX_WRITE_ENTRIES`] entries) produces
 /// [`PackError::OverReadLimit`], which names the limit. This holds whatever `limits` the caller
@@ -51,14 +51,19 @@ pub struct Rewritten {
 /// takes about twice as many entries to read, so a changed rewrite of an input
 /// sealed past the bound is refused unless it leaves at most that many
 /// entries. An unchanged pack is returned as is. No partial output is returned.
+///
+/// `max_pack_bytes` is a transport's limit on one pack, header and trailer
+/// included, such as [`crate::protocol::PACK_BODY_LIMIT`], the body limit of
+/// every transport.
 #[allow(clippy::implicit_hasher)] // The orchestrator fixes this additive API signature.
 pub fn rewrite_excluding<B: DeltaBaseSource>(
     pack: &[u8],
     excluded: &HashSet<Hash>,
     bases: &mut B,
     limits: DecodeLimits,
+    max_pack_bytes: u64,
 ) -> Result<Rewritten, PackError> {
-    let mut rewrite = Rewrite::new(pack, excluded);
+    let mut rewrite = Rewrite::new(pack, excluded, max_pack_bytes);
     decode_entries_with(pack, bases, limits, |entry| rewrite.accept(&entry))?;
     rewrite.finish()
 }
@@ -72,10 +77,11 @@ struct Rewrite<'a> {
     removed_seen: HashSet<Hash>,
     rawified: Vec<Hash>,
     writer_error: Option<PackError>,
+    max_pack_bytes: u64,
 }
 
 impl<'a> Rewrite<'a> {
-    fn new(pack: &'a [u8], excluded: &'a HashSet<Hash>) -> Self {
+    fn new(pack: &'a [u8], excluded: &'a HashSet<Hash>, max_pack_bytes: u64) -> Self {
         Self {
             pack,
             excluded,
@@ -85,6 +91,7 @@ impl<'a> Rewrite<'a> {
             removed_seen: HashSet::new(),
             rawified: Vec::new(),
             writer_error: None,
+            max_pack_bytes,
         }
     }
 
@@ -178,7 +185,13 @@ impl<'a> Rewrite<'a> {
             // bytes. A rewrite of a pack an older writer sealed above the
             // budget is refused, as the output is a pack a writer would not
             // seal.
-            within_read_limits(bytes.len(), decoded, resident_bases, entries)?;
+            within_read_limits(
+                bytes.len(),
+                decoded,
+                resident_bases,
+                entries,
+                self.max_pack_bytes,
+            )?;
             bytes
         };
         Ok(Rewritten {

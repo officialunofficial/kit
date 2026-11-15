@@ -132,6 +132,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gets its own `fdatasync` before its rename. A large object never grows the
   pool past 64 threads, a batch of only large objects renames them on one
   thread, and other platforms are unchanged.
+- The pack module no longer knows the transports' body limit; its callers
+  pass the limit. `kit_core::pack::serialized_limit` is now
+  `kit_core::protocol::max_pack_bytes`. `PackFill::seals_before` takes the
+  resolved limit as a `u64` where it took the advertised `Option<u64>`: pass
+  `protocol::max_pack_bytes(advertised)`. `pack::rewrite_excluding` takes a
+  fifth argument, the longest pack it may write (`protocol::PACK_BODY_LIMIT`
+  for the old behaviour), and `pack::ReadLimit::BodyLimit` carries that
+  limit as `BodyLimit(u64)`. The error text is the same.
 
 ### Removed
 
