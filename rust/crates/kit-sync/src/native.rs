@@ -29,6 +29,7 @@ use kit_client::{
     FailureObserver, HttpTransport, RequestStream, RequestTimeout, ResponseStream,
 };
 use kit_core::hash::Hash;
+use kit_core::protocol::PackSink;
 use rustls::{ClientConfig, RootCertStore};
 
 use crate::client_source::Executor;
@@ -1155,12 +1156,16 @@ impl HttpTransport for NativeHttp {
         self.test_pack_location_http
     }
 
+    /// Streams the body into `sink` as it arrives, refusing it once it
+    /// passes `response_limit` bytes. A declared `Content-Length` goes to
+    /// [`PackSink::begin`] before any byte.
     async fn fetch_pack_location(
         &self,
         url: &str,
-        response_limit: usize,
+        response_limit: u64,
         timeout: Option<Duration>,
-    ) -> Result<Vec<u8>, String> {
+        sink: &mut dyn PackSink,
+    ) -> Result<(), String> {
         let uri: Uri = url.parse().map_err(|_| "invalid pack location URL")?;
         let authority = uri.authority().ok_or("pack location has no authority")?;
         if authority.as_str().contains('@') {
@@ -1213,15 +1218,35 @@ impl HttpTransport for NativeHttp {
                         .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")) => {}
                 _ => return Err("encoded pack location body refused".to_owned()),
             }
-            let diagnostics = Diagnostics::<NoDiagnostics> {
-                observer: None,
-                procedure: "pack location",
-                status: Some(response.status()),
-                headers: None,
+            let declared = match response.headers().get(CONTENT_LENGTH) {
+                None => None,
+                Some(value) => Some(
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u64>().ok())
+                        .ok_or("pack location length is invalid")?,
+                ),
             };
-            read_bounded(response.into_body(), response_limit, diagnostics)
-                .await
-                .map_err(|_| "pack location body failed or exceeded the size limit".to_owned())
+            if declared.is_some_and(|declared| declared > response_limit) {
+                return Err("pack location body exceeded the size limit".to_owned());
+            }
+            sink.begin(declared)
+                .map_err(|error| format!("pack location body refused: {error}"))?;
+            let mut body = response.into_body();
+            let mut received = 0_u64;
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|_| "pack location body failed".to_owned())?;
+                if let Some(data) = frame.data_ref() {
+                    received = received.saturating_add(data.len() as u64);
+                    if received > response_limit {
+                        return Err("pack location body exceeded the size limit".to_owned());
+                    }
+                    sink.write(data)
+                        .map_err(|error| format!("pack location body refused: {error}"))?;
+                }
+            }
+            Ok(())
         };
         tokio::time::timeout(timeout, fetch)
             .await

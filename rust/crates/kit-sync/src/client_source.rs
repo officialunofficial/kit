@@ -157,11 +157,15 @@ fn source_error(error: ClientError) -> SourceError {
         ClientError::ReservedHeader(name) => SourceError::ReservedHeader(name),
         ClientError::EnvelopeExpired => SourceError::EnvelopeExpired,
         ClientError::Deadline => SourceError::Deadline,
+        // A local failure: the caller's sink, or reading the pack to send.
+        // The sink's owner reports its own error first.
+        ClientError::Sink(_) | ClientError::Pack(kit_core::pack::PackError::Io(_)) => {
+            SourceError::ProtocolError
+        }
         ClientError::Limit(_)
         | ClientError::Invalid(_)
         | ClientError::Pack(_)
         | ClientError::Packlist(_)
-        | ClientError::Sink(_)
         | ClientError::Signature { .. } => SourceError::InvalidResponse,
         // A future unclassified client variant is terminal, never retryable.
         other => SourceError::RemoteError(other.to_string()),
@@ -196,20 +200,40 @@ impl<
         Ok(self)
     }
 
-    /// Download a pack without a read-your-writes ref hint.
+    /// Download a pack into `sink` without a read-your-writes ref hint, as
+    /// [`RemoteSource::download_pack`] does with one.
     ///
     /// # Errors
-    /// Transport, remote, size or content-integrity failures.
-    pub fn download_pack_unhinted(&self, key: &PackKey) -> Result<Vec<u8>, SourceError> {
+    /// Transport, remote or size failures, or the sink's failure.
+    pub fn download_pack_unhinted(
+        &self,
+        key: &PackKey,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
+        self.download_into(key, None, kit_core::protocol::PACK_BODY_LIMIT, sink)
+    }
+
+    /// Stream a pack into `sink`. The client holds one bounded frame and no
+    /// pack bytes, and the sink's owner checks the key. A sink that has
+    /// failed ends the download: [`ClientSource::write_call`] never retries
+    /// a local failure, and kit-client never falls back on one.
+    fn download_into(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+        sink: &mut dyn PackSink,
+    ) -> Result<(), SourceError> {
         self.write_call("DownloadPack", false, None, |identity| {
             self.executor.block_on(self.client.download_pack(
                 &key.into_hash(),
-                None,
-                kit_core::protocol::PACK_BODY_LIMIT,
+                ref_hint,
+                max,
+                &mut *sink,
                 identity,
             ))
         })
-        .map(|reply| reply.value)
+        .map(|_| ())
     }
 
     /// Test pack membership without a ref hint.
@@ -311,8 +335,8 @@ impl<
         self.client.supports_writes()
     }
 
-    /// Reads the whole pack into memory before it is sent: the Connect
-    /// client takes a pack as one buffer.
+    /// Streams the pack from its body: each request, part and retry reads
+    /// the body again, and the client holds one chunk at a time.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
@@ -322,15 +346,14 @@ impl<
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        let bytes = kit_core::protocol::read_body(pack)?;
-        self.write_upload(&bytes, key, head_ref)
+        self.write_upload(pack, key, head_ref)
     }
 
     fn upload_blob(&self, bytes: &[u8], key: &PackKey, head_ref: &str) -> Result<(), SourceError> {
         if !self.client.supports_writes() {
             return Err(SourceError::ProtocolError);
         }
-        self.write_upload(bytes, key, head_ref)
+        self.write_upload(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
 
     fn update_ref(
@@ -399,38 +422,28 @@ impl<
         }
     }
 
+    /// A node is at most [`NODE_LIMIT`] bytes, held in memory. The caller
+    /// checks it against its key.
     fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
-        self.write_call("DownloadPack", false, None, |identity| {
-            self.executor.block_on(self.client.download_pack(
-                &key.into_hash(),
-                Some(ref_hint),
-                NODE_LIMIT,
-                identity,
-            ))
-        })
-        .map(|reply| reply.value)
+        let mut sink = kit_core::protocol::MemorySink::new(NODE_LIMIT);
+        self.download_into(key, Some(ref_hint), NODE_LIMIT, &mut sink)?;
+        Ok(sink.into_bytes()?)
     }
 
-    /// Receives the whole pack into memory, then writes it to `sink`: the
-    /// Connect client returns a pack as one buffer.
+    /// Streams the pack into `sink` as it arrives (see
+    /// [`ClientSource::download_pack_unhinted`]).
     fn download_pack(
         &self,
         key: &PackKey,
         ref_hint: &str,
         sink: &mut dyn PackSink,
     ) -> Result<(), SourceError> {
-        let bytes = self
-            .write_call("DownloadPack", false, None, |identity| {
-                self.executor.block_on(self.client.download_pack(
-                    &key.into_hash(),
-                    Some(ref_hint),
-                    kit_core::protocol::PACK_BODY_LIMIT,
-                    identity,
-                ))
-            })?
-            .value;
-        kit_core::protocol::write_body(sink, &bytes)?;
-        Ok(())
+        self.download_into(
+            key,
+            Some(ref_hint),
+            kit_core::protocol::PACK_BODY_LIMIT,
+            sink,
+        )
     }
 
     fn repository_address(&self) -> Option<(String, String)> {

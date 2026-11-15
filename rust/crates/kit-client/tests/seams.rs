@@ -19,6 +19,7 @@ use kit_core::{
     hash::{Hash, hash},
     object::{Blob, Object},
     pack::pack_key,
+    protocol::SliceBody,
     refs::RefWriteCondition,
     serialize::serialize,
     upload_parts::PartPlan,
@@ -336,14 +337,15 @@ fn the_signer_sees_every_commitment_form() {
 
     let pack = vec![9_u8; 100];
     let pack_id = pack_key(&pack);
-    block_on(client.upload_pack(&pack_id, &pack, None, None)).unwrap();
+    block_on(client.upload_pack(&pack_id, &SliceBody(&pack), None, None)).unwrap();
     let plan = PartPlan::new((8 << 20) + 100, 8 << 20, 4).unwrap();
+    let whole = [vec![0_u8; 8 << 20], pack.clone()].concat();
     let ticket = proto::UploadTicket {
         id: Some([5; 32].to_vec()),
         token: Some(vec![1, 2, 3]),
         ..Default::default()
     };
-    block_on(client.upload_part(&ticket, &plan, 1, &pack, None)).unwrap();
+    block_on(client.upload_part(&ticket, &plan, 1, &SliceBody(&whole), None)).unwrap();
     block_on(client.begin_upload("refs/heads/main", &pack_id, 100, None)).unwrap();
 
     let seen = signer.seen.borrow();
@@ -398,10 +400,13 @@ fn an_observer_veto_stops_every_write_before_anything_is_signed_or_sent() {
                 block_on(client.begin_upload("refs/heads/main", &[1; 32], 1, None)).map(|_| ())
             }
             "UploadPack" => {
-                block_on(client.upload_pack(&pack_key(&pack), &pack, None, None)).map(|_| ())
+                block_on(client.upload_pack(&pack_key(&pack), &SliceBody(&pack), None, None))
+                    .map(|_| ())
             }
             "UploadPart" => {
-                block_on(client.upload_part(&ticket, &plan, 1, &pack, None)).map(|_| ())
+                let whole = [vec![0_u8; 8 << 20], pack.clone()].concat();
+                block_on(client.upload_part(&ticket, &plan, 1, &SliceBody(&whole), None))
+                    .map(|_| ())
             }
             "CompleteUpload" => {
                 block_on(client.complete_upload(&[1], vec![vec![1]], None)).map(|_| ())

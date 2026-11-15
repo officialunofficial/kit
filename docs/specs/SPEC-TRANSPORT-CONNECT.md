@@ -775,6 +775,14 @@ These are the same checks SPEC-TRANSPORT §4.2 already requires of the
 SSH server's `UploadPack` handling, restated for a Connect stream
 instead of an `SshFrame` sequence.
 
+**Reference-client behavior.** The client reads each chunk from the
+caller's pack body as it sends it, in chunks of 800 KiB, so it holds no
+copy of the pack. The header's `pack_id` and `total_bytes` come from
+the caller before the first byte is read, and the `pack:<id>:<len>`
+commitment needs no pass over the body. A retry reads the body again
+from its start. A failure to read the body is local: it ends the upload
+and is never retried. The messages on the wire are unchanged.
+
 ### 6.2 `DownloadPack` (server-streaming)
 
 **Protocol requirement.**
@@ -853,6 +861,33 @@ bounds response bytes before pack verification. `RequestPolicy::request_timeout`
 covers the initial RPC, location fetch, and any streaming fallback. The location
 fetch receives only the remaining budget and cannot exceed its own transfer
 timeout. The wasm client continues to request streaming.
+
+**Reference-client streaming.** These are client rules; the wire is
+unchanged, and a server that streams within them needs no change.
+
+- The client reads each response frame's length from its 5-byte Connect
+  envelope and refuses a `DownloadPack` frame over 4 MiB
+  (`DOWNLOAD_FRAME_MAX`) before reading it, as an invalid response. A
+  server that sends a pack in 800 KiB chunks, or a packmap node in one
+  frame under the client's 1 MiB node bound, is unaffected.
+- The client forwards `header.total_bytes` and each chunk's bytes to the
+  caller's pack sink as they arrive. It refuses a declared length over the
+  caller's cap before the first chunk, and checks each chunk's `pack_id`,
+  its `offset` against the bytes received, and that the stream ends with
+  `last` at exactly `total_bytes`. The sink's owner checks the content
+  address: a fetch spools the pack to disk and verifies its length, key and
+  trailer before it reads any entry.
+- A packmap node is a `DownloadPack` into a sink of at most 1 MiB, which
+  refuses a larger declared length before any byte is read.
+- Location bytes stream into the same sink through a check that refuses a
+  declared length other than the location's `total_bytes`, counts the
+  bytes and hashes them. Only a length or key mismatch, or a failed fetch,
+  is a location failure, and the client then streams the RPC into the same
+  sink, which starts over at its `header`.
+- A failure of the sink itself, such as a full disk, is local and is not a
+  location failure. It ends the download on every attempt, including a
+  streamed answer to a location offer, with no fallback and no retry; the
+  caller reports the sink's I/O error.
 
 **Conformance coverage.** The two ordinary location cases remain Tier 1 wire
 cases. Optional fixture cases for location security, fallback, and expiry are
@@ -1510,6 +1545,13 @@ received, and the client keeps them. A client that lost receipts sends
 the missing parts again. A client that calls `BeginUpload` again gets
 the same ticket. The server offers no listing of received parts.
 
+**Reference-client behavior.** The client reads each part from the
+caller's pack body twice and holds no copy of it. The first pass hashes
+the part's bytes into its `part:` commitment; the client then signs the
+request and the second pass streams the part in 800 KiB chunks. A resumed
+upload loads the stored receipts first and reads only the parts without
+one. The messages on the wire are unchanged.
+
 **Single-part packs.** A pack of at most `part_size` bytes uses
 `UploadPack` with the ticket token in its header and the usual `pack:`
 commitment. It sends no `part:` commitment and no `CompleteUpload`.
@@ -2066,10 +2108,13 @@ only in that loop. Read helpers walk a packmap chain and unpack packs into an
 abstract object sink, verifying commit, remix and tag signatures unless the
 caller opts out. The HTTP boundary is injectable and carries buffered Connect
 frames with an explicit response limit; clock, entropy, waiting and signing are
-also injectable. A streaming request body does not fit that boundary: the
-transport must replay the exact request bytes after an ambiguous failure, and
-browser fetch cannot stream request bodies portably, so request bodies stay
-buffered (bounded per part by the ticket part size). Exact-byte replay applies
+also injectable. A streaming request body does not fit that boundary by
+default: the transport must replay the exact request bytes after an ambiguous
+failure, and browser fetch cannot stream request bodies portably, so a channel
+that does not override `send_stream` buffers each request body (bounded per
+part by the ticket part size). The native channel streams request bodies, and
+every channel hands `DownloadPack` response frames and location bytes to the
+caller's pack sink one bounded frame at a time (§6.2). Exact-byte replay applies
 to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves

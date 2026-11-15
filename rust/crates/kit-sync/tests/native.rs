@@ -5,6 +5,20 @@
 
 use kit_sync::NativeHttp;
 
+/// Fetch a location into memory, as kit-client's location sink would take it.
+fn fetch(
+    transport: &NativeHttp,
+    url: &str,
+    limit: u64,
+    timeout: Option<std::time::Duration>,
+) -> Result<Vec<u8>, String> {
+    use kit_client::HttpTransport as _;
+    use kit_sync::Executor as _;
+    let mut sink = kit_core::protocol::MemorySink::new(limit);
+    transport.block_on(transport.fetch_pack_location(url, limit, timeout, &mut sink))?;
+    Ok(sink.into_bytes().unwrap())
+}
+
 /// Serve exactly one plain HTTP response and retain its request headers.
 fn location_response(
     response: &'static [u8],
@@ -38,7 +52,6 @@ fn location_response(
 #[test]
 fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
     use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let (url, server) = location_response(
         b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npack",
         std::time::Duration::ZERO,
@@ -54,12 +67,7 @@ fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
         .allow_private_pack_locations(true)
         .with_default_headers(headers);
     assert!(transport.supports_pack_locations());
-    assert_eq!(
-        transport
-            .block_on(transport.fetch_pack_location(&url, 4, None))
-            .unwrap(),
-        b"pack"
-    );
+    assert_eq!(fetch(&transport, &url, 4, None).unwrap(), b"pack");
     let request = server.join().unwrap().to_ascii_lowercase();
     assert!(request.starts_with("get /pack?signature=test http/1.1\r\n"));
     assert!(request.contains("accept-encoding: identity\r\n"));
@@ -71,9 +79,28 @@ fn pack_location_fetch_never_sends_rpc_defaults_or_credentials() {
 }
 
 #[test]
+fn pack_location_bodies_stream_into_the_sink_with_or_without_a_length() {
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true);
+    let (url, server) = location_response(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\npa\r\n2\r\nck\r\n0\r\n\r\n",
+        std::time::Duration::ZERO,
+    );
+    assert_eq!(fetch(&transport, &url, 4, None).unwrap(), b"pack");
+    server.join().unwrap();
+    // A chunked body that runs past the limit is refused as it arrives.
+    let (url, server) = location_response(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\npac\r\n2\r\nks\r\n0\r\n\r\n",
+        std::time::Duration::ZERO,
+    );
+    assert!(fetch(&transport, &url, 4, None).is_err());
+    server.join().unwrap();
+}
+
+#[test]
 fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
-    use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let transport = NativeHttp::new()
         .unwrap()
         .with_test_pack_location_http(true)
@@ -85,8 +112,7 @@ fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
     ] {
         let (url, server) = location_response(response, std::time::Duration::ZERO);
         assert!(
-            transport
-                .block_on(transport.fetch_pack_location(&url, 4, None))
+            fetch(&transport, &url, 4, None)
                 .is_err()
         );
         server.join().unwrap();
@@ -95,8 +121,6 @@ fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
 
 #[test]
 fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
-    use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let transport = NativeHttp::new()
         .unwrap()
         .allow_insecure_http(true)
@@ -110,20 +134,13 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
         "https://user:secret@example.invalid/pack",
         "/relative/pack",
     ] {
-        assert!(
-            transport
-                .block_on(transport.fetch_pack_location(url, 4, None))
-                .is_err(),
-            "{url}"
-        );
+        assert!(fetch(&transport, url, 4, None).is_err(), "{url}");
     }
     let (url, server) = location_response(
         b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\npack",
         std::time::Duration::from_millis(400),
     );
-    let error = transport
-        .block_on(transport.fetch_pack_location(&url, 4, None))
-        .unwrap_err();
+    let error = fetch(&transport, &url, 4, None).unwrap_err();
     assert!(error.contains("deadline"), "{error}");
     server.join().unwrap();
 }
@@ -131,15 +148,12 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
 #[test]
 fn pack_location_fetch_requires_explicit_test_opt_in_for_loopback_http() {
     use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let url = format!("http://{}/pack", listener.local_addr().unwrap());
     let transport = NativeHttp::new().unwrap().allow_insecure_http(true);
     assert!(!transport.allows_test_pack_location_http());
-    let error = transport
-        .block_on(transport.fetch_pack_location(&url, 4, None))
-        .unwrap_err();
+    let error = fetch(&transport, &url, 4, None).unwrap_err();
     assert!(error.contains("HTTPS"), "{error}");
     assert_eq!(
         listener.accept().unwrap_err().kind(),
@@ -155,19 +169,13 @@ fn pack_location_fetch_requires_explicit_test_opt_in_for_loopback_http() {
 
 #[test]
 fn pack_location_rejects_loopback_before_connecting() {
-    use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let transport = NativeHttp::new()
         .unwrap()
         .with_transfer_timeout(std::time::Duration::from_millis(25));
     let url = format!("https://{}/pack", listener.local_addr().unwrap());
-    assert!(
-        transport
-            .block_on(transport.fetch_pack_location(&url, 4, None))
-            .is_err()
-    );
+    assert!(fetch(&transport, &url, 4, None).is_err());
     assert_eq!(
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -176,8 +184,6 @@ fn pack_location_rejects_loopback_before_connecting() {
 
 #[test]
 fn pack_location_fetch_honors_shorter_local_budget() {
-    use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let transport = NativeHttp::new()
         .unwrap()
         .with_test_pack_location_http(true)
@@ -187,11 +193,12 @@ fn pack_location_fetch_honors_shorter_local_budget() {
         std::time::Duration::from_millis(300),
     );
     let start = std::time::Instant::now();
-    let result = transport.block_on(transport.fetch_pack_location(
+    let result = fetch(
+        &transport,
         &url,
         4,
         Some(std::time::Duration::from_millis(40)),
-    ));
+    );
     assert!(start.elapsed() < std::time::Duration::from_millis(200));
     assert!(result.is_err());
     server.join().unwrap();
@@ -199,8 +206,6 @@ fn pack_location_fetch_honors_shorter_local_budget() {
 
 #[test]
 fn pack_location_rejects_private_literals_before_dispatch() {
-    use kit_client::HttpTransport as _;
-    use kit_sync::Executor as _;
     let transport = NativeHttp::new()
         .unwrap()
         .with_transfer_timeout(std::time::Duration::from_millis(20));
@@ -212,9 +217,7 @@ fn pack_location_rejects_private_literals_before_dispatch() {
         "[::10.1.2.3]",
     ] {
         let url = format!("https://{host}/pack");
-        let error = transport
-            .block_on(transport.fetch_pack_location(&url, 4, None))
-            .unwrap_err();
+        let error = fetch(&transport, &url, 4, None).unwrap_err();
         assert!(error.contains("destination refused"), "{host}: {error}");
     }
 }

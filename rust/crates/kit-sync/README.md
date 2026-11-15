@@ -348,8 +348,9 @@ The host must bound its retry ladder and waits.
 The CLI uses a configured `ClientSource` for `kit+https` and `kit+http` push,
 fetch, pull, and clone. Native extra-CA, bearer credentials, grants, helpers, and
 configuration remain host-owned. Other schemes retain `TransportSource`.
-`NativeHttp` streams upload frames and incrementally decodes downloads; generic
-HTTP transports retain an additive buffered fallback. The protocol client's
+`NativeHttp` streams upload frames and incrementally decodes downloads, and
+pack locations, into the fetch's spool; generic HTTP transports retain an
+additive buffered fallback. The protocol client's
 whole-push API is unchanged.
 
 A missing repository, a private one read anonymously and one read by a signer

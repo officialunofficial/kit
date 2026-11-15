@@ -92,9 +92,10 @@ The memory and file transports copy bodies in chunks of `SPOOL_BUFFER`
 from offset 0 on every attempt. On download, SSH passes the header's
 `total_bytes` to `begin` and writes each `PackChunk` frame to the sink as
 it arrives; S3 passes a `200` answer's `Content-Length` to `begin` and
-writes its body to the sink as it arrives (§6.7). Connect still holds one
-pack in memory on upload, and reads a download's response whole before it
-writes it to the sink.
+writes its body to the sink as it arrives (§6.7). Connect reads the body as
+it builds each chunk or part, and passes `total_bytes` to `begin` and each
+`PackChunk`, or a pack location's bytes, to the sink as they arrive,
+holding one frame of at most 4 MiB (SPEC-TRANSPORT-CONNECT §6).
 
 Spool files have no name on Unix (`O_TMPFILE`, or unlinked on creation); on
 Windows they are `.tmp` files deleted on close. Only the handle that wrote

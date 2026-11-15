@@ -33,6 +33,6 @@ pub use seams::{
     UnsignedRequestContext, Veto, WriteIntent, is_reserved_header, procedures,
 };
 
-pub use stream::{RequestStream, ResponseStream};
+pub use stream::{DOWNLOAD_FRAME_MAX, RequestStream, ResponseStream};
 
 pub use seams::{FailureDiagnostic, FailureKind, FailureObserver};

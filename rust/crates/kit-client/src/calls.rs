@@ -10,7 +10,7 @@ use crate::proto::{
 };
 use crate::push::{condition, pack_commitment, pack_messages, part_commitment, part_messages};
 use crate::seams::{Observer, RefMove, RefTarget, RequestPolicy, WriteIntent, procedures};
-use kit_core::{hash::Hash, refs::RefWriteCondition, upload_parts::PartPlan};
+use kit_core::{hash::Hash, protocol::PackBody, refs::RefWriteCondition, upload_parts::PartPlan};
 
 pub(crate) type Called<R> = Result<(R, Option<Identity>), Error>;
 
@@ -55,7 +55,7 @@ pub(crate) async fn upload_pack<
 >(
     rpc: &Rpc<'_, T, S, C, O, P>,
     pack_id: &Hash,
-    pack: &[u8],
+    pack: &dyn PackBody,
     ticket_id: Option<Hash>,
     ticket_token: Option<Vec<u8>>,
     new_objects: Option<&[Hash]>,
@@ -65,7 +65,7 @@ pub(crate) async fn upload_pack<
     let intent = WriteIntent::new(procedures::UPLOAD_PACK)
         .with_ticketed(ticket_token.is_some())
         .with_tickets(&tickets)
-        .with_pack(*pack_id, pack.len() as u64)
+        .with_pack(*pack_id, pack.len())
         .with_new_objects(new_objects);
     let opts = Opts {
         identity,
@@ -93,16 +93,24 @@ pub(crate) async fn upload_part<
     ticket_token: Option<Vec<u8>>,
     plan: &PartPlan,
     index: u32,
-    part: &[u8],
+    pack: &dyn PackBody,
     new_objects: Option<&[Hash]>,
     identity: Option<&Identity>,
 ) -> Called<UploadPartResponse> {
-    let commitment = part_commitment(ticket_id, plan, index, part)?;
+    if pack.len() != plan.total() {
+        return Err(Error::Invalid("part length"));
+    }
+    let len = plan
+        .expected_len(index)
+        .map_err(|_| Error::Invalid("part length"))?;
+    // Two reads of the part, and no buffer of it: one to sign its
+    // commitment, then one to send it.
+    let commitment = part_commitment(ticket_id, plan, index, pack)?;
     let tickets = [ticket_id];
     let intent = WriteIntent::new(procedures::UPLOAD_PART)
         .with_ticketed(true)
         .with_tickets(&tickets)
-        .with_part(index, part.len() as u64)
+        .with_part(index, len)
         .with_new_objects(new_objects);
     let opts = Opts {
         identity,
@@ -111,7 +119,7 @@ pub(crate) async fn upload_part<
     };
     rpc.stream_with(
         "UploadPart",
-        part_messages(ticket_token, index, part),
+        part_messages(ticket_token, plan, index, pack)?,
         &commitment,
         opts,
     )

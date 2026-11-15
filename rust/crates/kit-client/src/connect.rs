@@ -12,7 +12,9 @@ use http::{HeaderMap, HeaderValue, Request, Response};
 use kit_core::{
     admission::{MAX_CHALLENGES, MAX_DESCRIPTION_BYTES, MAX_VALUE_BYTES, validate_challenges},
     hash::{Hash, hash, to_hex},
-    protocol::{AdmissionChallengeEntry, AdmissionRequired},
+    protocol::{
+        AdmissionChallengeEntry, AdmissionRequired, PackSink, TransportError, TransportResult,
+    },
     write_auth::{ContentCommitment, Context, MAX_VALIDITY_MS, Operation},
 };
 use serde::Deserialize;
@@ -53,19 +55,27 @@ pub trait HttpTransport {
         false
     }
 
-    /// Fetch a location with a fresh credential-free GET. Never apply RPC
-    /// policies, auth-v2 headers, tokens, cookies, or default credentials.
-    /// HTTPS is required; loopback HTTP is reserved for test hosts. The local
-    /// timeout must be clamped to the channel timeout and must not become a header.
+    /// Fetch a location with a fresh credential-free GET, writing the body
+    /// into `sink` as it arrives: call [`PackSink::begin`] once, with the
+    /// declared length if the response has one, then [`PackSink::write`] for
+    /// each received piece. Never apply RPC policies, auth-v2 headers,
+    /// tokens, cookies, or default credentials. HTTPS is required; loopback
+    /// HTTP is reserved for test hosts. The local timeout must be clamped to
+    /// the channel timeout and must not become a header. Refuse a body over
+    /// `response_limit` bytes.
     ///
     /// # Errors
-    /// A fetch, protocol, timeout, or response-size failure.
+    /// The remote's or the network's failure: a fetch, protocol, timeout or
+    /// response-size failure, or a write the sink refused. A local failure
+    /// to store the bytes shows as [`PackSink::failed`], which the client
+    /// checks first and never falls back on.
     async fn fetch_pack_location(
         &self,
         _url: &str,
-        _response_limit: usize,
+        _response_limit: u64,
         _timeout: Option<Duration>,
-    ) -> Result<Vec<u8>, String> {
+        _sink: &mut dyn PackSink,
+    ) -> Result<(), String> {
         Err("pack locations are unsupported".into())
     }
 
@@ -165,11 +175,74 @@ pub struct RequestTimeout(pub Duration);
 #[derive(Clone, Copy, Debug)]
 pub struct AdvertiseRequestTimeout;
 
-fn verify_location_download(bytes: &[u8], key: &Hash) -> Result<(), Error> {
-    if kit_core::pack::pack_key(bytes) != *key {
-        return Err(Error::Invalid("pack content commitment"));
+/// Wraps the caller's sink for a location fetch: it counts and hashes what
+/// the location host sends, so a body of the wrong length or key falls back
+/// to the RPC, which restarts the same sink.
+struct LocationSink<'a> {
+    inner: &'a mut dyn PackSink,
+    size: u64,
+    received: u64,
+    hasher: kit_core::hash::Hasher,
+    begun: bool,
+}
+impl<'a> LocationSink<'a> {
+    fn new(inner: &'a mut dyn PackSink, size: u64) -> Self {
+        Self {
+            inner,
+            size,
+            received: 0,
+            hasher: kit_core::hash::Hasher::new(),
+            begun: false,
+        }
     }
-    Ok(())
+    /// Whether exactly the location's length arrived and hashes to `key`.
+    fn verified(&self, key: &Hash) -> bool {
+        self.begun && self.received == self.size && self.hasher.finalize() == *key
+    }
+}
+impl PackSink for LocationSink<'_> {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        self.begun = false;
+        if declared.is_some_and(|declared| declared != self.size) {
+            return Err(TransportError::InvalidResponse);
+        }
+        self.inner.begin(Some(self.size))?;
+        self.received = 0;
+        self.hasher = kit_core::hash::Hasher::new();
+        self.begun = true;
+        Ok(())
+    }
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        if !self.begun {
+            return Err(TransportError::ProtocolError);
+        }
+        let end = self.received.saturating_add(bytes.len() as u64);
+        if end > self.size {
+            self.begun = false;
+            return Err(TransportError::PayloadTooLarge(
+                kit_core::protocol::saturating_usize(end),
+            ));
+        }
+        self.inner.write(bytes)?;
+        self.hasher.update(bytes);
+        self.received = end;
+        Ok(())
+    }
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.inner.failed()
+    }
+}
+
+/// The local write failure of `sink`, which ends a download with no retry
+/// and no fallback.
+fn local_failure(sink: &dyn PackSink) -> Result<(), Error> {
+    match sink.failed() {
+        Some(kind) => Err(Error::Sink(format!(
+            "pack sink: local write failed: {}",
+            std::io::Error::from(kind)
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn channel_error(error: ChannelError) -> Error {
@@ -510,6 +583,14 @@ impl Default for Opts<'_> {
     }
 }
 
+/// What one `DownloadPack` call returned.
+enum Downloaded {
+    /// The server offered a location; nothing was written to the sink.
+    Location(crate::proto::DownloadPackLocation),
+    /// The pack streamed into the sink: this many bytes.
+    Streamed(u64),
+}
+
 /// A built request and the identity it carries.
 pub(crate) struct Built {
     pub(crate) request: Request<Vec<u8>>,
@@ -628,17 +709,20 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Ok((value, None))
     }
 
+    /// A client-streaming call. Each message is built, framed and sent in
+    /// turn, so a long body is never held whole; an `Err` message ends the
+    /// call before it is sent.
     pub(crate) async fn stream_with<Q: Message, R: Message + Default>(
         &self,
         method: &str,
-        messages: impl IntoIterator<Item = Q>,
+        messages: impl IntoIterator<Item = Result<Q, Error>>,
         commitment: &str,
         opts: Opts<'_>,
     ) -> Result<(R, Option<Identity>), Error> {
         let mut body = crate::stream::Chunks(
             messages
                 .into_iter()
-                .map(|message| framed(&message.encode_to_vec())),
+                .map(|message| framed(&message?.encode_to_vec())),
         );
         let sink = crate::stream::Decoder::new(crate::stream::SingleFrame::default(), opts.limit);
         let (sink, identity, headers, status) = self
@@ -652,26 +736,41 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         Ok((value, identity))
     }
 
-    /// A packmap node: capped like any other RPC response.
+    /// A packmap node: capped like any other RPC response, and checked
+    /// against its key here, since it never reaches a verifying sink.
     pub(crate) async fn download(&self, key: Hash, head_ref: &str) -> Result<Vec<u8>, Error> {
         let opts = Opts {
             hint: Some(head_ref),
             ..Opts::default()
         };
-        Ok(self
-            .download_with(key, RESPONSE_LIMIT as u64, opts)
-            .await?
-            .0)
+        let mut sink = kit_core::protocol::MemorySink::new(RESPONSE_LIMIT as u64);
+        self.download_with(key, RESPONSE_LIMIT as u64, opts, &mut sink)
+            .await?;
+        let bytes = sink
+            .into_bytes()
+            .map_err(|_| Error::Invalid("download length"))?;
+        if kit_core::pack::pack_key(&bytes) != key {
+            return Err(Error::Invalid("pack content commitment"));
+        }
+        Ok(bytes)
     }
 
-    /// Download one pack of at most `cap` bytes. Incremental channels retain
-    /// one bounded Connect frame beside the returned pack.
+    /// Download one pack of at most `cap` bytes into `sink`, returning its
+    /// length. The client holds one bounded Connect frame
+    /// ([`crate::stream::DOWNLOAD_FRAME_MAX`]) at a time, and no pack bytes.
+    /// It checks the chunks' order and the declared length; the sink's owner
+    /// checks the key. Only location bytes are hashed here, so that a wrong
+    /// body falls back to the RPC.
+    ///
+    /// A local write failure ([`PackSink::failed`]) ends the download at
+    /// once, with no fallback, whatever the attempt.
     pub(crate) async fn download_with(
         &self,
         key: Hash,
         cap: u64,
         opts: Opts<'_>,
-    ) -> Result<(Vec<u8>, Option<Identity>), Error> {
+        sink: &mut dyn PackSink,
+    ) -> Result<(u64, Option<Identity>), Error> {
         let lifetime = self.pack_location_lifetime().await;
         if let Some(lifetime) = lifetime {
             let opts = Opts {
@@ -680,23 +779,26 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                     .map(|timeout| (std::time::Instant::now(), timeout)),
                 ..opts
             };
-            if let Ok((pack, identity)) = self.download_attempt(key, cap, opts, true).await {
-                if let Some(location) = pack.location {
-                    if let Ok(bytes) = self
-                        .fetch_location(key, cap, lifetime, location, opts.local_budget)
-                        .await
-                    {
-                        return Ok((bytes, identity));
+            let offered = self.download_attempt(key, cap, opts, true, sink).await;
+            local_failure(sink)?;
+            if let Ok((outcome, identity)) = offered {
+                match outcome {
+                    Downloaded::Location(location) => {
+                        let fetched = self
+                            .fetch_location(key, cap, lifetime, location, opts.local_budget, sink)
+                            .await;
+                        local_failure(sink)?;
+                        if let Ok(size) = fetched {
+                            return Ok((size, identity));
+                        }
                     }
-                } else {
-                    verify_location_download(&pack.bytes, &key)?;
-                    return Ok((pack.bytes, identity));
+                    Downloaded::Streamed(size) => return Ok((size, identity)),
                 }
             }
             self.remaining_request_timeout(DOWNLOAD_PACK, opts.local_budget)?;
             // The opt-in changes the signed request body. Build and sign the
             // fallback as a separate call, retaining the caller's ref hint.
-            let (pack, identity) = self
+            let fallback = self
                 .download_attempt(
                     key,
                     cap,
@@ -705,13 +807,21 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                         ..opts
                     },
                     false,
+                    sink,
                 )
-                .await?;
-            verify_location_download(&pack.bytes, &key)?;
-            return Ok((pack.bytes, identity));
+                .await;
+            local_failure(sink)?;
+            return match fallback? {
+                (Downloaded::Streamed(size), identity) => Ok((size, identity)),
+                (Downloaded::Location(_), _) => Err(Error::Invalid("download order")),
+            };
         }
-        let (pack, identity) = self.download_attempt(key, cap, opts, false).await?;
-        Ok((pack.bytes, identity))
+        let attempt = self.download_attempt(key, cap, opts, false, sink).await;
+        local_failure(sink)?;
+        match attempt? {
+            (Downloaded::Streamed(size), identity) => Ok((size, identity)),
+            (Downloaded::Location(_), _) => Err(Error::Invalid("download order")),
+        }
     }
 
     async fn pack_location_lifetime(&self) -> Option<u64> {
@@ -730,6 +840,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         lifetime
     }
 
+    /// Fetch a location into `sink`, returning its length once exactly that
+    /// many bytes arrived and hashed to `key`. Any other outcome is an error
+    /// the caller falls back from, unless the sink itself failed.
     async fn fetch_location(
         &self,
         key: Hash,
@@ -737,7 +850,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         lifetime: u64,
         location: crate::proto::DownloadPackLocation,
         local_budget: Option<(std::time::Instant, Duration)>,
-    ) -> Result<Vec<u8>, Error> {
+        sink: &mut dyn PackSink,
+    ) -> Result<u64, Error> {
         let size = location
             .total_bytes
             .ok_or(Error::Invalid("location size"))?;
@@ -770,21 +884,17 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             return Err(Error::Invalid("location URL"));
         }
         let timeout = self.remaining_request_timeout(DOWNLOAD_PACK, local_budget)?;
-        let bytes = self
-            .transport
-            .fetch_pack_location(
-                &url,
-                usize::try_from(size).map_err(|_| Error::Limit("pack download"))?,
-                timeout,
-            )
+        let mut checked = LocationSink::new(sink, size);
+        self.transport
+            .fetch_pack_location(&url, size, timeout, &mut checked)
             .await
             .map_err(Error::Transport)?;
         // Location bytes never honor a host's streaming hash-verification
         // override: an external host is untrusted until both checks pass.
-        if bytes.len() as u64 != size || kit_core::pack::pack_key(&bytes) != key {
+        if !checked.verified(&key) {
             return Err(Error::Invalid("pack location content commitment"));
         }
-        Ok(bytes)
+        Ok(size)
     }
 
     async fn download_attempt(
@@ -793,7 +903,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         cap: u64,
         opts: Opts<'_>,
         accept_location: bool,
-    ) -> Result<(crate::stream::Pack, Option<Identity>), Error> {
+        sink: &mut dyn PackSink,
+    ) -> Result<(Downloaded, Option<Identity>), Error> {
         let request = crate::proto::DownloadPackRequest {
             pack_id: Some(key.to_vec()),
             accept_location: accept_location.then_some(true),
@@ -810,8 +921,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let opts = Opts { limit, ..opts };
         let mut chunks = crate::stream::Chunks(std::iter::once(Ok(body)));
         let sink = crate::stream::Decoder::new(
-            crate::stream::Pack::new(key, cap).accept_locations(accept_location),
-            limit,
+            crate::stream::Pack::new(key, cap, sink).accept_locations(accept_location),
+            limit.min(crate::stream::DOWNLOAD_FRAME_MAX),
         );
         let (sink, identity, _, _) = self
             .stream_call(
@@ -823,7 +934,12 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                 sink,
             )
             .await?;
-        Ok((sink.sink, identity))
+        let mut pack = sink.sink;
+        let outcome = match pack.location.take() {
+            Some(location) => Downloaded::Location(location),
+            None => Downloaded::Streamed(pack.received()),
+        };
+        Ok((outcome, identity))
     }
 
     fn apply_ref_hint<B>(request: &mut Request<B>, hint: Option<&str>) -> Result<(), Error> {

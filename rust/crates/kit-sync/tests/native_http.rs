@@ -1141,7 +1141,12 @@ fn an_early_admission_reply_keeps_its_typed_challenge_after_upload_receiver_clos
     let destination = Destination::new(format!("http://{address}"), "default".to_owned()).unwrap();
     let client = Client::anonymous(&channel, destination).with_unsigned_writes();
     let key = kit_core::pack::pack_key(b"pack");
-    let result = http.block_on(client.upload_pack(&key, b"pack", None, None));
+    let result = http.block_on(client.upload_pack(
+        &key,
+        &kit_core::protocol::SliceBody(b"pack"),
+        None,
+        None,
+    ));
     finished_sender.send(()).unwrap();
     server.join().unwrap();
     assert!(
