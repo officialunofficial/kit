@@ -260,6 +260,175 @@ fn a_push_does_not_plan_a_wrong_span_of_a_chunk_the_walk_keeps_as_a_blob() {
     );
 }
 
+/// A manifest of `entries`, each a chunk id and the end of its span.
+fn manifest_of(s: &ObjectStore, entries: &[(Hash, u64)]) -> Hash {
+    let total = entries.last().map_or(0, |&(_, end)| end);
+    put(
+        s,
+        &Object::ChunkedBlob(
+            crate::object::ChunkedBlob::new(total, 0, entries.iter().copied()).unwrap(),
+        ),
+    )
+}
+
+/// Chunk heads the plan read since the last call.
+fn head_reads() -> usize {
+    crate::ops::graph::CHUNK_TYPE_READS.with(std::cell::Cell::take)
+}
+
+/// A chunk that the manifest it replaces lists with the same span length is
+/// not read: that manifest is held by the remote or checked in its own turn.
+/// Only the chunk the old manifest lacks is read.
+#[test]
+fn a_chunk_the_replaced_manifest_lists_with_the_same_span_is_not_read() {
+    let (_d, s) = store();
+    let one = put_blob(&s, chunk_content(1, 300));
+    let two = put_blob(&s, chunk_content(2, 400));
+    let three = put_blob(&s, chunk_content(3, 500));
+    let old = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let new = manifest_of(&s, &[(one, 300), (two, 700), (three, 1200)]);
+    let base = commit(&s, tree_of(&s, &[("f", old)]), &[], "old");
+    let c = commit(&s, tree_of(&s, &[("f", new)]), &[base], "new");
+    head_reads();
+    let plan = plan_pack(&s, c, Some(base)).unwrap();
+    assert_eq!(head_reads(), 1, "only the chunk the old manifest lacks");
+    assert!(plan.raw.contains(&three));
+    assert!(!plan.raw.contains(&one) && !plan.raw.contains(&two));
+}
+
+/// A chunk that the replaced manifest lists with another span length is
+/// read, so a wrong span in either manifest is found.
+#[test]
+fn a_chunk_the_replaced_manifest_lists_with_another_span_is_read() {
+    let (_d, s) = store();
+    let one = put_blob(&s, chunk_content(1, 300));
+    let two = put_blob(&s, chunk_content(2, 400));
+    let right = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let wrong = manifest_of(&s, &[(one, 400), (two, 800)]);
+
+    // The new manifest is wrong: the plan refuses it, as a fetch would.
+    let base = commit(&s, tree_of(&s, &[("f", right)]), &[], "right");
+    let c = commit(&s, tree_of(&s, &[("f", wrong)]), &[base], "wrong");
+    head_reads();
+    assert!(plan_pack(&s, c, Some(base)).is_err());
+    assert!(head_reads() >= 1);
+
+    // The old manifest is the wrong one: the new one is read where they
+    // differ, and passes. The second chunk has the same length in both.
+    let base = commit(&s, tree_of(&s, &[("g", wrong)]), &[], "wrong old");
+    let c = commit(&s, tree_of(&s, &[("g", right)]), &[base], "right new");
+    head_reads();
+    plan_pack(&s, c, Some(base)).unwrap();
+    assert_eq!(head_reads(), 1);
+
+    // A chunk that the old manifest lists twice with two lengths is never
+    // taken as known.
+    let twice = manifest_of(&s, &[(one, 300), (one, 500)]);
+    let single = manifest_of(&s, &[(one, 300)]);
+    let base = commit(&s, tree_of(&s, &[("h", twice)]), &[], "twice");
+    let c = commit(&s, tree_of(&s, &[("h", single)]), &[base], "once");
+    head_reads();
+    plan_pack(&s, c, Some(base)).unwrap();
+    assert_eq!(head_reads(), 1);
+}
+
+/// A chunk that the replaced manifest does not list is read, and a wrong span
+/// of it is refused.
+#[test]
+fn a_chunk_the_replaced_manifest_does_not_list_is_read() {
+    let (_d, s) = store();
+    let one = put_blob(&s, chunk_content(1, 300));
+    let two = put_blob(&s, chunk_content(2, 400));
+    let old = manifest_of(&s, &[(one, 300)]);
+    let base = commit(&s, tree_of(&s, &[("f", old)]), &[], "old");
+
+    let right = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let c = commit(&s, tree_of(&s, &[("f", right)]), &[base], "right");
+    head_reads();
+    plan_pack(&s, c, Some(base)).unwrap();
+    assert_eq!(head_reads(), 1);
+
+    // The second chunk holds 400 bytes. This manifest says 500.
+    let wrong = manifest_of(&s, &[(one, 300), (two, 800)]);
+    let c = commit(&s, tree_of(&s, &[("f", wrong)]), &[base], "wrong");
+    assert!(plan_pack(&s, c, Some(base)).is_err());
+
+    // With no replaced manifest every chunk is read.
+    let c = commit(&s, tree_of(&s, &[("other", right)]), &[], "first push");
+    head_reads();
+    plan_pack(&s, c, None).unwrap();
+    assert_eq!(head_reads(), 2);
+}
+
+/// A chunk that the walk keeps as an ordinary object is read as well.
+#[test]
+fn a_chunk_the_walk_keeps_as_an_object_is_read() {
+    let (_d, s) = store();
+    let one = put_blob(&s, chunk_content(1, 300));
+    let two = put_blob(&s, chunk_content(2, 400));
+    let right = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let c = commit(
+        &s,
+        tree_of(&s, &[("chunk", one), ("f", right)]),
+        &[],
+        "a chunk that is also a file",
+    );
+    head_reads();
+    plan_pack(&s, c, None).unwrap();
+    assert_eq!(head_reads(), 2);
+
+    let wrong = manifest_of(&s, &[(one, 400), (two, 800)]);
+    let c = commit(
+        &s,
+        tree_of(&s, &[("chunk", one), ("f", wrong)]),
+        &[],
+        "the same, with a wrong span",
+    );
+    assert!(plan_pack(&s, c, None).is_err());
+
+    // The replaced manifest lists the chunk with the same span, so the head
+    // is not read, whether or not the walk also keeps the chunk as a file.
+    let three = put_blob(&s, chunk_content(3, 500));
+    let old = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let new = manifest_of(&s, &[(one, 300), (two, 700), (three, 1200)]);
+    let base = commit(&s, tree_of(&s, &[("f", old)]), &[], "old");
+    let c = commit(
+        &s,
+        tree_of(&s, &[("chunk", one), ("f", new)]),
+        &[base],
+        "new",
+    );
+    head_reads();
+    plan_pack(&s, c, Some(base)).unwrap();
+    assert_eq!(head_reads(), 1, "only the third chunk");
+}
+
+/// The replaced manifest of a new commit is checked in its own turn, so a
+/// child that repeats its wrong span is refused: the skip trusts only what the
+/// plan checks, the remote holds, or a fetch refuses already.
+#[test]
+fn a_wrong_span_repeated_by_a_new_child_is_still_refused() {
+    let (_d, s) = store();
+    let one = put_blob(&s, chunk_content(1, 300));
+    let two = put_blob(&s, chunk_content(2, 400));
+    let right = manifest_of(&s, &[(one, 300), (two, 700)]);
+    let wrong = manifest_of(&s, &[(one, 400), (two, 800)]);
+    let three = put_blob(&s, chunk_content(3, 500));
+    let wrong_longer = manifest_of(&s, &[(one, 400), (two, 800), (three, 1300)]);
+    let base = commit(&s, tree_of(&s, &[("f", right)]), &[], "held");
+    // A new commit brings the wrong manifest, and its child repeats the span
+    // it gives the first two chunks.
+    let parent = commit(&s, tree_of(&s, &[("f", wrong)]), &[base], "wrong");
+    let child = commit(
+        &s,
+        tree_of(&s, &[("f", wrong_longer)]),
+        &[parent],
+        "repeats",
+    );
+    assert!(check_closure_present(&s, [&child]).is_err());
+    assert!(plan_pack(&s, child, Some(base)).is_err());
+}
+
 #[test]
 fn a_first_push_sends_the_whole_closure_and_is_self_contained() {
     let (_d, s) = store();

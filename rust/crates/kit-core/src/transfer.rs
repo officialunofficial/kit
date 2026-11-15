@@ -755,8 +755,9 @@ fn plan_pack_capped(
     // Then the chunks of every kept manifest, which the walk never counted.
     // They follow the other blobs, in manifest order.
     let mut memory = ChunkMemory::new(limits.chunk_memory);
-    // The walk checks each chunk as a fetch checks it, so a bad chunk fails
-    // the plan before anything is uploaded.
+    // The walk checks each chunk as a fetch checks it, except that it takes
+    // the length a replaced manifest states for the same chunk. A bad chunk
+    // fails the plan before anything is uploaded.
     walk.for_each_chunk(store, &mut memory, |_, _, _, chunk| {
         blobs.push(chunk);
         Ok(())

@@ -23,6 +23,7 @@
 //! manifest at the same path in a parent lists it or the plan already sends it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
@@ -324,11 +325,13 @@ impl PushWalk {
     /// Stream the chunks the plan has to send, manifest by manifest.
     ///
     /// Every chunk of every manifest is checked as a fetch checks it: a
-    /// `Blob` whose length is its span in that manifest. A chunk is then
-    /// skipped when the manifest it replaces lists it, when the walk keeps it
-    /// as an object, or when `memory` has seen it. The callback gets the
-    /// commit that brought the manifest, the manifest, the index of the chunk
-    /// in it and the chunk.
+    /// `Blob` whose length is its span in that manifest. The head of a chunk
+    /// is not read when the manifest it replaces lists the same chunk with the
+    /// same span length, as the replaced manifest is held or checked in its own
+    /// turn. A chunk is then skipped when the manifest it replaces lists it,
+    /// when the walk keeps it as an object, or when `memory` has seen it. The
+    /// callback gets the commit that brought the manifest, the manifest, the
+    /// index of the chunk in it and the chunk.
     ///
     /// # Errors
     ///
@@ -345,17 +348,22 @@ impl PushWalk {
             let Object::ChunkedBlob(blob) = store.read_object(&manifest.id)? else {
                 continue;
             };
-            let replaced: HashSet<Hash> = match manifest.old.map(|old| store.read_object(&old)) {
-                Some(Ok(Object::ChunkedBlob(old))) => old.into_chunks().into_iter().collect(),
-                Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => HashSet::new(),
+            let replaced: SpanLengths = match manifest.old.map(|old| store.read_object(&old)) {
+                Some(Ok(Object::ChunkedBlob(old))) => replaced_spans(&old),
+                Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => SpanLengths::default(),
                 Some(Err(error)) => return Err(error),
             };
             for (index, chunk) in (0u32..).zip(blob.chunks().iter().copied()) {
-                let len = memory.blob_len(store, &chunk, index)?;
-                blob.check_chunk_length(index, len)?;
-                if replaced.contains(&chunk)
-                    || self.objects.contains(&chunk)
-                    || !memory.first_sight(&chunk)
+                // The replaced manifest gives the chunk the same span length,
+                // so the chunk holds what it says (see `replaced_spans`). The
+                // head is read in every other case.
+                let span_len = blob.span(index).map(|(start, end)| end - start);
+                let listed = replaced.get(&chunk).copied();
+                if span_len.is_none() || listed != span_len {
+                    let len = memory.blob_len(store, &chunk, index)?;
+                    blob.check_chunk_length(index, len)?;
+                }
+                if listed.is_some() || self.objects.contains(&chunk) || !memory.first_sight(&chunk)
                 {
                     continue;
                 }
@@ -365,6 +373,71 @@ impl PushWalk {
         Ok(())
     }
 }
+
+/// The span length each chunk of `old` has in that manifest. A chunk that the
+/// manifest lists with two lengths maps to [`CONFLICTING_SPANS`]: no span
+/// length of a new manifest equals it, so the chunk is never taken as known.
+///
+/// A new manifest that gives a chunk this same length needs no read of the
+/// chunk's head. `old` is the manifest at the same path in a parent of the
+/// commit that brought the new one, so it is in the history of the pushed
+/// tip, and every fetch of that tip checks that history. A chunk is the same
+/// object whatever manifest lists it, so the new manifest is wrong about a
+/// chunk only if `old` is wrong about it too, and then every fetch of the tip
+/// is refused already. A manifest that a new commit brought is also checked
+/// by the plan itself: parents come before children, and the weighing of a
+/// split push sizes every new commit before anything is uploaded. A manifest
+/// of a held commit was written by the chunker of this store or checked by a
+/// fetch of it, or the remote refuses it already.
+fn replaced_spans(old: &ChunkedBlob) -> SpanLengths {
+    let mut spans = SpanLengths::with_capacity_and_hasher(old.chunks().len(), IdHash::default());
+    for (index, &chunk) in (0u32..).zip(old.chunks()) {
+        let len = old
+            .span(index)
+            .map_or(CONFLICTING_SPANS, |(start, end)| end - start);
+        spans
+            .entry(chunk)
+            .and_modify(|known| {
+                if *known != len {
+                    *known = CONFLICTING_SPANS;
+                }
+            })
+            .or_insert(len);
+    }
+    spans
+}
+
+/// Span lengths by chunk id.
+type SpanLengths = HashMap<Hash, u64, IdHash>;
+
+/// The hash of a map keyed by object ids. An id is a BLAKE3 digest, so its
+/// first eight bytes are as uniform as any hash of it. The map is built for
+/// each manifest of each walk and read for each of its chunks, so a hash of
+/// 32 bytes per key is the larger part of its cost. A key is a digest of
+/// content, so a bucket takes ids at random; grinding content to fill one
+/// bucket only slows the plan of the repository that holds it.
+type IdHash = BuildHasherDefault<IdHasher>;
+
+/// Takes the first eight bytes of a 32 byte id as the hash. Any other write,
+/// such as the length prefix of an array, leaves it as it is.
+#[derive(Debug, Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if let Some(head) = bytes.get(..8).filter(|_| bytes.len() == 32) {
+            self.0 = u64::from_le_bytes(head.try_into().unwrap_or_default());
+        }
+    }
+}
+
+/// The value of a chunk that a manifest lists with two span lengths. A span
+/// is at most the total size of a file, far below it.
+const CONFLICTING_SPANS: u64 = u64::MAX;
 
 fn read_commit(store: &ObjectStore, id: &Hash) -> Result<Option<(Hash, Vec<Hash>)>, StoreError> {
     Ok(match store.read_object(id)? {
@@ -641,4 +714,26 @@ impl Builder<'_> {
 #[cfg(test)]
 pub(super) fn take_counted() -> Vec<Hash> {
     COUNTED.with(|counted| std::mem::take(&mut *counted.borrow_mut()))
+}
+
+#[cfg(test)]
+mod id_hash_tests {
+    use std::hash::BuildHasher;
+
+    use super::IdHash;
+
+    /// Two ids that differ in the first eight bytes hash apart. A hash that
+    /// ignored the 32 byte write would put every id in one bucket.
+    #[test]
+    fn ids_hash_by_their_first_eight_bytes() {
+        let build = IdHash::default();
+        let mut one = [7_u8; 32];
+        let mut two = one;
+        two[0] = 8;
+        assert_ne!(build.hash_one(one), build.hash_one(two));
+        assert_eq!(build.hash_one(one), build.hash_one(one));
+        // The rest of an id does not change the hash.
+        one[31] = 9;
+        assert_eq!(build.hash_one([7_u8; 32]), build.hash_one(one));
+    }
 }

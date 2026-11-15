@@ -495,6 +495,8 @@ pub(crate) fn chunk_blob_len(
     chunk: &Hash,
     index: u32,
 ) -> Result<u64, StoreError> {
+    #[cfg(test)]
+    CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
     let (_, len) = store.object_head(chunk)?;
     Ok(len.ok_or(KitError::ChunkNotBlob { index })?)
 }
@@ -512,8 +514,6 @@ fn check_manifest_chunks(
         let len = if let Some(&len) = checked.get(&chunk) {
             len
         } else {
-            #[cfg(test)]
-            CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
             let len = chunk_blob_len(store, &chunk, index)?;
             if checked.len() < memory {
                 checked.insert(chunk, len);
@@ -527,9 +527,9 @@ fn check_manifest_chunks(
 
 #[cfg(test)]
 std::thread_local! {
-    // Chunk type reads in the presence check. Thread-local state keeps
-    // concurrently running unit tests independent.
-    static CHUNK_TYPE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    // Chunk head reads, by the presence check and by the push plan.
+    // Thread-local state keeps concurrently running unit tests independent.
+    pub(crate) static CHUNK_TYPE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // =====================================================================
