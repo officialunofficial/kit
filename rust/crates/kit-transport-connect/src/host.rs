@@ -326,6 +326,7 @@ impl RequestPolicy for HostPolicy<'_> {
                     .iter()
                     .map(|movement| {
                         let condition = match (movement.old, &movement.new) {
+                            (_, RefTarget::Delete) => GrantCondition::Delete,
                             (
                                 kit_core::refs::RefWriteCondition::Match(old),
                                 RefTarget::Set(new),
@@ -813,6 +814,17 @@ impl RemoteSource for HostSource<'_> {
     ) -> Result<kit_core::protocol::CommitOutcome, SourceError> {
         self.0
             .advance_refs_committing(head, hc, tip, packmap, pc, node, keys)
+            .map_err(|e| self.failure(e, false))
+    }
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        self.0
+            .delete_refs(head, head_expected, map, map_expected)
             .map_err(|e| self.failure(e, false))
     }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {

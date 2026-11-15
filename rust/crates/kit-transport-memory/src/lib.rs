@@ -196,6 +196,22 @@ impl Transport for MemoryTransport {
         Ok(())
     }
 
+    /// Remove `name` if it holds `expected`, under the lock that every ref
+    /// write takes. An absent ref or another value is a conflict.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        let mut g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        let current: Option<Hash> = g.refs.get(name).and_then(|wire| decode_ref_wire(wire));
+        if current != Some(*expected) {
+            return Err(TransportError::RefConflict);
+        }
+        g.refs.remove(name);
+        g.generation = g.generation.wrapping_add(1);
+        Ok(())
+    }
+
     /// The instance number and the count of committed ref writes. Both are
     /// read under the `Mutex`, so the pair names one state of the refs.
     fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
@@ -287,6 +303,33 @@ mod tests {
     // ------------------------------------------------------------------
     // Pack verb tests (5 tests)
     // ------------------------------------------------------------------
+
+    /// A delete removes the ref only while it holds the expected value, and
+    /// counts as a write for the cursor.
+    #[test]
+    fn delete_ref_needs_the_expected_value() {
+        let t = MemoryTransport::new();
+        let name = "refs/heads/main";
+        let (a, b) = ([1u8; 32], [2u8; 32]);
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+        t.update_ref(name, RefWriteCondition::Missing, &a).unwrap();
+        assert!(matches!(
+            t.delete_ref(name, &b),
+            Err(TransportError::RefConflict)
+        ));
+        assert_eq!(t.read_ref(name).unwrap(), Some(a));
+        let before = t.repo_cursor().unwrap();
+        t.delete_ref(name, &a).unwrap();
+        assert_eq!(t.read_ref(name).unwrap(), None);
+        assert_ne!(t.repo_cursor().unwrap(), before);
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+    }
 
     #[test]
     fn upload_and_download_pack() {

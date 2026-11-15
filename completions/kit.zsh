@@ -351,6 +351,7 @@ _kit() {
                     _arguments \
                         '(--tags)--all[mirror every local branch]' \
                         '(--all -u --set-upstream)--tags[push every local tag]' \
+                        '(--all --tags -f --force --force-with-lease -u --set-upstream)--delete[delete a remote branch or tag]' \
                         '(-f --force --force-with-lease)-f[overwrite the remote branch unconditionally]' \
                         '(-u --set-upstream)'{-u,--set-upstream}'[record the pushed remote as upstream]' \
                         '(--force --force-with-lease)--force[overwrite the remote branch unconditionally (skip CAS)]' \

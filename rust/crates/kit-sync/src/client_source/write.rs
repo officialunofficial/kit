@@ -864,6 +864,69 @@ impl<
         }
     }
 
+    /// `UpdateRef` with `delete` under `MATCH` (SPEC-TRANSPORT-CONNECT
+    /// §7.8). Another value or an absent ref is `failed_precondition`, a
+    /// [`SourceError::RefConflict`].
+    pub(super) fn write_delete_ref(&self, name: &str, expected: &Hash) -> Result<(), SourceError> {
+        let result = self
+            .write_call("UpdateRef", false, None, |identity| {
+                self.executor.block_on(self.client.delete_ref(
+                    name,
+                    RefWriteCondition::Match(*expected),
+                    identity,
+                ))
+            })
+            .map(|_| ());
+        match result {
+            Err(error) if remote_is(&error, "failed_precondition") => Err(SourceError::RefConflict),
+            other => other,
+        }
+    }
+
+    /// Delete a head and its chain ref in one `AdvanceRefs` with `delete`,
+    /// both under `MATCH` (SPEC-TRANSPORT-CONNECT §7.8): both go, or neither
+    /// does and the outcome names the ref that moved. A head without a chain
+    /// ref is deleted alone, through `UpdateRef`.
+    pub(super) fn write_delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<AdvanceOutcome, SourceError> {
+        let Some(map_expected) = map_expected else {
+            return match self.write_delete_ref(head, head_expected) {
+                Ok(()) => Ok(AdvanceOutcome::Committed),
+                Err(SourceError::RefConflict) => Ok(AdvanceOutcome::HeadConflict),
+                Err(error) => Err(error),
+            };
+        };
+        let mut completion = AdvanceCompletion::new(self.recovery);
+        let request = proto::AdvanceRefsRequest {
+            head_ref: Some(head.to_owned()),
+            head_expectation: Some(proto::RefExpectation::Match.into()),
+            head_expected_id: Some(head_expected.to_vec()),
+            packmap_ref: Some(map.to_owned()),
+            packmap_expectation: Some(proto::RefExpectation::Match.into()),
+            packmap_expected_id: Some(map_expected.to_vec()),
+            delete: Some(true),
+            ..Default::default()
+        };
+        let deadline = self
+            .client
+            .now_ms()
+            .map(|now| now.saturating_add(7 * 24 * 60 * 60 * 1000));
+        let response = self
+            .write_call("AdvanceRefs", false, deadline, |identity| {
+                self.executor
+                    .block_on(self.client.advance_refs(&request, identity))
+            })?
+            .value;
+        let outcome = advance_outcome(&response)?;
+        completion.finish(CommitOutcome::Advanced(outcome));
+        Ok(outcome)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn write_advance_refs_committing(
         &self,

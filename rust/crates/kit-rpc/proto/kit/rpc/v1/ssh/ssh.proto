@@ -171,7 +171,7 @@ message ReadRefResponse {
 message UpdateRef {
   string name = 1;
   bytes expected_id = 2;
-  bytes new_id = 3;            // empty new_id deletes the ref
+  bytes new_id = 3;            // empty new_id deletes the ref, under MATCH only
   kit.common.v1.RefExpectation expectation = 4;  // REQUIRED; UNSPECIFIED is a protocol error
 }
 

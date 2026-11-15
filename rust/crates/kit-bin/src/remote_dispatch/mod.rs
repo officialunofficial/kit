@@ -418,6 +418,19 @@ pub(crate) fn push_tags_with_source(
     transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
 }
 
+/// Delete one remote branch or tag; see [`transfer::push_delete_with_source`].
+pub(crate) fn push_delete_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    target: kit_sync::push::DeleteTarget,
+    terminal: &Terminal,
+) -> Result<kit_sync::push::DeletedRef, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (settings, observer) = push_inputs(&layout, None, terminal);
+    transfer::push_delete_with_source(cwd, source, remote, target, &settings, &observer)
+}
+
 /// Push one branch to the remote; see [`transfer::push_branch_tracked_with_source`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_branch_tracked_source(

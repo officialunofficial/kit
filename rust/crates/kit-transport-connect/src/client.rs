@@ -1140,6 +1140,23 @@ impl Transport for ConnectTransport {
     ) -> TransportResult<()> {
         self.with_client_source(|source| source.update_ref(name, condition, tip))
     }
+    /// `UpdateRef` with `delete` under `MATCH` (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.with_client_source(|source| source.delete_ref(name, expected))
+    }
+    /// One `AdvanceRefs` with `delete`: both refs go, or neither does
+    /// (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> TransportResult<CoreAdvanceOutcome> {
+        self.with_client_source(|source| {
+            RemoteSource::delete_refs(source, head, head_expected, map, map_expected)
+        })
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.with_client_source(|source| source.read_ref(name))
     }

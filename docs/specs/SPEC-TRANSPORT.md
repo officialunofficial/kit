@@ -44,6 +44,8 @@ internal `Mutex` so the trait object remains object-safe.
 | `upload_blob(bytes, key, head_ref)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
 | `download_blob(key, ref_hint, max)` | Fetch an auxiliary blob of at most `max` bytes. The default runs `download_pack` into an in-memory sink of limit `max`, so a blob whose length the transport knows first is refused before any byte of it is read. |
 | `update_ref(name, condition, hash)` | CAS ref write. |
+| `delete_ref(name, expected)` | Delete `name` while it holds `expected`. An absent ref or another value is `RefConflict`, with nothing deleted. There is no unconditional delete. |
+| `delete_refs(head, head_expected, map, map_expected)` | Delete a head and its chain ref (§7.3). The default deletes the head, then the chain ref, each under its own `Match`; once the head is gone the delete has happened, so a failure on the chain ref still reports `Committed`. A head that does not match is `HeadConflict`, with nothing deleted. With no `map_expected` the head goes alone. |
 | `advance_refs(head, head_condition, head_value, packmap, packmap_condition, packmap_value)` | Move a branch head and its packmap together (§7.2). The default writes the packmap, then the head, each under its own condition. |
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
 | `list_refs(prefix)` | List refs whose full name starts with `prefix`. Returned names have `prefix` stripped per SPEC-REFS §4. |
@@ -423,6 +425,26 @@ A conforming server MUST treat `REF_EXPECTATION_UNSPECIFIED` (the
 zero value, sent when the client omits the field) as a protocol
 error and reply with `ERROR_CODE_INVALID_REQUEST`.
 
+An empty (or absent) `new_id` deletes the ref, and only under
+`REF_EXPECTATION_MATCH`:
+
+| Request | Reply |
+|---|---|
+| empty `new_id`, `MATCH h`, ref holds `h` | The ref is deleted; `UpdateRefResponse`. |
+| empty `new_id`, `MATCH h`, ref holds another value | CAS mismatch, as below: the current value in `details`. |
+| empty `new_id`, `MATCH h`, ref absent | CAS mismatch with empty `details`. |
+| empty `new_id`, `ANY` or `MISSING` | `Error { code = ERROR_CODE_INVALID_REQUEST, message = "a delete (empty new_id) requires a MATCH expectation" }` |
+
+A delete runs the same checks as any other write: the name grammar, the
+`refs/` prefix and the server's write policy. An absent ref has no current
+value to put in `details`, so a delete refused with empty `details` is
+ambiguous; the client reads the ref, and treats an absent ref as a
+`RefConflict` and a present one as the server's refusal, surfaced with its
+message. A server that predates deletes refuses an empty `new_id` with
+"new_id must be 32 bytes"; when the ref exists, that refusal reaches the
+user as "deleting `<ref>` failed: remote error: new_id must be 32 bytes",
+and nothing is deleted.
+
 A server serves only ref names under `refs/` (SPEC-REFS §2). An
 `UpdateRef` or `ReadRef` whose name passes the SPEC-REFS §3 grammar but
 lies outside `refs/` is answered, before any storage access, with:
@@ -704,6 +726,13 @@ surfaces `TransportError::AccessDenied`.
 | `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. |
 
 `409` and `412` → `RefConflict`; never retried.
+
+`delete_ref` and `delete_refs` are refused with "the s3 transport cannot
+delete a ref conditionally", before any request. `push --delete` reads the
+refs first, so it sends reads but no write. The transport does not
+probe whether a store honors `If-Match` on `DELETE`, and a store that
+ignored it would delete without a check. So `push --delete` to an S3 remote
+deletes nothing, branch or tag.
 
 `upload_pack` carries no `RefWriteCondition` &mdash; packs are content-addressed
 and every write is one plain unconditional `PUT` (§6.7).
@@ -1034,6 +1063,55 @@ comes in one `kit serve` frame (`kit+ssh`, `kit+file`), a push refuses a
 create that would take the listing of `refs/tags/` or `refs/kit/tagmap/`
 past 960 KiB, counting each name without its prefix plus 48 bytes. A
 conflict reads that tag again and decides again, at most eight times.
+
+### 7.3 Deleting a head and its chain ref
+
+`push --delete` removes a branch `refs/heads/<b>` with its packmap
+`refs/kit/packmap/<b>`, or a tag `refs/tags/<t>` with its tag map
+`refs/kit/tagmap/<t>`. Both go under `Match`, the head first:
+
+- **Branch.** The head's expected value is the tracking ref, the lease a
+  push uses. A branch with no tracking ref is refused: fetch first. After
+  the delete, the tracking ref and its fetch record go too.
+- **Tag.** A tag has no tracking ref, so its expected value is the one just
+  read. The delete removes whatever the remote held a moment earlier, like
+  git's `push --delete`; the `Match` still stops it from removing a value
+  written in between.
+- **Chain ref.** Its expected value is the one just read. A tag whose tag
+  map name is no valid ref has no tag map and goes alone.
+- **A short name.** `push --delete <remote> <n>` deletes the remote's branch
+  or tag named `<n>`. A name the remote holds as both is refused; name
+  `refs/heads/<n>` or `refs/tags/<n>`. A name it holds as neither is still
+  a branch when a tracking ref names it, so that the tracking ref goes.
+
+A head that holds another value is a conflict, and nothing is deleted. A
+tag the remote does not hold is refused before any write, and so is a branch
+with no tracking ref. A head that is absent when the delete reaches it, a
+leased branch or a tag read a moment earlier, is gone, as asked: the delete
+reports it with no value, and drops a branch's tracking ref. This covers
+another writer's delete and a retried delete whose answer was lost; in the
+second case the chain ref may stay behind, as after a crash.
+
+Once the head is gone the delete has happened. A crash before the chain ref
+goes, or a lost CAS on it, leaves a chain ref without its head. A fetch reads
+it as a stale listing and publishes nothing for it, and the next push of that
+name appends to it: a branch push extends the chain it finds, and a tag push
+takes the leftover row of §7.2. No reader sees a head whose chain ref is
+missing, because the head goes first.
+
+A transport that deletes both refs in one transaction (Connect, one
+`AdvanceRefs` with `delete`, SPEC-TRANSPORT-CONNECT §7.8) deletes both or
+neither. When the chain ref moved, it reports `PackmapConflict`; the client
+reads the chain ref again and retries, at most eight times. S3 refuses every
+delete (§6.3).
+
+| Transport | `delete_ref` |
+|---|---|
+| Memory | `Mutex`-protected compare and remove |
+| File | Under the exclusive repo lock `<root>/.kit/refs/.lock`, which also lets it prune the empty directories the ref leaves; bumps the ref's stripe, so the cursor changes |
+| SSH | `UpdateRef` with an empty `new_id` under `MATCH` (§4.2.1) |
+| S3 | Refused before any request of its own (§6.3) |
+| Connect | `UpdateRef` with `delete`; `delete_refs` is one `AdvanceRefs` with `delete` |
 
 ---
 

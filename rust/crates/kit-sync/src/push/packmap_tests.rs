@@ -379,6 +379,9 @@ impl Transport for LostResponseTransport {
         }
         self.inner.update_ref(name, condition, hash)
     }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> Result<(), TransportError> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, TransportError> {
         self.inner.read_ref(name)
     }

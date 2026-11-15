@@ -87,6 +87,10 @@ pub enum SourceError {
     EnvelopeExpired,
     #[error("remote error: push deadline expired")]
     Deadline,
+    /// The source cannot do this operation safely and refused it before it
+    /// wrote anything.
+    #[error("{0}")]
+    Unsupported(&'static str),
     /// Raw Connect evidence survives even for absence and authorization failures.
     #[error("{}", remote_display(.0))]
     Remote(Box<RemoteFailure>),
@@ -162,6 +166,7 @@ impl From<TransportError> for SourceError {
             }
             TransportError::MembershipNotVisible => Self::MembershipNotVisible,
             TransportError::RetryAfter { ms } => Self::RetryAfter { ms },
+            TransportError::Unsupported(what) => Self::Unsupported(what),
             // Future, unclassified transport errors remain terminal.
             other => Self::RemoteError(other.to_string()),
         }

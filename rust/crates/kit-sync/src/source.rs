@@ -98,6 +98,19 @@ pub trait RemoteSource {
         );
         Err(SourceError::ProtocolError)
     }
+    /// Delete a head ref and then its chain ref, each under `Match`, as
+    /// [`Transport::delete_refs`] defines it. `map_expected` `None` deletes
+    /// the head alone. The default refuses, as the other write verbs do.
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        let _ = (head, head_expected, map, map_expected);
+        Err(SourceError::ProtocolError)
+    }
     /// Remote upload bounds, unchanged from the transport contract.
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         kit_core::protocol::UploadLimits::default()
@@ -251,6 +264,17 @@ impl RemoteSource for TransportSource<'_> {
             )
             .map_err(Into::into)
     }
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        self.transport
+            .delete_refs(head, head_expected, map, map_expected)
+            .map_err(Into::into)
+    }
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.transport.upload_limits()
     }
@@ -376,6 +400,9 @@ mod tests {
             unreachable!()
         }
         fn update_ref(&self, _: &str, _: RefWriteCondition, _: &Hash) -> TransportResult<()> {
+            self.take()
+        }
+        fn delete_ref(&self, _: &str, _: &Hash) -> TransportResult<()> {
             self.take()
         }
         fn read_ref(&self, _: &str) -> TransportResult<Option<Hash>> {

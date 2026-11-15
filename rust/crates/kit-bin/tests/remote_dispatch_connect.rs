@@ -180,6 +180,41 @@ impl TestService {
         }
         Ok(())
     }
+
+    /// `AdvanceRefs` with `delete`: both refs under `MATCH`, both checked
+    /// (the packmap's conflict reported first) before the head, then the
+    /// packmap, goes.
+    fn delete_refs(
+        &self,
+        msg: generated::AdvanceRefsRequest,
+    ) -> ServiceResult<generated::AdvanceRefsResponse> {
+        let expected = |expectation, id| match wire_to_condition(expectation, id)? {
+            RefWriteCondition::Match(expected) => Ok(expected),
+            _ => Err(ConnectError::invalid_argument("a delete needs MATCH")),
+        };
+        let head = msg.head_ref.unwrap_or_default();
+        let head_expected = expected(msg.head_expectation, msg.head_expected_id)?;
+        let map = msg.packmap_ref.unwrap_or_default();
+        let map_expected = expected(msg.packmap_expectation, msg.packmap_expected_id)?;
+        let read = |name: &str| self.inner.read_ref(name).map_err(to_connect_error);
+        let outcome = if read(&map)? != Some(map_expected) {
+            generated::AdvanceOutcome::PackmapConflict
+        } else if read(&head)? != Some(head_expected) {
+            generated::AdvanceOutcome::HeadConflict
+        } else {
+            self.inner
+                .delete_ref(&head, &head_expected)
+                .map_err(to_connect_error)?;
+            self.inner
+                .delete_ref(&map, &map_expected)
+                .map_err(to_connect_error)?;
+            generated::AdvanceOutcome::Committed
+        };
+        Ok(Response::new(generated::AdvanceRefsResponse {
+            outcome: Some(outcome.into()),
+            ..Default::default()
+        }))
+    }
 }
 
 #[allow(refining_impl_trait)]
@@ -385,6 +420,15 @@ impl generated::TransportService for TestService {
         let msg = request.to_owned_message();
         let name = msg.name.unwrap_or_default();
         let condition = wire_to_condition(msg.expectation, msg.expected_id)?;
+        if msg.delete == Some(true) {
+            let RefWriteCondition::Match(expected) = condition else {
+                return Err(ConnectError::invalid_argument("a delete needs MATCH"));
+            };
+            self.inner
+                .delete_ref(&name, &expected)
+                .map_err(to_connect_error)?;
+            return Ok(Response::new(generated::UpdateRefResponse::default()));
+        }
         let new_id = to_hash(msg.new_id)?;
         self.inner
             .update_ref(&name, condition, &new_id)
@@ -409,6 +453,9 @@ impl generated::TransportService for TestService {
             );
         }
         let msg = request.to_owned_message();
+        if msg.delete == Some(true) {
+            return self.delete_refs(msg);
+        }
         let head_ref = msg.head_ref.unwrap_or_default();
         let head_condition = wire_to_condition(msg.head_expectation, msg.head_expected_id)?;
         let head_new = to_hash(msg.head_new_id)?;
@@ -1853,6 +1900,9 @@ impl Transport for ResetBeforeAdvance<'_> {
         self.interleave();
         self.inner.update_ref(name, condition, tip)
     }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
     }
@@ -2147,6 +2197,144 @@ fn cli_ticketed_push_tags_then_clone_verifies() {
         );
     }
     kit(&clone, &["verify", "v2"]);
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+/// `push --delete` over Connect deletes a branch and a tag, each with its
+/// chain ref in one `AdvanceRefs`, and drops the branch's tracking ref.
+#[test]
+#[allow(clippy::too_many_lines)] // one server, each delete case in turn
+fn cli_push_delete_removes_a_branch_and_a_tag_with_their_chain_refs() {
+    let (src, _tip_hex) = source_repo_with_one_commit();
+    let backend = Arc::new(MemoryTransport::new());
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let config_path = src.path().join(".kit/config");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\nremote.origin.url = ");
+    config.push_str(&url);
+    config.push_str("\nremote.origin.type = http\n");
+    std::fs::write(config_path, config).unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(xdg.path().join("kit")).unwrap();
+    std::fs::write(
+        xdg.path().join("kit/config"),
+        format!("transport_auth = envelope\ntrusted_remote_endpoint = {url}\n"),
+    )
+    .unwrap();
+    let kit = |args: &[&str]| {
+        Command::new(kit_bin())
+            .args(args)
+            .current_dir(src.path())
+            .env("XDG_CONFIG_HOME", xdg.path())
+            .env("HOME", xdg.path())
+            .output()
+            .unwrap()
+    };
+    let ok = |out: &std::process::Output, what: &str| {
+        assert!(
+            out.status.success(),
+            "{what}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    ok(&kit(&["push", "origin"]), "push");
+    ok(&kit(&["branch", "topic"]), "branch");
+    ok(&kit(&["push", "origin", "topic"]), "push topic");
+    ok(&kit(&["tag", "v1"]), "tag");
+    ok(&kit(&["push", "origin", "v1"]), "push v1");
+    let layout = kit_core::layout::RepoLayout::single(src.path());
+    let tracking = || kit_core::refs::read_remote_ref(&layout, "origin", "topic").unwrap();
+    assert!(tracking().is_some());
+    for name in [
+        "refs/heads/topic",
+        "refs/kit/packmap/topic",
+        "refs/tags/v1",
+        "refs/kit/tagmap/v1",
+    ] {
+        assert!(backend.read_ref(name).unwrap().is_some(), "{name}");
+    }
+    calls.lock().unwrap().clear();
+
+    let out = kit(&["push", "--delete", "origin", "topic"]);
+    ok(&out, "delete topic");
+    assert!(String::from_utf8_lossy(&out.stderr).contains(" - [deleted]         refs/heads/topic"));
+    let out = kit(&["push", "--format", "json", "--delete", "origin", "v1"]);
+    ok(&out, "delete v1");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["deleted"], "refs/tags/v1");
+
+    for name in [
+        "refs/heads/topic",
+        "refs/kit/packmap/topic",
+        "refs/tags/v1",
+        "refs/kit/tagmap/v1",
+    ] {
+        assert_eq!(backend.read_ref(name).unwrap(), None, "{name}");
+    }
+    assert!(backend.read_ref("refs/heads/main").unwrap().is_some());
+    assert_eq!(tracking(), None);
+    assert!(kit_core::refs::read_tag(&layout, "v1").unwrap().is_some());
+    {
+        let calls = calls.lock().unwrap();
+        let writes: Vec<_> = calls
+            .iter()
+            .map(|call| call.procedure)
+            .filter(|p| matches!(*p, "AdvanceRefs" | "UpdateRef"))
+            .collect();
+        assert_eq!(writes, ["AdvanceRefs", "AdvanceRefs"], "{calls:?}");
+    }
+
+    // A branch that moved since the last fetch is not deleted.
+    let main = backend.read_ref("refs/heads/main").unwrap().unwrap();
+    let main_map = backend.read_ref("refs/kit/packmap/main").unwrap();
+    let moved = [7u8; 32];
+    backend
+        .update_ref("refs/heads/main", RefWriteCondition::Match(main), &moved)
+        .unwrap();
+    let out = kit(&["push", "--delete", "origin", "main"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("refs/heads/main on the remote is not at the value"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(backend.read_ref("refs/heads/main").unwrap(), Some(moved));
+    assert_eq!(backend.read_ref("refs/kit/packmap/main").unwrap(), main_map);
+    assert_eq!(
+        kit_core::refs::read_remote_ref(&layout, "origin", "main").unwrap(),
+        Some(main)
+    );
+
+    // A tag with no tag map goes alone, through `UpdateRef` with `delete`.
+    backend
+        .update_ref("refs/tags/v9", RefWriteCondition::Missing, &main)
+        .unwrap();
+    calls.lock().unwrap().clear();
+    ok(
+        &kit(&["push", "--delete", "origin", "refs/tags/v9"]),
+        "delete v9",
+    );
+    assert_eq!(backend.read_ref("refs/tags/v9").unwrap(), None);
+    assert!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.procedure == "UpdateRef")
+    );
+
+    // A second delete of the same branch finds no tracking ref to lease on.
+    let out = kit(&["push", "--delete", "origin", "refs/heads/topic"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no tracking ref for 'topic'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = shutdown.send(());
     handle.join().unwrap();
 }

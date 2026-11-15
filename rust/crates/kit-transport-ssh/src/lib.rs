@@ -478,6 +478,55 @@ impl Transport for SshTransport {
         })
     }
 
+    /// `UpdateRef` with an empty `new_id` under `MATCH` (SPEC-TRANSPORT
+    /// §4.2.1). A conflict on another value carries the current id in
+    /// `details` and is [`TransportError::RefConflict`]. A conflict on an
+    /// absent ref carries empty `details`, as every other `INVALID_REQUEST`
+    /// refusal does, so the ref is read to tell them apart: absent, the
+    /// delete is a conflict; present, the refusal is surfaced as the server
+    /// gave it. A server that predates deletes refuses with
+    /// "`new_id` must be 32 bytes", and that is what the caller sees.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.into()));
+        }
+        if name.len() > MAX_REF_NAME {
+            return Err(TransportError::InvalidRef("ref name too long".into()));
+        }
+        let condition = RefWriteCondition::Match(*expected);
+        let refused = self.with_retry(|io| {
+            let (expected_id, expectation) = cond_to_wire(condition);
+            let req = SshFrame {
+                body: Some(ssh_frame::Body::UpdateRef(Box::new(
+                    UpdateRef::default()
+                        .with_name(name)
+                        .with_expected_id(expected_id)
+                        .with_new_id(Vec::new())
+                        .with_expectation(expectation),
+                ))),
+                ..Default::default()
+            };
+            write_child_frame_or_err(io, req)?;
+            let resp = read_child_frame_or_err(io)?;
+            match resp.body {
+                Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(None),
+                Some(ssh_frame::Body::Error(e)) => Ok(Some(*e)),
+                other => Err(unexpected_frame("ssh", "UpdateRefResponse", other)),
+            }
+        })?;
+        let Some(refused) = refused else {
+            return Ok(());
+        };
+        let invalid_request = refused.code.is_some_and(|c| c == ErrorCode::InvalidRequest);
+        let error = map_update_ref_error(refused, condition, "ssh");
+        if matches!(error, TransportError::RefConflict)
+            || (invalid_request && self.read_ref(name)?.is_none())
+        {
+            return Err(TransportError::RefConflict);
+        }
+        Err(error)
+    }
+
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         if !validate_ref_name(name) {
             return Err(TransportError::InvalidRef(name.into()));

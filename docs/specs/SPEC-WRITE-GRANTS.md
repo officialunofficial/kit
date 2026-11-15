@@ -740,7 +740,9 @@ determines the required flag from the request and the ref's state at
   `permission_denied` with nothing committed.
 - The `d` flag governs ref deletion through `UpdateRef` and
   `AdvanceRefs`. A deployment MAY refuse deletion outright
-  (SPEC-TRANSPORT-CONNECT §7.8).
+  (SPEC-TRANSPORT-CONNECT §7.8). A client that deletes a head with its
+  chain ref (SPEC-TRANSPORT §7.3) selects a grant with `d` on the head;
+  the chain ref adds no flag (§8.3).
 - `BeginUpload` names the ref its ticket will advance. It needs `write`
   and a ref-scope entry that matches that ref, with any flag. It changes
   no ref, so no flag is required.

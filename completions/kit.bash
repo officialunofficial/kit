@@ -105,7 +105,7 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--all -p --prune --tags --no-tags --no-verify-signatures --format -q --quiet --help" -- "$cur") )
             ;;
         push)
-            COMPREPLY=( $(compgen -W "--all --tags -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "--all --tags --delete -f --force --force-with-lease -u --set-upstream --dry-run --help" -- "$cur") )
             ;;
         clone)
             COMPREPLY=( $(compgen -W "--sparse --tags --no-tags --help" -- "$cur") )

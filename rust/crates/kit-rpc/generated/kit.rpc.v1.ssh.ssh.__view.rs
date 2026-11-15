@@ -2943,7 +2943,7 @@ pub struct UpdateRefView<'a> {
     pub name: ::core::option::Option<&'a str>,
     /// Field 2: `expected_id`
     pub expected_id: ::core::option::Option<&'a [u8]>,
-    /// empty new_id deletes the ref
+    /// empty new_id deletes the ref, under MATCH only
     ///
     /// Field 3: `new_id`
     pub new_id: ::core::option::Option<&'a [u8]>,
@@ -3188,7 +3188,7 @@ impl UpdateRefOwnedView {
     pub fn expected_id(&self) -> ::core::option::Option<&'_ [u8]> {
         self.0.reborrow().expected_id
     }
-    /// empty new_id deletes the ref
+    /// empty new_id deletes the ref, under MATCH only
     ///
     /// Field 3: `new_id`
     #[must_use]

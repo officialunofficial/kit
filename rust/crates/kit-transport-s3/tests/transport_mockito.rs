@@ -68,6 +68,38 @@ fn build_transport_with_prefix(endpoint: &str, prefix: &str) -> S3Transport {
     t
 }
 
+// -- deletes -----------------------------------------------------------------
+
+/// Every delete is refused, a head alone or a head with its chain ref, and
+/// no request reaches the store.
+#[test]
+fn every_delete_is_refused_before_any_request() {
+    let mut server = mockito::Server::new();
+    let none: Vec<_> = ["GET", "HEAD", "PUT", "POST", "DELETE"]
+        .into_iter()
+        .map(|method| {
+            server
+                .mock(method, mockito::Matcher::Any)
+                .expect(0)
+                .create()
+        })
+        .collect();
+    let t = build_transport(&server.url());
+    let refused = |e: TransportError| matches!(e, TransportError::Unsupported(m) if m == kit_transport_s3::S3_DELETE_REFUSED);
+    assert!(refused(
+        t.delete_ref("refs/heads/main", &sample_hash()).unwrap_err()
+    ));
+    for map in [Some(&sample_hash()), None] {
+        assert!(refused(
+            t.delete_refs("refs/tags/v1", &sample_hash(), "refs/kit/tagmap/v1", map,)
+                .unwrap_err()
+        ));
+    }
+    for mock in none {
+        mock.assert();
+    }
+}
+
 // -- uploadPack --------------------------------------------------------------
 
 #[test]

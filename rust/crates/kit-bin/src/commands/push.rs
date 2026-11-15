@@ -15,7 +15,7 @@ use std::io::Write;
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
 use kit_core::protocol::UploadLimits;
-use kit_sync::push::{TagPushOutcome, TagSelection};
+use kit_sync::push::{DeleteTarget, TagPushOutcome, TagSelection};
 use libkit::push::{self, PushLease};
 
 use crate::clap_args;
@@ -47,10 +47,21 @@ struct PushOpts {
     /// a `refs/heads/` ref.
     /// A local tag, as `<tag>` or `refs/tags/<tag>`, pushes that tag under
     /// its own name; a name that is both a branch and a tag needs its full ref.
-    /// Wildcards, a leading `+`, an empty `<src>` (a delete) and other refs
-    /// are errors. Needs a `<remote>`.
+    /// Wildcards, a leading `+`, an empty `<src>` (use --delete) and other
+    /// refs are errors. Needs a `<remote>`.
     #[arg(requires = "remote", conflicts_with = "all")]
     refspec: Option<String>,
+    /// Delete the remote branch or tag `<refspec>` with its chain ref. A
+    /// branch is deleted only while it holds its tracking ref's value, and
+    /// the tracking ref goes too; a tag only while it holds the value just
+    /// read. A short name the remote holds as both a branch and a tag needs
+    /// its full ref. An s3 remote refuses every delete.
+    #[arg(
+        long,
+        requires = "refspec",
+        conflicts_with_all = ["all", "tags", "force", "force_with_lease", "set_upstream"]
+    )]
+    delete: bool,
     /// Mirror every local branch instead of just the current one.
     #[arg(long)]
     all: bool,
@@ -125,6 +136,9 @@ pub fn run(args: &[String]) -> u8 {
     }
     if opts.tags {
         return push_tags(&layout, &cfg, &opts, TagSelection::All);
+    }
+    if opts.delete {
+        return push_delete(&layout, &cfg, &opts);
     }
     match opts
         .refspec
@@ -269,6 +283,103 @@ fn push_tags(
     }
     if rejected > 0 {
         return exit::GENERAL_ERROR;
+    }
+    exit::OK
+}
+
+/// The ref `--delete` names: a full `refs/heads/` or `refs/tags/` name, or a
+/// short name that the remote resolves.
+fn delete_target(spec: &str) -> DeleteTarget {
+    if let Some(branch) = spec.strip_prefix("refs/heads/") {
+        DeleteTarget::Branch(branch.to_owned())
+    } else if let Some(tag) = spec.strip_prefix("refs/tags/") {
+        DeleteTarget::Tag(tag.to_owned())
+    } else {
+        DeleteTarget::Name(spec.to_owned())
+    }
+}
+
+/// `--delete <remote> <name>`: delete one remote branch or tag.
+fn push_delete(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -> u8 {
+    let json = matches!(opts.format, PushFormat::Json);
+    let spec = opts.refspec.as_deref().unwrap_or_default();
+    let resolved = match push::plan_all(cfg, opts.remote.as_deref()) {
+        Ok(resolved) => resolved,
+        Err(e) => return plan_failure(e, json),
+    };
+    if opts.dry_run {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "(dry-run) would delete {spec} on {} ({})",
+            resolved.name, resolved.endpoint
+        );
+        if json {
+            let mut obj = JsonObject::new();
+            obj.field_bool("ok", true)
+                .field_bool("dry_run", true)
+                .field_str("remote", &resolved.name)
+                .field_str("endpoint", &resolved.endpoint)
+                .field_str("delete", spec);
+            emit_json_stdout(obj);
+        }
+        return exit::OK;
+    }
+    let progress = crate::progress::start(
+        "Deleting",
+        None,
+        crate::progress::should_report(opts.quiet),
+        opts.quiet,
+    );
+    let remote = match remote_dispatch::open_trusted_for_push(
+        &resolved.endpoint,
+        &resolved.name,
+        resolved.repo_chosen,
+        cfg,
+        layout,
+        progress.terminal(),
+    ) {
+        Ok(remote) => remote,
+        Err(libkit::transfer::Error::UntrustedRemote(msg)) => {
+            return emit_err_json(&msg, exit::CONFIG_ERROR, json);
+        }
+        Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
+    };
+    let outcome = {
+        let outcome = remote
+            .tx
+            .with_source(|source| {
+                remote_dispatch::push_delete_with_source(
+                    layout.worktree_root(),
+                    source,
+                    &resolved.name,
+                    delete_target(spec),
+                    progress.terminal(),
+                )
+            })
+            .and_then(|result| result);
+        drop(progress);
+        outcome
+    };
+    let deleted = match outcome {
+        Ok(deleted) => deleted,
+        Err(libkit::transfer::Error::Interrupted) => {
+            return emit_err_json("push: interrupted; re-run to retry", exit::TEMPFAIL, json);
+        }
+        Err(e) => return emit_push_error(e, None, json),
+    };
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(stderr, "To {}", resolved.endpoint);
+    let _ = writeln!(stderr, " - [deleted]         {}", deleted.name);
+    drop(stderr);
+    if json {
+        let mut obj = JsonObject::new();
+        obj.field_bool("ok", true)
+            .field_str("remote", &resolved.name)
+            .field_str("endpoint", &resolved.endpoint)
+            .field_str("deleted", &deleted.name)
+            .field_opt_hash("old", deleted.value.as_ref());
+        emit_json_stdout(obj);
     }
     exit::OK
 }

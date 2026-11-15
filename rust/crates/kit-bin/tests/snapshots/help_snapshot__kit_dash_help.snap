@@ -187,7 +187,7 @@ commands:
                     stops before committing; finish with `kit commit` or
                     `kit merge --continue`; -m overrides the merge message;
                     --format=json emits a JSON outcome object)
-  push [<remote> [<src>:<dst>|<branch>]] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run] [--format=json]
+  push [<remote> [<src>:<dst>|<branch>]] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--delete <remote> <ref>] [--dry-run] [--format=json]
                     Push current branch to its upstream (--all mirrors every
                     branch; -u records the upstream; prints git's `To <url>` +
                     ref-update summary, or `Everything up-to-date`;
