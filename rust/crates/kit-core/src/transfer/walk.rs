@@ -23,7 +23,6 @@
 //! manifest at the same path in a parent lists it or the plan already sends it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
 
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
@@ -390,7 +389,10 @@ impl PushWalk {
 /// of a held commit was written by the chunker of this store or checked by a
 /// fetch of it, or the remote refuses it already.
 fn replaced_spans(old: &ChunkedBlob) -> SpanLengths {
-    let mut spans = SpanLengths::with_capacity_and_hasher(old.chunks().len(), IdHash::default());
+    let mut spans = SpanLengths::with_capacity_and_hasher(
+        old.chunks().len(),
+        foldhash::fast::RandomState::default(),
+    );
     for (index, &chunk) in (0u32..).zip(old.chunks()) {
         let len = old
             .span(index)
@@ -407,33 +409,10 @@ fn replaced_spans(old: &ChunkedBlob) -> SpanLengths {
     spans
 }
 
-/// Span lengths by chunk id.
-type SpanLengths = HashMap<Hash, u64, IdHash>;
-
-/// The hash of a map keyed by object ids. An id is a BLAKE3 digest, so its
-/// first eight bytes are as uniform as any hash of it. The map is built for
-/// each manifest of each walk and read for each of its chunks, so a hash of
-/// 32 bytes per key is the larger part of its cost. A key is a digest of
-/// content, so a bucket takes ids at random; grinding content to fill one
-/// bucket only slows the plan of the repository that holds it.
-type IdHash = BuildHasherDefault<IdHasher>;
-
-/// Takes the first eight bytes of a 32 byte id as the hash. Any other write,
-/// such as the length prefix of an array, leaves it as it is.
-#[derive(Debug, Default)]
-struct IdHasher(u64);
-
-impl Hasher for IdHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        if let Some(head) = bytes.get(..8).filter(|_| bytes.len() == 32) {
-            self.0 = u64::from_le_bytes(head.try_into().unwrap_or_default());
-        }
-    }
-}
+/// Span lengths by chunk id. A replaced manifest can come from a fetched
+/// repository, so its ids are not trusted to spread: the map is keyed by a
+/// seed of this process, which no content can be ground against ahead of time.
+type SpanLengths = HashMap<Hash, u64, foldhash::fast::RandomState>;
 
 /// The value of a chunk that a manifest lists with two span lengths. A span
 /// is at most the total size of a file, far below it.
@@ -714,26 +693,4 @@ impl Builder<'_> {
 #[cfg(test)]
 pub(super) fn take_counted() -> Vec<Hash> {
     COUNTED.with(|counted| std::mem::take(&mut *counted.borrow_mut()))
-}
-
-#[cfg(test)]
-mod id_hash_tests {
-    use std::hash::BuildHasher;
-
-    use super::IdHash;
-
-    /// Two ids that differ in the first eight bytes hash apart. A hash that
-    /// ignored the 32 byte write would put every id in one bucket.
-    #[test]
-    fn ids_hash_by_their_first_eight_bytes() {
-        let build = IdHash::default();
-        let mut one = [7_u8; 32];
-        let mut two = one;
-        two[0] = 8;
-        assert_ne!(build.hash_one(one), build.hash_one(two));
-        assert_eq!(build.hash_one(one), build.hash_one(one));
-        // The rest of an id does not change the hash.
-        one[31] = 9;
-        assert_eq!(build.hash_one([7_u8; 32]), build.hash_one(one));
-    }
 }
