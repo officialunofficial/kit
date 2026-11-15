@@ -3301,9 +3301,10 @@ fn a_recreated_remote_never_matches_an_old_cursor() {
 
 /// An unchanged cursor checks that the object of each tracked tip is in the
 /// store, not the closure below it. An object below a tip that the store
-/// lost stays missing through such a fetch. The next fetch that does its
-/// full work, because the cursor changed or no record matches, checks the
-/// closure and fetches the chain again.
+/// lost stays missing through such a fetch, and through one that does its
+/// full work: its closure check stops at the tracking tip. Once no tracking
+/// ref names that tip, a fetch checks the whole closure and fetches the chain
+/// again.
 #[test]
 fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     let remote = Remote::new();
@@ -3329,7 +3330,12 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
-    assert!(store.contains(&blob), "a full fetch heals the closure");
+    assert!(!store.contains(&blob), "the check stops at the tracking tip");
+
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(store.contains(&blob), "a fetch with no anchor heals the closure");
 }
 
 // ---- A pull writes only what the new tip changed ------------------------

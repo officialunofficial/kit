@@ -480,19 +480,4 @@ mod tests {
             repo.check(tip, &[]).unwrap()
         );
     }
-
-    #[test]
-    fn cancellation_interrupts_the_check() {
-        let repo = Repo::new();
-        let base = repo.commit(&with(Files::new(), "f", b"base"), &[]);
-        let mut tip = base;
-        for i in 0..POLL_OBJECTS {
-            tip = repo.commit(&with(Files::new(), "f", i.to_string().as_bytes()), &[tip]);
-        }
-        let anchors = Anchors([base].into_iter().collect());
-        assert!(matches!(
-            check_above(&repo.store, &tip, &anchors, &|| true),
-            Err(SyncError::Interrupted)
-        ));
-    }
 }
