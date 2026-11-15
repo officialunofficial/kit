@@ -167,6 +167,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged before it sweeps or writes anything, and refuses with the new
   `RestoreError::UnsweptPath` when one holds an untracked path the sweep
   would remove, where it trusted its caller's check.
+- A push reads and compresses a batch of large objects on all cores, as it
+  does a batch of many small ones. A batch is still at most 64 MiB.
 
 ### Removed
 
