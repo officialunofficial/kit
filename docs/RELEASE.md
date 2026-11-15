@@ -21,8 +21,8 @@ Contents:
 
 A single `vX.Y.Z` tag drives the binary release through
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
-The same workflow publishes the `kit-wasm` package to npm. A maintainer
-publishes the crates to crates.io by hand from the same tag.
+The same workflow publishes the `kit-wasm` package to npm and the workspace
+crates to crates.io.
 
 All three steps use the same signed tag. Before `release.yml` publishes anything,
 it verifies that the tag is strict semver, annotated, GPG-signed by an
@@ -75,7 +75,8 @@ allowlisted release fingerprint, and points at a commit reachable from
    [Publishing to npm](#publishing-to-npm).
 
 3. **crates.io** &mdash; every workspace crate without `publish = false`, in
-   dependency order. See [Publishing to crates.io](#publishing-to-cratesio).
+   dependency order, by the `publish-crates` job. See
+   [Publishing to crates.io](#publishing-to-cratesio).
 
 ## Pre-release checklist
 
@@ -123,6 +124,11 @@ Run top to bottom. Do not skip steps.
 - [ ] The trusted publisher of `@officialunofficial/kit-wasm` on npm names
       `release.yml` and the environment `npm` (see
       [Publishing to npm](#publishing-to-npm)).
+- [ ] Every publishable crate has a trusted publisher on crates.io that names
+      `release.yml` and the environment `crates-io`, and the GitHub environment
+      `crates-io` exists and allows only `v*` tags (see
+      [Publishing to crates.io](#one-time-setup)). Without it, the
+      `publish-crates` job fails after the GitHub Release exists.
 - [ ] `KIT_RELEASE_GPG_FINGERPRINTS` repo/org Actions variable contains the
       release tag signing key fingerprint.
 - [ ] The release tag signing public key is published to `keys.openpgp.org` or
@@ -155,6 +161,12 @@ Run top to bottom. Do not skip steps.
       succeeds for at least one archive.
 - [ ] The `publish-npm` job succeeded, and `npm view
       @officialunofficial/kit-wasm@X.Y.Z version` prints `X.Y.Z`.
+- [ ] The `publish-crates` job succeeded, and `cargo info kit-core@X.Y.Z`
+      (or the crate page) shows the version for every crate in
+      [the table](#what-publishes-vs-what-doesnt). If either publish job failed,
+      re-run the failed job alone (see
+      [Rerun a failed publish](#rerun-a-failed-publish)). Do not move on while
+      npm and crates.io hold different versions.
 - [ ] `npm audit signatures` passes in a project that installs
       `@officialunofficial/kit-wasm@X.Y.Z`. It checks the registry signature
       and the provenance attestation.
@@ -245,7 +257,7 @@ disagree, fix the script:
    `origin/main`.
 5. Watch the workflows. `release.yml` job order is:
    `validate-release-tag` → `build` (× 4 archs) → `sbom` / `third-party-notices` (parallel) →
-   `release` → `publish-npm`.
+   `release` → `publish-npm` and `publish-crates` (the last two run in parallel).
 6. Run the [smoke test](#smoke-test).
 
 ### The release PR
@@ -260,17 +272,44 @@ entry to `CHANGELOG.md`. It checks the public API for breaking changes with
 `cargo-semver-checks`. Edit the PR if the entry needs better wording.
 
 release-plz does not tag, publish or create a GitHub release. After the merge,
-a maintainer cuts the signed tag and publishes the crates by hand. The
+a maintainer cuts the signed tag and the `release.yml` run for that tag publishes the crates. The
 settings are in `rust/release-plz.toml`.
 
 ## Publishing to crates.io
 
-No workflow in this repository publishes to crates.io. A maintainer checks out
-the signed tag and runs `cargo publish --workspace --locked`. The command
-publishes every workspace member without `publish = false` to crates.io in
-dependency order, waiting for each to index before the next. Before the run,
-check that the tag matches the workspace version (`kit-core`'s version in
-`rust/Cargo.toml` at the tagged tree).
+The `publish-crates` job of `release.yml` publishes every workspace member
+without `publish = false` to crates.io. It uses crates.io trusted publishing:
+the job asks GitHub for an OIDC token, and crates.io exchanges it for a
+publish token. The token lasts 30 minutes, covers only the crates whose
+trusted publisher matches the run, and the
+[`rust-lang/crates-io-auth-action`](https://github.com/rust-lang/crates-io-auth-action)
+step revokes it when the job ends. No crates.io token or repository secret
+exists. The trusted publisher cannot publish a new crate, only a new version of
+a crate that is on crates.io.
+
+The job runs in the GitHub environment `crates-io`, after the GitHub Release
+exists and on the commit that `validate-release-tag` checked. It runs beside
+`publish-npm` and does not wait for it, so the two never block each other.
+The job:
+
+1. Checks that every publishable crate has the version of the tag. A
+   mismatch stops the job before any upload.
+2. Asks the crates.io API about each crate at that version (200 means
+   published, 404 means not yet, anything else stops the job). The job
+   excludes each published crate with `--exclude` and ends if all of them are
+   published. cargo does not do this itself: it stops with `crate X@V already
+   exists` when any selected crate is on the registry, before it uploads
+   anything.
+3. Runs `cargo publish --workspace --dry-run --locked` with the same
+   `--exclude` flags and no token. This packs and builds every crate to
+   publish, so a build failure shows before the first upload and the build of
+   the real run is warm inside the 30 minutes of the token.
+4. Gets the token and runs `cargo publish --workspace --locked` with the same
+   flags. cargo publishes the crates in dependency order and waits for each to
+   index before the next.
+
+A crate that publishes cannot be republished, so a build problem found after
+the first upload needs a new version.
 
 ### Dry run
 
@@ -355,20 +394,84 @@ Notes on the published set:
 - **The crates.io `kit` name** belongs to an unrelated project; the CLI is
   published as **`kit-bin`**. Do not run `cargo install kit`.
 
-### Token
+### One-time setup
 
-`cargo publish` needs a crates.io API token with the publish-new and
-publish-update scopes. The account must own the `kit-*` crates. A token is
-required because a brand-new crate cannot use trusted publishing on its first
-publish. Keep the token out of the repository.
+Do this once, before the tag that first runs the job. Every published crate
+is already on crates.io, so the setup can be done at any time before the tag.
+
+1. In the repository settings on GitHub, create the environment
+   `crates-io`. Under deployment branches and tags, allow only tags that match
+   `v*`. crates.io checks the repository, the workflow filename and the
+   environment of the run, not its ref, so this rule is what keeps a branch
+   from getting a token. Required reviewers are optional. A required reviewer
+   makes the job wait for approval.
+2. For each crate in [the table](#what-publishes-vs-what-doesnt), an owner of
+   the crate opens `https://crates.io/crates/<crate>/settings`, goes to
+   Trusted Publishing, and adds a GitHub configuration:
+
+   | Field | Value |
+   | --- | --- |
+   | Repository owner | `officialunofficial` |
+   | Repository name | `kit` |
+   | Workflow filename | `release.yml` |
+   | Environment | `crates-io` |
+
+   The configuration belongs to one crate, so repeat it for each of the
+   crates. crates.io does not check the values until a publish. The token of
+   a run covers exactly the crates that have a matching configuration, so a
+   crate without one cannot publish, and the job fails at the upload of that
+   crate. A crate that is configured for one environment name only accepts a
+   run from that environment.
+3. After the first successful publish from the job, optionally enable
+   "Require trusted publishing for all new versions" for each crate on the same
+   settings page. An API token can then no longer publish the crate, and the
+   [manual fallback](#manual-fallback) stops working until you turn the
+   setting off.
+
+crates.io sends the crate owners an email for each publish by trusted
+publishing.
+
+### Rerun a failed publish
+
+Re-run only the failed job from the Actions UI ("Re-run failed jobs") or with
+`gh run rerun <run-id> --failed`. The job reads the registry again, excludes
+the crates that landed and publishes the rest, so it never fails on, and never
+changes, a version that is on crates.io. When the job fails after the GitHub
+Release and `publish-npm` succeeded, only `publish-crates` runs again. Do the
+same for `publish-npm` when it is the one that failed: it also skips a version
+that is already on npm.
+
+The rerun checks out the commit that the first run validated, not a branch.
+When GitHub no longer allows a rerun of the run, use the manual fallback
+below.
+
+### Manual fallback
+
+Use this only when the job cannot run. A maintainer who owns the crates checks
+out the signed tag, checks that the version of every crate in `rust/Cargo.toml`
+equals the tag, and finds the crates that are already published (`cargo info
+<crate>@X.Y.Z`). Then, with a crates.io API token that has the publish-update
+scope in `CARGO_REGISTRY_TOKEN`:
+
+```sh
+cd rust
+cargo publish --workspace --dry-run --locked --exclude <crate> ...
+cargo publish --workspace --locked --exclude <crate> ...
+```
+
+Pass one `--exclude` for each published crate and none when none is
+published. Keep the token out of the repository and revoke it afterwards.
 
 ### Gotchas
 
 - **Immutable versions**: crates.io never lets you overwrite a published
   version. Always bump before tagging; never re-publish an existing version.
 - **Partial publish**: if a publish fails mid-train, the crates that landed
-  cannot be published again. Run the next attempt with `--exclude` for each
-  crate that landed.
+  cannot be published again. The job excludes them on a rerun, and the manual
+  fallback does the same with `--exclude`.
+- **Token lifetime**: the token lasts 30 minutes from the moment the job gets
+  it, and the publish waits for each crate to index. A run that outlasts the
+  token fails on the next upload. Re-run the job to continue.
 - **Native deps**: `cargo publish` builds each crate with **default** features.
   No `protoc` is needed, because `kit-rpc` ships its generated code in
   `generated/`. No hardware keystore backend is implemented.
@@ -746,9 +849,9 @@ x86_64 build is the most reliable reproducibility target for third parties.
 
 ## Required GitHub Actions secrets and variables
 
-cosign keyless signing runs on the GitHub OIDC token. npm trusted publishing
-runs on the same kind of token. No release step needs a repository secret or
-an npm token.
+cosign keyless signing runs on the GitHub OIDC token. npm and crates.io
+trusted publishing run on the same kind of token. No release step needs a
+repository secret, an npm token or a crates.io token.
 
 | Variable | Purpose | Required for |
 | --- | --- | --- |
