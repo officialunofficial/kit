@@ -276,14 +276,13 @@ pub const TOKEN_ENV: &str = "KIT_API_TOKEN";
 #[allow(clippy::duration_suboptimal_units)]
 pub const UNARY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default timeout for pack-transfer RPCs — `UploadPack`, `DownloadPack`.
-/// Generous enough for a
-/// large pack transfer over a slow link, bounded enough that a hung peer
-/// can't wedge a caller indefinitely. Override via
-/// [`ConnectTransport::with_pack_transfer_timeout`] for deployments moving
-/// unusually large packs over unusually slow links.
-#[allow(clippy::duration_suboptimal_units)]
-pub const PACK_TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default stall bound for pack-transfer RPCs — `UploadPack`, `UploadPart`,
+/// `DownloadPack`: a transfer fails once this long passes with no byte sent
+/// or received, and is retried on the same ladder as a lost connection. It
+/// bounds silence, not total time, so a slow link that keeps moving data
+/// finishes a pack of any size, while a hung peer still fails within a
+/// minute. Override via [`ConnectTransport::with_pack_transfer_timeout`].
+pub const PACK_TRANSFER_TIMEOUT: Duration = kit_sync::DEFAULT_TRANSFER_TIMEOUT;
 
 /// Per-`UploadPack`-chunk data cap. Mirrors
 /// `kit_rpc::helpers::CHUNK_DATA_MAX` (the SSH/enc wire's per-frame pack
@@ -307,7 +306,6 @@ pub struct ConnectTransport {
     pub(crate) signer_key: Option<String>,
     pub(crate) grant_source: Option<Arc<dyn GrantSource>>,
     pub(crate) unary_timeout: Duration,
-    pub(crate) pack_transfer_timeout: Duration,
     pub(crate) backoff: fn() -> BackoffIterator,
     pub(crate) sleep: fn(Duration),
     pub(crate) now: fn() -> i64,
@@ -334,7 +332,6 @@ impl std::fmt::Debug for ConnectTransport {
         f.debug_struct("ConnectTransport")
             .field("remote_identity", &self.remote_identity)
             .field("unary_timeout", &self.unary_timeout)
-            .field("pack_transfer_timeout", &self.pack_transfer_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -557,7 +554,6 @@ impl ConnectTransport {
             token,
             grant_source: None,
             unary_timeout: UNARY_TIMEOUT,
-            pack_transfer_timeout: PACK_TRANSFER_TIMEOUT,
             backoff: BackoffIterator::new,
             sleep: thread::sleep,
             now: crate::envelope::now_ms,
@@ -656,14 +652,13 @@ impl ConnectTransport {
         self.http = self.http.with_metadata_timeout(timeout);
         self
     }
-    /// Override the per-call timeout applied to pack-transfer RPCs
-    /// (`UploadPack`, `DownloadPack`). Defaults to
-    /// [`PACK_TRANSFER_TIMEOUT`]. Independent of
+    /// Override the stall bound of pack-transfer RPCs (`UploadPack`,
+    /// `UploadPart`, `DownloadPack`): how long one may send and receive
+    /// nothing. Defaults to [`PACK_TRANSFER_TIMEOUT`]. Independent of
     /// [`Self::with_unary_timeout`] — changing one does not affect the
     /// other.
     #[must_use]
     pub fn with_pack_transfer_timeout(mut self, timeout: Duration) -> Self {
-        self.pack_transfer_timeout = timeout;
         self.http = self.http.with_transfer_timeout(timeout);
         self
     }
@@ -1532,10 +1527,12 @@ mod tests {
     fn timeouts_default_to_the_named_constants() {
         let t = ConnectTransport::connect("kit+http://127.0.0.1:9/proj").unwrap();
         assert_eq!(t.unary_timeout, UNARY_TIMEOUT);
-        assert_eq!(t.pack_transfer_timeout, PACK_TRANSFER_TIMEOUT);
+        assert_eq!(PACK_TRANSFER_TIMEOUT, Duration::from_mins(1));
         assert!(
-            t.unary_timeout < t.pack_transfer_timeout,
-            "the unary class must default shorter than the pack-transfer class"
+            format!("{:?}", t.http)
+                .contains(&format!("transfer_timeout: {PACK_TRANSFER_TIMEOUT:?}")),
+            "{:?}",
+            t.http
         );
     }
 
@@ -1546,7 +1543,9 @@ mod tests {
             .with_unary_timeout(Duration::from_millis(5))
             .with_pack_transfer_timeout(Duration::from_secs(600));
         assert_eq!(t.unary_timeout, Duration::from_millis(5));
-        assert_eq!(t.pack_transfer_timeout, Duration::from_secs(600));
+        let http = format!("{:?}", t.http);
+        assert!(http.contains("metadata_timeout: 5ms"), "{http}");
+        assert!(http.contains("transfer_timeout: 600s"), "{http}");
     }
 
     // -- condition_to_wire() --------------------------------------------

@@ -24,7 +24,9 @@
 //!
 //! A pack streams both ways (SPEC-TRANSPORT §6.7). `upload_pack` hashes
 //! the body once for the SigV4 payload hash, then sends it in one sized
-//! `PUT`, reading it again from offset 0 on every attempt. `download_pack`
+//! `PUT`, reading it again from offset 0 on every attempt. That `PUT` runs
+//! on reqwest's async client, so it can fail on a stall rather than on
+//! total time. `download_pack`
 //! writes only a `200` answer's body to the sink, as it arrives. Neither
 //! holds the pack in memory. Every pack fits one `PUT`: S3 takes up to
 //! 5 GiB, and a pack is at most [`PACK_BODY_LIMIT`].
@@ -40,7 +42,8 @@ pub mod sigv4;
 
 use std::env;
 use std::io::{self, Read as _};
-use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -54,7 +57,7 @@ use kit_core::refs::{
 };
 use md5::Md5;
 use reqwest::Method;
-use reqwest::blocking::{Body, Client, RequestBuilder, Response};
+use reqwest::blocking::{Client, RequestBuilder, Response};
 use sha2::{Digest as _, Sha256};
 
 use crate::sigv4::{Credentials, SignedRequest, sha256_hex, sign_request_with_payload_hash};
@@ -79,13 +82,11 @@ const PACK_IO_CHUNK: usize = 256 * 1024;
 const PACK_FEED_DEPTH: usize = 2;
 
 /// The client's timeout for one request, up to its response headers, and
-/// for each read of a response body.
+/// for each read of a response body. A pack `PUT` fails once this long
+/// passes with no byte of its body taken by the connection and no answer:
+/// a bound on silence, not on total time, so a slow upload that keeps
+/// moving finishes a pack of any size.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// The slowest upload a pack `PUT` waits for, in bytes per second. The
-/// request's timeout is [`REQUEST_TIMEOUT`] plus the pack's length at this
-/// rate, since its body is sent before its response is awaited.
-const PACK_PUT_MIN_RATE: u64 = 1024 * 1024;
 
 /// Environment variable names for credentials.
 pub const ENV_ACCESS_KEY: &str = "KIT_S3_ACCESS_KEY_ID";
@@ -116,6 +117,11 @@ pub struct S3Transport {
     sleeper: Sleeper,
     /// Backoff ladder constructor — swapped in tests to tighten delays.
     backoff: fn() -> BackoffIterator,
+    /// The client and runtime of pack `PUT`s.
+    put: PackPut,
+    /// How long a pack `PUT` may move nothing: [`REQUEST_TIMEOUT`], shorter
+    /// in tests.
+    stall: Duration,
 }
 
 impl std::fmt::Debug for S3Transport {
@@ -184,6 +190,8 @@ impl S3Transport {
             clock: default_clock,
             sleeper: default_sleeper,
             backoff: BackoffIterator::new,
+            put: PackPut::new()?,
+            stall: REQUEST_TIMEOUT,
         })
     }
 
@@ -211,6 +219,8 @@ impl S3Transport {
             clock: default_clock,
             sleeper: default_sleeper,
             backoff: BackoffIterator::new,
+            put: PackPut::new()?,
+            stall: REQUEST_TIMEOUT,
         })
     }
 
@@ -380,6 +390,24 @@ impl S3Transport {
         payload_sha256: &str,
         extra_headers: &[(&'static str, String)],
     ) -> RequestBuilder {
+        let (url, headers) = self.signed_parts(method, key, query, payload_sha256, extra_headers);
+        let mut builder = self.client.request(method.clone(), &url);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        builder
+    }
+
+    /// The URL and headers of a request for `key` signed over
+    /// `payload_sha256`.
+    fn signed_parts(
+        &self,
+        method: &Method,
+        key: &str,
+        query: &str,
+        payload_sha256: &str,
+        extra_headers: &[(&'static str, String)],
+    ) -> (String, Vec<(&'static str, String)>) {
         let path = self.build_path(key);
         let signed: SignedRequest = sign_request_with_payload_hash(
             &self.creds,
@@ -397,16 +425,13 @@ impl S3Transport {
             format!("{}{}?{}", self.endpoint, path, query)
         };
 
-        let mut builder = self
-            .client
-            .request(method.clone(), &url)
-            .header("Authorization", signed.authorization)
-            .header("x-amz-date", signed.x_amz_date)
-            .header("x-amz-content-sha256", signed.x_amz_content_sha256);
-        for (name, value) in extra_headers {
-            builder = builder.header(*name, value);
-        }
-        builder
+        let mut headers = vec![
+            ("Authorization", signed.authorization),
+            ("x-amz-date", signed.x_amz_date),
+            ("x-amz-content-sha256", signed.x_amz_content_sha256),
+        ];
+        headers.extend(extra_headers.iter().cloned());
+        (url, headers)
     }
 
     fn http_request_once(
@@ -441,23 +466,35 @@ impl S3Transport {
     /// `PUT` `pack` at `object_key` in one request whose body streams from
     /// `pack`. The request is signed over the SHA-256 of one pass over
     /// `pack.len()` bytes from offset 0, and every attempt sends those
-    /// bytes, read again from offset 0. Each attempt may take
-    /// [`REQUEST_TIMEOUT`] plus the pack's length at [`PACK_PUT_MIN_RATE`].
+    /// bytes, read again from offset 0. An attempt has no total time limit:
+    /// it fails once [`REQUEST_TIMEOUT`] passes with no progress, and is
+    /// retried like a lost connection.
     ///
     /// # Errors
     /// [`TransportError::ProtocolError`] when `pack` cannot be read or holds
     /// fewer bytes than its length, before or during a send: a local
-    /// failure, never retried. Otherwise as [`Self::http_request`].
+    /// failure, never retried. [`TransportError::RemoteError`] naming the
+    /// stall when the last attempt stalled. Otherwise as
+    /// [`Self::http_request`].
     fn put_pack(&self, pack: &dyn PackBody, object_key: &str) -> TransportResult<HttpResponse> {
         let payload_sha256 = pack_sha256(pack)?;
-        let timeout = REQUEST_TIMEOUT + Duration::from_secs(pack.len() / PACK_PUT_MIN_RATE);
-        self.retrying(|| {
-            let builder = self
-                .signed_request(&Method::PUT, object_key, "", &payload_sha256, &[])
-                .timeout(timeout);
-            let resp = send_streamed(builder, pack)?;
-            extract_response(resp, Some(SMALL_RESPONSE_LIMIT), false)
-        })
+        let stalled = std::cell::Cell::new(false);
+        let result = self.retrying(|| {
+            let (url, headers) =
+                self.signed_parts(&Method::PUT, object_key, "", &payload_sha256, &[]);
+            let sent = self.put.send(&url, headers, pack, self.stall);
+            stalled.set(matches!(sent, Err(PutError::Stalled)));
+            sent.map_err(|error| match error {
+                PutError::Stalled => TransportError::ConnectionFailed,
+                PutError::Transport(error) => error,
+            })
+        });
+        match result {
+            Err(TransportError::ConnectionFailed) if stalled.get() => {
+                Err(TransportError::RemoteError(stall_text(self.stall)))
+            }
+            other => other,
+        }
     }
 
     /// `GET` the pack at `object_key` into `sink`. Only a `200` answer's body
@@ -513,33 +550,183 @@ fn pack_sha256(pack: &dyn PackBody) -> TransportResult<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-/// Send `builder` with a body of `pack.len()` bytes read from `pack` at
-/// offset 0.
+/// Pack `PUT`s run on reqwest's async client, each attempt on a runtime of
+/// its own. The blocking client bounds a request that has a body only in
+/// total, and cannot end one that stopped moving; here a watchdog can.
 ///
-/// reqwest's blocking client takes only a `'static` reader. It reads that
-/// reader on this thread while `send` runs, and drops it before `send`
-/// returns. A scoped thread reads `pack` and hands its bytes over in chunks
-/// of [`PACK_IO_CHUNK`], at most [`PACK_FEED_DEPTH`] ahead, so the upload
-/// holds a few chunks, never the pack. Once `send` returns, the dropped
-/// reader ends the thread's sends, and the thread is joined.
-///
-/// # Errors
-/// [`TransportError::ProtocolError`] when `pack` cannot be read or ends
-/// early: a local failure, never retried. [`TransportError::ConnectionFailed`]
-/// for any other failure to send, a thread that cannot start included.
-fn send_streamed(builder: RequestBuilder, pack: &dyn PackBody) -> TransportResult<Response> {
-    let len = pack.len();
-    thread::scope(|scope| {
-        let (tx, rx) = mpsc::sync_channel(PACK_FEED_DEPTH);
-        let feeder = thread::Builder::new()
-            .spawn_scoped(scope, move || feed(pack, len, &tx))
+/// The client keeps no idle connection: a connection lives on the runtime
+/// of its attempt, which is shut down when the attempt ends. That shutdown
+/// drops the request body still held by the connection, which frees the
+/// thread feeding it.
+struct PackPut {
+    client: reqwest::Client,
+}
+
+/// Why a pack `PUT` attempt failed.
+enum PutError {
+    /// No byte moved for the stall bound.
+    Stalled,
+    Transport(TransportError),
+}
+
+impl From<TransportError> for PutError {
+    fn from(error: TransportError) -> Self {
+        Self::Transport(error)
+    }
+}
+
+impl PackPut {
+    fn new() -> Result<Self, TransportError> {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(0)
+            .build()
             .map_err(|_| TransportError::ConnectionFailed)?;
-        let sent = builder.body(Body::sized(FedBody::new(rx), len)).send();
-        match feeder.join() {
-            Ok(Ok(())) => sent.map_err(|_| TransportError::ConnectionFailed),
-            Ok(Err(_)) | Err(_) => Err(TransportError::ProtocolError),
+        Ok(Self { client })
+    }
+
+    /// `PUT` `pack.len()` bytes read from `pack` at offset 0 to `url`, and
+    /// read a success's body of at most [`SMALL_RESPONSE_LIMIT`] bytes.
+    ///
+    /// A scoped thread reads `pack` and hands its bytes over in chunks of
+    /// [`PACK_IO_CHUNK`], at most [`PACK_FEED_DEPTH`] ahead, so the upload
+    /// holds a few chunks, never the pack. Each chunk the connection takes,
+    /// the answer's head and each chunk of the answer's body is progress;
+    /// `stall` with none ends the attempt.
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when `pack` cannot be read or ends
+    /// early: a local failure, never retried. [`PutError::Stalled`] after
+    /// `stall` with no progress. [`TransportError::ConnectionFailed`] for any
+    /// other failure to send, a thread or runtime that cannot start
+    /// included.
+    fn send(
+        &self,
+        url: &str,
+        headers: Vec<(&'static str, String)>,
+        pack: &dyn PackBody,
+        stall: Duration,
+    ) -> Result<HttpResponse, PutError> {
+        let len = pack.len();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        thread::scope(|scope| {
+            let (tx, rx) = tokio::sync::mpsc::channel(PACK_FEED_DEPTH);
+            let feeder = thread::Builder::new()
+                .spawn_scoped(scope, move || feed(pack, len, &tx))
+                .map_err(|_| TransportError::ConnectionFailed)?;
+            let progress = Arc::new(Progress::new());
+            let mut request = self
+                .client
+                .put(url)
+                .header(reqwest::header::CONTENT_LENGTH, len)
+                .body(reqwest::Body::wrap(FedBody {
+                    rx,
+                    rest: bytes::Bytes::new(),
+                    len,
+                    progress: Arc::clone(&progress),
+                }));
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let exchange = async {
+                let mut response = request
+                    .send()
+                    .await
+                    .map_err(|_| TransportError::ConnectionFailed)?;
+                progress.mark();
+                let status = response.status().as_u16();
+                // An error answer's body is never read (see
+                // [`extract_response`]).
+                let mut body = Vec::new();
+                if (200..300).contains(&status) {
+                    while let Some(chunk) = response
+                        .chunk()
+                        .await
+                        .map_err(|_| TransportError::ConnectionFailed)?
+                    {
+                        progress.mark();
+                        if body.len() + chunk.len() > SMALL_RESPONSE_LIMIT {
+                            return Err(TransportError::PayloadTooLarge(body.len() + chunk.len()));
+                        }
+                        body.extend_from_slice(&chunk);
+                    }
+                }
+                Ok(HttpResponse { status, body })
+            };
+            let sent = runtime.block_on(watched(exchange, stall, &progress));
+            // The connection task may still hold the body. Shutting the
+            // runtime down drops it, and with it the body's receiver, which
+            // ends the feeder's sends.
+            runtime.shutdown_background();
+            match feeder.join() {
+                Ok(Ok(())) => match sent {
+                    Some(result) => result.map_err(PutError::from),
+                    None => Err(PutError::Stalled),
+                },
+                Ok(Err(_)) | Err(_) => Err(TransportError::ProtocolError.into()),
+            }
+        })
+    }
+}
+
+/// The time a pack `PUT` last moved, as nanoseconds from its start.
+struct Progress {
+    start: tokio::time::Instant,
+    last: AtomicU64,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            start: tokio::time::Instant::now(),
+            last: AtomicU64::new(0),
         }
-    })
+    }
+
+    fn mark(&self) {
+        let elapsed = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.last.fetch_max(elapsed, Ordering::Relaxed);
+    }
+
+    /// When the attempt stalls if nothing moves before then.
+    fn stalls_at(&self, stall: Duration) -> tokio::time::Instant {
+        let quiet_since = Duration::from_nanos(self.last.load(Ordering::Relaxed));
+        self.start
+            .checked_add(quiet_since.saturating_add(stall))
+            .unwrap_or_else(|| self.start + Duration::from_hours(30 * 365 * 24))
+    }
+}
+
+/// Run `future` until it finishes, or `None` once `stall` passes with no
+/// [`Progress::mark`]. Each wake rechecks the last mark, so an upload that
+/// keeps moving keeps going.
+async fn watched<F: std::future::Future>(
+    future: F,
+    stall: Duration,
+    progress: &Progress,
+) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    loop {
+        let at = progress.stalls_at(stall);
+        if let Ok(output) = tokio::time::timeout_at(at, future.as_mut()).await {
+            return Some(output);
+        }
+        if tokio::time::Instant::now() >= progress.stalls_at(stall) {
+            return None;
+        }
+    }
+}
+
+/// The failure text of a pack `PUT` that moved nothing for `stall`.
+fn stall_text(stall: Duration) -> String {
+    if stall.subsec_nanos() == 0 {
+        format!("transfer stalled: no data for {} s", stall.as_secs())
+    } else {
+        format!("transfer stalled: no data for {} ms", stall.as_millis())
+    }
 }
 
 /// Read `len` bytes of `pack` from offset 0 into `tx`, a chunk at a time.
@@ -549,11 +736,11 @@ fn send_streamed(builder: RequestBuilder, pack: &dyn PackBody) -> TransportResul
 fn feed(
     pack: &dyn PackBody,
     len: u64,
-    tx: &mpsc::SyncSender<io::Result<Vec<u8>>>,
+    tx: &tokio::sync::mpsc::Sender<io::Result<Vec<u8>>>,
 ) -> Result<(), io::ErrorKind> {
     let fail = |err: io::Error| {
         let kind = err.kind();
-        let _ = tx.send(Err(err));
+        let _ = tx.blocking_send(Err(err));
         Err(kind)
     };
     let mut reader = match pack.read_from(0) {
@@ -567,47 +754,53 @@ fn feed(
             return fail(err);
         }
         left -= chunk.len() as u64;
-        if tx.send(Ok(chunk)).is_err() {
+        if tx.blocking_send(Ok(chunk)).is_err() {
             return Ok(());
         }
     }
     Ok(())
 }
 
-/// The `'static` reader reqwest sends: the chunks [`feed`] queues, in
-/// order, then end of file once the feeder is done.
+/// The most bytes of a pack `PUT`'s body handed to the connection at once.
+/// The connection takes the next slice only once it has written the
+/// previous ones, so each take is progress; a whole [`PACK_IO_CHUNK`] would
+/// leave a slow link silent for longer between takes.
+const PUT_SLICE: usize = 64 * 1024;
+
+/// The body a pack `PUT` sends: the chunks [`feed`] queues, in order and in
+/// slices of at most [`PUT_SLICE`], then its end once the feeder is done.
+/// Handing a slice to the connection is progress.
 struct FedBody {
-    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
-    chunk: Vec<u8>,
-    at: usize,
+    rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// What is left of the chunk being sent.
+    rest: bytes::Bytes,
+    len: u64,
+    progress: Arc<Progress>,
 }
 
-impl FedBody {
-    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
-        Self {
-            rx,
-            chunk: Vec::new(),
-            at: 0,
-        }
-    }
-}
+impl http_body::Body for FedBody {
+    type Data = bytes::Bytes;
+    type Error = io::Error;
 
-impl io::Read for FedBody {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while self.at == self.chunk.len() {
-            match self.rx.recv() {
-                Ok(Ok(chunk)) => {
-                    self.chunk = chunk;
-                    self.at = 0;
-                }
-                Ok(Err(err)) => return Err(err),
-                Err(mpsc::RecvError) => return Ok(0),
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        if self.rest.is_empty() {
+            match std::task::ready!(self.rx.poll_recv(cx)) {
+                Some(Ok(chunk)) => self.rest = bytes::Bytes::from(chunk),
+                Some(Err(err)) => return std::task::Poll::Ready(Some(Err(err))),
+                None => return std::task::Poll::Ready(None),
             }
         }
-        let n = buf.len().min(self.chunk.len() - self.at);
-        buf[..n].copy_from_slice(&self.chunk[self.at..self.at + n]);
-        self.at += n;
-        Ok(n)
+        let take = self.rest.len().min(PUT_SLICE);
+        let slice = self.rest.split_to(take);
+        self.progress.mark();
+        std::task::Poll::Ready(Some(Ok(http_body::Frame::data(slice))))
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.len)
     }
 }
 
@@ -1710,5 +1903,131 @@ mod tests {
     #[test]
     fn connect_rejects_bad_url() {
         assert!(S3Transport::connect("not-a-url").is_err());
+    }
+
+    /// A transport against `endpoint` whose pack `PUT`s stall after `stall`
+    /// and retry twice, without sleeping.
+    fn stalling_transport(endpoint: &str, stall: Duration) -> S3Transport {
+        let mut t = S3Transport::with_parts(
+            endpoint,
+            "bucket",
+            None,
+            Credentials {
+                access_key_id: "AKIA_TEST".into(),
+                secret_access_key: "secret".into(),
+                region: "us-east-1".into(),
+            },
+        )
+        .unwrap();
+        t.set_sleeper(|_| {});
+        t.set_backoff(|| BackoffIterator::with(Duration::ZERO, Duration::ZERO, 2));
+        t.stall = stall;
+        t
+    }
+
+    /// A server that reads each request's head, then reads the first `paced`
+    /// bytes of its body `step` bytes every `gap` (nothing, if `step` is
+    /// zero) and the rest at once, then answers `200`. It counts the
+    /// requests it took.
+    fn pacing_server(step: usize, gap: Duration, paced: usize) -> (String, Arc<AtomicUsize>) {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let taken = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&taken);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    let mut reader = BufReader::new(stream);
+                    let mut len = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let line = line.trim_end().to_ascii_lowercase();
+                        if line.is_empty() {
+                            break;
+                        }
+                        if let Some(value) = line.strip_prefix("content-length:") {
+                            len = value.trim().parse().unwrap();
+                        }
+                    }
+                    if step == 0 {
+                        // Hold the connection, read nothing, answer nothing.
+                        thread::sleep(Duration::from_secs(60));
+                        return;
+                    }
+                    let mut chunk = vec![0u8; step];
+                    let mut left = len;
+                    while left > 0 {
+                        let want = left.min(step);
+                        if reader.read_exact(&mut chunk[..want]).is_err() {
+                            return;
+                        }
+                        left -= want;
+                        if len - left < paced {
+                            thread::sleep(gap);
+                        }
+                    }
+                    let _ = reader
+                        .get_mut()
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+                });
+            }
+        });
+        (endpoint, taken)
+    }
+
+    #[test]
+    fn a_pack_put_that_keeps_moving_outlives_the_stall_bound() {
+        // About 5 MiB/s for 32 MiB, 6.4 s in all, past the 4 s bound; the
+        // rest is read at once, so the end of the upload is never quiet.
+        let stall = Duration::from_secs(4);
+        let (endpoint, taken) = pacing_server(256 * 1024, Duration::from_millis(50), 32 << 20);
+        let t = stalling_transport(&endpoint, stall);
+        let pack = vec![7u8; 40 * 1024 * 1024];
+        let started = std::time::Instant::now();
+        t.upload_pack(
+            &kit_core::protocol::SliceBody(&pack),
+            &PackKey::new([1; 32]),
+            None,
+        )
+        .unwrap();
+        assert!(
+            started.elapsed() > stall,
+            "the upload took {:?}, within one stall bound",
+            started.elapsed()
+        );
+        assert_eq!(taken.load(Ordering::SeqCst), 1, "no attempt was retried");
+    }
+
+    #[test]
+    fn a_pack_put_that_stops_is_retried_then_fails_naming_the_stall() {
+        let (endpoint, taken) = pacing_server(0, Duration::ZERO, 0);
+        let t = stalling_transport(&endpoint, Duration::from_millis(300));
+        let pack = vec![7u8; 64 * 1024 * 1024];
+        let started = std::time::Instant::now();
+        let err = t
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&pack),
+                &PackKey::new([1; 32]),
+                None,
+            )
+            .unwrap_err();
+        match err {
+            TransportError::RemoteError(text) => {
+                assert_eq!(text, "transfer stalled: no data for 300 ms");
+            }
+            other => panic!("expected the stall, got {other:?}"),
+        }
+        assert_eq!(
+            taken.load(Ordering::SeqCst),
+            3,
+            "one attempt and two retries"
+        );
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 }

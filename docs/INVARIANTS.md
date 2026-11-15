@@ -1161,8 +1161,9 @@ split-vs-single-run equivalence.
 **Always:** `NativeHttp` preserves supplied user-agent and gzip/identity-only
 accept-encoding values, refuses unsupported or malformed negotiation before
 connecting, and bounds each HTTP exchange through response receipt. Metadata
-uses a 30-second default; UploadPack, UploadPart and DownloadPack use 300 seconds.
-The two budgets can be configured independently.
+uses a 30-second default. UploadPack, UploadPart and DownloadPack have no total
+bound of their own: they fail once 60 seconds pass with no data moving either
+way. The two budgets can be configured independently.
 
 **Because:** observer headers replace transport defaults, and metadata work
 must not inherit a pack-transfer deadline.

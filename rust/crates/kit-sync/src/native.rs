@@ -12,7 +12,7 @@ mod location;
 use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -36,8 +36,20 @@ use crate::client_source::Executor;
 
 /// Default wall-clock bound on metadata requests, response body included.
 pub const DEFAULT_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
-/// Default wall-clock bound on pack/part transfers, response body included.
-pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(5);
+/// Default stall bound on pack and part transfers and pack-location fetches:
+/// a transfer fails once this long passes with no byte sent or received. It
+/// bounds silence, not total time, so a slow link that keeps moving data
+/// finishes a pack of any size, and a dead connection still fails within a
+/// minute. A minute also covers a network handover and a server's pause
+/// before it answers an upload.
+pub const DEFAULT_TRANSFER_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// The most bytes of a streamed request body handed to the connection at
+/// once. The connection takes the next slice only once it has written the
+/// previous ones, so each take is progress for the stall bound; a whole
+/// message of a pack upload (about 800 KiB) would leave a slow link silent
+/// for too long between takes.
+const UPLOAD_SLICE: usize = 64 * 1024;
 
 type LocationConnector = hyper_rustls::HttpsConnector<HttpConnector<location::LocationResolver>>;
 
@@ -326,7 +338,8 @@ impl NativeHttp {
         self
     }
 
-    /// Bound both metadata and transfer requests, response bodies included.
+    /// Bound metadata requests and transfer stalls with one value (see
+    /// [`Self::with_metadata_timeout`] and [`Self::with_transfer_timeout`]).
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.metadata_timeout = timeout;
@@ -341,22 +354,133 @@ impl NativeHttp {
         self
     }
 
-    /// Bound `UploadPack`, `UploadPart`, `DownloadPack` and pack-location
-    /// fetches, response body included (default: 300 seconds). Other procedures
-    /// use the metadata bound.
+    /// Fail `UploadPack`, `UploadPart`, `DownloadPack` and pack-location
+    /// fetches that send and receive nothing for this long (default: 60
+    /// seconds). These transfers have no total bound of their own; a
+    /// [`RequestTimeout`] still bounds one in total. Other procedures use the
+    /// metadata bound.
     #[must_use]
     pub fn with_transfer_timeout(mut self, timeout: Duration) -> Self {
         self.transfer_timeout = timeout;
         self
     }
 
-    fn request_timeout(&self, uri: &Uri) -> Duration {
-        match uri.path() {
+    /// The bounds of a request: a transfer has a stall bound and only the
+    /// caller's total bound, any other request a total bound.
+    fn budget<B>(&self, request: &Request<B>) -> Budget {
+        let bound = request
+            .extensions()
+            .get::<RequestTimeout>()
+            .map(|bound| bound.0);
+        match request.uri().path() {
             kit_client::procedures::UPLOAD_PACK
             | kit_client::procedures::UPLOAD_PART
-            | "/kit.transport.v1.TransportService/DownloadPack" => self.transfer_timeout,
-            _ => self.metadata_timeout,
+            | "/kit.transport.v1.TransportService/DownloadPack" => Budget {
+                total: bound,
+                stall: Some(self.transfer_timeout),
+            },
+            _ => Budget {
+                total: Some(bound.map_or(self.metadata_timeout, |bound| {
+                    bound.min(self.metadata_timeout)
+                })),
+                stall: None,
+            },
         }
+    }
+}
+
+/// How long a request may take in total, and how long it may go without
+/// progress. `None` is no bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budget {
+    total: Option<Duration>,
+    stall: Option<Duration>,
+}
+
+/// The time a transfer last moved data. The clock starts when the request
+/// does, so connecting and the answer's head count against the stall bound.
+/// An atomic, not a cell, keeps the exchange futures `Send`.
+struct Progress {
+    start: tokio::time::Instant,
+    /// Nanoseconds from `start` to the last mark.
+    last: AtomicU64,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            start: tokio::time::Instant::now(),
+            last: AtomicU64::new(0),
+        }
+    }
+
+    fn mark(&self) {
+        let elapsed = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        self.last.fetch_max(elapsed, Ordering::Relaxed);
+    }
+
+    fn last(&self) -> tokio::time::Instant {
+        after(
+            self.start,
+            Duration::from_nanos(self.last.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+/// Which bound of a [`Budget`] ended a request.
+enum Expired {
+    Deadline,
+    Stalled(Duration),
+}
+
+/// `at` plus `duration`, or about 30 years after `at` when that overflows,
+/// as tokio does for a timeout too long to represent.
+fn after(at: tokio::time::Instant, duration: Duration) -> tokio::time::Instant {
+    at.checked_add(duration)
+        .or_else(|| at.checked_add(Duration::from_hours(30 * 365 * 24)))
+        .unwrap_or(at)
+}
+
+/// Run `future` until it finishes, its total budget passes, or its stall
+/// bound passes with no [`Progress::mark`]. Each wake rechecks the time of
+/// the last mark, so data that keeps arriving keeps the transfer alive.
+async fn within<F: std::future::Future>(
+    future: F,
+    budget: Budget,
+    progress: &Progress,
+) -> Result<F::Output, Expired> {
+    let deadline = budget
+        .total
+        .map(|total| after(tokio::time::Instant::now(), total));
+    let mut future = std::pin::pin!(future);
+    loop {
+        let stalled_at = budget.stall.map(|stall| after(progress.last(), stall));
+        let wake = match (deadline, stalled_at) {
+            (None, None) => return Ok(future.await),
+            (Some(at), None) | (None, Some(at)) => at,
+            (Some(deadline), Some(stalled_at)) => deadline.min(stalled_at),
+        };
+        if let Ok(output) = tokio::time::timeout_at(wake, future.as_mut()).await {
+            return Ok(output);
+        }
+        let now = tokio::time::Instant::now();
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            return Err(Expired::Deadline);
+        }
+        if let Some(stall) = budget.stall
+            && now >= after(progress.last(), stall)
+        {
+            return Err(Expired::Stalled(stall));
+        }
+    }
+}
+
+/// The failure text of a transfer that moved no data for `stall`.
+fn stalled(stall: Duration) -> String {
+    if stall.subsec_nanos() == 0 {
+        format!("transfer stalled: no data for {} s", stall.as_secs())
+    } else {
+        format!("transfer stalled: no data for {} ms", stall.as_millis())
     }
 }
 
@@ -507,9 +631,11 @@ async fn read_bounded<D: FailureObserver + ?Sized>(
     mut body: hyper::body::Incoming,
     limit: usize,
     diagnostics: Diagnostics<'_, D>,
+    progress: &Progress,
 ) -> Result<Vec<u8>, ExchangeFailure> {
     let mut out = Vec::new();
     while let Some(frame) = body.frame().await {
+        progress.mark();
         let frame = frame.map_err(|error| {
             diagnostics.failure(
                 FailureKind::BodyIo,
@@ -753,11 +879,10 @@ impl NativeHttp {
         response_limit: usize,
         observer: Option<&D>,
     ) -> Result<Response<Vec<u8>>, ExchangeFailure> {
-        let timeout = request.extensions().get::<RequestTimeout>().map_or_else(
-            || self.request_timeout(request.uri()),
-            |bound| self.request_timeout(request.uri()).min(bound.0),
-        );
-        advertise_timeout(&mut request, timeout)?;
+        let budget = self.budget(&request);
+        if let Some(total) = budget.total {
+            advertise_timeout(&mut request, total)?;
+        }
         let procedure = request.uri().path().to_owned();
         let initial = Diagnostics {
             observer,
@@ -786,6 +911,7 @@ impl NativeHttp {
             )
         });
         let request = Request::from_parts(parts, NativeBody::Full(Full::new(body)));
+        let progress = Progress::new();
         let exchange = async {
             let response = self
                 .request_resending_reads(request, resend)
@@ -799,6 +925,7 @@ impl NativeHttp {
                         exchange_error("request failed", &error),
                     )
                 })?;
+            progress.mark();
             // Redirects are never followed: a redirect would carry a signed
             // request to an origin the signature was not made for.
             if response.status().is_redirection() {
@@ -821,15 +948,28 @@ impl NativeHttp {
                 headers: Some(&parts.headers),
                 ..initial
             };
-            let wire = read_bounded(body, response_limit, diagnostics).await?;
+            let wire = read_bounded(body, response_limit, diagnostics, &progress).await?;
             let bytes = decode_body(wire, &parts.headers, response_limit, diagnostics)?;
             parts.headers.remove(CONTENT_ENCODING);
             parts.headers.remove(CONTENT_LENGTH);
             Ok(Response::from_parts(parts, bytes))
         };
-        tokio::time::timeout(timeout, exchange).await.map_err(|_| {
-            ExchangeFailure::Native(NativeHttpError::Timeout("request timed out".to_owned()))
-        })?
+        match within(exchange, budget, &progress).await {
+            Ok(result) => result,
+            Err(Expired::Deadline) => Err(ExchangeFailure::Native(NativeHttpError::Timeout(
+                "request timed out".to_owned(),
+            ))),
+            Err(Expired::Stalled(stall)) => {
+                let cause = stalled(stall);
+                Err(initial.failure(
+                    FailureKind::Stalled,
+                    &cause,
+                    None,
+                    response_limit,
+                    NativeHttpError::Connection(cause.clone()),
+                ))
+            }
+        }
     }
 }
 
@@ -936,6 +1076,7 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
     limit: usize,
     sink: &mut S,
     initial: Diagnostics<'_, D>,
+    progress: &Progress,
 ) -> Result<(), Error> {
     if response.status().is_redirection() {
         return Err(Error::Transport("redirect refused".to_owned()));
@@ -962,6 +1103,7 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
         };
         let mut decoder = flate2::write::GzDecoder::new(writer);
         while let Some(frame) = body.frame().await {
+            progress.mark();
             let frame = frame.map_err(|error| {
                 diagnostics.client_failure(
                     FailureKind::BodyIo,
@@ -985,6 +1127,8 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
                 if let Err(error) = decoder.write_all(bytes) {
                     return Err(gzip_error(&mut decoder, &error));
                 }
+                // The sink's own work is local: it never counts as a stall.
+                progress.mark();
             }
         }
         if let Err(error) = decoder.try_finish() {
@@ -993,6 +1137,7 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
         decoder.get_mut().sink.finish()
     } else {
         while let Some(frame) = body.frame().await {
+            progress.mark();
             let frame = frame.map_err(|error| {
                 diagnostics.client_failure(
                     FailureKind::BodyIo,
@@ -1014,10 +1159,44 @@ async fn stream_response<S: ResponseStream + ?Sized, D: FailureObserver + ?Sized
                     ));
                 }
                 sink.chunk(bytes)?;
+                progress.mark();
             }
         }
         sink.finish()
     }
+}
+
+/// Hand `body` to the connection through `sender` in slices of at most
+/// [`UPLOAD_SLICE`], marking `progress` each time the connection takes one.
+/// Returns whether every slice went out: false when the connection dropped
+/// the receiver first. `queued` turns true once the last slice is queued,
+/// before the connection takes it.
+async fn produce_body<B: RequestStream + ?Sized>(
+    body: &mut B,
+    sender: tokio::sync::mpsc::Sender<Bytes>,
+    progress: &Progress,
+    queued: &AtomicBool,
+) -> Result<bool, Error> {
+    while let Some(chunk) = body.next_chunk()? {
+        let mut chunk = Bytes::from(chunk);
+        while !chunk.is_empty() {
+            let slice = chunk.split_to(chunk.len().min(UPLOAD_SLICE));
+            if sender.send(slice).await.is_err() {
+                // A response head may close the upload receiver before its
+                // error body arrives. Let that response finish before deciding
+                // whether incomplete request production failed.
+                return Ok(false);
+            }
+            // The connection took the previous slice.
+            progress.mark();
+        }
+    }
+    queued.store(true, Ordering::Release);
+    // And the last one, once the connection takes it.
+    if sender.reserve().await.is_ok() {
+        progress.mark();
+    }
+    Ok(true)
 }
 
 impl NativeHttp {
@@ -1033,11 +1212,10 @@ impl NativeHttp {
         sink: &mut S,
         observer: Option<&D>,
     ) -> Result<(), Error> {
-        let timeout = request.extensions().get::<RequestTimeout>().map_or_else(
-            || self.request_timeout(request.uri()),
-            |bound| self.request_timeout(request.uri()).min(bound.0),
-        );
-        advertise_timeout(&mut request, timeout).map_err(client_error)?;
+        let budget = self.budget(&request);
+        if let Some(total) = budget.total {
+            advertise_timeout(&mut request, total).map_err(client_error)?;
+        }
         let procedure = request.uri().path().to_owned();
         let diagnostics = Diagnostics {
             observer,
@@ -1058,17 +1236,9 @@ impl NativeHttp {
             .map_err(client_error)?;
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         let request = Request::from_parts(parts, NativeBody::Stream(receiver));
-        let produce = async move {
-            while let Some(chunk) = body.next_chunk()? {
-                if sender.send(Bytes::from(chunk)).await.is_err() {
-                    // A response head may close the upload receiver before its
-                    // error body arrives. Let that response finish before
-                    // deciding whether incomplete request production failed.
-                    return Ok::<_, Error>(false);
-                }
-            }
-            Ok::<_, Error>(true)
-        };
+        let progress = &Progress::new();
+        let queued = &AtomicBool::new(false);
+        let produce = produce_body(body, sender, progress, queued);
         let exchange = async {
             let response = self.client.request(request).await.map_err(|error| {
                 diagnostics.client_failure(
@@ -1079,7 +1249,8 @@ impl NativeHttp {
                     client_error(exchange_error("request failed", &error)),
                 )
             })?;
-            stream_response(response, response_limit, sink, diagnostics).await
+            progress.mark();
+            stream_response(response, response_limit, sink, diagnostics, progress).await
         };
         // Drive both borrowing futures locally. An early rejection cancels the
         // producer; successful exchanges require complete request production.
@@ -1110,6 +1281,9 @@ impl NativeHttp {
                         Some(false) => Poll::Ready(Err(Error::Transport(
                             "request body stopped before completion".to_owned(),
                         ))),
+                        // Every slice is queued; an answer that came before the
+                        // connection took the last one stands.
+                        None if queued.load(Ordering::Acquire) => Poll::Ready(Ok(())),
                         None => Poll::Pending,
                     }
                 } else {
@@ -1118,9 +1292,22 @@ impl NativeHttp {
             })
             .await
         };
-        tokio::time::timeout(timeout, together)
-            .await
-            .map_err(|_| Error::RequestTimeout("client-side deadline exceeded".to_owned()))?
+        match within(together, budget, progress).await {
+            Ok(result) => result,
+            Err(Expired::Deadline) => Err(Error::RequestTimeout(
+                "client-side deadline exceeded".to_owned(),
+            )),
+            Err(Expired::Stalled(stall)) => {
+                let cause = stalled(stall);
+                Err(diagnostics.client_failure(
+                    FailureKind::Stalled,
+                    &cause,
+                    None,
+                    response_limit,
+                    Error::Connection(cause.clone()),
+                ))
+            }
+        }
     }
 }
 
@@ -1187,12 +1374,14 @@ impl HttpTransport for NativeHttp {
                 return Err("pack location destination refused".to_owned());
             }
         }
-        let timeout = timeout.map_or(self.transfer_timeout, |bound| {
-            bound.min(self.transfer_timeout)
-        });
-        if timeout.is_zero() {
+        if timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Err("pack location deadline exceeded".to_owned());
         }
+        let budget = Budget {
+            total: timeout,
+            stall: Some(self.transfer_timeout),
+        };
+        let progress = Progress::new();
         // This is deliberately independent of the RPC request path: neither
         // default headers nor signed request headers reach the location host.
         // Hyper does not follow redirects or retain cookies.
@@ -1206,6 +1395,7 @@ impl HttpTransport for NativeHttp {
                 .request(request)
                 .await
                 .map_err(|_| "pack location request failed".to_owned())?;
+            progress.mark();
             if response.status() != http::StatusCode::OK {
                 return Err("pack location response was not OK".to_owned());
             }
@@ -1236,6 +1426,7 @@ impl HttpTransport for NativeHttp {
             let mut body = response.into_body();
             let mut received = 0_u64;
             while let Some(frame) = body.frame().await {
+                progress.mark();
                 let frame = frame.map_err(|_| "pack location body failed".to_owned())?;
                 if let Some(data) = frame.data_ref() {
                     received = received.saturating_add(data.len() as u64);
@@ -1244,13 +1435,16 @@ impl HttpTransport for NativeHttp {
                     }
                     sink.write(data)
                         .map_err(|error| format!("pack location body refused: {error}"))?;
+                    progress.mark();
                 }
             }
             Ok(())
         };
-        tokio::time::timeout(timeout, fetch)
-            .await
-            .map_err(|_| "pack location deadline exceeded".to_owned())?
+        match within(fetch, budget, &progress).await {
+            Ok(result) => result,
+            Err(Expired::Deadline) => Err("pack location deadline exceeded".to_owned()),
+            Err(Expired::Stalled(stall)) => Err(format!("pack location {}", stalled(stall))),
+        }
     }
 
     async fn send_stream<B: RequestStream + ?Sized, S: ResponseStream + ?Sized>(
@@ -1383,11 +1577,33 @@ mod tests {
         ));
     }
 
+    fn budget(http: &NativeHttp, uri: &Uri, bound: Option<Duration>) -> Budget {
+        let mut request = Request::post(uri.clone()).body(()).expect("request");
+        if let Some(bound) = bound {
+            request.extensions_mut().insert(RequestTimeout(bound));
+        }
+        http.budget(&request)
+    }
+
+    fn total(total: Duration) -> Budget {
+        Budget {
+            total: Some(total),
+            stall: None,
+        }
+    }
+
+    fn stall(stall: Duration) -> Budget {
+        Budget {
+            total: None,
+            stall: Some(stall),
+        }
+    }
+
     #[test]
     fn timeout_defaults_and_overrides_are_selected_by_exact_procedure() {
         let http = NativeHttp::new().expect("native transport");
         assert_eq!(DEFAULT_METADATA_TIMEOUT, Duration::from_secs(30));
-        assert_eq!(DEFAULT_TRANSFER_TIMEOUT, Duration::from_mins(5));
+        assert_eq!(DEFAULT_TRANSFER_TIMEOUT, Duration::from_mins(1));
         for procedure in [
             "GetServerInfo",
             "ListRefs",
@@ -1402,14 +1618,14 @@ mod tests {
                 format!("https://example.invalid/kit.transport.v1.TransportService/{procedure}")
                     .parse::<Uri>()
                     .expect("uri");
-            assert_eq!(http.request_timeout(&uri), DEFAULT_METADATA_TIMEOUT);
+            assert_eq!(budget(&http, &uri, None), total(DEFAULT_METADATA_TIMEOUT));
         }
         for procedure in ["DownloadPack", "UploadPack", "UploadPart"] {
             let uri =
                 format!("https://example.invalid/kit.transport.v1.TransportService/{procedure}")
                     .parse::<Uri>()
                     .expect("uri");
-            assert_eq!(http.request_timeout(&uri), DEFAULT_TRANSFER_TIMEOUT);
+            assert_eq!(budget(&http, &uri, None), stall(DEFAULT_TRANSFER_TIMEOUT));
         }
         let metadata: Uri = "https://example.invalid/other/UploadPack"
             .parse()
@@ -1420,11 +1636,53 @@ mod tests {
         let http = http
             .with_timeout(Duration::from_secs(7))
             .with_metadata_timeout(Duration::from_secs(1));
-        assert_eq!(http.request_timeout(&metadata), Duration::from_secs(1));
-        assert_eq!(http.request_timeout(&transfer), Duration::from_secs(7));
+        assert_eq!(
+            budget(&http, &metadata, None),
+            total(Duration::from_secs(1))
+        );
+        assert_eq!(
+            budget(&http, &transfer, None),
+            stall(Duration::from_secs(7))
+        );
         let http = http.with_transfer_timeout(Duration::from_secs(2));
-        assert_eq!(http.request_timeout(&metadata), Duration::from_secs(1));
-        assert_eq!(http.request_timeout(&transfer), Duration::from_secs(2));
+        assert_eq!(
+            budget(&http, &metadata, None),
+            total(Duration::from_secs(1))
+        );
+        assert_eq!(
+            budget(&http, &transfer, None),
+            stall(Duration::from_secs(2))
+        );
+        // A caller's bound shortens a metadata request and is the only total
+        // bound of a transfer.
+        let bound = Some(Duration::from_millis(1500));
+        assert_eq!(
+            budget(&http, &metadata, bound),
+            total(Duration::from_secs(1))
+        );
+        assert_eq!(
+            budget(&http, &metadata, Some(Duration::from_millis(500))),
+            total(Duration::from_millis(500))
+        );
+        assert_eq!(
+            budget(&http, &transfer, bound),
+            Budget {
+                total: bound,
+                stall: Some(Duration::from_secs(2)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_stall_names_its_bound() {
+        assert_eq!(
+            stalled(Duration::from_mins(1)),
+            "transfer stalled: no data for 60 s"
+        );
+        assert_eq!(
+            stalled(Duration::from_millis(400)),
+            "transfer stalled: no data for 400 ms"
+        );
     }
 
     #[test]

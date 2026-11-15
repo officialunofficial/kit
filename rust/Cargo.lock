@@ -2605,14 +2605,17 @@ dependencies = [
 name = "kit-transport-s3"
 version = "0.8.1"
 dependencies = [
+ "bytes",
  "hex",
  "hmac",
+ "http-body",
  "kit-core",
  "md-5",
  "mockito",
  "reqwest",
  "serde_json",
  "sha2",
+ "tokio",
 ]
 
 [[package]]

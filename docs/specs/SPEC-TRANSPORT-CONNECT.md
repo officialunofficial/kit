@@ -843,9 +843,10 @@ Checking the URL hostname alone does not prevent DNS rebinding. A local caller
 MAY override this policy for a private pack host; remote responses MUST NOT
 control that override. Destination rejection is a location-fetch failure.
 
-A location fetch SHOULD honor the remaining local request deadline, clamped
-to the location channel's transfer timeout. This budget is local metadata and
-MUST NOT add headers to the location request. On any location fetch or
+A location fetch SHOULD honor the remaining local request deadline, and SHOULD
+end once the location channel's transfer timeout passes with no data moving.
+These bounds are local metadata and MUST NOT add headers to the location
+request. On any location fetch or
 verification failure, including an invalid location response, the client MUST
 retry once with streaming `DownloadPack` and `accept_location` absent or false,
 unless the local request deadline has expired. The client MUST check the

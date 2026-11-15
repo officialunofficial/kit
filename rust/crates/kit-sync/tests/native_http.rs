@@ -1237,6 +1237,156 @@ fn diagnosed_body_io_has_a_typed_cause_without_the_native_display_prefix() {
     assert!(!failures[0].2.is_empty());
 }
 
+/// Serve one transfer answer of `chunks` chunks of `chunk` bytes, with `gap`
+/// before each. The request is read whole first. Returns the base URL.
+fn trickled_answer(chunks: usize, chunk: usize, gap: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_chunked_request(&mut stream);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            chunks * chunk
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        for _ in 0..chunks {
+            std::thread::sleep(gap);
+            // The client may have given up on a stalled body.
+            if stream.write_all(&vec![7; chunk]).is_err() {
+                return;
+            }
+        }
+    });
+    format!("http://{addr}/kit.transport.v1.TransportService/DownloadPack")
+}
+
+fn download(
+    http: &NativeHttp,
+    url: &str,
+    observer: &FailureCapture,
+) -> Result<StreamingReply, kit_client::Error> {
+    let request = Request::post(url).body(()).unwrap();
+    let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+    let mut reply = StreamingReply::default();
+    http.block_on(http.send_stream_diagnosed(request, &mut body, 1 << 20, &mut reply, observer))?;
+    Ok(reply)
+}
+
+/// Records failures and keeps each default error.
+#[derive(Default)]
+struct StallCapture(std::cell::RefCell<Vec<(kit_client::FailureKind, String)>>);
+impl kit_client::FailureObserver for StallCapture {
+    fn map_failure(
+        &self,
+        failure: &kit_client::FailureDiagnostic<'_>,
+    ) -> Option<kit_client::Error> {
+        self.0
+            .borrow_mut()
+            .push((failure.kind, failure.cause.to_owned()));
+        None
+    }
+}
+
+#[test]
+fn a_slow_transfer_that_keeps_moving_outlives_the_stall_bound() {
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(Duration::from_secs(3));
+    // Fourteen chunks 250 ms apart take 3.5 s in all, past the 3 s bound.
+    let url = trickled_answer(14, 1024, Duration::from_millis(250));
+    let start = std::time::Instant::now();
+    let reply = download(&http, &url, &FailureCapture::default()).unwrap();
+    assert_eq!(reply.bytes, vec![7; 14 * 1024]);
+    assert!(start.elapsed() >= Duration::from_millis(3500));
+}
+
+#[test]
+fn a_transfer_that_stops_fails_after_the_stall_bound_as_transient() {
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(Duration::from_millis(300));
+    // The answer's head arrives, then nothing for 6 s.
+    let url = trickled_answer(1, 1024, Duration::from_secs(6));
+    let observer = StallCapture::default();
+    let start = std::time::Instant::now();
+    let request = Request::post(url).body(()).unwrap();
+    let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+    let mut reply = StreamingReply::default();
+    let result = http.block_on(http.send_stream_diagnosed(
+        request,
+        &mut body,
+        1 << 20,
+        &mut reply,
+        &observer,
+    ));
+    assert!(
+        matches!(&result, Err(kit_client::Error::Connection(cause)) if cause == "transfer stalled: no data for 300 ms"),
+        "{result:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        observer.0.borrow().as_slice(),
+        &[(
+            kit_client::FailureKind::Stalled,
+            "transfer stalled: no data for 300 ms".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_transfer_whose_upload_is_never_read_fails_after_the_stall_bound() {
+    // The server takes the connection and reads nothing, so once the socket
+    // buffers fill the upload cannot move.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // It holds the connection well past the bound, so the stall, not a
+    // reset, ends the upload.
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+        drop(stream);
+    });
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(Duration::from_millis(300));
+    let request = Request::post(format!(
+        "http://{addr}/kit.transport.v1.TransportService/UploadPack"
+    ))
+    .body(())
+    .unwrap();
+    let mut body = StreamingBody(vec![vec![0; 1 << 20]; 64].into_iter());
+    let mut reply = StreamingReply::default();
+    let start = std::time::Instant::now();
+    let result = http.block_on(http.send_stream(request, &mut body, 1024, &mut reply));
+    assert!(
+        matches!(&result, Err(kit_client::Error::Connection(cause)) if cause == "transfer stalled: no data for 300 ms"),
+        "{result:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(20));
+}
+
+#[test]
+fn a_transfer_has_only_the_callers_total_bound() {
+    let url = trickled_answer(2, 1024, Duration::from_secs(3));
+    let http = NativeHttp::new()
+        .unwrap()
+        .with_transfer_timeout(Duration::from_secs(30));
+    let mut request = Request::post(url).body(()).unwrap();
+    request
+        .extensions_mut()
+        .insert(kit_client::RequestTimeout(Duration::from_millis(200)));
+    let mut body = StreamingBody(vec![b"request".to_vec()].into_iter());
+    let mut reply = StreamingReply::default();
+    let start = std::time::Instant::now();
+    let result = http.block_on(http.send_stream(request, &mut body, 1 << 20, &mut reply));
+    assert!(
+        matches!(&result, Err(kit_client::Error::RequestTimeout(cause)) if cause == "client-side deadline exceeded"),
+        "{result:?}"
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 #[test]
 fn timeout_advertisement_is_opt_in_and_uses_the_clamped_budget() {
     for advertise in [false, true] {

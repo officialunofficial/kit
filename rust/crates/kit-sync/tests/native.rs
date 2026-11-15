@@ -120,7 +120,7 @@ fn pack_location_fetch_refuses_redirects_encoding_and_oversize_bodies() {
 }
 
 #[test]
-fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
+fn pack_location_fetch_enforces_its_own_scheme_and_stall_bound() {
     let transport = NativeHttp::new()
         .unwrap()
         .allow_insecure_http(true)
@@ -141,7 +141,73 @@ fn pack_location_fetch_enforces_its_own_scheme_and_transfer_deadline() {
         std::time::Duration::from_millis(400),
     );
     let error = fetch(&transport, &url, 4, None).unwrap_err();
-    assert!(error.contains("deadline"), "{error}");
+    assert_eq!(error, "pack location transfer stalled: no data for 200 ms");
+    server.join().unwrap();
+}
+
+/// Serve one location response of `chunks` chunks of `chunk` bytes, with
+/// `gap` before each chunk.
+fn trickled_location(
+    chunks: usize,
+    chunk: usize,
+    gap: std::time::Duration,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/pack", listener.local_addr().unwrap());
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            chunks * chunk
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        for _ in 0..chunks {
+            std::thread::sleep(gap);
+            // The client may have given up on a stalled body.
+            if stream.write_all(&vec![7; chunk]).is_err() {
+                return;
+            }
+        }
+    });
+    (url, thread)
+}
+
+#[test]
+fn a_slow_location_body_that_keeps_moving_outlives_the_stall_bound() {
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true)
+        .with_transfer_timeout(std::time::Duration::from_secs(3));
+    // Fourteen chunks 250 ms apart take 3.5 s in all, past the 3 s bound.
+    let (url, server) = trickled_location(14, 1024, std::time::Duration::from_millis(250));
+    let start = std::time::Instant::now();
+    let body = fetch(&transport, &url, 14 * 1024, None).unwrap();
+    assert_eq!(body, vec![7; 14 * 1024]);
+    assert!(start.elapsed() >= std::time::Duration::from_millis(3500));
+    server.join().unwrap();
+}
+
+#[test]
+fn a_location_body_that_stops_fails_after_the_stall_bound() {
+    let transport = NativeHttp::new()
+        .unwrap()
+        .with_test_pack_location_http(true)
+        .allow_private_pack_locations(true)
+        .with_transfer_timeout(std::time::Duration::from_millis(300));
+    // The answer's head arrives, then nothing for 6 s.
+    let (url, server) = trickled_location(1, 1024, std::time::Duration::from_secs(6));
+    let start = std::time::Instant::now();
+    let error = fetch(&transport, &url, 2 * 1024, None).unwrap_err();
+    assert_eq!(error, "pack location transfer stalled: no data for 300 ms");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
     server.join().unwrap();
 }
 

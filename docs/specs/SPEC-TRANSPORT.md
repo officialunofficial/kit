@@ -762,8 +762,10 @@ and every write is one plain unconditional `PUT` (§6.7).
   document names the key, the request and the host), and a limit must not
   turn a `404` into `PayloadTooLarge`.
 - HTTP timeout: 60 s for a request up to its response headers, and 60 s
-  for each read of a response body. A pack `PUT` sends its body before it
-  awaits the answer, so it gets 60 s plus one second per MiB of the pack.
+  for each read of a response body. A pack `PUT` has no total bound: it
+  fails once 60 s pass with no byte of its body taken and no answer, and is
+  retried like a lost connection. A slow upload that keeps moving finishes
+  a pack of any size.
 
 ### 6.5 Retry
 
