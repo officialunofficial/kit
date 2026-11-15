@@ -33,10 +33,13 @@ pub const MAX_CHUNKED_TOTAL_SIZE: u64 = 128 * 1024 * 1024 * 1024;
 /// writers both enforce it, and `crate::verify` bounds a disclosure
 /// bundle's claimed chunk count with it.
 pub const MAX_CHUNKS: u32 = 8_388_608;
+/// Bytes of a `ChunkedBlob` manifest before its entries: the 6-byte
+/// prologue, `total_size` (`u64`), `chunk_size` (`u32`) and `chunk_count`
+/// (`u32`).
+pub const CHUNKED_HEADER_LEN: usize = 22;
 /// Bytes of one `ChunkedBlob` manifest entry: a 32-byte chunk id and the
 /// `u64` end offset of the chunk. A manifest of `n` chunks is
-/// `22 + CHUNKED_ENTRY_LEN * n` bytes long: the 6-byte prologue,
-/// `total_size`, `chunk_size` and `chunk_count`, then the entries.
+/// `CHUNKED_HEADER_LEN + CHUNKED_ENTRY_LEN * n` bytes long.
 pub const CHUNKED_ENTRY_LEN: usize = 40;
 /// The longest span one chunk may cover: a Blob object of at most
 /// [`crate::store::MAX_RAW_OBJECT_SIZE`] bytes, less its 10-byte prologue.
@@ -419,7 +422,9 @@ fn estimated_body_len(obj: &Object) -> usize {
                 + 32
                 + 64
         }
-        Object::ChunkedBlob(cb) => 8 + 4 + 4 + cb.chunks().len() * CHUNKED_ENTRY_LEN,
+        Object::ChunkedBlob(cb) => {
+            CHUNKED_HEADER_LEN - PROLOGUE_LEN + cb.chunks().len() * CHUNKED_ENTRY_LEN
+        }
         Object::Delta(d) => 32 + 4 + 4 + d.instructions.len(),
         Object::Tag(t) => {
             32 + 1
@@ -1268,7 +1273,7 @@ mod tests {
         assert_eq!(deserialize(&buf), Err(KitError::TooManySources));
     }
 
-    /// The 22-byte prologue and header of a manifest.
+    /// The `CHUNKED_HEADER_LEN`-byte prologue and header of a manifest.
     fn chunked_header(total: u64, chunk_size: u32, count: u32) -> Vec<u8> {
         let mut buf = vec![0x05, b'K', b'O', b'B', b'1', 0x02];
         buf.extend_from_slice(&total.to_le_bytes());
@@ -1321,9 +1326,9 @@ mod tests {
             deserialize(&chunked_header(MAX_CHUNKED_TOTAL_SIZE, 0, MAX_CHUNKS)),
             Err(KitError::ChunkedBlobLength)
         );
-        // Fewer than 22 bytes is a truncated header.
+        // Fewer than `CHUNKED_HEADER_LEN` bytes is a truncated header.
         assert_eq!(
-            deserialize(&chunked_header(1, 0, 0)[..20]),
+            deserialize(&chunked_header(1, 0, 0)[..CHUNKED_HEADER_LEN - 2]),
             Err(KitError::UnexpectedEof)
         );
     }
@@ -1386,7 +1391,7 @@ mod tests {
     fn a_manifest_is_laid_out_as_22_plus_40_per_chunk() {
         let cb = ChunkedBlob::new(10, 0, [([1u8; 32], 4), ([2u8; 32], 10)]).unwrap();
         let bytes = serialize(&Object::ChunkedBlob(cb)).unwrap();
-        assert_eq!(bytes.len(), 22 + 2 * CHUNKED_ENTRY_LEN);
+        assert_eq!(bytes.len(), CHUNKED_HEADER_LEN + 2 * CHUNKED_ENTRY_LEN);
         assert_eq!(&bytes[..6], &[0x05, b'K', b'O', b'B', b'1', 0x02]);
         assert_eq!(&bytes[6..14], &10u64.to_le_bytes());
         assert_eq!(&bytes[14..18], &0u32.to_le_bytes());
