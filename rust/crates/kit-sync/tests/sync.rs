@@ -3378,6 +3378,106 @@ fn the_restore_safety_messages_are_unchanged() {
     );
 }
 
+/// Each of the eight restore-safety refusals of a pull keeps its exact text. A
+/// downstream tells local work from other restore failures by these texts, so
+/// a reword would silently change what it reports.
+#[test]
+fn the_eight_restore_safety_refusals_keep_their_exact_text() {
+    fn refusal(result: Result<kit_sync::PullReport, SyncError>) -> String {
+        match result {
+            Err(SyncError::RestoreSafety(message)) => message,
+            other => panic!("expected a restore safety refusal, got {other:?}"),
+        }
+    }
+    let run = |dir: &Path, remote: &Remote| {
+        pull(
+            dir,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+    let unstage = |layout: &RepoLayout, path: &str| {
+        let mut index = kit_core::index::read_index(layout).unwrap();
+        index.retain_entries(|entry| entry.path != path);
+        kit_core::index::write_index(layout, &index).unwrap();
+    };
+    // A clone of `a.txt` and `c.txt` whose remote then moved `a.txt` on.
+    let behind = || {
+        let remote = Remote::new();
+        let first = remote.publish(None, &[("a.txt", b"one\n"), ("c.txt", b"same\n")], true);
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        remote.publish(
+            Some(first),
+            &[("a.txt", b"two\n"), ("c.txt", b"same\n")],
+            true,
+        );
+        (remote, dir)
+    };
+
+    let (remote, dir) = behind();
+    unstage(&RepoLayout::single(dir.path()), "a.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite staged changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("a.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite local changes; commit, stash, or reset 'a.txt' first"
+    );
+
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    remote.publish(Some(first), &[("a.txt", b"one\n"), ("b.txt", b"b\n")], true);
+    std::fs::write(dir.path().join("b.txt"), b"mine\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would overwrite untracked path 'b.txt'; move or remove it first"
+    );
+
+    let (remote, dir) = behind();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "restore would remove untracked path 'notes.txt'; move or remove it first"
+    );
+
+    let (remote, dir, layout, _, _) = pending_restore();
+    unstage(&layout, "c.txt");
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite staged changes; copy staged work elsewhere before discarding it with `kit checkout -f <branch>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("c.txt"), b"local edit\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would overwrite local changes at 'c.txt'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+    );
+
+    let (remote, dir, _, _, _) = pending_restore();
+    std::fs::write(dir.path().join("notes.txt"), b"notes\n").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &remote)),
+        "pull recovery would remove untracked path 'notes.txt'; move or remove it, then pull again"
+    );
+
+    let (_, dir, layout, _, _) = pending_restore();
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    assert_eq!(
+        refusal(run(dir.path(), &Remote::new())),
+        "unfinished pull cannot recover without a remote branch; restore the remote branch, then pull again"
+    );
+}
+
 /// A tracked file of many chunks that another process keeps appending to while
 /// the pull's safety check hashes it. The check must report the file as a local
 /// change, so the pull refuses with the usual message, and not fail with an
