@@ -380,6 +380,9 @@ impl RemoteSource for Wire<'_> {
         condition: RefWriteCondition,
         tip: &Hash,
     ) -> Result<(), SourceError> {
+        if self.refused.borrow().contains(name) {
+            return Err(denied());
+        }
         self.inner.update_ref(name, condition, tip)
     }
     fn advance_refs_committing(
@@ -740,6 +743,72 @@ fn a_remote_tag_with_another_value_is_refused_and_an_equal_one_is_up_to_date() {
         );
         assert_eq!(wire.read("refs/tags/v1"), Some(c[0]));
     }
+}
+
+/// A forced update to a value inside the old value's history sends nothing:
+/// the tag map already rebuilds it, so only the tag moves, under `Match` on
+/// the old value. A remote that refuses the move refuses that tag.
+#[test]
+fn a_forced_update_inside_the_old_history_moves_only_the_tag() {
+    for kind in KINDS {
+        let (tx, _root) = transport(kind);
+        let wire = Wire::new(&*tx);
+        let work = Work::new();
+        let c = work.commits(None, 2);
+        work.branch("main", c[1]);
+        work.push_branch(&wire, "main");
+        work.light("v1", c[1]);
+        work.light("v2", c[1]);
+        work.push_tags(&wire, false);
+        wire.take_objects();
+        let map = wire.read("refs/kit/tagmap/v1");
+
+        work.light("v1", c[0]);
+        let results = work.push_tag(&wire, "v1", true);
+        assert!(
+            matches!(outcome(&results, "v1"), TagPushOutcome::Forced { old, value } if *old == c[1] && *value == c[0]),
+            "{results:?}"
+        );
+        assert!(wire.take_objects().is_empty() && wire.nodes.borrow().is_empty());
+        assert_eq!(wire.read("refs/kit/tagmap/v1"), map, "{kind:?}");
+        assert_eq!(wire.read("refs/tags/v1"), Some(c[0]));
+        let (_dir, report, _) = clone_of(&wire);
+        assert_eq!(report.tags_fetched, ["v1", "v2"], "{kind:?}");
+
+        work.light("v2", c[0]);
+        wire.refused.borrow_mut().insert("refs/tags/v2".to_owned());
+        let results = work.push_tag(&wire, "v2", true);
+        assert!(
+            matches!(rejection(&results, "v2"), TagPushRejection::Refused(_)),
+            "{results:?}"
+        );
+        assert_eq!(wire.read("refs/tags/v2"), Some(c[1]));
+    }
+}
+
+/// A tag between two pushed branches, below the newer one's tip and above
+/// the older one's, grafts on the branch that already holds its commit.
+#[test]
+fn a_tag_between_two_pushed_branches_grafts_on_the_one_that_holds_it() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 5);
+    work.branch("topic", c[1]);
+    work.push_branch(&wire, "topic");
+    work.branch("main", c[4]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    let v1 = work.tag("v1", c[3]);
+
+    let results = work.push_tags(&wire, false);
+
+    assert_created(&results, "v1");
+    assert_eq!(wire.take_objects(), [v1]);
+    assert_eq!(
+        wire.node(wire.read("refs/kit/tagmap/v1").unwrap()).prev,
+        wire.read("refs/kit/packmap/main")
+    );
 }
 
 /// `--force` moves a tag with a tag map. A reader who reads the old value
@@ -1269,7 +1338,7 @@ fn a_tag_past_the_listing_bound_is_refused_where_the_listing_is_one_frame() {
 }
 
 /// A name `refs/kit/tagmap/<t>` cannot hold, an annotated tag named for
-/// another tag, and an unsigned annotated tag (as a git import makes) are
+/// another tag, and an unsigned annotated tag are
 /// refused before the remote is read.
 #[test]
 fn tags_that_cannot_go_are_refused_locally() {

@@ -85,7 +85,9 @@ pub enum PushName {
 /// [`Error::AmbiguousName`], [`Error::NoSuchTag`], or what
 /// [`parse_refspec`] returns.
 pub fn resolve_push_name(layout: &RepoLayout, spec: &str) -> Result<PushName, Error> {
-    if let Some(tag) = spec.strip_prefix(refs::TAG_REF_PREFIX) {
+    if let Some(tag) = spec.strip_prefix(refs::TAG_REF_PREFIX)
+        && !spec.contains(':')
+    {
         return match refs::read_tag(layout, tag) {
             Ok(Some(_)) => Ok(PushName::Tag(tag.to_owned())),
             _ => Err(Error::NoSuchTag(tag.to_owned())),

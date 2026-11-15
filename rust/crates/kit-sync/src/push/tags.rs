@@ -363,17 +363,21 @@ impl BaseSearch {
 
     /// The base of a tag on `target`: the first candidate a breadth-first
     /// walk of `target`'s ancestry meets whose stable read holds, or `None`.
-    /// A tag on the history of a pushed branch, below its tip, meets no
-    /// candidate that way; when a walk finds none, the candidates' own
-    /// ancestries are added to the memo once per push and the walk runs
-    /// again. Each walk visits at most `budget` commits the memo does not
-    /// answer, so one tag costs at most two budgets.
+    /// A tag on the history of a pushed branch, below its tip, would meet
+    /// only a tip below it that way, or none: unless `target` is itself a
+    /// candidate, the candidates' own ancestries are added to the memo first,
+    /// once per push, so the walk stops at the first commit a branch holds.
+    /// Each walk visits at most `budget` commits the memo does not answer,
+    /// and a walk that finds nothing before seeding runs once more after it.
     fn base_of(
         &mut self,
         tx: &PushContext<'_>,
         store: &ObjectStore,
         target: Hash,
     ) -> Result<Option<Base>, PushError> {
+        if !self.seeded && !self.usable(&target) {
+            self.seed(store)?;
+        }
         loop {
             let mut budget = self.budget;
             while let Some(candidate) = self.nearest(store, target, &mut budget)? {
@@ -543,8 +547,10 @@ fn parents(store: &ObjectStore, id: &Hash) -> Result<Vec<Hash>, PushError> {
 fn peel(store: &ObjectStore, id: Hash) -> Result<Hash, PushError> {
     let mut id = id;
     for _ in 0..MAX_PEELED_TAGS {
-        if store.object_type(&id)? != ObjectType::Tag {
-            break;
+        match store.object_type(&id) {
+            Ok(ObjectType::Tag) => {}
+            Ok(_) | Err(StoreError::ObjectNotFound(_)) => break,
+            Err(error) => return Err(error.into()),
         }
         let Object::Tag(tag) = store.read_object(&id)? else {
             break;
@@ -617,6 +623,13 @@ fn local_refusal(
             tag: local.name.clone(),
         }));
     }
+    let target = peel(store, local.value)?;
+    if !store.contains(&target) {
+        return Ok(Some(TagPushRejection::NotPushable(format!(
+            "the object {} it names is not in this repository",
+            to_hex(&target)
+        ))));
+    }
     Ok(None)
 }
 
@@ -627,8 +640,12 @@ enum Advance {
     Landed { committed: bool },
     /// A condition failed; the tag is read again and placed anew.
     Conflict,
-    /// The remote refused the write.
+    /// The remote refused the write: `scope` when it refused this caller's
+    /// access to the ref, as a grant whose scopes miss it does.
     Refused { message: String, scope: bool },
+    /// The remote refused the upload tickets the write carried, as it does
+    /// once they expire.
+    Stale(String),
 }
 
 /// Whether a failed write is the remote's refusal of this write, which
@@ -655,10 +672,13 @@ fn scope_refusal(error: &SourceError) -> bool {
     }
 }
 
-/// The remote's refusal inside a failed upload, as [`refusal`] reads it.
-fn refused_upload(error: &PushError) -> Option<String> {
+/// The remote's refusal inside a failed upload, as [`refusal`] reads it, and
+/// whether it is a [`scope_refusal`].
+fn refused_upload(error: &PushError) -> Option<(String, bool)> {
     match error {
-        PushError::Sync(SyncError::Source(source)) if refusal(source) => Some(source.to_string()),
+        PushError::Sync(SyncError::Source(source)) if refusal(source) => {
+            Some((source.to_string(), scope_refusal(source)))
+        }
         _ => None,
     }
 }
@@ -672,6 +692,9 @@ struct TagPush<'a, 'b> {
     results: BTreeMap<String, TagPushOutcome>,
     /// Tags whose write lost a race this round.
     retry: Vec<Local>,
+    /// Uploads of a ticketed group again after its ticket-carrying tag lost
+    /// a race, across the push: at most [`PACKMAP_CAS_ATTEMPTS`].
+    reuploads: u32,
 }
 
 impl TagPush<'_, '_> {
@@ -807,10 +830,16 @@ impl TagPush<'_, '_> {
         if self.read(&tag_ref)? == Some(local.value) {
             return Ok(Advance::Landed { committed: false });
         }
-        Ok(refused.map_or(Advance::Conflict, |error| Advance::Refused {
-            message: error.to_string(),
-            scope: false,
-        }))
+        Ok(match refused {
+            None => Advance::Conflict,
+            Some(PushError::TicketRejected) => {
+                Advance::Stale(PushError::TicketRejected.to_string())
+            }
+            Some(error) => Advance::Refused {
+                message: error.to_string(),
+                scope: false,
+            },
+        })
     }
 
     /// Move only the tag, when its tag map already rebuilds the new value.
@@ -853,9 +882,17 @@ impl TagPush<'_, '_> {
         match advance {
             Advance::Landed { .. } => self.finish(local, row.landed(local.value)),
             Advance::Conflict => self.retry.push(local.clone()),
-            Advance::Refused { message, .. } => {
+            Advance::Refused { message, .. } | Advance::Stale(message) => {
                 self.reject(local, TagPushRejection::Refused(message));
             }
+        }
+    }
+
+    /// Refuse `local` and every member after it with `message`.
+    fn refuse_group(&mut self, local: &Local, members: &mut VecDeque<(Local, Row)>, message: &str) {
+        self.reject(local, TagPushRejection::Refused(message.to_owned()));
+        while let Some((local, _)) = members.pop_front() {
+            self.reject(&local, TagPushRejection::Refused(message.to_owned()));
         }
     }
 
@@ -886,25 +923,32 @@ impl TagPush<'_, '_> {
             return Ok(());
         }
         let ticketed = self.ticketed();
-        let mut uploads = 0;
         // The tag map value and the keys its advance commits, once uploaded.
         let mut chain: Option<(Hash, Vec<PackKey>)> = None;
-        // Whether an advance of this group landed: its packs and node are
+        // Whether an advance of this group committed: its packs and node are
         // then in the repository.
         let mut landed = false;
+        // Whether the last ticket-carrying advance lost a race, so that the
+        // next upload counts against the push's bound.
+        let mut lost = false;
+        // Whether expired tickets were already uploaded again once.
+        let mut renewed = false;
         let mut members = VecDeque::from(members);
         while let Some((local, row)) = members.pop_front() {
             if self.tx.observer.cancelled() {
                 return Err(SyncError::Interrupted.into());
             }
             // A ticket binds an upload to its head ref, so until an advance
-            // lands, each ticket-carrying tag uploads the group again.
+            // commits, each ticket-carrying tag uploads the group again.
             if chain.is_none() || (ticketed && !landed) {
-                if uploads == PACKMAP_CAS_ATTEMPTS {
-                    self.reject(&local, TagPushRejection::Contended);
-                    continue;
+                if lost {
+                    if self.reuploads == PACKMAP_CAS_ATTEMPTS {
+                        self.reject(&local, TagPushRejection::Contended);
+                        continue;
+                    }
+                    self.reuploads += 1;
+                    lost = false;
                 }
-                uploads += 1;
                 chain = Some(match base {
                     Some(base) if plan.is_empty() => (base.packmap, Vec::new()),
                     _ => {
@@ -913,13 +957,17 @@ impl TagPush<'_, '_> {
                         });
                         match self.upload(&local.tag_ref(), plan.clone(), state) {
                             Ok(uploaded) => uploaded,
-                            // A ticket names this tag's ref, which the
-                            // remote may refuse to this caller alone: the
-                            // next tag uploads the group again.
                             Err(error) => match refused_upload(&error) {
-                                Some(message) => {
+                                // A ticket names this tag's ref, which the
+                                // remote may refuse to this caller alone:
+                                // the next tag uploads the group again.
+                                Some((message, true)) => {
                                     self.reject(&local, TagPushRejection::Refused(message));
                                     continue;
+                                }
+                                Some((message, false)) => {
+                                    self.refuse_group(&local, &mut members, &message);
+                                    return Ok(());
                                 }
                                 None => return Err(error),
                             },
@@ -929,24 +977,29 @@ impl TagPush<'_, '_> {
             }
             let (map, keys) = chain.as_ref().expect("the group was uploaded");
             let advance = self.advance(&local, row, *map, keys)?;
-            match advance {
-                // Only this group's own commit makes its packs members; a
-                // value another push placed does not.
-                Advance::Landed { committed: true } => landed = true,
-                // A refusal of this caller's access to the ticket-carrying
-                // tag refuses that tag; the next one uploads again.
-                Advance::Refused { scope: true, .. } if ticketed && !landed => {}
-                // Any other refusal of the ticket-carrying advance refuses
-                // the whole group: its packs are not in the repository.
-                Advance::Refused { ref message, .. } if ticketed && !landed => {
-                    let message = message.clone();
-                    self.reject(&local, TagPushRejection::Refused(message.clone()));
-                    while let Some((local, _)) = members.pop_front() {
-                        self.reject(&local, TagPushRejection::Refused(message.clone()));
+            if ticketed && !landed {
+                match &advance {
+                    // Only this group's own commit makes its packs members;
+                    // a value another push placed does not.
+                    Advance::Landed { committed } => landed = *committed,
+                    Advance::Conflict => lost = true,
+                    // A refusal of this caller's access to the tag refuses
+                    // that tag; the next one uploads again.
+                    Advance::Refused { scope: true, .. } => {}
+                    // Expired tickets: the same tag uploads again, once.
+                    Advance::Stale(_) if !renewed => {
+                        renewed = true;
+                        members.push_front((local, row));
+                        continue;
                     }
-                    return Ok(());
+                    // Any other refusal of the ticket-carrying advance
+                    // refuses the whole group: its packs are not members.
+                    Advance::Refused { message, .. } | Advance::Stale(message) => {
+                        let message = message.clone();
+                        self.refuse_group(&local, &mut members, &message);
+                        return Ok(());
+                    }
                 }
-                _ => {}
             }
             self.record(&local, row, advance);
         }
@@ -992,7 +1045,7 @@ impl TagPush<'_, '_> {
         let (node, keys) = match uploaded {
             Ok(uploaded) => uploaded,
             Err(error) => match refused_upload(&error) {
-                Some(message) => {
+                Some((message, _)) => {
                     self.reject(local, TagPushRejection::Refused(message));
                     return Ok(());
                 }
@@ -1061,6 +1114,7 @@ fn push_tags_with(
         payload_cap: super::effective_payload_cap(payload_cap, limits.max_pack_bytes)?,
         results: BTreeMap::new(),
         retry: Vec::new(),
+        reuploads: 0,
     };
     let mut work = Vec::new();
     for local in select(layout, selection)? {

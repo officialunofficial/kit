@@ -980,20 +980,26 @@ written under `Match` on that value, and covers both the remote tag's
 current value and its new value. A tag map is therefore a superset of
 every value its tag held, a reader of an earlier value is still served in
 whatever order the two refs land, and a crash between the writes leaves
-nothing to clean up. A tag map is never re-baselined or reset.
+nothing to clean up. That holds against tag pushes. On an ordered advance,
+a tag written without its tag map by anything else between the two writes
+is not covered, the same window a branch push has. A tag map is never
+re-baselined or reset.
 
 A tag map create may **graft**: its node's `prev` names the packmap node
 of one of the remote's branches, and several tag maps may name the same
 node. A tag chain never grafts on another tag chain. The push finds the
 base by walking each tag's peeled commit backward to the nearest commit
 that is the local tracking tip of one of this remote's branches, at most
-100,000 commits not seen before per tag. When no tag's walk meets a tip, the
-push walks the tips' own histories once, at most 100,000 commits, so that a
-tag below a branch tip, or on a fork of that branch's history, grafts on that
-branch, and walks back from the tag once more. It reads that branch stably: its
+100,000 commits not seen before per tag. Unless the tag's commit is itself
+such a tip, the push first walks the tips' own histories, once per push and
+at most 100,000 commits, so that the walk back stops at the first commit a
+branch holds: a tag below a branch tip, or on a fork of that branch's
+history, grafts on that branch. It reads that branch stably: its
 head, then its packmap `p`, then its head again, up to eight times, and
 uses the base only when both head reads agree on a commit the local store
-holds. Tags that share a base form one group. A group is planned once,
+holds. Two equal head reads do not rule out a head that moved away and back
+around a reset of its chain: a fetch then refuses a tag grafted in that
+window, and loses nothing. Tags that share a base form one group. A group is planned once,
 against that head, under one node `{prev: p, packs}` that every tag of the
 group takes as its tag map, or takes `p` itself when the plan is empty.
 Without a base the node has no `prev` and lists the full closure. The

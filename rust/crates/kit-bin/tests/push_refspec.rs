@@ -194,7 +194,7 @@ fn unsupported_refspecs_are_rejected_before_any_push() {
         ("+main:main", "leading '+'"),
         (":release", "deleting a remote ref"),
         ("", "expected <branch> or <src>:<dst>"),
-        ("refs/tags/v1", "only refs/heads/"),
+        ("refs/tags/v1", "tag 'v1' does not exist"),
         ("main:", "not a valid branch name"),
         ("main:a:b", "not a valid branch name"),
         ("main:refs/tags/v1", "only refs/heads/"),

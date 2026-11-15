@@ -344,7 +344,7 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `refs/heads/<n>` or `refs/tags/<n>` picks one. A remote tag with another
   value is refused unless `--force` (or `--force-with-lease`), and a forced
   update conditions on the value kit read. Unlike Git, kit refuses an
-  unsigned annotated tag, which a Git import makes, and an annotated tag
+  unsigned annotated tag and an annotated tag
   whose object names another tag. Each tag is reported on its own line, and
   the push exits 1 if any was refused.
 - **Tags on `fetch`, `pull` and `clone`.** kit takes every remote tag by
