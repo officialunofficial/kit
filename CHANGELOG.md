@@ -31,6 +31,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PlannedDelta::stream` is a `DeltaBytes`. `PackError` has the new variants
   `Io` and `KeyMismatch`. A push seals each pack with one BLAKE3 pass instead
   of two (`PackWriter::finish_with_key`).
+- On Linux, a clone or an add of many small files flushes them faster: objects
+  of at most 16 KiB, header included, are flushed by up to 256 threads instead
+  of 64, and a batch of them is renamed into place on a pool. Each file still
+  gets its own `fdatasync` before its rename. A large object never grows the
+  pool past 64 threads, a batch of only large objects renames them on one
+  thread, and other platforms are unchanged.
 
 ## [0.8.1] - 2026-11-15
 
