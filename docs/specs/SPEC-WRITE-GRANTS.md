@@ -771,6 +771,9 @@ A tag's tag map travels with its tag in the same way:
 - A repair writes `REF_EXPECTATION_MATCH v → v` on the tag together with
   a tag map create (SPEC-TRANSPORT §7.2). It changes no tag, so it needs
   `c`, the flag of the tag map it creates, and not `u` or `f`.
+- A tag-only `UpdateRef` on `refs/tags/<x>`, which a forced update makes
+  when the tag map already rebuilds the new value, is authorized under the
+  tag's flags: a `REF_EXPECTATION_MATCH` move needs `f`.
 - A direct `UpdateRef` on any ref under `refs/kit/tagmap/` is
   `permission_denied`.
 

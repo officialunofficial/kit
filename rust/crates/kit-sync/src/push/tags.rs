@@ -38,8 +38,8 @@ use kit_core::ops::graph::{MAX_REACHABLE, check_closure_present};
 use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PackKey, RefListing, UploadLimits};
 use kit_core::refs::{self, RefWriteCondition, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
 use kit_core::store::{ObjectStore, StoreError};
-use kit_core::transfer::PackPlan;
 use kit_core::transfer::packmap::{ChainState, PlanError, plan_advance};
+use kit_core::transfer::{MAX_PEELED_TAGS, PackPlan};
 
 use super::packmap::PACKMAP_CAS_ATTEMPTS;
 use super::{
@@ -63,9 +63,6 @@ const TAG_LISTING_ENTRY_BYTES: usize = 48;
 /// the push visited. A tag that finds no base within it sends its whole
 /// closure.
 pub const MAX_BASE_WALK_COMMITS: usize = 100_000;
-
-/// The most annotated tags a tag nests, as revision syntax peels them.
-const MAX_TAG_DEPTH: usize = 16;
 
 /// Which local tags a push sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,9 +320,12 @@ struct BaseSearch {
     candidates: HashMap<Hash, String>,
     /// Candidates whose stable read gave no base.
     excluded: HashSet<Hash>,
-    /// A commit, and the candidate an earlier search reached from it, or
-    /// `None` when no candidate is below it.
+    /// A commit, and a candidate whose head serves as its base: one an
+    /// earlier search reached below it, or, once seeded, one whose history
+    /// holds it. `None` when no candidate serves it.
     memo: HashMap<Hash, Option<Hash>>,
+    /// Whether the ancestries of the candidates are in the memo.
+    seeded: bool,
     /// The stable read of each candidate, once per push.
     reads: HashMap<Hash, Option<Base>>,
     budget: usize,
@@ -351,6 +351,7 @@ impl BaseSearch {
             candidates,
             excluded: HashSet::new(),
             memo: HashMap::new(),
+            seeded: false,
             reads: HashMap::new(),
             budget,
         })
@@ -362,31 +363,82 @@ impl BaseSearch {
 
     /// The base of a tag on `target`: the first candidate a breadth-first
     /// walk of `target`'s ancestry meets whose stable read holds, or `None`.
+    /// A tag on the history of a pushed branch, below its tip, meets no
+    /// candidate that way; when a walk finds none, the candidates' own
+    /// ancestries are added to the memo once per push and the walk runs
+    /// again. Each walk visits at most `budget` commits the memo does not
+    /// answer, so one tag costs at most two budgets.
     fn base_of(
         &mut self,
         tx: &PushContext<'_>,
         store: &ObjectStore,
         target: Hash,
     ) -> Result<Option<Base>, PushError> {
-        while let Some(candidate) = self.nearest(store, target)? {
-            if let Some(base) = self.stable_read(tx, store, candidate)? {
-                return Ok(Some(base));
+        loop {
+            let mut budget = self.budget;
+            while let Some(candidate) = self.nearest(store, target, &mut budget)? {
+                if let Some(base) = self.stable_read(tx, store, candidate)? {
+                    return Ok(Some(base));
+                }
+                self.excluded.insert(candidate);
             }
-            self.excluded.insert(candidate);
+            if self.seeded {
+                return Ok(None);
+            }
+            self.seed(store)?;
         }
-        Ok(None)
     }
 
-    /// The nearest usable candidate below `start`, by a breadth-first walk
-    /// of at most `budget` commits that no earlier walk visited.
-    fn nearest(&mut self, store: &ObjectStore, start: Hash) -> Result<Option<Hash>, PushError> {
+    /// Add to the memo the commits the usable candidates reach, each with
+    /// the nearest candidate above it, by one breadth-first walk from all of
+    /// them of at most `budget` commits. Answers that no candidate serves a
+    /// commit are dropped: a seeded commit may lie below them.
+    fn seed(&mut self, store: &ObjectStore) -> Result<(), PushError> {
+        self.seeded = true;
+        self.memo.retain(|_, candidate| candidate.is_some());
+        if self.memo.len().saturating_add(self.budget) > MAX_REACHABLE {
+            self.memo.clear();
+        }
+        let mut tips: Vec<Hash> = self
+            .candidates
+            .keys()
+            .filter(|tip| !self.excluded.contains(*tip))
+            .copied()
+            .collect();
+        tips.sort_unstable();
+        let mut seen: HashSet<Hash> = tips.iter().copied().collect();
+        let mut queue: VecDeque<(Hash, Hash)> = tips.iter().map(|tip| (*tip, *tip)).collect();
+        let mut visited = 0usize;
+        while let Some((id, candidate)) = queue.pop_front() {
+            visited += 1;
+            if visited > self.budget {
+                break;
+            }
+            self.memo.insert(id, Some(candidate));
+            for parent in parents(store, &id)? {
+                if seen.insert(parent) {
+                    queue.push_back((parent, candidate));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The nearest usable candidate that serves `start`, by a breadth-first
+    /// walk that visits at most `budget` commits the memo does not answer,
+    /// and takes them from `budget`.
+    fn nearest(
+        &mut self,
+        store: &ObjectStore,
+        start: Hash,
+        budget: &mut usize,
+    ) -> Result<Option<Hash>, PushError> {
         if self.candidates.len() == self.excluded.len() {
             return Ok(None);
         }
         // Each visited commit and the commit the walk reached it from.
         let mut from: HashMap<Hash, Option<Hash>> = HashMap::from([(start, None)]);
         let mut queue = VecDeque::from([start]);
-        let mut fresh = 0usize;
         let mut found = None;
         while let Some(id) = queue.pop_front() {
             if self.usable(&id) {
@@ -401,10 +453,10 @@ impl BaseSearch {
                 Some(None) => continue,
                 _ => {}
             }
-            fresh += 1;
-            if fresh > self.budget {
+            if *budget == 0 {
                 return Ok(None);
             }
+            *budget -= 1;
             for parent in parents(store, &id)? {
                 if let std::collections::hash_map::Entry::Vacant(slot) = from.entry(parent) {
                     slot.insert(Some(id));
@@ -487,10 +539,10 @@ fn parents(store: &ObjectStore, id: &Hash) -> Result<Vec<Hash>, PushError> {
     })
 }
 
-/// `id` with its annotated tags peeled, at most [`MAX_TAG_DEPTH`] deep.
+/// `id` with its annotated tags peeled, at most [`MAX_PEELED_TAGS`] deep.
 fn peel(store: &ObjectStore, id: Hash) -> Result<Hash, PushError> {
     let mut id = id;
-    for _ in 0..MAX_TAG_DEPTH {
+    for _ in 0..MAX_PEELED_TAGS {
         if store.object_type(&id)? != ObjectType::Tag {
             break;
         }
@@ -541,8 +593,16 @@ fn local_refusal(
     if let Err(error) = refs::check_pushable_tag(&local.name) {
         return Ok(Some(TagPushRejection::NotPushable(error.to_string())));
     }
-    if store.object_type(&local.value)? != ObjectType::Tag {
-        return Ok(None);
+    match store.object_type(&local.value) {
+        Ok(ObjectType::Tag) => {}
+        Ok(_) => return Ok(None),
+        Err(StoreError::ObjectNotFound(_)) => {
+            return Ok(Some(TagPushRejection::NotPushable(format!(
+                "its object {} is not in this repository",
+                to_hex(&local.value)
+            ))));
+        }
+        Err(error) => return Err(error.into()),
     }
     let Object::Tag(tag) = store.read_object(&local.value)? else {
         return Ok(None);
@@ -562,12 +622,13 @@ fn local_refusal(
 
 /// How one tag's two-ref write ended.
 enum Advance {
-    /// The remote tag holds the pushed value.
-    Landed,
+    /// The remote tag holds the pushed value: `committed` when this write
+    /// put it there, and not when a re-read found it there after a refusal.
+    Landed { committed: bool },
     /// A condition failed; the tag is read again and placed anew.
     Conflict,
     /// The remote refused the write.
-    Refused(String),
+    Refused { message: String, scope: bool },
 }
 
 /// Whether a failed write is the remote's refusal of this write, which
@@ -581,6 +642,24 @@ fn refusal(error: &SourceError) -> bool {
             "invalid_argument" | "permission_denied" | "failed_precondition" | "unauthenticated"
         ),
         _ => false,
+    }
+}
+
+/// Whether the remote refused this caller's access to the ref, as a grant
+/// whose scopes do not match it does: that refuses the one tag.
+fn scope_refusal(error: &SourceError) -> bool {
+    match error {
+        SourceError::AccessDenied => true,
+        SourceError::Remote(remote) => remote.code == "permission_denied",
+        _ => false,
+    }
+}
+
+/// The remote's refusal inside a failed upload, as [`refusal`] reads it.
+fn refused_upload(error: &PushError) -> Option<String> {
+    match error {
+        PushError::Sync(SyncError::Source(source)) if refusal(source) => Some(source.to_string()),
+        _ => None,
     }
 }
 
@@ -702,11 +781,18 @@ impl TagPush<'_, '_> {
             keys,
         ) {
             Ok(outcome) => outcome,
-            Err(error) if refusal(&error) => return Ok(Advance::Refused(error.to_string())),
+            Err(error) if refusal(&error) => {
+                return Ok(Advance::Refused {
+                    message: error.to_string(),
+                    scope: scope_refusal(&error),
+                });
+            }
             Err(error) => return Err(repository_operation_error(self.tx, error)),
         };
         let refused = match outcome {
-            CommitOutcome::Advanced(AdvanceOutcome::Committed) => return Ok(Advance::Landed),
+            CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                return Ok(Advance::Landed { committed: true });
+            }
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
                 return Ok(Advance::Conflict);
             }
@@ -716,12 +802,14 @@ impl TagPush<'_, '_> {
             CommitOutcome::DeltaBaseUnavailable => Some(PushError::DeltaBaseUnavailable),
             _ => return Err(PushError::from(SourceError::InvalidResponse)),
         };
-        // The retry ladder may have re-sent a write that landed.
+        // The retry ladder may have re-sent a write that landed, or another
+        // push placed the same value.
         if self.read(&tag_ref)? == Some(local.value) {
-            return Ok(Advance::Landed);
+            return Ok(Advance::Landed { committed: false });
         }
-        Ok(refused.map_or(Advance::Conflict, |error| {
-            Advance::Refused(error.to_string())
+        Ok(refused.map_or(Advance::Conflict, |error| Advance::Refused {
+            message: error.to_string(),
+            scope: false,
         }))
     }
 
@@ -732,15 +820,18 @@ impl TagPush<'_, '_> {
             RefWriteCondition::Match(old),
             &local.value,
         ) {
-            Ok(()) => Ok(Advance::Landed),
+            Ok(()) => Ok(Advance::Landed { committed: true }),
             Err(SourceError::RefConflict) => {
                 if self.read(&local.tag_ref())? == Some(local.value) {
-                    Ok(Advance::Landed)
+                    Ok(Advance::Landed { committed: false })
                 } else {
                     Ok(Advance::Conflict)
                 }
             }
-            Err(error) if refusal(&error) => Ok(Advance::Refused(error.to_string())),
+            Err(error) if refusal(&error) => Ok(Advance::Refused {
+                message: error.to_string(),
+                scope: scope_refusal(&error),
+            }),
             Err(error) => Err(repository_operation_error(self.tx, error)),
         }
     }
@@ -760,9 +851,11 @@ impl TagPush<'_, '_> {
 
     fn record(&mut self, local: &Local, row: Row, advance: Advance) {
         match advance {
-            Advance::Landed => self.finish(local, row.landed(local.value)),
+            Advance::Landed { .. } => self.finish(local, row.landed(local.value)),
             Advance::Conflict => self.retry.push(local.clone()),
-            Advance::Refused(message) => self.reject(local, TagPushRejection::Refused(message)),
+            Advance::Refused { message, .. } => {
+                self.reject(local, TagPushRejection::Refused(message));
+            }
         }
     }
 
@@ -818,17 +911,34 @@ impl TagPush<'_, '_> {
                         let state = base.map_or(ChainState::Missing, |base| ChainState::Graft {
                             tail: base.packmap,
                         });
-                        self.upload(&local.tag_ref(), plan.clone(), state)?
+                        match self.upload(&local.tag_ref(), plan.clone(), state) {
+                            Ok(uploaded) => uploaded,
+                            // A ticket names this tag's ref, which the
+                            // remote may refuse to this caller alone: the
+                            // next tag uploads the group again.
+                            Err(error) => match refused_upload(&error) {
+                                Some(message) => {
+                                    self.reject(&local, TagPushRejection::Refused(message));
+                                    continue;
+                                }
+                                None => return Err(error),
+                            },
+                        }
                     }
                 });
             }
             let (map, keys) = chain.as_ref().expect("the group was uploaded");
             let advance = self.advance(&local, row, *map, keys)?;
             match advance {
-                Advance::Landed => landed = true,
+                // Only this group's own commit makes its packs members; a
+                // value another push placed does not.
+                Advance::Landed { committed: true } => landed = true,
+                // A refusal of this caller's access to the ticket-carrying
+                // tag refuses that tag; the next one uploads again.
+                Advance::Refused { scope: true, .. } if ticketed && !landed => {}
                 // Any other refusal of the ticket-carrying advance refuses
                 // the whole group: its packs are not in the repository.
-                Advance::Refused(ref message) if ticketed && !landed => {
+                Advance::Refused { ref message, .. } if ticketed && !landed => {
                     let message = message.clone();
                     self.reject(&local, TagPushRejection::Refused(message.clone()));
                     while let Some((local, _)) = members.pop_front() {
@@ -871,14 +981,24 @@ impl TagPush<'_, '_> {
             self.reject(local, TagPushRejection::TooLarge);
             return Ok(());
         }
-        let (node, keys) = self.upload(
+        let uploaded = self.upload(
             &local.tag_ref(),
             plan,
             ChainState::Append {
                 head: map,
                 packs: HashSet::new(),
             },
-        )?;
+        );
+        let (node, keys) = match uploaded {
+            Ok(uploaded) => uploaded,
+            Err(error) => match refused_upload(&error) {
+                Some(message) => {
+                    self.reject(local, TagPushRejection::Refused(message));
+                    return Ok(());
+                }
+                None => return Err(error),
+            },
+        };
         let advance = self.advance(local, row, node, &keys)?;
         self.record(local, row, advance);
         Ok(())

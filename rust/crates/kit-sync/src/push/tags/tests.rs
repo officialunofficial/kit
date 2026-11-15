@@ -129,16 +129,55 @@ fn the_base_memo_answers_a_later_search() {
         candidates: HashMap::from([(base[0], "main".to_owned())]),
         excluded: HashSet::new(),
         memo: HashMap::new(),
+        seeded: false,
         reads: HashMap::new(),
         budget: 11,
     };
-    assert_eq!(search.nearest(&store, above[9]).unwrap(), Some(base[0]));
+    let mut budget = 11;
+    assert_eq!(
+        search.nearest(&store, above[9], &mut budget).unwrap(),
+        Some(base[0])
+    );
+    assert_eq!(budget, 1, "ten commits walked above the candidate");
     // Every commit on the path is remembered, so a search from one of them
     // visits nothing new, even with no budget left.
-    search.budget = 0;
-    assert_eq!(search.nearest(&store, above[4]).unwrap(), Some(base[0]));
+    let mut budget = 0;
+    assert_eq!(
+        search.nearest(&store, above[4], &mut budget).unwrap(),
+        Some(base[0])
+    );
     // A candidate that gives no base is passed over.
     search.excluded.insert(base[0]);
-    search.budget = 100;
-    assert_eq!(search.nearest(&store, above[4]).unwrap(), None);
+    let mut budget = 100;
+    assert_eq!(search.nearest(&store, above[4], &mut budget).unwrap(), None);
+}
+
+/// A commit below a candidate, on its own history, finds that candidate
+/// once the candidates' ancestries are seeded, and so does a commit that
+/// forks from that history.
+#[test]
+fn a_seeded_search_finds_the_branch_above_a_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    let main = commits(&store, None, 10, "main");
+    let fork = commits(&store, Some(main[3]), 1, "fork");
+    let mut search = BaseSearch {
+        candidates: HashMap::from([(main[9], "main".to_owned())]),
+        excluded: HashSet::new(),
+        memo: HashMap::new(),
+        seeded: false,
+        reads: HashMap::new(),
+        budget: 100,
+    };
+    let mut budget = 100;
+    assert_eq!(search.nearest(&store, main[2], &mut budget).unwrap(), None);
+    search.seed(&store).unwrap();
+    for start in [main[2], fork[0]] {
+        let mut budget = 100;
+        assert_eq!(
+            search.nearest(&store, start, &mut budget).unwrap(),
+            Some(main[9])
+        );
+    }
 }

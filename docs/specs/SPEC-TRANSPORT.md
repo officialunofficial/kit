@@ -987,7 +987,10 @@ of one of the remote's branches, and several tag maps may name the same
 node. A tag chain never grafts on another tag chain. The push finds the
 base by walking each tag's peeled commit backward to the nearest commit
 that is the local tracking tip of one of this remote's branches, at most
-100,000 commits not seen before per tag. It reads that branch stably: its
+100,000 commits not seen before per tag. When no tag's walk meets a tip, the
+push walks the tips' own histories once, at most 100,000 commits, so that a
+tag below a branch tip, or on a fork of that branch's history, grafts on that
+branch, and walks back from the tag once more. It reads that branch stably: its
 head, then its packmap `p`, then its head again, up to eight times, and
 uses the base only when both head reads agree on a commit the local store
 holds. Tags that share a base form one group. A group is planned once,
@@ -1006,7 +1009,7 @@ For each tag with local value `v`, from the remote tag `T` and tag map
 | `v` | present | Up to date. |
 | `v` | absent | Repair: tag map `Missing`, then tag `Match(v) → v`. |
 | other | any | Refused, unless forced. |
-| other, forced | present | Append to `M` a node planned against `T` when the local store holds `T`'s whole closure, else the full closure of `v`, under `Match(M)`; then tag `Match(T)`. |
+| other, forced | present | Append to `M` a node planned against `T` when the local store holds `T`'s whole closure, else the full closure of `v`, under `Match(M)`; then tag `Match(T)`. When that plan is empty, `T`'s history holds all of `v`'s and `M` already rebuilds `v`, so the tag moves alone under `Match(T)`. |
 | other, forced | absent | Tag map `Missing` on a node whose plan includes `T`, then tag `Match(T)`. Refused when the local store lacks `T` or its closure. |
 
 A forced update conditions on the value it read, never `Any`. A push

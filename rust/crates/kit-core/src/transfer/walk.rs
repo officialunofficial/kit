@@ -459,10 +459,6 @@ fn read_commit(store: &ObjectStore, id: &Hash) -> Result<Option<(Hash, Vec<Hash>
     })
 }
 
-/// The most annotated tags [`PushWalk::run_tips`] peels from one tip, as a
-/// revision peels them. A deeper tag is walked as a closure.
-const MAX_PEELED_TAGS: usize = 16;
-
 /// Peel the annotated tags of `tip` that `held` lacks, pushing each onto
 /// `tags`, and return the object the walk takes as the tip.
 fn peel_tags(
@@ -472,7 +468,7 @@ fn peel_tags(
     tags: &mut Vec<Hash>,
 ) -> Result<Hash, StoreError> {
     let mut id = tip;
-    for _ in 0..MAX_PEELED_TAGS {
+    for _ in 0..super::MAX_PEELED_TAGS {
         if held.contains(&id) || store.object_type(&id)? != ObjectType::Tag {
             break;
         }

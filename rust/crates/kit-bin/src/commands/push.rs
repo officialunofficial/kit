@@ -131,6 +131,11 @@ pub fn run(args: &[String]) -> u8 {
         .as_deref()
         .map(|spec| push::resolve_push_name(&layout, spec))
     {
+        Some(Ok(push::PushName::Tag(tag))) if opts.set_upstream => emit_err_json(
+            &format!("-u records a branch's upstream; '{tag}' is a tag"),
+            exit::USAGE,
+            json,
+        ),
         Some(Ok(push::PushName::Tag(tag))) => {
             push_tags(&layout, &cfg, &opts, TagSelection::Named(vec![tag]))
         }

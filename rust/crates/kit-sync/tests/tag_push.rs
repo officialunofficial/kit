@@ -236,6 +236,17 @@ type AdvanceHook<'a> = dyn FnMut(&str) -> Option<Result<CommitOutcome, SourceErr
 type BetweenHook<'a> = dyn FnMut(&str) -> Result<(), SourceError> + 'a;
 type ReadHook<'a> = dyn FnMut(&str) + 'a;
 
+/// The refusal of a grant whose scopes do not match the ref.
+fn denied() -> SourceError {
+    SourceError::Remote(Box::new(kit_sync::RemoteFailure {
+        code: "permission_denied".to_owned(),
+        message: "the grant does not cover this ref".to_owned(),
+        details: Vec::new(),
+        status: 403,
+        headers: Vec::new(),
+    }))
+}
+
 /// A source over a transport that records what a push sends. Its advance
 /// writes the chain ref, then the head, as an ordered transport does, and
 /// can step in between.
@@ -258,6 +269,9 @@ struct Wire<'a> {
     between: RefCell<Option<Box<BetweenHook<'a>>>>,
     /// Runs before each ref read.
     on_read: RefCell<Option<Box<ReadHook<'a>>>>,
+    /// Head refs whose uploads are refused, as a grant that does not cover
+    /// them refuses them.
+    refused: RefCell<HashSet<String>>,
 }
 
 impl<'a> Wire<'a> {
@@ -274,6 +288,7 @@ impl<'a> Wire<'a> {
             before: RefCell::default(),
             between: RefCell::default(),
             on_read: RefCell::default(),
+            refused: RefCell::default(),
         }
     }
 
@@ -345,6 +360,9 @@ impl RemoteSource for Wire<'_> {
         key: &PackKey,
         head_ref: &str,
     ) -> Result<(), SourceError> {
+        if self.refused.borrow().contains(head_ref) {
+            return Err(denied());
+        }
         let mut bytes = Vec::new();
         pack.read_from(0).unwrap().read_to_end(&mut bytes).unwrap();
         self.packs.borrow_mut().push((head_ref.to_owned(), bytes));
@@ -523,6 +541,127 @@ fn a_tag_on_a_pushed_commit_sends_only_its_tag_object() {
         let (_dir, report, _) = clone_of(&wire);
         assert_eq!(report.tags_fetched, ["light", "v1"], "{kind:?}");
     }
+}
+
+/// A tag on the history of a pushed branch, below its tip, grafts on that
+/// branch: an annotated one sends its tag object, a lightweight one nothing.
+#[test]
+fn a_tag_below_a_pushed_tip_sends_only_its_tag_object() {
+    for kind in KINDS {
+        let (tx, _root) = transport(kind);
+        let wire = Wire::new(&*tx);
+        let work = Work::new();
+        let c = work.commits(None, 4);
+        let fork = work.commits(Some(c[1]), 1);
+        work.branch("main", c[3]);
+        work.push_branch(&wire, "main");
+        wire.take_objects();
+        let packmap = wire.read("refs/kit/packmap/main").unwrap();
+        let v1 = work.tag("v1", c[1]);
+        work.light("old", c[0]);
+
+        let results = work.push_tags(&wire, false);
+        assert_created(&results, "v1");
+        assert_created(&results, "old");
+        assert_eq!(wire.take_objects(), [v1], "{kind:?}");
+        assert_eq!(
+            wire.node(wire.read("refs/kit/tagmap/v1").unwrap()).prev,
+            Some(packmap)
+        );
+        // One group, one node.
+        assert_eq!(
+            wire.read("refs/kit/tagmap/old"),
+            wire.read("refs/kit/tagmap/v1")
+        );
+
+        // A tag on a fork of that history sends the fork and grafts too.
+        work.light("fork", fork[0]);
+        assert_created(&work.push_tag(&wire, "fork", false), "fork");
+        let sent: HashSet<Hash> = wire.take_objects().into_iter().collect();
+        assert!(sent.contains(&fork[0]) && !sent.contains(&c[1]), "{kind:?}");
+        assert_eq!(
+            wire.node(wire.read("refs/kit/tagmap/fork").unwrap()).prev,
+            Some(packmap)
+        );
+        let (_dir, report, _) = clone_of(&wire);
+        assert_eq!(report.tags_fetched, ["fork", "old", "v1"], "{kind:?}");
+    }
+}
+
+/// Ticketed Connect: a tag whose upload or advance the caller's grant does
+/// not cover is refused alone; the group goes under the next tag.
+#[test]
+fn a_tag_outside_the_grant_is_refused_alone() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    for t in ["a", "b", "v1"] {
+        work.tag(t, c[1]);
+    }
+    wire.limits.set(UploadLimits {
+        max_pack_bytes: None,
+        data_packs_per_advance: Some(6),
+        ticket_threshold_bytes: Some(0),
+    });
+    wire.refused.borrow_mut().insert("refs/tags/a".to_owned());
+    *wire.before.borrow_mut() = Some(Box::new(|head: &str| {
+        (head == "refs/tags/b").then(|| Err(denied()))
+    }));
+
+    let results = work.push_tags(&wire, false);
+
+    for t in ["a", "b"] {
+        assert!(
+            matches!(rejection(&results, t), TagPushRejection::Refused(_)),
+            "{t}: {results:?}"
+        );
+    }
+    assert_created(&results, "v1");
+    assert_eq!(wire.uploaded_for(), ["refs/tags/b", "refs/tags/v1"]);
+    assert_eq!(wire.read("refs/tags/a"), None);
+    assert_eq!(wire.read("refs/tags/b"), None);
+}
+
+/// Ticketed Connect: when another push already placed the ticket-carrying
+/// tag at the same value, this group's packs are not members, so the next
+/// tag uploads them again under its own ticket.
+#[test]
+fn a_ticketed_tag_another_push_placed_does_not_land_the_group() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    let a = work.tag("a", c[1]);
+    work.tag("b", c[1]);
+    wire.limits.set(UploadLimits {
+        max_pack_bytes: None,
+        data_packs_per_advance: Some(6),
+        ticket_threshold_bytes: Some(0),
+    });
+    let remote = &*tx;
+    *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
+        (head == "refs/tags/a").then(|| {
+            remote
+                .update_ref("refs/tags/a", RefWriteCondition::Missing, &a)
+                .unwrap();
+            Ok(CommitOutcome::Advanced(
+                kit_core::protocol::AdvanceOutcome::HeadConflict,
+            ))
+        })
+    }));
+
+    let results = work.push_tags(&wire, false);
+
+    assert_created(&results, "a");
+    assert_created(&results, "b");
+    assert_eq!(wire.uploaded_for(), ["refs/tags/a", "refs/tags/b"]);
 }
 
 /// A tag above the pushed branch sends what the branch lacks; with no

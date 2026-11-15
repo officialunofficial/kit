@@ -830,11 +830,15 @@ fn plan_pack_capped(
     plan_tips_capped(store, &[new_tip], old_tip, encode_deltas, limits)
 }
 
+/// The most annotated tags a push peels from one tip, as a revision peels
+/// them. The push walk takes a deeper tag as a closure.
+pub const MAX_PEELED_TAGS: usize = 16;
+
 /// The object a tip's tree comes from: the tip with its annotated tags
-/// peeled, at most as deep as the push walk peels them.
+/// peeled, at most [`MAX_PEELED_TAGS`] deep.
 fn peeled_tip(store: &ObjectStore, tip: Hash) -> Result<Hash, StoreError> {
     let mut id = tip;
-    for _ in 0..16 {
+    for _ in 0..MAX_PEELED_TAGS {
         match store.object_type(&id) {
             Ok(ObjectType::Tag) => {}
             Ok(_) | Err(StoreError::ObjectNotFound(_)) => break,
