@@ -1,4 +1,4 @@
-//! `kit push <remote> <src>:<dst>`: branch refspecs over a `kit+file://`
+//! `kit push <remote> <src>:<dst>` and `kit push <remote> <branch>`: branch refspecs over a `kit+file://`
 //! remote. The push runs the same path as a plain push, so the lease and the
 //! non-fast-forward check apply. Wildcards, a leading `+`, a delete and refs
 //! outside `refs/heads/` are rejected before the remote is contacted.
@@ -85,6 +85,53 @@ fn refspec_accepts_full_heads_refs_and_a_branch_that_is_not_current() {
     );
 }
 
+/// A lone branch stands for `<branch>:<branch>`, as in `git push origin main`.
+#[test]
+fn a_lone_branch_is_pushed_under_its_own_name() {
+    let (repo, remote) = repo_and_remote();
+    ok(repo.path(), &["push", "origin", "main"]);
+    let tip = local_branch(repo.path(), "main");
+    assert_eq!(remote_branch(remote.path(), "main"), Some(tip.clone()));
+    assert_eq!(tracking(repo.path(), "main"), Some(tip));
+    // Like any refspec push, it records no upstream without -u.
+    let out = run_in(repo.path(), &["push"]);
+    assert!(!out.status.success(), "no upstream expected: {out:?}");
+}
+
+/// The branch need not be the current one. The current branch stays as it is
+/// and goes nowhere.
+#[test]
+fn a_lone_branch_that_is_not_current_is_the_one_pushed() {
+    let (repo, remote) = repo_and_remote();
+    ok(repo.path(), &["branch", "topic"]);
+    commit(repo.path(), b"two", "c2");
+    ok(repo.path(), &["push", "origin", "topic"]);
+    assert_eq!(
+        remote_branch(remote.path(), "topic"),
+        Some(local_branch(repo.path(), "topic"))
+    );
+    assert_ne!(
+        local_branch(repo.path(), "topic"),
+        local_branch(repo.path(), "main")
+    );
+    assert_eq!(remote_branch(remote.path(), "main"), None);
+    let out = run_in(repo.path(), &["push", "origin", "refs/heads/topic"]);
+    assert!(out.status.success(), "{out:?}");
+}
+
+#[test]
+fn a_lone_branch_that_does_not_exist_is_refused() {
+    let (repo, remote) = repo_and_remote();
+    let out = run_in(repo.path(), &["push", "origin", "nosuch"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("does not match any local branch")
+    );
+    assert_eq!(fs::read_dir(remote.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn refspec_with_set_upstream_records_the_upstream() {
     let (repo, remote) = repo_and_remote();
@@ -141,12 +188,13 @@ fn refspec_dry_run_contacts_nothing() {
 fn unsupported_refspecs_are_rejected_before_any_push() {
     let (repo, remote) = repo_and_remote();
     let long = format!("main:{}", "a".repeat(600));
-    let cases: [(&str, &str); 11] = [
+    let cases: [(&str, &str); 12] = [
         ("refs/heads/*:refs/heads/*", "wildcards"),
         ("main:release*", "wildcards"),
         ("+main:main", "leading '+'"),
         (":release", "deleting a remote ref"),
-        ("main", "expected <src>:<dst>"),
+        ("", "expected <branch> or <src>:<dst>"),
+        ("refs/tags/v1", "only refs/heads/"),
         ("main:", "not a valid branch name"),
         ("main:a:b", "not a valid branch name"),
         ("main:refs/tags/v1", "only refs/heads/"),

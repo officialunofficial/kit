@@ -2395,6 +2395,7 @@ dependencies = [
  "commonware-storage",
  "curve25519-dalek",
  "ed25519-dalek",
+ "foldhash 0.2.0",
  "getrandom 0.4.3",
  "hex",
  "libc",

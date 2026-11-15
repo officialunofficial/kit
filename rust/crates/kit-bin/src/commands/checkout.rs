@@ -54,7 +54,8 @@ struct CheckoutOpts {
     /// Discard local changes that would block the switch, like
     /// `git checkout -f`: skip the dirty-tracked/staged safety gate and
     /// overwrite locally-modified tracked paths with the target's version.
-    /// Untracked files are still preserved. Used by `bisect run` to
+    /// Untracked files that do not stand in the target's way are kept; one
+    /// that does is overwritten. Used by `bisect run` to
     /// materialize each candidate over the test command's scribbles.
     #[arg(short = 'f', long = "force")]
     force: bool,

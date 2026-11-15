@@ -17,13 +17,14 @@ pub const HELP_TEXT: &str = "\
 usage: kit <command> [args]
 
 commands:
-  init              Create a new kit repository
-  add [-A|-u] [-f] <path>...  Stage files for the next commit
+  init [-q] [<dir>]  Create a new kit repository (in <dir>, made if missing)
+  add [-A|-u] [-f] [-n] <path>...  Stage files for the next commit
   add .             Stage all files under cwd (respects .gitignore/.kitignore)
   add -A            Stage all changes incl. deletions (no path args)
   add -u            Restage only already-tracked files (no path args)
   add -f <path>     Stage an ignored path (overrides .gitignore/.kitignore)
   add -p <path>...  Interactively choose hunks to stage (y/n/q/a/d per hunk)
+  add -n <path>...  Show what would be staged; change nothing
   rm [--cached] [-r] [-f] <path>...  Remove path(s) and stage the deletion
   rm --cached       Stage the removal only; keep the worktree file(s)
   mv [-f] <source>... <dest>  Move/rename tracked path(s) and stage it
@@ -55,15 +56,21 @@ commands:
   ls-files [-s] [-z] [--others] [--ignored] [--exclude-standard]
                     List tracked files (-s adds stage info; --others lists
                     untracked; --exclude-standard drops ignored)
-  rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [<rev>...]
+  rev-parse [--short[=N]] [--abbrev-ref] [--show-toplevel] [--verify [-q]] [<rev>...]
                     Resolve revisions to object ids (--short abbreviates,
                     --abbrev-ref HEAD prints the branch, --show-toplevel
-                    prints the repo root; kit always errors on a bad revision)
+                    prints the repo root; --verify takes exactly one revision
+                    and prints nothing on stdout when it does not resolve,
+                    -q also drops the message; kit always errors on a bad
+                    revision)
   merge-base [--is-ancestor] <a> <b>  Print the common ancestor of two
                     commits (--is-ancestor tests ancestry: exit 0/1, no output)
-  rev-list [--count] <rev>  List commit ids reachable from <rev> (--count
-                    prints the number)
-  show-ref [--heads] [--tags]  List refs as `<hash> <refname>`
+  rev-list [--count] [-n N] <rev> | <A>..<B> | <A>...<B>
+                    List commit ids reachable from <rev>, or in a range
+                    (--count prints the number; -n/--max-count stops after N)
+  show-ref [--heads] [--tags] [<pattern>...]
+                    List refs as `<hash> <refname>` (a <pattern> keeps the refs
+                    it names: the full name or its trailing components)
   for-each-ref [--format=<fmt>] [<pattern>...]
                     Iterate refs, optionally with a %(atom) format string
   symbolic-ref [--short] <name> [<ref>]
@@ -80,17 +87,18 @@ commands:
   ref cat <name>    Print the resolved hash for one ref (HEAD,
                     refs/heads/<b>, refs/tags/<t>, or refs/remotes/<r>/<b>),
                     following HEAD's symbolic indirection
-  commit [-a] [-q] [--amend] [-m <msg> | -F <file>] [--author <spec>] [--format=json]
+  commit [-a] [-q] [--amend] [--allow-empty] [-m <msg> | -F <file>] [--author <spec>] [--format=json]
                     Create a signed commit (opens $EDITOR if -m/-F omitted).
                     -F reads the message from <file> (`-` = stdin); --author
                     overrides the commit author. After `merge --no-commit`
                     (or a resolved merge) this records a two-parent merge commit.
                     -q suppresses the summary; kit always signs;
-                    --format=json emits a JSON result object on success
+                    --allow-empty also lets the first commit have nothing
+                    staged; --format=json emits a JSON result object on success
   commit --amend [-m <msg>]  Replace HEAD: re-commit on HEAD's parent, re-sign,
                     move the branch. Reuses HEAD's message if -m omitted.
                     The superseded commit becomes unreachable; `gc` can reclaim it.
-  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-n N] [<rev> | <A>..<B> | <A>...<B>]
+  log [--oneline] [--abbrev-commit] [--abbrev[=N]] [--format=json] [--author PAT] [--grep PAT] [--since DATE] [--until DATE] [--no-merges] [--first-parent] [-p|--patch] [--stat] [--all] [--decorate] [--graph] [-n N] [<rev> | <A>..<B> | <A>...<B>]
                     Show commit history (default prints the full message
                     body + a UTC date; --oneline/--abbrev-commit abbreviate
                     the commit id, --abbrev[=N] sets the length (default 7);
@@ -105,7 +113,11 @@ commands:
                     branch. Filters apply before -n's limit. Optional
                     <rev> starts the walk there; <A>..<B> shows commits in B
                     not in A; <A>...<B> the symmetric difference (empty
-                    side = HEAD)
+                    side = HEAD). -p/--patch and --stat follow each commit
+                    with its diff against the first parent; --all starts at
+                    HEAD, every branch, remote-tracking ref and tag;
+                    --decorate names the refs at each commit; --graph draws
+                    the commit graph in the margin
   reflog [<ref>] [--format=json] [-n N]
                     Show a branch's first-parent ancestry (read-only).
                     Lists the branch's first-parent chain (newest first,
@@ -156,7 +168,8 @@ commands:
                     as an ancestor; --merged keeps those merged into <c>; the
                     --no-* forms invert. All four commit args default to HEAD
                     when omitted
-  checkout <branch> Switch HEAD to a branch and restore files
+  checkout [-f] <branch>  Switch HEAD to a branch and restore files (-f
+                    discards local changes that would block the switch)
   checkout -b|-B <new> [<start>]  Create (or -B reset) a branch and switch to it
   switch <branch>   Switch branches (git switch)
   switch -c|-C <new> [<start>]    Create (or -C reset) a branch and switch to it
@@ -186,19 +199,26 @@ commands:
                     stops before committing; finish with `kit commit` or
                     `kit merge --continue`; -m overrides the merge message;
                     --format=json emits a JSON outcome object)
-  push [<remote>] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run] [--format=json]
+  push [<remote> [<src>:<dst>|<branch>]] [-u|--set-upstream] [--all] [-f|--force|--force-with-lease] [--dry-run] [--format=json]
                     Push current branch to its upstream (--all mirrors every
                     branch; -u records the upstream; prints git's `To <url>` +
                     ref-update summary, or `Everything up-to-date`;
+                    <src>:<dst> pushes the local branch <src> to the remote
+                    branch <dst>, a lone <branch> means <branch>:<branch>,
+                    and the branch need not be the current one; wildcards,
+                    a leading `+`, a delete and non-branch refs are errors;
                     --format=json emits a JSON outcome object)
-  pull [<remote>] [--all] [--format=json]  Pull changes from remote (fast-forward;
+  pull [<remote>] [--all] [--rebase|--no-ff] [--format=json]  Pull changes from remote (fast-forward;
                     prints `Updating <a>..<b>`/`Fast-forward`/diffstat, or
                     `Already up to date.`); --all pulls every configured remote;
+                    --rebase replays the current branch onto the fetched one;
+                    --no-ff always writes a merge commit;
                     --format=json emits a JSON outcome object
-  fetch [<remote>] [--all] [--format=json]  Download from remote without merging
+  fetch [<remote>] [--all] [-p|--prune] [--format=json]  Download from remote without merging
                     (prints `From <url>` + per-ref summary; silent when nothing
-                    changed); --all fetches every configured remote;
-                    --format=json emits a JSON outcome object
+                    changed); --all fetches every configured remote; --prune
+                    deletes the remote-tracking refs of branches the remote
+                    lost; --format=json emits a JSON outcome object
   worktree add <path> [<commit-ish>]  Create a linked working tree (shares the
                     object store and refs; own HEAD/index/stash). With no
                     commit-ish, creates a branch named after the path
@@ -211,7 +231,7 @@ commands:
   worktree repair [<path>...]  Repair the links between trees and the registry
   stash [--format=json]  Stash working dir changes (save WIP; -m for a message;
                     --format=json emits a JSON outcome, or JSONL on `list`)
-  stash save -m <msg>  Stash with a message
+  stash save|push -m <msg>  Stash with a message
   stash list        List stash entries (printed as stash@{N})
   stash pop [--index] [<n>|stash@{n}]    Apply and remove a stash entry (default
                     0; --index also restores the staged state, like git)
@@ -256,8 +276,11 @@ commands:
                     -m picks the mainline parent (1-based) to revert a merge;
                     --format=json emits a JSON outcome object)
   rebase <branch>    Replay commits onto a different base
+  rebase --onto <newbase> <upstream> [<branch>]  Replay <upstream>..<branch>
+                     onto <newbase>
   rebase -i <branch> Interactive: reorder/drop/reword/squash/fixup the todo
   rebase --continue  Continue rebase after conflict resolution
+  rebase --skip      Drop the current commit and continue
   rebase --abort     Abort rebase and restore original state
                     (--format=json on any form emits a JSON outcome object)
   bisect start       Begin binary search for a bug

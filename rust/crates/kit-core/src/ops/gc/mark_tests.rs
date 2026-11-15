@@ -741,6 +741,7 @@ fn a_tree_used_as_a_chunk_aborts_gc_and_names_its_manifest() {
     });
     let text = fx.gc(MarkLimits::DEFAULT, false).unwrap_err().to_string();
     assert!(text.contains(&hash::to_hex(&bad)) && text.contains(&hash::to_hex(&not_a_chunk)));
+    assert!(text.contains("is not a blob (fail closed)"), "{text}");
 }
 
 #[test]

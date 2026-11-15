@@ -768,7 +768,7 @@ and
 for untracked. Header lines
 .Pq Fl Fl branch
 are not emitted.
-.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl r | Fl a Oc Oo Fl d | Fl D | Fl m | Fl u Ar upstream | Fl Fl unset-upstream Oc Oo Fl Fl list Oc Oo Fl Fl contains Ar commit Oc Oo Fl Fl no-contains Ar commit Oc Oo Fl Fl merged Op Ar commit Oc Oo Fl Fl no-merged Op Ar commit Oc Op Ar name ...
+.It Cm branch Oo Fl v | Fl Fl verbose Oc Oo Fl r | Fl a Oc Oo Fl d | Fl D | Fl m | Fl u Ar upstream | Fl Fl unset-upstream | Fl Fl show-current Oc Oo Fl Fl list Oc Oo Fl Fl contains Op Ar commit Oc Oo Fl Fl no-contains Op Ar commit Oc Oo Fl Fl merged Op Ar commit Oc Oo Fl Fl no-merged Op Ar commit Oc Oo Fl Fl format Ar format Oc Op Ar name ...
 List, create, rename, or delete branches. With no arguments, lists
 branches as
 .Ql <marker> <name>
@@ -807,14 +807,18 @@ and
 .Fl a
 lists the local branches and then the remote-tracking branches as
 .Ql remotes/<remote>/<branch> .
+.Fl Fl show-current
+prints the name of the current branch, and nothing on a detached HEAD.
+.Fl Fl format Ns = Ns Cm json
+lists as JSONL.
 .Pp
 The listing accepts ancestry filters (like
 .Xr git 1 Cm branch ) :
-.Fl Fl contains Ar commit
+.Fl Fl contains Op Ar commit
 keeps only branches whose tip has
 .Ar commit
 as an ancestor, and
-.Fl Fl no-contains Ar commit
+.Fl Fl no-contains Op Ar commit
 inverts that;
 .Fl Fl merged Op Ar commit
 keeps branches already merged into
@@ -827,8 +831,13 @@ to
 .Cm HEAD .
 .Fl Fl list
 is an explicit list selector.
-.It Cm checkout Ar branch
+.It Cm checkout Oo Fl f Oc Ar branch
 Switch HEAD to a branch and restore files from its tree.
+.Fl f
+discards the local changes that would block the switch, as
+.Xr git 1 Cm checkout Fl f
+does. Untracked paths that stand in the way of a path of the target, a file or
+a whole directory, are replaced; other untracked files are kept.
 Prints
 .Sy Switched to branch Ar n
 or
@@ -966,7 +975,7 @@ Accepts
 and
 .Fl Fl abort
 after a conflict.
-.It Cm push Oo Fl Fl dry-run Oc Op Ar remote Op Ar src Ns : Ns Ar dst
+.It Cm push Oo Fl Fl dry-run Oc Op Ar remote Op Ar src Ns : Ns Ar dst | Ar branch
 Push HEAD's commit chain to the configured remote. With
 .Ar remote
 and
@@ -974,8 +983,14 @@ and
 it pushes the local branch
 .Ar src
 to the remote branch
-.Ar dst .
-Wildcards, a leading
+.Ar dst ;
+a lone
+.Ar branch
+means
+.Ar branch Ns : Ns Ar branch ,
+as in
+.Xr git 1 Cm push .
+The branch need not be the current one. Wildcards, a leading
 .Ql + ,
 an empty
 .Ar src

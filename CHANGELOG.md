@@ -12,23 +12,54 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A fetch that verifies signatures now checks every commit, remix and tag in
   the history of each tip before it publishes the remote-tracking ref, down to
   a tip an earlier signed fetch verified, not only the objects of the packs
-  that fetch applied. Before, a remote could have a
-  ref published over an unsigned commit that was already in the local store,
-  by re-pointing the branch at it with a pack chain that did not carry it. The
-  commit could be one a refused pack left behind, one another remote wrote, or
-  one an earlier fetch with `--no-verify-signatures` applied. `clone`, `fetch`
-  and `pull` now refuse it with `SyncError::UnsignedOrInvalidObject`. A `pull`
-  that verifies also checks the history of the tip it moves the branch to, so
-  a tracking ref its fetch did not publish is checked too. Each signed fetch
-  records the tip it published in `.kit/applied-packs/.verified/`, a
-  disposable cache like the cursor and checkpoint records, and later walks stop
-  there, so a fetch of one new commit verifies about one commit. The first
-  signed fetch after an upgrade walks each branch's history once. A tip an
-  opt-out fetch published is no stopping point, so a branch whose unrecorded
-  history holds an unsigned commit needs `--no-verify-signatures` on every fetch
-  or pull. An unchanged cursor no longer lets a signed fetch skip a tracking ref
-  no signed fetch recorded. The walk follows parents and tag targets only and
-  has the closure check's 10,000,000-object cap.
+  that fetch applied. Before, a remote could have a ref published over an
+  unsigned commit that was already in the local store, by re-pointing the
+  branch at it with a pack chain that did not carry it. The commit could be one
+  a refused pack left behind, one another remote wrote, or one an earlier fetch
+  with `--no-verify-signatures` applied. `clone`, `fetch` and `pull` now refuse
+  it with `SyncError::UnsignedOrInvalidObject`. A `pull` that verifies also
+  checks the history of the tip it moves the branch to, so a tracking ref its
+  fetch did not publish is checked too. Each signed fetch records the tip it
+  published in `.kit/applied-packs/.verified/`, a disposable cache like the
+  cursor and checkpoint records, and later walks stop there, so a fetch of one
+  new commit verifies about one commit. The first signed fetch after an upgrade
+  walks each branch's history once. A tip an opt-out fetch published is no
+  stopping point, so a branch whose unrecorded history holds an unsigned commit
+  needs `--no-verify-signatures` on every fetch or pull. An unchanged cursor no
+  longer lets a signed fetch skip a tracking ref no signed fetch recorded. The
+  walk follows parents and tag targets only and has the closure check's
+  10,000,000-object cap.
+
+### Added
+
+- `kit push <remote> <branch>` pushes the local branch `<branch>` under its
+  own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
+  be the current one. Like any refspec push, it records an upstream only with
+  `-u`. `libkit::push::parse_refspec` accepts a lone branch the same way; it
+  returned an error for it before.
+
+### Changed
+
+- The error for a repository in the `bmt-v1` format, and for any other
+  unreadable `.kit/format`, now says how to move a 0.7.3 repository: run
+  `kit git export` with kit 0.7.3, then `kit git import` with this kit, or
+  commit a checkout into a new `kit init` repository.
+- The top-level `kit help`, `docs/CLI.md`, `man/kit.1` and the shell
+  completions list flags that `--help` already showed: `checkout -f`, the
+  `kit branch` options, `init -q`, `add -n`, the `log` display flags,
+  `rev-list -n` and ranges, `show-ref <pattern>`, `commit --allow-empty`,
+  `pull --rebase` and `--no-ff`, `fetch --prune`, `push <remote> <src>:<dst>`,
+  `rebase --onto` and `--skip`, `stash push` and `rev-parse --verify`.
+- The `gc` error for a manifest chunk that is not a blob now reads `chunk
+  <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
+  delta`, but gc refuses a delta there too.
+
+### Fixed
+
+- A push plan checks each chunk of a new manifest against the span that the
+  manifest gives it, also when the plan sent the chunk for another manifest
+  or the manifest it replaces already lists it. A manifest that every fetch
+  refuses is no longer pushed to a remote that checks nothing.
 
 ## [0.8.0] - 2026-11-14
 

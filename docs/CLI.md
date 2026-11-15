@@ -850,9 +850,12 @@ Branches / refs:
   default when no create/delete/rename flag is given, but `--list` also
   enables `<pattern>` filtering (for example, `kit branch --list "release/*"`, or
   `kit branch --list main` to test existence).
-- `kit checkout <branch>` &mdash; switch HEAD and restore files. Refuses to
+- `kit checkout [-f] <branch>` &mdash; switch HEAD and restore files. Refuses to
   run when staged changes, dirty tracked files, or untracked path
-  collisions would be overwritten. Non-colliding untracked files are
+  collisions would be overwritten; `-f` skips that check. It overwrites those
+  paths with the target's version and replaces anything untracked that stands
+  in the way of a path of the target, a file or a whole directory. Other
+  untracked files are kept. Non-colliding untracked files are
   preserved across the switch (git branch-switch semantics); tracked
   files the target tree drops are removed, with emptied directories
   pruned. Prints `Switched to branch '<n>'`, or `Already on '<n>'` for a
@@ -1229,14 +1232,15 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote> [<src>:<dst>]] [--all] [--force|--force-with-lease]
+- `kit push [<remote> [<src>:<dst>|<branch>]] [--all] [--force|--force-with-lease]
   [--dry-run] [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
   explicit `<remote>` name overrides that choice. `<src>:<dst>` pushes the
   local branch `<src>` to the remote branch `<dst>`, and `<src>` need not be
-  the current branch. Each side is a branch name or a `refs/heads/<name>`
+  the current branch. A lone `<branch>` means `<branch>:<branch>`, as in
+  `git push <remote> <branch>`. Each side is a branch name or a `refs/heads/<name>`
   ref. A refspec push goes through the same path as a plain push, so the
   lease and the non-fast-forward check apply, and it records an upstream only
   with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
