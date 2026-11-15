@@ -574,7 +574,7 @@ pub fn read_index(layout: &RepoLayout) -> IndexResult<Index> {
             continue;
         }
         let window = if index_ns_precise && !e.mtime_ns.is_multiple_of(1_000_000_000) {
-            RACY_WINDOW_NS / 100
+            PRECISE_RACY_WINDOW_NS
         } else {
             RACY_WINDOW_NS
         };
@@ -595,6 +595,13 @@ pub fn read_index(layout: &RepoLayout) -> IndexResult<Index> {
 /// is the conservative bound git uses for second-granularity
 /// filesystems.
 const RACY_WINDOW_NS: u64 = 1_000_000_000;
+
+/// The racy-clean window for an entry whose recorded mtime and the index
+/// file's mtime both have sub-second precision. A caller that writes files and
+/// then the index can wait this long first, plus one tick of the file clock,
+/// and then check the index file's mtime, so the entries it just recorded are
+/// not racy against the new index (see [`read_index`]).
+pub const PRECISE_RACY_WINDOW_NS: u64 = RACY_WINDOW_NS / 100;
 
 /// Write this worktree's staging index atomically. The containing
 /// directory is created if absent.

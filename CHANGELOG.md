@@ -60,6 +60,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manifest gives it, also when the plan sent the chunk for another manifest
   or the manifest it replaces already lists it. A manifest that every fetch
   refuses is no longer pushed to a remote that checks nothing.
+- A clone, pull or checkout waits out the racy window (usually under 15 ms)
+  before it writes the index, so the first `kit status` afterwards does not
+  hash the files it just wrote again, on a file system with sub-second
+  timestamps. The first `status` after a clone of a 16 GiB file took 14 s, and
+  97 s or more with a cold page cache, when the index landed within 10 ms of
+  the newest file.
+- `kit gc` names the linked worktree whose state it cannot read when it
+  refuses to run. `docs/CLI.md` no longer says that gc refuses to run while a
+  linked worktree exists. gc runs and keeps what every tree reaches.
 
 ## [0.8.0] - 2026-11-14
 

@@ -405,8 +405,10 @@ where
 /// the open handle reported after the last write. Its fields are read
 /// from the final path after the rename, because a rename moves the
 /// ctime. A later edit that leaves size, mtime and ctime unchanged is
-/// invisible to it, as to every stat observation; the index's racy-clean
-/// rule bounds that window.
+/// invisible to it, as to every stat observation. A caller that writes the
+/// index after this returns can wait out the racy window first, as
+/// `kit_sync::worktree::sync_index_to_tree_observed` does, so that the next
+/// command trusts these observations.
 ///
 /// # Errors
 /// Same as [`restore_tree_to_worktree_with`].
