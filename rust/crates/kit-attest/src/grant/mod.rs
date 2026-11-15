@@ -46,7 +46,9 @@ pub use error::GrantError;
 pub use header::{OwnerScheme, SignedHeader};
 pub use kit_core::repo_identity::{Namespace, RepositoryIdentity};
 pub use owner::verify_owner_signature;
-pub use ref_scope::{RefFlags, RefPattern, RefScopes, head_packmap, packmap_head};
+pub use ref_scope::{
+    RefFlags, RefPattern, RefScopes, head_packmap, packmap_head, tag_tagmap, tagmap_tag,
+};
 pub use statement::{Capabilities, Capability, Grant, RepoScope};
 pub use url_token::{
     MAX_TOKEN_PATH_BYTES, TokenTarget, URL_TOKEN_MAX_LIFETIME_MS, UrlTokenRequest,

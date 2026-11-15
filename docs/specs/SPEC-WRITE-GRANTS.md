@@ -203,9 +203,9 @@ flag       = "c" / "u" / "f" / "d"
 - A **prefix pattern** is a valid ref name `P` followed by `/*`. It
   matches every ref whose name begins with `P/`, at any depth. The single
   trailing `*` is the only wildcard; a bare `*` is not a pattern.
-- A pattern MUST NOT be, or begin with, `refs/kit/packmap/`. Packmap
-  refs are never matched directly; §8.3 covers them through their
-  branch.
+- A pattern MUST NOT be, or begin with, `refs/kit/packmap/` or
+  `refs/kit/tagmap/`. Packmap and tag map refs are never matched
+  directly; §8.3 covers them through their branch or their tag.
 - Flags: `c` create, `u` update, `f` force, `d` delete. §8 defines what
   each permits.
 
@@ -260,8 +260,8 @@ repair it:
   duplicated;
 - ref scopes that are not `-` for a `read` grant, or `-` for a grant with
   `write`;
-- a pattern outside §3.3, a pattern under `refs/kit/packmap/`, an
-  unknown flag, flags out of the `cufd` order or repeated, more than 16
+- a pattern outside §3.3, a pattern under `refs/kit/packmap/` or
+  `refs/kit/tagmap/`, an unknown flag, flags out of the `cufd` order or repeated, more than 16
   entries, entries out of order, or two entries with one pattern;
 - `expiry <= created`, or a lifetime above `GRANT_MAX_LIFETIME_MS`;
 - a statement longer than `MAX_STATEMENT_BYTES`.

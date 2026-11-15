@@ -1,11 +1,12 @@
 //! Host-owned credentials, retry scheduling, admission and progress policy.
 use crate::{
-    ConnectTransport, EnvelopeSigner, GrantOperation, GrantRef, GrantRequest, PendingEvent,
-    UploadEvent,
+    ConnectTransport, EnvelopeSigner, GrantCondition, GrantOperation, GrantRef, GrantRequest,
+    PendingEvent, UploadEvent,
 };
 use http::HeaderMap;
 use kit_client::{
-    Clock, RequestContext, RequestHeaders, RequestPolicy, Signer, UnsignedRequestContext, Veto,
+    Clock, RefTarget, RequestContext, RequestHeaders, RequestPolicy, Signer,
+    UnsignedRequestContext, Veto,
 };
 use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, BackoffIterator, CommitOutcome, TransportError};
@@ -324,7 +325,14 @@ impl RequestPolicy for HostPolicy<'_> {
                     .ref_moves
                     .iter()
                     .map(|movement| {
-                        GrantRef::new(&movement.name, crate::client::grant_condition(movement.old))
+                        let condition = match (movement.old, &movement.new) {
+                            (
+                                kit_core::refs::RefWriteCondition::Match(old),
+                                RefTarget::Set(new),
+                            ) if old == *new => GrantCondition::Unchanged,
+                            (old, _) => crate::client::grant_condition(old),
+                        };
+                        GrantRef::new(&movement.name, condition)
                     })
                     .collect()
             })

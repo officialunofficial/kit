@@ -664,8 +664,13 @@ fn a_ticketed_tag_another_push_placed_does_not_land_the_group() {
         ticket_threshold_bytes: Some(0),
     });
     let remote = &*tx;
+    // The other push's own tag map node: any node other than this push's.
+    let other = remote.read_ref("refs/kit/packmap/main").unwrap().unwrap();
     *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
         (head == "refs/tags/a").then(|| {
+            remote
+                .update_ref("refs/kit/tagmap/a", RefWriteCondition::Missing, &other)
+                .unwrap();
             remote
                 .update_ref("refs/tags/a", RefWriteCondition::Missing, &a)
                 .unwrap();
@@ -680,6 +685,86 @@ fn a_ticketed_tag_another_push_placed_does_not_land_the_group() {
     assert_created(&results, "a");
     assert_created(&results, "b");
     assert_eq!(wire.uploaded_for(), ["refs/tags/a", "refs/tags/b"]);
+}
+
+/// A tag the listing missed, already at the pushed value but with no tag
+/// map, is not reported as pushed: the next round repairs its tag map.
+#[test]
+fn a_tag_found_without_its_tag_map_after_a_conflict_is_repaired() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    let v1 = work.tag("v1", c[1]);
+    let remote = &*tx;
+    let placed = std::cell::Cell::new(false);
+    *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
+        (head == "refs/tags/v1" && !placed.replace(true)).then(|| {
+            remote
+                .update_ref("refs/tags/v1", RefWriteCondition::Missing, &v1)
+                .unwrap();
+            Ok(CommitOutcome::Advanced(
+                kit_core::protocol::AdvanceOutcome::HeadConflict,
+            ))
+        })
+    }));
+
+    let results = work.push_tags(&wire, false);
+
+    assert_eq!(
+        outcome(&results, "v1"),
+        &TagPushOutcome::Repaired { value: v1 }
+    );
+    assert!(wire.read("refs/kit/tagmap/v1").is_some());
+    let (_dir, report, _) = clone_of(&wire);
+    assert_eq!(report.tags_fetched, ["v1"]);
+}
+
+/// Ticketed Connect: tags whose advances the remote refuses to this caller
+/// alone each send the group again, within the push's upload bound.
+#[test]
+fn scope_refused_ticketed_tags_upload_within_the_bound() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    let names: Vec<String> = (0..12).map(|n| format!("t{n:02}")).collect();
+    for name in &names {
+        work.tag(name, c[1]);
+    }
+    wire.limits.set(UploadLimits {
+        max_pack_bytes: None,
+        data_packs_per_advance: Some(6),
+        ticket_threshold_bytes: Some(0),
+    });
+    *wire.before.borrow_mut() = Some(Box::new(|head: &str| {
+        head.starts_with("refs/tags/").then(|| Err(denied()))
+    }));
+
+    let results = work.push_tags(&wire, false);
+
+    for name in &names {
+        assert!(
+            matches!(
+                rejection(&results, name),
+                TagPushRejection::Refused(_) | TagPushRejection::Contended
+            ),
+            "{name}: {results:?}"
+        );
+    }
+    let uploads = wire.uploaded_for().len();
+    assert!(uploads <= 1 + 8, "{uploads} uploads");
+    assert_eq!(
+        rejection(&results, "t11"),
+        &TagPushRejection::Contended,
+        "past the bound"
+    );
 }
 
 /// A tag above the pushed branch sends what the branch lacks; with no

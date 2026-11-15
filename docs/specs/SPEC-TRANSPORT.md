@@ -1024,7 +1024,9 @@ For each tag with local value `v`, from the remote tag `T` and tag map
 A forced update conditions on the value it read, never `Any`. When a tag
 map write reports a conflict and a read shows the tag map already holds the
 push's own node with the tag absent, as after a retried write whose answer
-was lost, the push writes the tag alone under `Missing`. A push
+was lost, a push whose tag condition is `Missing` writes the tag alone
+under `Missing`. A tag read back at the pushed value with no tag map is a
+conflict, so the next decision repairs it. A push
 refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
 would not be a valid ref name, an annotated tag whose object names
 another tag, and an unsigned annotated tag. On a remote whose tag listing

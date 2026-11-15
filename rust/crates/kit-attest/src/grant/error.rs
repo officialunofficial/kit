@@ -59,6 +59,8 @@ pub enum GrantError {
     RefPattern,
     /// A pattern that is, or begins with, `refs/kit/packmap/`.
     PackmapPattern,
+    /// A pattern that is, or begins with, `refs/kit/tagmap/`.
+    TagmapPattern,
     /// A flag other than `c`, `u`, `f`, `d`.
     UnknownRefFlag,
     /// Empty flags, or flags repeated or out of the `cufd` order.
@@ -205,6 +207,7 @@ impl GrantError {
             Self::RefScopesMissing => "ref scopes missing",
             Self::RefPattern => "ref pattern",
             Self::PackmapPattern => "packmap pattern",
+            Self::TagmapPattern => "tagmap pattern",
             Self::UnknownRefFlag => "unknown ref flag",
             Self::RefFlagsNotCanonical => "noncanonical ref flags",
             Self::RefScopeCount => "ref scope count",

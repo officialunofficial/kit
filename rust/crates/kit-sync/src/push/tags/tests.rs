@@ -183,3 +183,57 @@ fn a_seeded_search_finds_the_branch_above_a_commit() {
         );
     }
 }
+
+/// A tag read back at the pushed value with no tag map is a conflict, so the
+/// next round repairs it; with a tag map, it has landed.
+#[test]
+fn a_tag_read_back_without_its_tag_map_is_a_conflict() {
+    let (value, map): (Hash, Hash) = ([1; 32], [2; 32]);
+    let state = |tag, map| RemoteState { tag, map };
+    assert!(matches!(
+        state(Some(value), None).landed(value, map),
+        Some(Advance::Conflict)
+    ));
+    assert!(matches!(
+        state(Some(value), Some(map)).landed(value, map),
+        Some(Advance::Landed { members: true })
+    ));
+    assert!(matches!(
+        state(Some(value), Some(value)).landed(value, map),
+        Some(Advance::Landed { members: false })
+    ));
+    assert!(state(None, Some(map)).landed(value, map).is_none());
+}
+
+/// The memo is seeded at most [`PACKMAP_CAS_ATTEMPTS`] times per push, at
+/// the start of a tag's search as well as after an exclusion.
+#[test]
+fn the_base_memo_is_seeded_at_most_the_bounded_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    let main = commits(&store, None, 10, "main");
+    let tx = MemoryTransport::new();
+    let source = TransportSource::new(&tx);
+    let context = PushContext::new(&source, &NoopObserver, &store);
+    for (seeds, seeded) in [(0, true), (PACKMAP_CAS_ATTEMPTS, false)] {
+        let mut search = BaseSearch {
+            candidates: HashMap::from([(main[9], vec!["main".to_owned()])]),
+            excluded: HashSet::new(),
+            memo: HashMap::new(),
+            seeded: false,
+            seeds,
+            reads: HashMap::new(),
+            budget: 100,
+        };
+        // `main` is not on the remote, so no read gives a base.
+        assert!(search.base_of(&context, &store, main[2]).unwrap().is_none());
+        assert_eq!(
+            search.seeds > seeds,
+            seeded,
+            "seeds {seeds} -> {}",
+            search.seeds
+        );
+        assert!(search.seeds <= PACKMAP_CAS_ATTEMPTS);
+    }
+}

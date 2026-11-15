@@ -211,6 +211,8 @@ def validate_pattern(pattern):
         raise Reject("ref pattern")
     if pattern.startswith("refs/kit/packmap/"):
         raise Reject("packmap pattern")
+    if pattern.startswith("refs/kit/tagmap/"):
+        raise Reject("tagmap pattern")
 
 
 def validate_ref_scopes(capabilities, field):
@@ -1249,7 +1251,8 @@ R_CAP = "an unknown capability, or capabilities not in the canonical spelling"
 R_AUD = ("an audience that fails the auth v2 origin rules, a * anywhere in the "
          "audience list, more than 8 audiences, or audiences out of order or duplicated")
 R_REFS = ("ref scopes that are not - for a read grant, or - for a grant with write")
-R_PAT = ("a pattern outside §3.3, a pattern under refs/kit/packmap/, an unknown "
+R_PAT = ("a pattern outside §3.3, a pattern under refs/kit/packmap/ or "
+         "refs/kit/tagmap/, an unknown "
          "flag, flags out of the cufd order or repeated, more than 16 entries, "
          "entries out of order, or two entries with one pattern")
 R_LIFE = "expiry <= created, or a lifetime above GRANT_MAX_LIFETIME_MS"
@@ -1324,6 +1327,8 @@ CASES = {
     "pattern-star-suffix": (R_PAT, edit(f6="refs/heads/*x=cu"), "ref pattern"),
     "pattern-packmap-prefix": (R_PAT, edit(f6="refs/kit/packmap/*=cu"), "packmap pattern"),
     "pattern-packmap-exact": (R_PAT, edit(f6="refs/kit/packmap/main=cu"), "packmap pattern"),
+    "pattern-tagmap-prefix": (R_PAT, edit(f6="refs/kit/tagmap/*=c"), "tagmap pattern"),
+    "pattern-tagmap-exact": (R_PAT, edit(f6="refs/kit/tagmap/v1=c"), "tagmap pattern"),
     "flags-unknown": (R_PAT, edit(f6="refs/heads/main=cx"), "unknown ref flag"),
     "flags-out-of-order": (R_PAT, edit(f6="refs/heads/main=uc"), "noncanonical ref flags"),
     "flags-repeated": (R_PAT, edit(f6="refs/heads/main=cc"), "noncanonical ref flags"),

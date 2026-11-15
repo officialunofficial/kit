@@ -164,6 +164,20 @@ struct RemoteState {
     map: Option<Hash>,
 }
 
+impl RemoteState {
+    /// What a write of `value` with tag map `map` came to, read back after
+    /// a conflict: `None` unless the tag holds `value`. A tag with no tag map
+    /// is a conflict, so that the next round repairs it.
+    fn landed(&self, value: Hash, map: Hash) -> Option<Advance> {
+        (self.tag == Some(value)).then(|| match self.map {
+            None => Advance::Conflict,
+            Some(held) => Advance::Landed {
+                members: held == map,
+            },
+        })
+    }
+}
+
 /// What a push writes for one tag.
 #[derive(Debug, Clone, Copy)]
 enum Row {
@@ -385,7 +399,7 @@ impl BaseSearch {
         store: &ObjectStore,
         target: Hash,
     ) -> Result<Option<Base>, PushError> {
-        if !self.seeded && !self.usable(&target) {
+        if !self.seeded && self.seeds < PACKMAP_CAS_ATTEMPTS && !self.usable(&target) {
             self.seed(store)?;
         }
         loop {
@@ -396,7 +410,7 @@ impl BaseSearch {
                 }
                 self.exclude(candidate);
             }
-            if self.seeded || self.seeds == PACKMAP_CAS_ATTEMPTS {
+            if self.seeded || self.seeds >= PACKMAP_CAS_ATTEMPTS {
                 return Ok(None);
             }
             self.seed(store)?;
@@ -849,12 +863,15 @@ impl TagPush<'_, '_> {
             // placed the same value.
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
                 let state = self.read_state(local)?;
-                if state.tag == Some(local.value) {
-                    return Ok(Advance::Landed {
-                        members: state.map == Some(map),
-                    });
+                if let Some(advance) = state.landed(local.value, map) {
+                    return Ok(advance);
                 }
-                if state.map == Some(map) && state.tag.is_none() {
+                // Only a create writes the tag alone here: every other row's
+                // tag condition fails on an absent tag.
+                if state.map == Some(map)
+                    && state.tag.is_none()
+                    && matches!(tag_condition, RefWriteCondition::Missing)
+                {
                     return self.place_tag(local, tag_condition);
                 }
                 return Ok(Advance::Conflict);
@@ -868,10 +885,8 @@ impl TagPush<'_, '_> {
         // The retry ladder may have re-sent a write that landed, or another
         // push placed the same value.
         let state = self.read_state(local)?;
-        if state.tag == Some(local.value) {
-            return Ok(Advance::Landed {
-                members: state.map == Some(map),
-            });
+        if let Some(advance) = state.landed(local.value, map) {
+            return Ok(advance);
         }
         Ok(match refused {
             None => Advance::Conflict,
@@ -1045,6 +1060,7 @@ impl TagPush<'_, '_> {
                         // the group again.
                         Some((message, true)) if ticketed => {
                             self.reject(&local, TagPushRejection::Refused(message));
+                            lost = true;
                             continue;
                         }
                         Some((message, _)) => {
@@ -1066,10 +1082,10 @@ impl TagPush<'_, '_> {
                         landed = *members;
                         lost = !*members;
                     }
-                    Advance::Conflict => lost = true,
-                    // A refusal of this caller's access to the tag refuses
-                    // that tag; the next one uploads again.
-                    Advance::Refused { scope: true, .. } => {}
+                    // A lost race, or a refusal of this caller's access to
+                    // the tag, which refuses that tag: the next one uploads
+                    // again, within the push's bound.
+                    Advance::Conflict | Advance::Refused { scope: true, .. } => lost = true,
                     // Expired tickets: the same tag uploads again, once.
                     Advance::Stale(_) if !renewed => {
                         renewed = true;
