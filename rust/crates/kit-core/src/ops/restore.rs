@@ -357,7 +357,9 @@ pub fn restore_tree_to_worktree(
 /// third-party `hash_chunks` already could on the write side.
 /// `kit-core` has no thread-pool dependency of its own — it stays
 /// usable from wasm targets, which have no OS threads — so the fan-out
-/// decision lives with the caller instead of living in this function.
+/// decision lives with the caller instead of living in this function. (The
+/// check of skipped subtrees below spreads its directory reads over a few
+/// scoped threads of its own where the target has them.)
 /// Reading each chunk (open + integrity-verify + decode) is independent
 /// of every other chunk in a batch, so `kit-bin`'s native
 /// checkout/clone/reset/restore paths pass a rayon-backed `read_chunks`,
@@ -477,7 +479,9 @@ where
     if opts.clean
         && let Some(base) = base_tree
     {
-        check_skipped_subtrees(store, *tree, base, root, "", &ignore_list, 0)?;
+        let mut skipped = Vec::new();
+        skipped_subtrees(store, *tree, base, root, "", 0, &mut skipped)?;
+        check_unswept(store, skipped, &ignore_list)?;
     }
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
@@ -551,7 +555,7 @@ where
         // Identical to what the worktree already holds (see
         // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
         // A clean restore checked the subtree it does not sweep before it
-        // started ([`check_skipped_subtrees`]).
+        // started ([`check_unswept`]).
         if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
             continue;
         }
@@ -1236,17 +1240,16 @@ fn make_tmp_name() -> String {
 }
 
 /// The subtrees a clean restore of `tree_hash` over `base_tree` skips, as
-/// [`restore_tree_to_worktree_inner`] skips them, each checked with
-/// [`check_unswept`] before the restore touches the worktree. `dir` is the
-/// worktree directory of `tree_hash`.
-fn check_skipped_subtrees(
+/// [`restore_tree_to_worktree_inner`] skips them, pushed onto `skipped` for
+/// [`check_unswept`]. `dir` is the worktree directory of `tree_hash`.
+fn skipped_subtrees(
     store: &ObjectStore,
     tree_hash: Hash,
     base_tree: Hash,
     dir: &Path,
     path_prefix: &str,
-    ignore: &IgnoreList,
     depth: usize,
+    skipped: &mut Vec<Unswept>,
 ) -> RestoreResult<()> {
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -1258,18 +1261,11 @@ fn check_skipped_subtrees(
     let Ok(Object::Tree(base)) = store.read_object(&base_tree) else {
         return Ok(());
     };
-    let base_entries: std::collections::HashMap<&[u8], &TreeEntry> = base
-        .entries
-        .iter()
-        .map(|entry| (entry.name.as_slice(), entry))
-        .collect();
     for entry in &tree.entries {
         if entry.mode != EntryMode::Tree || !TreeEntry::validate_name(&entry.name) {
             continue;
         }
-        let Some(base_entry) = base_entries
-            .get(entry.name.as_slice())
-            .filter(|b| b.mode == EntryMode::Tree)
+        let Some(base_entry) = tree_entry(&base, &entry.name).filter(|b| b.mode == EntryMode::Tree)
         else {
             continue;
         };
@@ -1277,77 +1273,176 @@ fn check_skipped_subtrees(
         let full_path = name_path(path_prefix, name);
         // Only a real directory holds anything the sweep would visit; the
         // walk never follows a symlink out of the worktree.
-        if !fs::symlink_metadata(dir.join(name)).is_ok_and(|meta| meta.is_dir()) {
+        let sub_dir = dir.join(name);
+        if !fs::symlink_metadata(&sub_dir).is_ok_and(|meta| meta.is_dir()) {
             continue;
         }
         if base_entry.object_hash == entry.object_hash {
-            check_unswept(
-                store,
-                entry.object_hash,
-                &dir.join(name),
-                &full_path,
-                ignore,
-                depth + 1,
-            )?;
+            skipped.push(Unswept {
+                tree: entry.object_hash,
+                dir: sub_dir,
+                path: full_path,
+                depth: depth + 1,
+            });
         } else {
-            check_skipped_subtrees(
+            skipped_subtrees(
                 store,
                 entry.object_hash,
                 base_entry.object_hash,
-                &dir.join(name),
+                &sub_dir,
                 &full_path,
-                ignore,
                 depth + 1,
+                skipped,
             )?;
         }
     }
     Ok(())
 }
 
+/// The entry of `tree` named `name`. A decoded tree's entries are sorted by
+/// name with no duplicates.
+fn tree_entry<'t>(tree: &'t crate::object::Tree, name: &[u8]) -> Option<&'t TreeEntry> {
+    tree.entries
+        .binary_search_by(|entry| entry.name.as_slice().cmp(name))
+        .ok()
+        .map(|i| &tree.entries[i])
+}
+
+/// A tracked directory a clean restore skips: the worktree directory `dir`
+/// of the tree `tree`, at the repository-relative `path` and tree `depth`.
+struct Unswept {
+    tree: Hash,
+    dir: PathBuf,
+    path: String,
+    depth: usize,
+}
+
+/// Upper bound on the threads [`check_unswept`] reads directories with.
+const MAX_WALK_THREADS: usize = 8;
+
 /// Refuse when the ignore-aware sweep of a clean restore would remove a path
-/// under `dir`, the worktree directory of the tree `tree_hash` that the
-/// restore skips: an untracked file or symlink outside the ignore rules,
-/// at any depth. A directory is judged by what it holds, as the sweep keeps
-/// one that holds ignored files.
+/// under one of the `skipped` directories: an untracked file or symlink
+/// outside the ignore rules, at any depth. A directory is judged by what it
+/// holds, as the sweep keeps one that holds ignored files.
+///
+/// The walk goes one tree level at a time, each level's directories spread
+/// over up to [`MAX_WALK_THREADS`] threads, the calling thread among them; a
+/// target without threads (wasm32) walks on the calling thread alone. The
+/// refusal names the first path found in the first directory, in level
+/// order, that holds one.
 fn check_unswept(
     store: &ObjectStore,
-    tree_hash: Hash,
-    dir: &Path,
-    path_prefix: &str,
+    skipped: Vec<Unswept>,
     ignore: &IgnoreList,
-    depth: usize,
 ) -> RestoreResult<()> {
-    if depth > MAX_TREE_DEPTH {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_WALK_THREADS);
+    let mut level = skipped;
+    while !level.is_empty() {
+        let workers = threads.min(level.len());
+        let results: Vec<RestoreResult<Vec<Unswept>>> = if workers <= 1 {
+            let mut results = Vec::with_capacity(level.len());
+            for dir in &level {
+                let result = check_unswept_dir(store, dir, ignore);
+                let failed = result.is_err();
+                results.push(result);
+                if failed {
+                    break;
+                }
+            }
+            results
+        } else {
+            check_level_in_parallel(store, &level, ignore, workers)
+        };
+        let mut next = Vec::new();
+        for result in results {
+            next.extend(result?);
+        }
+        level = next;
+    }
+    Ok(())
+}
+
+/// [`check_unswept_dir`] of each of `level` on `workers` threads, the
+/// calling thread one of them, the results in `level` order. After an error
+/// the threads take no more directories, so every directory before the
+/// first error has its result.
+fn check_level_in_parallel(
+    store: &ObjectStore,
+    level: &[Unswept],
+    ignore: &IgnoreList,
+    workers: usize,
+) -> Vec<RestoreResult<Vec<Unswept>>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failed = std::sync::atomic::AtomicBool::new(false);
+    let work = || {
+        let mut done = Vec::new();
+        while !failed.load(Ordering::Relaxed) {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(dir) = level.get(i) else {
+                break;
+            };
+            let result = check_unswept_dir(store, dir, ignore);
+            if result.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            done.push((i, result));
+        }
+        done
+    };
+    let mut done: Vec<(usize, RestoreResult<Vec<Unswept>>)> = std::thread::scope(|scope| {
+        // A thread that cannot be spawned leaves its share to the others;
+        // the calling thread works too, so the level is always finished.
+        let handles: Vec<_> = (1..workers)
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        let mut done = work();
+        for handle in handles {
+            done.extend(
+                handle
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            );
+        }
+        done
+    });
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+/// Check one skipped directory: refuse with [`RestoreError::UnsweptPath`]
+/// on an untracked path the sweep would remove from it or from an untracked
+/// directory under it, and return its tracked subdirectories to check next.
+fn check_unswept_dir(
+    store: &ObjectStore,
+    unswept: &Unswept,
+    ignore: &IgnoreList,
+) -> RestoreResult<Vec<Unswept>> {
+    if unswept.depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
-    let Object::Tree(tree) = store.read_object(&tree_hash)? else {
+    let Object::Tree(tree) = store.read_object(&unswept.tree)? else {
         return Err(RestoreError::NotATree);
     };
-    let tracked: std::collections::HashMap<&[u8], &TreeEntry> = tree
-        .entries
-        .iter()
-        .map(|entry| (entry.name.as_slice(), entry))
-        .collect();
+    let mut subdirs = Vec::new();
     // Untracked directories, walked without recursion: an untracked
     // directory can nest deeper than any tree.
     let mut untracked: Vec<(PathBuf, String, bool)> = Vec::new();
-    for (path, name, is_dir) in read_names(dir, true)? {
-        let full_path = name_path(path_prefix, &name);
-        match tracked.get(name.as_bytes()) {
-            Some(entry) if entry.mode == EntryMode::Tree && is_dir => {
-                check_unswept(
-                    store,
-                    entry.object_hash,
-                    &path,
-                    &full_path,
-                    ignore,
-                    depth + 1,
-                )?;
+    for_each_name(&unswept.dir, true, |entry, name, is_dir| {
+        match tree_entry(&tree, name.as_bytes()) {
+            Some(tracked) if tracked.mode == EntryMode::Tree && is_dir => {
+                subdirs.push(Unswept {
+                    tree: tracked.object_hash,
+                    dir: entry.path(),
+                    path: name_path(&unswept.path, name),
+                    depth: unswept.depth + 1,
+                });
             }
             Some(_) => {}
-            None => untracked.push((path, full_path, is_dir)),
+            None => untracked.push((entry.path(), name_path(&unswept.path, name), is_dir)),
         }
-    }
+    })?;
     while let Some((path, full_path, is_dir)) = untracked.pop() {
         if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
@@ -1355,32 +1450,36 @@ fn check_unswept(
         if !is_dir {
             return Err(RestoreError::UnsweptPath(full_path));
         }
-        for (child, name, child_is_dir) in read_names(&path, false)? {
-            untracked.push((child, name_path(&full_path, &name), child_is_dir));
-        }
+        for_each_name(&path, false, |entry, name, child_is_dir| {
+            untracked.push((entry.path(), name_path(&full_path, name), child_is_dir));
+        })?;
     }
-    Ok(())
+    Ok(subdirs)
 }
 
-/// The entries of `dir` the walk considers, with whether each is a real
-/// directory: every UTF-8 name but `.kit` and `.git`, which the safety gate
-/// leaves out at any depth. In a directory the
-/// tree lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
+/// Call `each` with every entry of `dir` the walk considers, its name, and
+/// whether it is a real directory: every UTF-8 name but `.kit` and `.git`,
+/// which the safety gate leaves out at any depth. In a directory the tree
+/// lists (`listed`), the sweep also keeps `.kitignore` and `.gitignore`
 /// ([`clean_directory`]); in one it does not, it keeps neither
 /// ([`sweep_unlisted_dir`]). A missing `dir` has none.
-fn read_names(dir: &Path, listed: bool) -> RestoreResult<Vec<(PathBuf, String, bool)>> {
+fn for_each_name(
+    dir: &Path,
+    listed: bool,
+    mut each: impl FnMut(&fs::DirEntry, &str, bool),
+) -> RestoreResult<()> {
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(RestoreError::Io(e)),
     };
-    let mut names = Vec::new();
     for entry in read {
         let entry = entry?;
+        let file_name = entry.file_name();
         // The safety gate and `sweep_unlisted_dir` skip a name that is not
         // UTF-8. `clean_directory` refuses one, but only in a directory the
         // restore enters, and the walk is of directories it skips.
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+        let Some(name) = file_name.to_str() else {
             continue;
         };
         if name.eq_ignore_ascii_case(".kit")
@@ -1390,9 +1489,9 @@ fn read_names(dir: &Path, listed: bool) -> RestoreResult<Vec<(PathBuf, String, b
             continue;
         }
         let is_dir = entry.file_type()?.is_dir();
-        names.push((entry.path(), name, is_dir));
+        each(&entry, name, is_dir);
     }
-    Ok(names)
+    Ok(())
 }
 
 /// `name` under the repository-relative directory `prefix`.
@@ -2394,6 +2493,72 @@ mod tests {
             restore(&target, None).unwrap();
             assert!(!path.exists(), "{untracked}");
         }
+    }
+
+    /// With many skipped directories the walk spreads each tree level over
+    /// threads. It finds an untracked file in any of them, and names the
+    /// first one in level order: a shallower level first, then tree order.
+    #[test]
+    fn a_clean_restore_checks_many_skipped_subtrees_in_level_order() {
+        let (_d, store) = fresh_store();
+        let blob = |name: &str, h| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: h,
+        };
+        let x = put_blob(&store, b"x");
+        let inner = put_tree_with(&store, vec![blob("x", x)]);
+        let names: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        let subtree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b"sub".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: inner,
+                },
+                blob("x", x),
+            ],
+        );
+        let with_a = |a: &[u8]| {
+            let mut entries = vec![blob("a", put_blob(&store, a))];
+            entries.extend(names.iter().map(|name| TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: subtree,
+            }));
+            put_tree_with(&store, entries)
+        };
+        let (base, next) = (with_a(b"a-old"), with_a(b"a-new"));
+        let opts = RestoreOptions::default();
+        let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
+        for (untracked, named) in [
+            (vec!["d29/notes.txt"], "d29/notes.txt"),
+            (vec!["d31/sub/new/notes.txt"], "d31/sub/new/notes.txt"),
+            (vec!["d33/notes.txt", "d07/notes.txt"], "d07/notes.txt"),
+            (vec!["d02/sub/notes.txt", "d38/notes.txt"], "d38/notes.txt"),
+        ] {
+            let target = TempDir::new().unwrap();
+            restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+            for path in &untracked {
+                let path = target.path().join(path);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, b"mine").unwrap();
+            }
+            let err =
+                restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+                    .unwrap_err();
+            assert!(
+                matches!(&err, RestoreError::UnsweptPath(p) if p == named),
+                "{untracked:?}: {err:?}"
+            );
+            assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+        }
+        let target = TempDir::new().unwrap();
+        restore_tree_to_worktree_with(&store, &base, None, target.path(), &opts, &rd).unwrap();
+        restore_tree_to_worktree_with(&store, &next, Some(base), target.path(), &opts, &rd)
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-new");
     }
 
     /// Without `observe`, a restored file reports no stat fields, chunked
