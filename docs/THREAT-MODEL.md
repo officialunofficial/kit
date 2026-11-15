@@ -84,11 +84,16 @@ kit defends:
   is spawned as an external signer, which keystore backend/key ref is
   used, or what argv an external signer gets.
 - Unsigned/forged history on `clone`/`pull`/`fetch`. Every
-  commit/remix/tag a fetch newly introduces is run through
+  commit/remix/tag a fetch newly introduces, and every one in the history
+  of each tip it publishes down to a tip an earlier signed fetch verified,
+  is run through
   `kit_core::sign::{verify_commit,verify_remix,verify_tag}` &mdash; the same
   check `kit verify <rev>` runs manually &mdash; before the remote-tracking
   ref is published; a structurally invalid or missing signature aborts
-  the fetch and leaves local state untouched. This is a
+  the fetch and leaves local state untouched. The tip's history is
+  checked even when no pack of this fetch carried it, so objects that a
+  refused pack, another remote, or a fetch with the opt-out left in the
+  local store cannot be published by re-pointing a branch at them. This is a
   default, not a guarantee against every key an attacker could produce:
   it proves the signature is well-formed over the object's own bytes,
   not that the signing key is one the user trusts (no trust-root /
