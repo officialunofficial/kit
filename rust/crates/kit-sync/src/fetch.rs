@@ -797,7 +797,7 @@ fn remote_unchanged(
 mod tests {
     use super::*;
     use kit_core::object::{
-        Blob, KitError, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry,
+        Blob, ChunkedBlob, Commit, EntryMode, Identity, KitError, Object, Tree, TreeEntry,
     };
     use kit_core::sign::{self, KeyPair};
 

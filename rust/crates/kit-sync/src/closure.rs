@@ -107,7 +107,9 @@ pub(crate) fn check_above(
     match kit_core::ops::check_closure_present_above(store, tip, &known, cap, cancelled) {
         Ok(Presence::Complete(checked)) => Ok(checked.len()),
         Ok(Presence::TooLarge(_)) => Err(SyncError::ClosureTooLarge(cap)),
-        Ok(Presence::Missing { object, .. }) => Err(SyncError::RemoteMissingObject(to_hex(&object))),
+        Ok(Presence::Missing { object, .. }) => {
+            Err(SyncError::RemoteMissingObject(to_hex(&object)))
+        }
         Ok(Presence::Stopped(_)) => Err(SyncError::Interrupted),
         Err(e) => Err(closure_error(e)),
     }

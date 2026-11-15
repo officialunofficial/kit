@@ -1399,7 +1399,10 @@ fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
         matches!(&error, SyncError::RemoteMissingObject(hex) if *hex == hash::to_hex(&bee)),
         "{error:?}"
     );
-    assert_eq!(refs::read_remote_ref(&layout, "other", "main").unwrap(), None);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "other", "main").unwrap(),
+        None
+    );
 
     let tip = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     let observer = Recorder::default();
@@ -3330,12 +3333,18 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
-    assert!(!store.contains(&blob), "the check stops at the tracking tip");
+    assert!(
+        !store.contains(&blob),
+        "the check stops at the tracking tip"
+    );
 
     refs::delete_remote_ref(&layout, "default", "main").unwrap();
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
-    assert!(store.contains(&blob), "a fetch with no anchor heals the closure");
+    assert!(
+        store.contains(&blob),
+        "a fetch with no anchor heals the closure"
+    );
 }
 
 // ---- A pull writes only what the new tip changed ------------------------

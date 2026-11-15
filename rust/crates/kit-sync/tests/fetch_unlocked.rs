@@ -1042,7 +1042,13 @@ fn a_fetch_overtaken_by_a_slower_one_does_not_hide_the_new_tip_from_later_fetche
 /// A target that fetched the first three commits of a remote that then added
 /// three more, one pack each. The tracking tip, returned last, is where the
 /// closure check of the next fetch stops.
-fn above_an_earlier_tip() -> (Remote, tempfile::TempDir, std::path::PathBuf, RepoLayout, Hash) {
+fn above_an_earlier_tip() -> (
+    Remote,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    RepoLayout,
+    Hash,
+) {
     let mut remote = Remote::with_commits(3);
     let (dir, target, layout) = fresh_target();
     run_fetch(&target, &remote.source(), &NoopObserver).unwrap();
