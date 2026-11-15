@@ -60,7 +60,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   manifest gives it, also when the plan sent the chunk for another manifest
   or the manifest it replaces already lists it. A manifest that every fetch
   refuses is no longer pushed to a remote that checks nothing.
-- A clone, pull or checkout waits out the racy window (about 15 ms at most)
+- A clone, pull or checkout waits out the racy window (usually under 15 ms)
   before it writes the index, so the first `kit status` afterwards does not
   hash the files it just wrote again, on a file system with sub-second
   timestamps. The first `status` after a clone of a 16 GiB file took 14 s, and
