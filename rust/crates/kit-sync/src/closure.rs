@@ -22,8 +22,8 @@
 //! trees of its parents, by path, down the paths that differ ([`covered`]).
 //! Such an object passed the check when the anchor did: every property the
 //! check tests depends on the id alone. Every other object the tip reaches is
-//! checked as a full check would. A timestamp out of order, a cap reached or
-//! an object that cannot be read only make the check read more.
+//! checked as a full check would. A timestamp out of order, a cap reached, or
+//! a new commit or tree that cannot be read only make the check read more.
 //!
 //! With no anchor the check is the full walk.
 
@@ -186,8 +186,8 @@ const OLD: u8 = 2;
 /// still queued is reached from the tip alone.
 ///
 /// A commit is `old` only when a chain of parents leads to it from an
-/// anchor, so it is in that anchor's closure. A commit that cannot be read
-/// ends its chain. Timestamps only order the walk: one out of order, or
+/// anchor, so it is in that anchor's closure, read or not. A commit that
+/// cannot be read ends its chain. Timestamps only order the walk: one out of order, or
 /// [`MAX_COMMITS`] reads, stop it early, and a commit then counts as new
 /// although it is an ancestor of an anchor.
 fn split(
@@ -305,7 +305,7 @@ impl Paint<'_> {
 /// so the check need not read them.
 ///
 /// It compares the tree of each new commit with the tree of each parent it
-/// read, oldest commit first, by path, down the paths that differ. The tree
+/// read, about oldest commit first, by path, down the paths that differ. The tree
 /// of an old parent is in an anchor's closure, and so is every id that a tree
 /// of an anchor's closure lists: such trees' entries are collected. A tree it
 /// cannot read only means it learns less, as does reaching [`MAX_COVERED`]
@@ -316,6 +316,9 @@ fn covered(
     poll: &mut Poll<'_>,
 ) -> Result<HashSet<Hash>, SyncError> {
     let mut covered = HashSet::new();
+    if split.old.is_empty() {
+        return Ok(covered);
+    }
     let mut tree_reads = 0usize;
     for id in split.new.iter().rev() {
         let Some(commit) = split.headers.get(id) else {
@@ -443,6 +446,11 @@ mod tests {
         }
 
         fn commit(&self, files: &Files, parents: &[Hash]) -> Hash {
+            let at = self.clock.replace(self.clock.get() + 1);
+            self.commit_at(files, parents, at)
+        }
+
+        fn commit_at(&self, files: &Files, parents: &[Hash], timestamp: u64) -> Hash {
             let tree = self.tree(files, "");
             self.put(&Object::Commit(Commit::new_unannotated(
                 tree,
@@ -450,7 +458,7 @@ mod tests {
                 Identity::ed25519([7; 32]),
                 [7; 32],
                 b"c".to_vec(),
-                self.clock.replace(self.clock.get() + 1),
+                timestamp,
                 [0; 64],
             )))
         }
@@ -543,6 +551,26 @@ mod tests {
         // The merge and the feature commit with their root trees, and `d3`
         // with its new file. `fork` and `base` are ancestors of the anchor.
         assert_eq!(repo.check(tip, &[anchor]).unwrap(), 6);
+    }
+
+    #[test]
+    fn timestamps_out_of_order_cost_reads_and_keep_the_check_whole() {
+        let repo = Repo::new();
+        let base = repo.commit_at(&files(), &[], 100);
+        let anchor = repo.commit_at(&with(files(), "d1/f1", b"one"), &[base], 200);
+        // Older than the history it builds on.
+        let tip = repo.commit_at(&with(files(), "d3/f3", b"new"), &[base], 50);
+        assert_eq!(repo.check(tip, &[anchor]).unwrap(), 4);
+
+        // An anchor from the future, over a tip from the past, whose history
+        // the anchor does not reach.
+        let lone = repo.commit_at(&with(Files::new(), "x", b"x"), &[], 10);
+        let late = repo.commit_at(&with(files(), "d1/f1", b"late"), &[base], u64::MAX);
+        let tip = repo.commit_at(&with(Files::new(), "x", b"y"), &[lone], 20);
+        assert_eq!(
+            repo.check(tip, &[late]).unwrap(),
+            repo.check(tip, &[]).unwrap()
+        );
     }
 
     #[test]

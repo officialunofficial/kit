@@ -1228,9 +1228,9 @@ tip and of the anchors together, newest first, and stops when every commit
 still queued is an ancestor of an anchor; those ancestors are not read. It
 also skips each ID listed by a tree of an anchor's closure that it reads
 while comparing each new commit's tree with its parents' trees, by path.
-Every other object of the tip's closure is checked. A fetch with no anchor,
-one with signature checking off, and the retry of a repair check the whole
-closure.
+Every other object of the tip's closure is checked. A clone, or a fetch with
+signature checking off, starts with no anchor and checks the first branch's
+whole closure; the retry of a repair always checks the whole closure.
 
 Stored-object ID lists are checked per pack and are not accumulated over the
 chain. The closure check before ref publication reads the type of each chunk
