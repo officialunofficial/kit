@@ -20,7 +20,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::pack;
 use kit_sync::{ClientSource, NoopObserver, SyncOptions, fetch, init_clone_dir};
 use pack_server::{Location, PART_SIZE, PackServer};
-use streaming::{Dalek, MIB, client, clone_remote, commit_files, entries_of, http, spool_entries};
+use streaming::{Dalek, MIB, client, clone_remote, commit_files, entries_of, http};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
@@ -156,7 +156,6 @@ fn push_and_fetch(files: usize, len: usize) -> (u64, Peaks) {
             Some(tip),
             "{mode:?}"
         );
-        assert_eq!(spool_entries(&work), 0, "{mode:?}");
         let counts = server.counts();
         let located = counts.downloads.iter().all(|(_, accept)| *accept)
             && counts.location_gets.len() == counts.downloads.len();

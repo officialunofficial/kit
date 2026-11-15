@@ -1034,6 +1034,8 @@ struct BlobSink {
 
 impl PackSink for BlobSink {
     fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        // A new attempt, such as the fallback after a location, starts over.
+        self.refused = None;
         let begun = self.inner.begin(declared);
         if let Err(TransportError::PayloadTooLarge(_)) = begun {
             self.refused = declared;

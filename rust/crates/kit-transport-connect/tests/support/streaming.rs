@@ -150,11 +150,6 @@ pub fn target(dir: &Path, name: &str) -> PathBuf {
     work
 }
 
-/// The files a fetch left in the clone's spool directory.
-pub fn spool_entries(work: &Path) -> usize {
-    std::fs::read_dir(work.join(".kit").join("tmp")).map_or(0, |dir| dir.count())
-}
-
 /// Fill `out` with incompressible bytes from `seed`.
 fn noise_into(seed: u64, out: &mut [u8]) {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;

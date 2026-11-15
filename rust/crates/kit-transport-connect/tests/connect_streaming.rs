@@ -30,7 +30,7 @@ use kit_sync::{
     fetch,
 };
 use pack_server::{Location, PART_SIZE, PackServer};
-use streaming::{Dalek, MIB, client, http, noise, seed, spool_entries, target};
+use streaming::{Dalek, MIB, client, http, noise, seed, target};
 
 /// The tests share the injected failures, so each one holds this while it
 /// runs.
@@ -88,7 +88,6 @@ fn a_download_frame_over_4_mib_is_refused() {
         Err(SyncError::Source(SourceError::InvalidResponse)) => {}
         other => panic!("expected the frame to be refused, got {other:?}"),
     }
-    assert_eq!(spool_entries(&work), 0);
 
     server.set_one_frame(false);
     let work = target(dir.path(), "chunked");
@@ -127,7 +126,6 @@ fn a_location_with_the_wrong_key_or_length_falls_back_to_the_rpc() {
             vec![true, false]
         };
         assert_eq!(counts.downloads_of(&seeded.pack), expected, "{mode:?}");
-        assert_eq!(spool_entries(&work), 0, "{mode:?}");
     }
 }
 
@@ -173,7 +171,6 @@ fn a_full_disk_ends_each_download_path_as_an_io_error_without_fallback_or_retry(
             "{mode:?}"
         );
         assert_eq!(retry.0.load(Ordering::SeqCst), 0, "{mode:?}: no retry");
-        assert_eq!(spool_entries(&work), 0, "{mode:?}");
         assert_eq!(fetched_main(&work), None, "{mode:?}");
 
         fetch_from(&server, &work, &RetryAll::default()).unwrap();

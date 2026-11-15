@@ -200,7 +200,8 @@ restarts (a golden test pins the ids of a fixed plan).
 
 `upload_pack` and `upload_part` read the pack from a `PackBody` as they build
 each 800 KiB chunk. A part is read twice, once to hash its commitment and once
-to send it, and a resumed upload reads only the parts without a stored receipt.
+to send it, so a host that resumes from stored receipts, as kit-sync's
+`ClientSource` does, reads only the parts it sends again.
 A channel that does not override `send_stream` buffers each request body: the
 seam is `Request<Vec<u8>>` because the transport must replay the exact request
 bytes after an ambiguous failure and because browser fetch cannot stream
