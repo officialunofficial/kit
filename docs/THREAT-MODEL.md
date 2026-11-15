@@ -85,7 +85,8 @@ kit defends:
   used, or what argv an external signer gets.
 - Unsigned/forged history on `clone`/`pull`/`fetch`. Every
   commit/remix/tag a fetch newly introduces, and every one in the history
-  of each tip it publishes, is run through
+  of each tip it publishes down to a tip an earlier signed fetch verified,
+  is run through
   `kit_core::sign::{verify_commit,verify_remix,verify_tag}` &mdash; the same
   check `kit verify <rev>` runs manually &mdash; before the remote-tracking
   ref is published; a structurally invalid or missing signature aborts

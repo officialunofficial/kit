@@ -1082,6 +1082,153 @@ fn a_pull_checks_a_tracking_tip_its_fetch_did_not_publish() {
     assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"one\n");
 }
 
+/// The record of `branch` of `remote` naming the last tip a signed fetch
+/// published, at the path the sync README documents.
+fn verified_tip_path(target: &Path, remote: &str, branch: &str) -> std::path::PathBuf {
+    let mut key = Vec::new();
+    for part in [remote, branch] {
+        key.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        key.extend_from_slice(part.as_bytes());
+    }
+    RepoLayout::single(target)
+        .applied_packs_dir()
+        .join(".verified")
+        .join(hash::to_hex(&hash::hash(&key)))
+}
+
+fn read_verified_tip(target: &Path, remote: &str, branch: &str) -> Option<Hash> {
+    let text = std::fs::read_to_string(verified_tip_path(target, remote, branch)).ok()?;
+    let mut lines = text.split('\n');
+    assert_eq!(lines.next(), Some("kit-verified-tip-v1"));
+    refs::parse_lowercase_hash(lines.next()?.as_bytes())
+}
+
+/// Write the record the sync README documents, as a signed fetch would.
+fn write_verified_tip(target: &Path, remote: &str, branch: &str, tip: Hash) {
+    let body = format!("kit-verified-tip-v1\n{}", hash::to_hex(&tip));
+    let path = verified_tip_path(target, remote, branch);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        format!("{body}\n{}", hash::to_hex(&hash::hash(body.as_bytes()))),
+    )
+    .unwrap();
+}
+
+/// A signed fetch records each tip it publishes. A fetch with the opt-out
+/// moves the tracking ref and leaves the record alone.
+#[test]
+fn a_signed_fetch_records_the_tip_it_verified_and_an_opted_out_one_does_not() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    assert_eq!(read_verified_tip(&target, "default", "main"), Some(first));
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    signed_fetch(&target, &remote).unwrap();
+    assert_eq!(read_verified_tip(&target, "default", "main"), Some(second));
+
+    let unsigned = remote.publish(Some(second), &[("a.txt", b"unsigned\n")], false);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    let layout = RepoLayout::single(&target);
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(unsigned)
+    );
+    assert_eq!(read_verified_tip(&target, "default", "main"), Some(second));
+}
+
+/// The walk stops at a recorded tip: signed commits on top of history a
+/// signed fetch accepted are checked down to it and no further. Here the
+/// record names an unsigned commit, so the walk passing it shows it is not
+/// read again. Without the record the same fetch is refused.
+#[test]
+fn signed_commits_on_top_of_a_recorded_tip_are_checked_only_down_to_it() {
+    for recorded in [true, false] {
+        let remote = Remote::new();
+        let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("work");
+        clone_into(&remote, &target);
+        let other = Remote::new();
+        let unsigned = other.publish(Some(first), &[("a.txt", b"unsigned\n")], false);
+        fetch(
+            &target,
+            &other.source(),
+            "other",
+            &SyncOptions::default().with_verify_signatures(false),
+            &NoopObserver,
+        )
+        .unwrap();
+        if recorded {
+            write_verified_tip(&target, "other", "main", unsigned);
+        }
+        remote.repoint(unsigned);
+        let tip = remote.publish(Some(unsigned), &[("a.txt", b"signed\n")], true);
+
+        let result = signed_fetch(&target, &remote);
+        let layout = RepoLayout::single(&target);
+        let tracking = refs::read_remote_ref(&layout, "default", "main").unwrap();
+        if recorded {
+            result.unwrap();
+            assert_eq!(tracking, Some(tip));
+            assert_eq!(read_verified_tip(&target, "default", "main"), Some(tip));
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(&error, SyncError::UnsignedOrInvalidObject { hash, .. } if *hash == hash::to_hex(&unsigned)),
+                "{error:?}"
+            );
+            assert_eq!(tracking, Some(first));
+        }
+    }
+}
+
+/// An unchanged cursor does not let a fetch that verifies skip a tracking ref
+/// whose tip no signed fetch recorded, such as one a fetch with the opt-out
+/// left for a branch the remote no longer lists.
+#[test]
+fn an_unchanged_cursor_does_not_cover_a_tracking_ref_no_signed_fetch_recorded() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let other = Remote::new();
+    let unsigned = other.publish(Some(first), &[("a.txt", b"unsigned\n")], false);
+    let unsigned_options = SyncOptions::default().with_verify_signatures(false);
+    fetch(
+        &target,
+        &other.source(),
+        "other",
+        &unsigned_options,
+        &NoopObserver,
+    )
+    .unwrap();
+    let layout = RepoLayout::single(&target);
+    refs::write_remote_ref(&layout, "default", "gone", &unsigned).unwrap();
+
+    let options = SyncOptions::default();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    let (report, calls) = counted_fetch(&remote, &target, &options);
+    assert!(
+        !report.remote_unchanged && calls > 0,
+        "the unrecorded ref keeps the fetch from trusting the cursor"
+    );
+    // A fetch with the opt-out does not need the record.
+    let (report, calls) = counted_fetch(&remote, &target, &unsigned_options);
+    assert!(report.remote_unchanged && calls == 0);
+}
+
 #[test]
 fn a_missing_target_branch_is_an_error_not_a_fallback() {
     let remote = Remote::new();

@@ -334,9 +334,12 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// # Signed history
 ///
 /// With signatures required, the history of each tip is verified before it
-/// is published. The returned set holds every object whose history this call
-/// verified, so branches that share history walk it once, and a pull does not
-/// walk again a tip this call published.
+/// is published, down to the tips earlier signed fetches recorded (see
+/// [`crate::anchor`]), and each tip it publishes is recorded in turn. So a
+/// fetch verifies only the commits between a new tip and what an earlier
+/// signed fetch verified. The returned set holds those recorded tips and every
+/// object whose history this call verified, so branches that share history
+/// walk it once, and a pull does not walk again a tip this call published.
 pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -349,7 +352,12 @@ pub(crate) fn fetch_objects(
     let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
-    let mut verified = VerifiedHistory::default();
+    // The tips earlier signed fetches recorded: a history walk stops at them.
+    let mut verified = if options.verify_signatures {
+        crate::anchor::load_all(layout)
+    } else {
+        VerifiedHistory::default()
+    };
     let result = fetch_objects_inner(
         store,
         layout,
@@ -544,6 +552,15 @@ fn fetch_objects_inner(
             // crash between them leaves the old record.
             tracking.write(&r.name, &completed.tip)?;
             published.push((r.name.clone(), completed.tip));
+            if require_signed {
+                // The history of the tip was verified above. Like the
+                // checkpoint, the record is a disposable cache: losing it
+                // makes a later walk longer, never shorter.
+                let _ = crate::anchor::persist(
+                    &crate::anchor::path(layout, remote, &r.name),
+                    &completed.tip,
+                );
+            }
             if require_signed && let Some(path) = &checkpoint_path {
                 let batch =
                     std::mem::replace(&mut tracking, refs::RemoteRefBatch::new(layout, remote)?);
@@ -624,7 +641,10 @@ fn prune_tracking(
     let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
     for name in gone {
         match refs::delete_remote_ref(layout, remote, &name) {
-            Ok(()) | Err(refs::RefError::NotFound(_)) => report.branches_pruned.push(name),
+            Ok(()) | Err(refs::RefError::NotFound(_)) => {
+                let _ = std::fs::remove_file(crate::anchor::path(layout, remote, &name));
+                report.branches_pruned.push(name);
+            }
             Err(e) => return Err(e.into()),
         }
     }
@@ -634,8 +654,9 @@ fn prune_tracking(
 /// Whether the last complete fetch saw `cursor`, the remote-tracking refs
 /// are as it left them, and the object of every tracked tip is in the store
 /// (a wiped store still heals). A fetch that verifies signatures does not
-/// trust a fetch that did not, and a fetch of a named branch needs its
-/// tracking ref.
+/// trust a fetch that did not, nor a tracking ref whose tip no signed fetch
+/// recorded, such as one a fetch with the opt-out left for a branch the
+/// remote no longer lists. A fetch of a named branch needs its tracking ref.
 fn remote_unchanged(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -660,9 +681,12 @@ fn remote_unchanged(
     if record.tracking != crate::cursor::digest_of(&mut tracked) {
         return Ok(false);
     }
-    Ok(tracked
-        .iter()
-        .all(|r| r.hash.is_some_and(|tip| store.contains(&tip))))
+    Ok(tracked.iter().all(|r| {
+        r.hash.is_some_and(|tip| {
+            store.contains(&tip)
+                && (!require_signed || crate::anchor::names(layout, remote, &r.name, &tip))
+        })
+    }))
 }
 
 #[cfg(test)]

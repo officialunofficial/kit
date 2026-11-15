@@ -243,12 +243,13 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
     }
 }
 
-/// The objects whose history [`verify_history_signatures`] has verified in
-/// full, which a later walk need not read again. An object enters it only
-/// once the walk that reached it has succeeded. It lives for one fetch (and
-/// the pull after it) and holds the union of the histories that fetch
-/// verified: each walk is capped, the union is not, so a remote with many
-/// unrelated branches costs 32 bytes of id per signed object it delivered.
+/// The objects whose history has been verified in full, which a walk need
+/// not read again. A fetch starts it from the tips earlier signed fetches
+/// recorded ([`crate::anchor`]). An object enters it only once the walk that
+/// reached it has succeeded. It lives for one fetch (and the pull after it)
+/// and holds the union of the histories that fetch verified: each walk is
+/// capped, the union is not, so a remote with many unrelated branches costs
+/// 32 bytes of id per signed object it delivered.
 pub(crate) type VerifiedHistory = HashSet<Hash>;
 
 /// Verify the signature of every commit, remix and tag in the history of
@@ -265,8 +266,10 @@ pub(crate) type VerifiedHistory = HashSet<Hash>;
 /// this on each tip right before it publishes the tip, so what a ref names
 /// is checked whatever path its objects took into the store.
 ///
-/// An object in `verified` had its whole history verified by an earlier
-/// walk, so the walk stops there. When the walk succeeds, every object it
+/// An object in `verified` had its whole history verified, by an earlier
+/// walk or by the signed fetch that recorded it, so the walk stops there.
+/// This makes the walk a range check: it reads the commits between `tip` and
+/// what was verified before. When the walk succeeds, every object it
 /// visited joins `verified`; when it fails, `verified` is unchanged.
 ///
 /// One walk visits at most [`kit_core::ops::graph::MAX_REACHABLE`] objects,
