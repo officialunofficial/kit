@@ -104,10 +104,10 @@ pub enum GcRootsError {
         /// The cap that applied.
         cap: usize,
     },
-    /// A manifest lists an object that is neither a blob nor a delta. A chunk
+    /// A manifest lists an object that is not a blob, a delta included. A chunk
     /// is a leaf, so gc cannot tell what that object reaches and refuses.
     #[error(
-        "chunk {} of manifest {} is not a blob or delta (fail closed)",
+        "chunk {} of manifest {} is not a blob (fail closed)",
         hash::to_hex(.chunk),
         hash::to_hex(.manifest)
     )]
@@ -396,7 +396,7 @@ impl MarkLimits {
 /// - `objects`: commits, trees, tags, remixes, manifests, and blobs reached
 ///   other than as a chunk. The mark caps it at [`MAX_REACHABLE`].
 /// - `chunks`: the ids that manifests list, sorted, without duplicates, and
-///   disjoint from `objects`. Each is a blob or a delta.
+///   disjoint from `objects`. Each is a blob.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LiveSet {
     objects: BTreeSet<Hash>,
@@ -610,7 +610,7 @@ pub(crate) fn live_objects(
 ///
 /// The closure follows commits, trees, tags and parents like
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
-/// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob or a delta.
+/// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
 /// Does not verify leaf (blob/delta) content integrity as part of the
 /// walk — see [`super::graph::reachable_objects`]'s "Content integrity

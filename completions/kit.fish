@@ -472,6 +472,7 @@ complete -c kit -n "__fish_seen_subcommand_from switch" -s c -d "Create a new br
 complete -c kit -n "__fish_seen_subcommand_from switch" -s C -d "Create-or-reset a branch and switch to it" -r
 complete -c kit -n "__fish_seen_subcommand_from checkout" -s b -d "Create a branch and switch to it" -r
 complete -c kit -n "__fish_seen_subcommand_from checkout" -s B -d "Create-or-reset a branch and switch to it" -r
+complete -c kit -n "__fish_seen_subcommand_from checkout" -s f -l force -d "Discard local changes that block the switch"
 complete -c kit -n "__fish_seen_subcommand_from merge-base" -l is-ancestor -d "Test ancestry: exit 0/1, no output"
 complete -c kit -n "__fish_seen_subcommand_from rev-list" -l count -d "Print the number of commits"
 complete -c kit -n "__fish_seen_subcommand_from rev-list" -s n -l max-count -d "Limit number of commits" -r

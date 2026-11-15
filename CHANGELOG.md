@@ -7,21 +7,48 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- A clone, pull or checkout waits out the racy window (at most about 10 ms)
-  before it writes the index, so the first `kit status` afterwards does not
-  hash the files it just wrote again. The first `status` after a clone of a
-  16 GiB file took 14 s, and 97 s or more with a cold page cache, when the
-  index landed within 10 ms of the newest file.
-- `kit gc` now names the linked worktree whose state it cannot read when it
-  refuses to run.
+- `kit push <remote> <branch>` pushes the local branch `<branch>` under its
+  own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
+  be the current one. Like any refspec push, it records an upstream only with
+  `-u`. `libkit::push::parse_refspec` accepts a lone branch the same way; it
+  returned an error for it before.
 
 ### Changed
 
+- The error for a repository in the `bmt-v1` format, and for any other
+  unreadable `.kit/format`, now says how to move a 0.7.3 repository: run
+  `kit git export` with kit 0.7.3, then `kit git import` with this kit, or
+  commit a checkout into a new `kit init` repository.
+- The top-level `kit help`, `docs/CLI.md`, `man/kit.1` and the shell
+  completions list flags that `--help` already showed: `checkout -f`, the
+  `kit branch` options, `init -q`, `add -n`, the `log` display flags,
+  `rev-list -n` and ranges, `show-ref <pattern>`, `commit --allow-empty`,
+  `pull --rebase` and `--no-ff`, `fetch --prune`, `push <remote> <src>:<dst>`,
+  `rebase --onto` and `--skip`, `stash push` and `rev-parse --verify`.
+- The `gc` error for a manifest chunk that is not a blob now reads `chunk
+  <id> of manifest <id> is not a blob (fail closed)`. It said `not a blob or
+  delta`, but gc refuses a delta there too.
 - On Linux with glibc, `kit` fixes glibc's malloc thresholds at 128 KiB when
-  it starts. The peak memory of a clone no longer grows with the size of the
-  file: a 64 GiB clone peaked at 431 MB and now peaks at about 349 MB.
+  it starts. A 16 GiB clone peaked at 359 to 437 MB and now peaks at 303 MB,
+  and the peak no longer grows with the size of the file.
+
+### Fixed
+
+- A push plan checks each chunk of a new manifest against the span that the
+  manifest gives it, also when the plan sent the chunk for another manifest
+  or the manifest it replaces already lists it. A manifest that every fetch
+  refuses is no longer pushed to a remote that checks nothing.
+- A clone, pull or checkout waits out the racy window (about 15 ms at most)
+  before it writes the index, so the first `kit status` afterwards does not
+  hash the files it just wrote again, on a file system with sub-second
+  timestamps. The first `status` after a clone of a 16 GiB file took 14 s, and
+  97 s or more with a cold page cache, when the index landed within 10 ms of
+  the newest file.
+- `kit gc` names the linked worktree whose state it cannot read when it
+  refuses to run. `docs/CLI.md` no longer says that gc refuses to run while a
+  linked worktree exists: it never did, and it keeps what every tree reaches.
 
 ## [0.8.0] - 2026-11-14
 

@@ -22,20 +22,22 @@
 //! in the remote head's own snapshot, and a chunk is skipped only when the
 //! manifest at the same path in a parent lists it or the plan already sends it.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
 use crate::object::{ChunkedBlob, EntryMode, Object, ObjectType, Tree, TreeEntry};
-use crate::ops::graph::{ClosureMode, children};
+use crate::ops::graph::{ClosureMode, children, chunk_blob_len};
 use crate::store::{ObjectStore, StoreError};
 
 /// Most trees the held filter reads from the remote head's snapshot. Past
 /// it the filter stops, which only makes the plan send more.
 pub const MAX_HELD_SCAN: usize = 2_097_152;
 
-/// Most chunk ids the plan remembers as already sent. Past it a chunk that
-/// several files share may be listed twice, and a pack reader accepts that.
+/// Most chunk ids the plan remembers, with their lengths and whether it
+/// listed them. Past it a chunk that several files share may be listed twice,
+/// and a pack reader accepts that. A length that is not remembered is read
+/// again.
 pub const MAX_CHUNK_MEMORY: usize = 2_097_152;
 
 fn limit_error() -> StoreError {
@@ -137,10 +139,11 @@ pub struct ChunkList {
     pub old: Option<Hash>,
 }
 
-/// The chunk ids a plan has listed, up to a bound.
+/// The chunk ids a plan has met, each with the length of its blob and whether
+/// the plan listed it, up to a bound.
 #[derive(Debug)]
 pub struct ChunkMemory {
-    seen: HashSet<Hash>,
+    seen: HashMap<Hash, (u64, bool)>,
     limit: usize,
 }
 
@@ -149,21 +152,39 @@ impl ChunkMemory {
     #[must_use]
     pub fn new(limit: usize) -> Self {
         Self {
-            seen: HashSet::new(),
+            seen: HashMap::new(),
             limit,
         }
+    }
+
+    /// The length of a chunk's blob, read once while it stays in memory.
+    fn blob_len(
+        &mut self,
+        store: &ObjectStore,
+        chunk: &Hash,
+        index: u32,
+    ) -> Result<u64, StoreError> {
+        if let Some(&(len, _)) = self.seen.get(chunk) {
+            return Ok(len);
+        }
+        let len = chunk_blob_len(store, chunk, index)?;
+        if self.seen.len() < self.limit {
+            self.seen.insert(*chunk, (len, false));
+        }
+        Ok(len)
     }
 
     /// `true` the first time a chunk is seen. Past the bound a chunk is
     /// reported as new again.
     fn first_sight(&mut self, chunk: &Hash) -> bool {
-        if self.seen.contains(chunk) {
-            return false;
+        match self.seen.get_mut(chunk) {
+            Some((_, listed)) if *listed => false,
+            Some((_, listed)) => {
+                *listed = true;
+                true
+            }
+            None => true,
         }
-        if self.seen.len() < self.limit {
-            self.seen.insert(*chunk);
-        }
-        true
     }
 }
 
@@ -302,16 +323,20 @@ impl PushWalk {
 
     /// Stream the chunks the plan has to send, manifest by manifest.
     ///
-    /// A chunk is skipped when the manifest it replaces lists it, when the
-    /// walk keeps it as an object, or when `memory` has seen it. The callback
-    /// gets the commit that brought the manifest, the manifest, the index of
-    /// the chunk in it and the chunk.
+    /// Every chunk of every manifest is checked as a fetch checks it: a
+    /// `Blob` whose length is its span in that manifest. The head of a chunk
+    /// is not read when the manifest it replaces lists the same chunk with the
+    /// same span length, as the replaced manifest is held or checked in its own
+    /// turn. A chunk is then skipped when the manifest it replaces lists it,
+    /// when the walk keeps it as an object, or when `memory` has seen it. The
+    /// callback gets the commit that brought the manifest, the manifest, the
+    /// index of the chunk in it and the chunk.
     ///
     /// # Errors
     ///
     /// Any [`StoreError`] from reading a manifest, except a missing replaced
-    /// manifest, which only means no chunk is skipped for it, and the callback's
-    /// own error.
+    /// manifest, which only means no chunk is skipped for it, a chunk that is
+    /// not a blob or does not fill its span, and the callback's own error.
     pub fn for_each_chunk(
         &self,
         store: &ObjectStore,
@@ -322,15 +347,22 @@ impl PushWalk {
             let Object::ChunkedBlob(blob) = store.read_object(&manifest.id)? else {
                 continue;
             };
-            let replaced: HashSet<Hash> = match manifest.old.map(|old| store.read_object(&old)) {
-                Some(Ok(Object::ChunkedBlob(old))) => old.into_chunks().into_iter().collect(),
-                Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => HashSet::new(),
+            let replaced: SpanLengths = match manifest.old.map(|old| store.read_object(&old)) {
+                Some(Ok(Object::ChunkedBlob(old))) => replaced_spans(&old),
+                Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => SpanLengths::default(),
                 Some(Err(error)) => return Err(error),
             };
             for (index, chunk) in (0u32..).zip(blob.chunks().iter().copied()) {
-                if replaced.contains(&chunk)
-                    || self.objects.contains(&chunk)
-                    || !memory.first_sight(&chunk)
+                // The replaced manifest gives the chunk the same span length,
+                // so the chunk holds what it says (see `replaced_spans`). The
+                // head is read in every other case.
+                let span_len = blob.span(index).map(|(start, end)| end - start);
+                let listed = replaced.get(&chunk).copied();
+                if span_len.is_none() || listed != span_len {
+                    let len = memory.blob_len(store, &chunk, index)?;
+                    blob.check_chunk_length(index, len)?;
+                }
+                if listed.is_some() || self.objects.contains(&chunk) || !memory.first_sight(&chunk)
                 {
                     continue;
                 }
@@ -340,6 +372,51 @@ impl PushWalk {
         Ok(())
     }
 }
+
+/// The span length each chunk of `old` has in that manifest. A chunk that the
+/// manifest lists with two lengths maps to [`CONFLICTING_SPANS`]: no span
+/// length of a new manifest equals it, so the chunk is never taken as known.
+///
+/// A new manifest that gives a chunk this same length needs no read of the
+/// chunk's head. `old` is the manifest at the same path in a parent of the
+/// commit that brought the new one, so it is in the history of the pushed
+/// tip, and every fetch of that tip checks that history. A chunk is the same
+/// object whatever manifest lists it, so the new manifest is wrong about a
+/// chunk only if `old` is wrong about it too, and then every fetch of the tip
+/// is refused already. A manifest that a new commit brought is also checked
+/// by the plan itself: parents come before children, and the weighing of a
+/// split push sizes every new commit before anything is uploaded. A manifest
+/// of a held commit was written by the chunker of this store or checked by a
+/// fetch of it, or the remote refuses it already.
+fn replaced_spans(old: &ChunkedBlob) -> SpanLengths {
+    let mut spans = SpanLengths::with_capacity_and_hasher(
+        old.chunks().len(),
+        foldhash::fast::RandomState::default(),
+    );
+    for (index, &chunk) in (0u32..).zip(old.chunks()) {
+        let len = old
+            .span(index)
+            .map_or(CONFLICTING_SPANS, |(start, end)| end - start);
+        spans
+            .entry(chunk)
+            .and_modify(|known| {
+                if *known != len {
+                    *known = CONFLICTING_SPANS;
+                }
+            })
+            .or_insert(len);
+    }
+    spans
+}
+
+/// Span lengths by chunk id. A replaced manifest can come from a fetched
+/// repository, so its ids are not trusted to spread: the map is keyed by a
+/// seed of this process, which no content can be ground against ahead of time.
+type SpanLengths = HashMap<Hash, u64, foldhash::fast::RandomState>;
+
+/// The value of a chunk that a manifest lists with two span lengths. A span
+/// is at most the total size of a file, far below it.
+const CONFLICTING_SPANS: u64 = u64::MAX;
 
 fn read_commit(store: &ObjectStore, id: &Hash) -> Result<Option<(Hash, Vec<Hash>)>, StoreError> {
     Ok(match store.read_object(id)? {
