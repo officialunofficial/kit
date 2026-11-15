@@ -1357,6 +1357,181 @@ fn progress_arrives_as_events_not_output() {
     );
 }
 
+/// The file of object `id` in the store of `target`.
+fn object_file(target: &Path, id: &Hash) -> std::path::PathBuf {
+    let hex = hash::to_hex(id);
+    RepoLayout::single(target)
+        .objects_dir()
+        .join(&hex[..2])
+        .join(&hex[2..])
+}
+
+/// A fetch checks the closure of a new tip down to the tracking tips of the
+/// remote it fetches, and no further. Another remote's tracking tip is no
+/// such point, so its fetch reads the closure below it.
+#[test]
+fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    // Drop an object below the tracking tip from the store.
+    let bee = Object::Blob(Blob {
+        data: b"bee\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    std::fs::remove_file(object_file(&target, &bee)).unwrap();
+
+    let other = Remote::new();
+    other.publish(Some(first), &[("a.txt", b"other\n")], true);
+    let error = fetch(
+        &target,
+        &other.source(),
+        "other",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, SyncError::RemoteMissingObject(hex) if *hex == hash::to_hex(&bee)),
+        "{error:?}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "other", "main").unwrap(),
+        None
+    );
+
+    let tip = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let observer = Recorder::default();
+    let report = fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert_eq!(report.packs_downloaded, 1);
+    assert!(
+        !observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. }))
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+/// A tracking ref that a fetch with the opt-out moved is no anchor: the record
+/// of verified tips still names the old tip, so the next fetch that verifies
+/// reads the closure below the ref again.
+#[test]
+fn a_tracking_tip_the_verified_record_does_not_name_is_no_anchor() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    let bee = Object::Blob(Blob {
+        data: b"bee\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    std::fs::remove_file(object_file(&target, &bee)).unwrap();
+
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let observer = Recorder::default();
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. })),
+        "the check read below the moved ref and repaired the store"
+    );
+    assert!(object_file(&target, &bee).exists());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(third)
+    );
+}
+
+/// After a forced update the old tip is no anchor: gc may prune its history,
+/// and a later tip over that history is refused while the history is gone.
+#[test]
+fn history_gc_pruned_after_a_forced_update_is_checked_again() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let fetch_default = || {
+        fetch(
+            &target,
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+    };
+    fetch_default().unwrap();
+    let rewritten = remote.publish_reset(&[("c.txt", b"see\n")]);
+    fetch_default().unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(rewritten)
+    );
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(
+        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false)
+            .unwrap()
+            .pruned
+            > 0
+    );
+    assert!(!store.contains(&first));
+
+    // The remote moves `main` over `first`, which no pack of its chain holds
+    // any more.
+    remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    let error = fetch_default().unwrap_err();
+    assert!(
+        matches!(&error, SyncError::RemoteMissingObject(hex) if *hex == hash::to_hex(&first)),
+        "{error:?}"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(rewritten)
+    );
+}
+
 #[test]
 fn a_stale_applied_packs_record_self_heals_with_a_visible_event() {
     let remote = Remote::new();
@@ -3185,9 +3360,10 @@ fn a_recreated_remote_never_matches_an_old_cursor() {
 
 /// An unchanged cursor checks that the object of each tracked tip is in the
 /// store, not the closure below it. An object below a tip that the store
-/// lost stays missing through such a fetch. The next fetch that does its
-/// full work, because the cursor changed or no record matches, checks the
-/// closure and fetches the chain again.
+/// lost stays missing through such a fetch, and through one that does its
+/// full work: its closure check stops at the tracking tip. Once no tracking
+/// ref names that tip, a fetch checks the whole closure and fetches the chain
+/// again.
 #[test]
 fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     let remote = Remote::new();
@@ -3213,7 +3389,18 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")).unwrap();
     let (report, _) = counted_fetch(&remote, &target, &options);
     assert!(!report.remote_unchanged);
-    assert!(store.contains(&blob), "a full fetch heals the closure");
+    assert!(
+        !store.contains(&blob),
+        "the check stops at the tracking tip"
+    );
+
+    refs::delete_remote_ref(&layout, "default", "main").unwrap();
+    let (report, _) = counted_fetch(&remote, &target, &options);
+    assert!(!report.remote_unchanged);
+    assert!(
+        store.contains(&blob),
+        "a fetch with no anchor heals the closure"
+    );
 }
 
 // ---- A pull writes only what the new tip changed ------------------------

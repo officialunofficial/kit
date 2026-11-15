@@ -7,7 +7,8 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 downloads the packs it does not already have, and unpacks and records each one
 as it arrives, with no repository lock held and one spool file in `.kit/tmp/`
 at a time. It verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete, verifies the signature of every commit, remix
+the tip's closure is complete down to the tracking tips an earlier signed
+fetch checked and the tips this fetch published, verifies the signature of every commit, remix
 and tag in the tip's history down to the tips earlier signed fetches
 verified, publishes the remote-tracking ref under the
 repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
@@ -87,8 +88,9 @@ tip and every local tag is in the store, a fetch that verifies
 signatures follows one that did and finds every tracked tip recorded as
 verified (see "Verified tips" below), and a named target branch has a tracking
 ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
-check of the tips, so an object lost below a tip heals on the next fetch that
-does work, not on this one.
+check of the tips. An object lost below a tip stays missing through such a
+fetch, and through one that does its full work too when a recorded tracking
+tip reaches the object; a fetch whose check no such tip covers heals it.
 
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an
@@ -227,8 +229,11 @@ For `k` appended nodes containing `p` missing packs, incremental fetch costs
 `2 + k + p`. A rewritten chain costs `2 + N + p`. Additional listing pages,
 branches, and recovery reads add their own calls. The report continues to count
 packs in the verified prefix as already applied; CLI output and exit codes stay
-the same. These formulas concern network calls; the local closure check still
-scales with reachable objects.
+the same. These formulas concern network calls. The local closure check reads
+the objects the new commits add, down to the tracking tips an earlier signed
+fetch checked, the tips this fetch published, and their history. The first
+branch of a clone or of a fetch with signature checking off, and a branch
+whose history shares nothing with those tips, read the whole closure.
 
 ### Pushing a repository
 
