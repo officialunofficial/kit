@@ -93,10 +93,10 @@ and writes each `PackChunk` frame to the sink as it arrives; S3 and Connect
 read the response whole, then write it to the sink.
 
 Spool files have no name on Unix (`O_TMPFILE`, or unlinked on creation); on
-Windows they are `.tmp` files deleted on close. Only the handle that wrote one reaches it, and
-a crash on Unix leaves nothing on disk. Fetch, push and gc remove every
-spool file (named `.tmp` and a random suffix) in `.kit/tmp/` when they
-start, which clears what a power loss leaves on Windows. A spool that
+Windows they are `.tmp` files deleted on close. Only the handle that wrote
+one reaches it, and a crash on Unix leaves nothing on disk. Fetch, push and
+gc remove every spool file (named `.tmp` and a random suffix) in `.kit/tmp/`
+when they start, which clears what a power loss leaves on Windows. A spool that
 another process holds open is left alone.
 
 `update_ref`'s condition is one of:

@@ -6,9 +6,10 @@
 //! the trailer as the bytes arrive, and only then yields a [`VerifiedPack`]
 //! for [`super::PackReader::read_verified`].
 //!
-//! Every spool is an unnamed temporary file in the directory its caller
-//! names: only its handle reaches it, so nothing can change it after it is
-//! checked, and on Unix nothing is left on disk when the process ends.
+//! Every spool is a temporary file in the directory its caller names,
+//! unnamed on Unix and a `.tmp` file deleted on close on Windows: only its
+//! handle reaches it, so nothing can change it after it is checked, and on
+//! Unix nothing is left on disk when the process ends.
 
 use super::window::WindowSource;
 use super::{
