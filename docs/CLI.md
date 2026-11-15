@@ -1222,13 +1222,23 @@ Remote / sync:
   introduces &mdash; the same check `kit verify <rev>` runs manually
   (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`) &mdash; before
   publishing the remote-tracking ref. A structurally invalid or missing
-  signature aborts with exit 65 (`DATAERR`) and leaves local branch/
-  remote-tracking refs and the working tree untouched. Only the objects
-  a given fetch actually introduces are checked, not the whole history
-  (bounded cost per fetch). Opt out per invocation with
+  signature aborts with exit 65 (`DATAERR`) and leaves local branches, the
+  working tree and the tracking ref of the failing branch untouched. The
+  history of each tip a fetch publishes is checked, down to a tip an earlier
+  signed fetch verified, so a fetch of a few new commits checks about those
+  commits. The first signed fetch after an upgrade walks the whole history
+  once. After a fetch with the opt-out, the next signed fetch walks back to the
+  last tip a signed fetch verified. Opt out per invocation with
   `--no-verify-signatures`, or persistently for scripted/CI use via the
   **user-scoped** `pull.require_signed = false` config key &mdash; it cannot be
   set from a cloned repo's own `.kit/config` (see THREAT-MODEL.md §4).
+  A tracking ref that a fetch with the opt-out published stays unverified
+  until a signed fetch of that remote publishes the branch again. If that check
+  fails, the fetch stops and the ref keeps the unverified tip. A ref for a
+  branch the remote no longer lists is not checked again; `kit fetch --prune`
+  removes it. Commands that read a tracking ref directly, such as
+  `kit merge default/main`, `kit pull --rebase` and `kit pull --no-ff`, use
+  whatever the last fetch published.
   `--all` applies the same verification (and the same opt-out) to every
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate

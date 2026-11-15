@@ -90,7 +90,8 @@ kit defends:
   `kit_core::sign::{verify_commit,verify_remix,verify_tag}` &mdash; the same
   check `kit verify <rev>` runs manually &mdash; before the remote-tracking
   ref is published; a structurally invalid or missing signature aborts
-  the fetch and leaves local state untouched. The tip's history is
+  the fetch and leaves the failing branch's tracking ref, the local branches
+  and the working tree untouched. The tip's history is
   checked even when no pack of this fetch carried it, so objects that a
   refused pack, another remote, or a fetch with the opt-out left in the
   local store cannot be published by re-pointing a branch at them. This is a
@@ -101,6 +102,11 @@ kit defends:
   explicit and user-scoped only (`--no-verify-signatures` / the
   user-scoped `pull.require_signed = false` config, never settable from
   a cloned repo's own `.kit/config` &mdash; see §4).
+  A tracking ref that an opt-out fetch published stays unverified until a
+  signed fetch of that remote publishes the branch again; if that check fails,
+  the fetch stops and the ref keeps the unverified tip. Commands that read a
+  tracking ref directly, such as `kit merge default/main`, `kit pull --rebase`
+  and `kit pull --no-ff`, use whatever the last fetch published.
 
 kit does NOT defend:
 

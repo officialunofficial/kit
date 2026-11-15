@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-15
+
 ### Security
 
 - A fetch that verifies signatures now checks every commit, remix and tag in
@@ -17,18 +19,23 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   branch at it with a pack chain that did not carry it. The commit could be one
   a refused pack left behind, one another remote wrote, or one an earlier fetch
   with `--no-verify-signatures` applied. `clone`, `fetch` and `pull` now refuse
-  it with `SyncError::UnsignedOrInvalidObject`. A `pull` that verifies also
-  checks the history of the tip it moves the branch to, so a tracking ref its
-  fetch did not publish is checked too. Each signed fetch records the tip it
+  it with `SyncError::UnsignedOrInvalidObject`. A fast-forward `pull` that
+  verifies also checks the history of the tip it moves the branch to, so a
+  tracking ref its fetch did not publish is checked too. `pull --rebase` and
+  `pull --no-ff` do not: they rebase or merge onto the tracking ref as the
+  fetch left it. Each signed fetch records the tip it
   published in `.kit/applied-packs/.verified/`, a disposable cache like the
   cursor and checkpoint records, and later walks stop there, so a fetch of one
-  new commit verifies about one commit. The first signed fetch after an upgrade
-  walks each branch's history once. A tip an opt-out fetch published is no
-  stopping point, so a branch whose unrecorded history holds an unsigned commit
-  needs `--no-verify-signatures` on every fetch or pull. An unchanged cursor no
-  longer lets a signed fetch skip a tracking ref no signed fetch recorded. The
-  walk follows parents and tag targets only and has the closure check's
-  10,000,000-object cap.
+  new commit verifies about one commit. A tip an opt-out fetch published is no
+  stopping point. If an earlier `--no-verify-signatures` fetch let an unsigned
+  commit into a branch, every later fetch or pull of that branch needs
+  `--no-verify-signatures` too. Before, only that one fetch did. An unchanged
+  cursor no longer lets a signed fetch skip a tracking ref no signed fetch
+  recorded. The walk follows parents and tag targets only and has the closure
+  check's 10,000,000-object cap.
+- After the upgrade, the first signed fetch walks the whole history of each
+  branch once, which can take a while on a large repository. Later fetches
+  check only the new commits.
 
 ### Added
 
@@ -57,13 +64,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunks at a time, not one after another, so they no longer wait on the disk
   once per chunk. A refused chunk is reported as before: the first one in the
   manifest.
+- A signed release tag now publishes the workspace crates to crates.io from
+  the release workflow, through trusted publishing, as it already publishes
+  the npm package. The GitHub Release waits for a dry-run build of the crates,
+  so a crate that fails to build stops the GitHub Release and the npm and
+  crates.io publishes.
 
 ### Fixed
 
 - A push plan checks each chunk of a new manifest against the span that the
   manifest gives it, also when the plan sent the chunk for another manifest
-  or the manifest it replaces already lists it. A manifest that every fetch
-  refuses is no longer pushed to a remote that checks nothing.
+  or the manifest it replaces lists it with a different span length. A
+  manifest that every fetch refuses is no longer pushed to a remote that
+  checks nothing.
 - A clone, pull or checkout waits out the racy window (usually under 15 ms)
   before it writes the index, so the first `kit status` afterwards does not
   hash the files it just wrote again, on a file system with sub-second
