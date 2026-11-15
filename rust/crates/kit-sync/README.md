@@ -88,8 +88,9 @@ tip and every local tag is in the store, a fetch that verifies
 signatures follows one that did and finds every tracked tip recorded as
 verified (see "Verified tips" below), and a named target branch has a tracking
 ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
-check of the tips, so an object lost below a tip heals on the next fetch that
-does work, not on this one.
+check of the tips. An object lost below a tip stays missing through such a
+fetch, and through one that does its full work too when a recorded tracking
+tip reaches the object; a fetch whose check no such tip covers heals it.
 
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an

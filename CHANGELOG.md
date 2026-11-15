@@ -62,7 +62,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   itself, and their history, so a fetch of one commit reads what that commit
   added, not every object of the repository. It no longer finds or repairs
   an object lost from the store below such a tip; `kit closure verify` finds
-  it, and a fetch with no tracking ref for the branch repairs it.
+  it, and a fetch repairs it once no recorded tracking tip of that remote
+  reaches it.
 - `Transport::delete_ref` is a required verb: an implementation outside kit
   adds it, refusing with `TransportError::Unsupported` when it cannot delete
   under a condition. `kit serve` answers an `UpdateRef` with an empty

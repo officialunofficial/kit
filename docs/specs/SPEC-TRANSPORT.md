@@ -154,8 +154,10 @@ policy, the tag setting and the local tags are as that fetch recorded them,
 and the object of every tracked tip and every local tag is in the local store.
 A fetch that refused a tag or could not list the tags (§1.4) records nothing. It checks the tips and not the closure below them. An
 object below a tip that the local store lost stays missing through such a
-fetch. The next fetch that does its full work, because the cursor changed or
-no record matches it, checks the closure and fetches the chain again.
+fetch. A fetch that does its full work, because the cursor changed or no
+record matches it, checks the closure down to its anchors (see "Pack-chain
+fetch"), so the object stays missing while an anchor reaches it; once none
+does, the check finds it and the fetch fetches the chain again.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file
@@ -1225,7 +1227,7 @@ with the opt-out moves the ref and not the record. gc keeps what a ref
 reaches, and the guard keeps gc from deleting anything after the read, so an
 anchor's closure is in the store. The check walks the commit history of the
 tip and of the anchors together, newest first, and stops when every commit
-still queued is an ancestor of an anchor; those ancestors are not read. It
+still queued is an ancestor of an anchor; those ancestors are not checked. It
 also skips each ID listed by a tree of an anchor's closure that it reads
 while comparing each new commit's tree with its parents' trees, by path.
 Every other object of the tip's closure is checked. A clone, or a fetch with

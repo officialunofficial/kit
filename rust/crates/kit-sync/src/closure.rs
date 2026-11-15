@@ -17,7 +17,7 @@
 //! An ancestor of an anchor is in its closure too. The check walks the commit
 //! history from the tip and the anchors at once, newest first, until every
 //! commit still queued is an ancestor of an anchor ([`split`]). Those
-//! ancestors are not read again. Neither is an id that a tree of an anchor's
+//! ancestors are not checked. Neither is an id that a tree of an anchor's
 //! closure lists, found by comparing the tree of each new commit with the
 //! trees of its parents, by path, down the paths that differ ([`covered`]).
 //! Such an object passed the check when the anchor did: every property the
@@ -571,6 +571,32 @@ mod tests {
             repo.check(tip, &[late]).unwrap(),
             repo.check(tip, &[]).unwrap()
         );
+    }
+
+    #[test]
+    fn a_walk_that_stops_before_it_reaches_the_anchor_checks_everything() {
+        let repo = Repo::new();
+        let base = repo.commit_at(&files(), &[], 1000);
+        let anchor = repo.commit_at(&with(files(), "d1/f1", b"one"), &[base], 10);
+        let tip = repo.commit_at(&with(files(), "d3/f3", b"new"), &[base], 500);
+        assert_eq!(
+            repo.check(tip, &[anchor]).unwrap(),
+            repo.check(tip, &[]).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_commit_taken_as_new_that_an_anchor_reaches_later_is_not_checked() {
+        let repo = Repo::new();
+        let base = repo.commit_at(&files(), &[], 1);
+        let old = repo.commit_at(&with(files(), "d1/f1", b"one"), &[base], 1000);
+        let lone = repo.commit_at(&with(Files::new(), "y", b"y"), &[], 5);
+        let anchor = repo.commit_at(&with(files(), "d2/f2", b"two"), &[old], 10);
+        let tip = repo.commit_at(&with(files(), "d1/f1", b"one"), &[old, lone], 2000);
+
+        // The merge, then `lone` with its tree and file. The merge's tree is
+        // `old`'s, and `old` is reached from the anchor after it was popped.
+        assert_eq!(repo.check(tip, &[anchor]).unwrap(), 4);
     }
 
     #[test]
