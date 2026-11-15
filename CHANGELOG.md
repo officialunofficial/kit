@@ -22,7 +22,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it with `SyncError::UnsignedOrInvalidObject`. A fast-forward `pull` that
   verifies also checks the history of the tip it moves the branch to, so a
   tracking ref its fetch did not publish is checked too. `pull --rebase` and
-  `pull --no-ff` do not check it. Each signed fetch records the tip it
+  `pull --no-ff` do not: they rebase or merge onto the tracking ref as the
+  fetch left it. Each signed fetch records the tip it
   published in `.kit/applied-packs/.verified/`, a disposable cache like the
   cursor and checkpoint records, and later walks stop there, so a fetch of one
   new commit verifies about one commit. A tip an opt-out fetch published is no
@@ -73,8 +74,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A push plan checks each chunk of a new manifest against the span that the
   manifest gives it, also when the plan sent the chunk for another manifest
-  or the manifest it replaces lists it with a different span length. A manifest that every fetch
-  refuses is no longer pushed to a remote that checks nothing.
+  or the manifest it replaces lists it with a different span length. A
+  manifest that every fetch refuses is no longer pushed to a remote that
+  checks nothing.
 - A clone, pull or checkout waits out the racy window (usually under 15 ms)
   before it writes the index, so the first `kit status` afterwards does not
   hash the files it just wrote again, on a file system with sub-second

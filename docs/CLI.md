@@ -1222,12 +1222,13 @@ Remote / sync:
   introduces &mdash; the same check `kit verify <rev>` runs manually
   (`kit_core::sign::{verify_commit,verify_remix,verify_tag}`) &mdash; before
   publishing the remote-tracking ref. A structurally invalid or missing
-  signature aborts with exit 65 (`DATAERR`) and leaves local branches,
-  the working tree and the tracking ref of the failing branch untouched. The history of
-  each tip a fetch publishes is checked, down to a tip an earlier signed fetch
-  verified, so a fetch of a few new commits checks about those commits. The
-  first signed fetch after an upgrade or after a fetch with the opt-out walks
-  the whole history once. Opt out per invocation with
+  signature aborts with exit 65 (`DATAERR`) and leaves local branches, the
+  working tree and the tracking ref of the failing branch untouched. The
+  history of each tip a fetch publishes is checked, down to a tip an earlier
+  signed fetch verified, so a fetch of a few new commits checks about those
+  commits. The first signed fetch after an upgrade walks the whole history
+  once. After a fetch with the opt-out, the next signed fetch walks back to the
+  last tip a signed fetch verified. Opt out per invocation with
   `--no-verify-signatures`, or persistently for scripted/CI use via the
   **user-scoped** `pull.require_signed = false` config key &mdash; it cannot be
   set from a cloned repo's own `.kit/config` (see THREAT-MODEL.md §4).
