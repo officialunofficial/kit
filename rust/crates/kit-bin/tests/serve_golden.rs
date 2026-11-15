@@ -87,7 +87,12 @@ fn seed(root: &Path, refs: &[(&str, [u8; 32])], packs: &[&[u8]]) {
         tx.update_ref(name, RefWriteCondition::Any, id).unwrap();
     }
     for pack in packs {
-        tx.upload_pack(pack, &PackKey::new(hash(pack))).unwrap();
+        tx.upload_pack(
+            &kit_core::protocol::SliceBody(pack),
+            &PackKey::new(hash(pack)),
+            None,
+        )
+        .unwrap();
     }
 }
 

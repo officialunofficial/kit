@@ -88,23 +88,25 @@ fn verify_chunk_size() -> usize {
 /// CPU-bound, so a large fetch's verification pass parallelizes cleanly
 /// across cores.
 ///
-/// The parallel path processes `stored` in fixed-size chunks of
-/// [`verify_chunk_size`] entries, verifying each chunk in full before
+/// The parallel path processes `signed` in runs of at most
+/// [`verify_chunk_size`] entries, verifying each run in full before
 /// starting the next, rather than fanning the whole slice out in one
 /// `par_iter` — rayon's `try_for_each` only best-effort short-circuits
 /// (already-dispatched work keeps running once an error is found), so a
 /// single flat fan-out over a very large hostile fetch could still force
 /// reading and Ed25519-verifying a large fraction of the batch past the
-/// first invalid signature before the rejection propagates. Chunking
-/// bounds that wasted work to at most one chunk: a hostile remote can
-/// force at most `verify_chunk_size()` extra reads/verifies beyond the
-/// object that actually fails, never the rest of `stored`. Which entry's
-/// error surfaces first is not guaranteed to match `stored`'s order
-/// *within* a chunk, but the chunk containing the first invalid entry
-/// (in `stored`'s order) is always the one whose error is returned,
-/// since later chunks are never started.
+/// first invalid signature before the rejection propagates. Runs bound
+/// that wasted work to at most one run, and the run containing the first
+/// invalid entry is always the one whose error is returned, since later
+/// runs are never started.
 ///
-/// Within each chunk (or the whole slice, below the fan-out threshold),
+/// A run also holds at most [`VERIFY_INFLIGHT_BYTES`] of objects, each
+/// charged twice its recorded size (its bytes and the parsed object are
+/// held at once), decided from the sizes before any object is read. An
+/// object over the budget is checked alone. So the check's memory does
+/// not grow with the pack or with the number of workers.
+///
+/// Within each run (or the whole slice, below the fan-out threshold),
 /// [`verify_slice`] first checks every signature in one
 /// [`sign::verify_ed25519_batch`] call per worker thread. The batch accepts
 /// exactly the signatures [`sign::verify_ed25519`] accepts (SPEC-SIGNING
@@ -112,18 +114,90 @@ fn verify_chunk_size() -> usize {
 /// does [`verify_slice`] check each object on its own to name the bad one.
 pub(crate) fn verify_new_object_signatures(
     store: &ObjectStore,
-    stored: &[Hash],
+    signed: &[(Hash, u32)],
     require_signed: bool,
 ) -> Result<(), SyncError> {
     if !require_signed {
         return Ok(());
     }
-    if stored.len() < verify_fanout_threshold() {
-        return verify_slice(store, stored, false);
+    let mut start = 0;
+    for len in verify_runs(signed, verify_chunk_size(), VERIFY_INFLIGHT_BYTES) {
+        let run = &signed[start..start + len];
+        start += len;
+        let hashes: Vec<Hash> = run.iter().map(|(h, _)| *h).collect();
+        #[cfg(test)]
+        test_counts::note_run(
+            run[0].0,
+            run.iter().map(|&(_, size)| verify_charge(size)).sum(),
+        );
+        verify_slice(store, &hashes, hashes.len() >= verify_fanout_threshold())?;
     }
-    stored
-        .chunks(verify_chunk_size())
-        .try_for_each(|chunk| verify_slice(store, chunk, true))
+    Ok(())
+}
+
+/// Bytes the parallel signature check may hold at once, 256 MiB.
+pub(crate) const VERIFY_INFLIGHT_BYTES: u64 = 256 << 20;
+
+/// What checking one object costs in memory: its bytes and the parsed object.
+fn verify_charge(size: u32) -> u64 {
+    2 * u64::from(size)
+}
+
+/// Split `signed` into consecutive runs of at most `max_entries` objects
+/// whose summed [`verify_charge`] stays within `budget`. An object over the
+/// budget is a run of its own.
+fn verify_runs(signed: &[(Hash, u32)], max_entries: usize, budget: u64) -> Vec<usize> {
+    let mut runs = Vec::new();
+    let (mut held, mut count) = (0u64, 0usize);
+    for &(_, size) in signed {
+        let charge = verify_charge(size);
+        if count > 0 && (count >= max_entries || held.saturating_add(charge) > budget) {
+            runs.push(count);
+            (held, count) = (0, 0);
+        }
+        held = held.saturating_add(charge);
+        count += 1;
+    }
+    if count > 0 {
+        runs.push(count);
+    }
+    runs
+}
+
+/// What the signature checks of tests did: the objects read in full, and
+/// each run's first object and charge. Keyed by object, so tests running at
+/// once see only their own.
+#[cfg(test)]
+pub(crate) mod test_counts {
+    use std::sync::Mutex;
+
+    use kit_core::hash::Hash;
+
+    static READS: Mutex<Vec<Hash>> = Mutex::new(Vec::new());
+    static RUNS: Mutex<Vec<(Hash, u64)>> = Mutex::new(Vec::new());
+
+    pub(super) fn note_read(hash: Hash) {
+        READS.lock().unwrap().push(hash);
+    }
+
+    pub(super) fn note_run(first: Hash, charge: u64) {
+        RUNS.lock().unwrap().push((first, charge));
+    }
+
+    /// How many times each of `hashes` was read in full.
+    pub(crate) fn reads_of(hashes: &[Hash]) -> usize {
+        let reads = READS.lock().unwrap();
+        reads.iter().filter(|h| hashes.contains(h)).count()
+    }
+
+    /// The charge of each run that started at one of `hashes`.
+    pub(crate) fn runs_from(hashes: &[Hash]) -> Vec<u64> {
+        let runs = RUNS.lock().unwrap();
+        runs.iter()
+            .filter(|(first, _)| hashes.contains(first))
+            .map(|&(_, charge)| charge)
+            .collect()
+    }
 }
 
 /// Verify the signature on a single already-read object through
@@ -179,32 +253,20 @@ fn verify_batch(batch: &[BatchEntry], parallel: bool) -> bool {
     batch.par_chunks(size).all(check)
 }
 
-/// Read every object in `hashes` (in parallel iff `parallel`, matching
-/// [`verify_new_object_signatures`]'s existing sequential/rayon split),
-/// then verify their signatures. Every hash is read (there's no cheaper
-/// way to learn an object's type), but only Commit/Remix/Tag entries are
-/// retained afterward — see the read step's own comment for why that
-/// matters for a chunk dominated by large blobs.
+/// Read every object in `hashes` (in parallel iff `parallel`), then verify
+/// their signatures. Only Commit/Remix/Tag entries are retained.
 ///
 /// The signed objects are checked as a batch first. If the batch fails,
 /// each object is checked with [`verify_one_object`], in parallel iff
 /// `parallel`, so the first failure names the offending hash.
 fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), SyncError> {
-    // Every hash in `hashes` still has to be *read* to learn its type —
-    // the pack format doesn't index that separately — but only
-    // Commit/Remix/Tag objects are ever inspected below, by
-    // `verify_one_object`. Dropping a
-    // Blob/Tree/ChunkedBlob/Delta right after the type check, instead of
-    // keeping it in `entries` for the rest of this call, matters
-    // concretely: a single `Blob` can be up to `worktree::CHUNK_THRESHOLD`
-    // (1 MiB — larger files are chunked, per this crate's whole design),
-    // so a `verify_chunk_size()`-sized chunk (up to 512 entries)
-    // dominated by such blobs previously held up to ~512 MiB of fully
-    // decoded, never-inspected object bytes resident at once. This way,
-    // at most one blob per rayon worker (or one at all, sequentially) is
-    // ever live simultaneously.
+    // The caller lists the commits, remixes and tags an unpack stored, so
+    // no blob is read here. An object of another kind is still dropped
+    // right after it is read, rather than kept for the rest of the call.
     let read_signed_one = |h: &Hash| -> Result<Option<(Hash, Object)>, SyncError> {
         let obj = store.read_object(h)?;
+        #[cfg(test)]
+        test_counts::note_read(*h);
         Ok(match obj {
             Object::Commit(_) | Object::Remix(_) | Object::Tag(_) => Some((*h, obj)),
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => None,
@@ -531,6 +593,17 @@ mod tests {
         hash::hash(seed.as_bytes())
     }
 
+    /// Each object with its stored size, as an unpack lists signed objects.
+    fn sized(store: &ObjectStore, hashes: &[Hash]) -> Vec<(Hash, u32)> {
+        hashes
+            .iter()
+            .map(|h| {
+                let len = store.object_metadata(h).unwrap().len();
+                (*h, u32::try_from(len).unwrap())
+            })
+            .collect()
+    }
+
     // ---- verify_new_object_signatures — sequential/rayon fan-out parity ----
 
     /// A validly-signed, independently-hashing commit — every `seed`
@@ -570,7 +643,7 @@ mod tests {
             .collect();
         assert!(stored.len() >= verify_fanout_threshold());
 
-        verify_new_object_signatures(&store, &stored, true)
+        verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect("every commit in the batch is validly signed");
     }
 
@@ -611,7 +684,7 @@ mod tests {
         }
         assert!(stored.len() >= verify_fanout_threshold());
 
-        verify_new_object_signatures(&store, &stored, true)
+        verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect("unsigned entries must not affect verifying the signed ones");
 
         // Tamper one of the commits — must still be caught even though
@@ -624,7 +697,7 @@ mod tests {
         let tampered_bytes = kit_core::serialize::serialize(&Object::Commit(c)).unwrap();
         stored[commit_index] = store.write(&tampered_bytes).unwrap();
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect_err("a tampered commit must still be caught alongside unsigned entries");
         assert!(matches!(err, SyncError::UnsignedOrInvalidObject { .. }));
     }
@@ -652,7 +725,7 @@ mod tests {
         let tampered_hash = store.write(&tampered_bytes).unwrap();
         stored[LARGE_BATCH / 2] = tampered_hash;
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &sized(&store, &stored), true)
             .expect_err("a batch with one bad signature must be rejected");
         assert!(matches!(err, SyncError::UnsignedOrInvalidObject { .. }));
     }
@@ -686,9 +759,10 @@ mod tests {
         let tampered_bytes = kit_core::serialize::serialize(&Object::Commit(c)).unwrap();
         let tampered_hash = store.write(&tampered_bytes).unwrap();
         stored[0] = tampered_hash;
-        stored.extend((0..chunk_size * 3).map(|i| h(&format!("never-written-{i}"))));
+        let mut signed = sized(&store, &stored);
+        signed.extend((0..chunk_size * 3).map(|i| (h(&format!("never-written-{i}")), 100)));
 
-        let err = verify_new_object_signatures(&store, &stored, true)
+        let err = verify_new_object_signatures(&store, &signed, true)
             .expect_err("the tampered signature in the first chunk must reject the fetch");
         match err {
             SyncError::UnsignedOrInvalidObject { hash: got, .. } => {
@@ -860,6 +934,33 @@ mod tests {
         ));
     }
 
+    /// Runs of the check hold at most `VERIFY_INFLIGHT_BYTES` of objects: a
+    /// batch of signed objects recorded at 1 MiB each is checked in runs of at
+    /// most 128, and one recorded over the budget runs alone.
+    #[test]
+    fn the_signature_check_runs_within_its_inflight_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = kit_core::layout::RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let hashes: Vec<Hash> = (0..300)
+            .map(|i| store.write(&signed_commit_bytes(&kp, 10_000 + i)).unwrap())
+            .collect();
+        let mut signed: Vec<(Hash, u32)> = hashes.iter().map(|&h| (h, 1 << 20)).collect();
+        signed[200].1 = u32::MAX;
+
+        verify_new_object_signatures(&store, &signed, true).unwrap();
+
+        // 128 objects fill the budget; the 72 up to the large one, the large
+        // one alone, then the 99 after it.
+        let mib = 1 << 20;
+        assert_eq!(
+            test_counts::runs_from(&hashes),
+            vec![256 * mib, 144 * mib, verify_charge(u32::MAX), 198 * mib]
+        );
+        assert_eq!(test_counts::reads_of(&hashes), 300);
+    }
+
     #[test]
     fn verify_new_object_signatures_require_signed_false_skips_a_large_batch() {
         // `require_signed = false` must short-circuit to `Ok(())` without
@@ -869,11 +970,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = kit_core::layout::RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).unwrap();
-        let stored: Vec<Hash> = (0..LARGE_BATCH)
-            .map(|i| h(&format!("never-written-{i}")))
+        let signed: Vec<(Hash, u32)> = (0..LARGE_BATCH)
+            .map(|i| (h(&format!("never-written-{i}")), 100))
             .collect();
 
-        verify_new_object_signatures(&store, &stored, false)
+        verify_new_object_signatures(&store, &signed, false)
             .expect("require_signed=false must no-op regardless of batch size");
     }
 }

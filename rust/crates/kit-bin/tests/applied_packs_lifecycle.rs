@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
-use kit_core::protocol::{PackKey, RefWriteCondition, Transport, TransportResult};
+use kit_core::protocol::{RefWriteCondition, Transport, TransportResult};
 use kit_core::refs::{self, Ref};
 use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
@@ -59,28 +59,52 @@ impl CountingTransport {
 }
 
 impl Transport for CountingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
         self.pack_downloads.fetch_add(1, Ordering::SeqCst);
-        self.inner.download_pack(key)
+        self.inner.download_pack(key, ref_hint, sink)
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
 
     // Explicitly delegated (rather than left to the trait's default, which
     // would route through `Self::download_pack`/`Self::upload_pack` and
     // inflate the pack counter with chain-node blob traffic).
-    fn upload_blob(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_blob(bytes, key)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_blob(bytes, key, head_ref)
     }
 
-    fn download_blob(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_blob(key)
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> kit_core::protocol::TransportResult<Vec<u8>> {
+        self.inner.download_blob(key, ref_hint, max)
     }
 
     fn update_ref(

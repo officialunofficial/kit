@@ -591,10 +591,11 @@ impl From<SyncError> for ChainFailure {
             }
             SyncError::ClosureTooLarge(cap) => Self::Refused(TagRejectReason::ClosureTooLarge(cap)),
             // The local store failed while the pack was written: that is no
-            // fault of this tag, and the next tag would meet it too.
-            e @ SyncError::Pack(kit_core::pack::PackError::Store(
-                StoreError::Io(_) | StoreError::HashMismatch { .. },
-            )) => Self::Fatal(e),
+            // fault of this tag, and the next tag would meet it too. A disk
+            // error arrives as `SyncError::Io` and is fatal below.
+            e @ SyncError::Pack(kit_core::pack::PackError::Store(StoreError::HashMismatch {
+                ..
+            })) => Self::Fatal(e),
             e @ (SyncError::AdvertisedPackMissing { .. }
             | SyncError::Pack(_)
             | SyncError::RemoteObject(_)

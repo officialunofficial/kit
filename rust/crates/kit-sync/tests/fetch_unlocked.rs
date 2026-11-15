@@ -148,12 +148,16 @@ impl Remote {
         let bytes = writer.finish().unwrap();
         let pack_key = pack::pack_key(&bytes);
         self.tx
-            .upload_pack(&bytes, &PackKey::from_hash(pack_key))
+            .upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &PackKey::from_hash(pack_key),
+                None,
+            )
             .unwrap();
         let node = transfer::encode_packlist(self.packmap_head, &[pack_key]).unwrap();
         let node_key = hash::hash(&node);
         self.tx
-            .upload_blob(&node, &PackKey::from_hash(node_key))
+            .upload_blob(&node, &PackKey::from_hash(node_key), None)
             .unwrap();
         let (packmap_condition, head_condition) = match (self.packmap_head, self.tip) {
             (Some(node), Some(tip)) => (
@@ -345,10 +349,15 @@ impl RemoteSource for HookSource<'_> {
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
         let n = self.downloads.fetch_add(1, Ordering::SeqCst) + 1;
         if n == self.at {
             match &self.action {
@@ -360,7 +369,7 @@ impl RemoteSource for HookSource<'_> {
                 }
             }
         }
-        self.inner.download_pack_via_ref(key, ref_name)
+        self.inner.download_pack(key, ref_name, sink)
     }
 }
 
@@ -909,11 +918,16 @@ impl RemoteSource for ViewBeforePush<'_> {
             self.inner.read_ref(name)
         }
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
         Ok(self.cursor.clone())
@@ -940,11 +954,16 @@ impl RemoteSource for PauseOnRead<'_> {
         }
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
         self.inner.repo_cursor()

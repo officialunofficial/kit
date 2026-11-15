@@ -81,7 +81,7 @@ pub(crate) fn download_packlist_node(
     ref_name: &str,
 ) -> Result<transfer::PackListNode, SyncError> {
     let requested = PackKey::from_hash(key);
-    let bytes = source.download_blob_via_ref(&requested, ref_name)?;
+    let bytes = source.download_blob(&requested, ref_name)?;
     requested
         .verify_bytes(&bytes)
         .map_err(crate::SourceError::from)?;

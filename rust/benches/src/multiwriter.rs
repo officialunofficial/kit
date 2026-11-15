@@ -629,14 +629,19 @@ impl RemoteSource for Counting<'_> {
         self.inner.read_ref(name)
     }
 
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
         self.bump(|c| c.node += 1);
-        self.inner.download_blob_via_ref(key, ref_name)
+        self.inner.download_blob(key, ref_name)
     }
 
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
         self.bump(|c| c.pack += 1);
-        self.inner.download_pack_via_ref(key, ref_name)
+        self.inner.download_pack(key, ref_name, sink)
     }
 
     fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, SourceError> {
@@ -682,36 +687,36 @@ impl RemoteSource for Uploads<'_> {
         self.inner.read_ref(name)
     }
 
-    fn download_blob_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_blob_via_ref(key, ref_name)
+    fn download_blob(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
+        self.inner.download_blob(key, ref_name)
     }
 
-    fn download_pack_via_ref(&self, key: &PackKey, ref_name: &str) -> Result<Vec<u8>, SourceError> {
-        self.inner.download_pack_via_ref(key, ref_name)
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), SourceError> {
+        self.inner.download_pack(key, ref_name, sink)
     }
 
     fn supports_push(&self) -> bool {
         self.inner.supports_push()
     }
 
-    fn upload_pack_via_ref(
+    fn upload_pack(
         &self,
-        bytes: &[u8],
+        bytes: &dyn kit_core::protocol::PackBody,
         key: &PackKey,
         name: &str,
     ) -> Result<(), SourceError> {
-        self.count(bytes);
-        self.inner.upload_pack_via_ref(bytes, key, name)
+        self.bytes.fetch_add(bytes.len(), Ordering::Relaxed);
+        self.inner.upload_pack(bytes, key, name)
     }
 
-    fn upload_blob_via_ref(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        name: &str,
-    ) -> Result<(), SourceError> {
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, name: &str) -> Result<(), SourceError> {
         self.count(bytes);
-        self.inner.upload_blob_via_ref(bytes, key, name)
+        self.inner.upload_blob(bytes, key, name)
     }
 
     fn update_ref(
@@ -1003,7 +1008,7 @@ fn chain_prev(tx: &dyn Transport, branch: &str) -> Result<Option<Hash>, String> 
         .map_err(|e| e.to_string())?
         .ok_or("the push left no packmap")?;
     let bytes = tx
-        .download_blob(&PackKey::from_hash(head))
+        .download_blob(&PackKey::from_hash(head), None, u64::MAX)
         .map_err(|e| e.to_string())?;
     Ok(kit_core::transfer::decode_packlist(&bytes)
         .map_err(|e| e.to_string())?
@@ -1022,7 +1027,7 @@ fn chain_nodes(tx: &dyn Transport, branch: &str, bound: usize) -> Result<usize, 
             return Err("the pack list chain is longer than the pushes".to_owned());
         }
         let bytes = tx
-            .download_blob(&PackKey::from_hash(h))
+            .download_blob(&PackKey::from_hash(h), None, u64::MAX)
             .map_err(|e| e.to_string())?;
         next = kit_core::transfer::decode_packlist(&bytes)
             .map_err(|e| e.to_string())?

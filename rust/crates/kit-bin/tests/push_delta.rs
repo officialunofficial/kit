@@ -68,16 +68,29 @@ impl CountingTransport {
 }
 
 impl Transport for CountingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.uploaded
-            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.uploaded.fetch_add(bytes.len(), Ordering::SeqCst);
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -315,14 +328,28 @@ impl PackmapBlockingTransport {
 }
 
 impl Transport for PackmapBlockingTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,
@@ -485,17 +512,31 @@ impl DropPackTransport {
 }
 
 impl Transport for DropPackTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
         if self.dropped.lock().unwrap().contains(key) {
             return Err(TransportError::PackNotFound);
         }
-        self.inner.download_pack(key)
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(&self, name: &str, c: RefWriteCondition, h: &hash::Hash) -> TransportResult<()> {
         self.inner.update_ref(name, c, h)
@@ -514,7 +555,9 @@ fn packmap_head_pack(tx: &dyn Transport, branch: &str) -> PackKey {
         .read_ref(&format!("refs/kit/packmap/{branch}"))
         .unwrap()
         .unwrap();
-    let node_bytes = tx.download_blob(&PackKey::from_hash(pm)).unwrap();
+    let node_bytes = tx
+        .download_blob(&PackKey::from_hash(pm), None, u64::MAX)
+        .unwrap();
     let node = kit_core::transfer::decode_packlist(&node_bytes).unwrap();
     PackKey::from_hash(node.packs[0])
 }

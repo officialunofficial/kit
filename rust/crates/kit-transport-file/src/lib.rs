@@ -118,9 +118,10 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
 
 use kit_core::bounded_read;
 use kit_core::hash::Hash;
+use kit_core::pack::SPOOL_BUFFER;
 use kit_core::protocol::{
-    AdvanceOutcome, PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE, PackKey, RefWriteCondition, RepoCursor,
-    Transport, TransportError, TransportResult,
+    AdvanceOutcome, PACK_BODY_LIMIT, PackBody, PackKey, PackSink, RefWriteCondition, RepoCursor,
+    Transport, TransportError, TransportResult, saturating_usize,
 };
 use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
@@ -189,14 +190,79 @@ pub fn create_temp(dest: &Path) -> io::Result<(PathBuf, fs::File)> {
 /// Write `bytes` to a new temp file beside `dest` and fsync it. A failure
 /// removes the temp file and returns the original error.
 fn write_temp(dest: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    write_temp_from(dest, &mut &bytes[..], bytes.len() as u64).map_err(StreamError::into_inner)
+}
+
+/// Where a streamed write failed: reading its source, or writing its
+/// destination.
+#[derive(Debug)]
+enum StreamError {
+    Source(io::Error),
+    Dest(io::Error),
+}
+
+impl StreamError {
+    fn into_inner(self) -> io::Error {
+        match self {
+            Self::Source(e) | Self::Dest(e) => e,
+        }
+    }
+}
+
+/// Copy exactly `len` bytes of `source` to a new temp file beside `dest`,
+/// [`SPOOL_BUFFER`] bytes at a time, and fsync it. A failure removes the
+/// temp file.
+fn write_temp_from(
+    dest: &Path,
+    source: &mut dyn io::Read,
+    len: u64,
+) -> Result<PathBuf, StreamError> {
     use std::io::Write;
-    let (path, mut file) = create_temp(dest)?;
-    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+    let (path, mut file) = create_temp(dest).map_err(StreamError::Dest)?;
+    let mut copy = || {
+        let mut buf = vec![0u8; usize::try_from(len).map_or(SPOOL_BUFFER, |n| n.min(SPOOL_BUFFER))];
+        let mut left = len;
+        while left > 0 {
+            let n = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+            source
+                .read_exact(&mut buf[..n])
+                .map_err(StreamError::Source)?;
+            file.write_all(&buf[..n]).map_err(StreamError::Dest)?;
+            left -= n as u64;
+        }
+        file.sync_all().map_err(StreamError::Dest)
+    };
+    if let Err(e) = copy() {
         drop(file);
         let _ = fs::remove_file(&path);
         return Err(e);
     }
     Ok(path)
+}
+
+/// [`write_atomic`] of exactly `len` bytes read from `source`, so a pack of
+/// any size is written with one buffer of memory.
+fn write_atomic_from(
+    dest: &Path,
+    source: &mut dyn io::Read,
+    len: u64,
+    make_parents: bool,
+) -> Result<(), StreamError> {
+    let parent = dest.parent().ok_or_else(|| {
+        StreamError::Dest(io::Error::new(
+            ErrorKind::InvalidInput,
+            "destination path has no parent",
+        ))
+    })?;
+    if make_parents {
+        create_dir_all_durably(parent).map_err(StreamError::Dest)?;
+    }
+    let tmp_path = write_temp_from(dest, source, len)?;
+    if let Err(e) = fs::rename(&tmp_path, dest) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(StreamError::Dest(e));
+    }
+    sync_parent(parent).map_err(StreamError::Dest)
 }
 
 /// Atomically write `bytes` to `dest` using a temp-file + fsync +
@@ -1621,18 +1687,42 @@ impl Transport for FileTransport {
     // Pack verbs
     // ------------------------------------------------------------------
 
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    /// Copy the pack from its body into a temp file beside the destination,
+    /// fsync it and rename it into place, one buffer at a time. A failure to
+    /// read the body is local: [`TransportError::ProtocolError`], never
+    /// retried.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        _head_ref: Option<&str>,
+    ) -> TransportResult<()> {
         // Refuse a pack that `download_pack` would refuse, rather than store
         // something that can never be read back.
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        let len = pack.len();
+        if len > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
         }
-        let dest = self.pack_path(key);
-        write_atomic(&dest, bytes, true)
-            .map_err(|e| TransportError::RemoteError(format!("upload_pack I/O error: {e}")))
+        let mut body = pack
+            .read_from(0)
+            .map_err(|_| TransportError::ProtocolError)?;
+        write_atomic_from(&self.pack_path(key), &mut body, len, true).map_err(|e| match e {
+            StreamError::Source(_) => TransportError::ProtocolError,
+            StreamError::Dest(e) => {
+                TransportError::RemoteError(format!("upload_pack I/O error: {e}"))
+            }
+        })
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    /// Declare the pack's length to `sink` before any byte, then copy it in
+    /// [`SPOOL_BUFFER`]-byte reads.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        _ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        use std::io::Read as _;
         let path = self.pack_path(key);
         let io_err = |e: io::Error| match e.kind() {
             ErrorKind::NotFound => TransportError::PackNotFound,
@@ -1640,7 +1730,7 @@ impl Transport for FileTransport {
         };
         // The open refuses a link, and the checks read the open handle, so
         // a swap of the path after the open changes nothing.
-        let file = open_pack_file(&path).map_err(|e| {
+        let mut file = open_pack_file(&path).map_err(|e| {
             if e.kind() == ErrorKind::InvalidInput {
                 TransportError::RemoteError("download_pack: pack is not a regular file".into())
             } else {
@@ -1649,20 +1739,21 @@ impl Transport for FileTransport {
         })?;
         let len = file.metadata().map_err(io_err)?.len();
         if len > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(
-                usize::try_from(len).unwrap_or(usize::MAX),
-            ));
+            return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
         }
-        bounded_read::read_capped_from(file, PACK_BODY_LIMIT).map_err(|e| {
-            if e.kind() == ErrorKind::InvalidData {
-                TransportError::PayloadTooLarge(PACK_BODY_LIMIT_USIZE.saturating_add(1))
-            } else {
-                io_err(e)
-            }
-        })
+        sink.begin(Some(len))?;
+        let mut buf = vec![0u8; usize::try_from(len).map_or(SPOOL_BUFFER, |n| n.min(SPOOL_BUFFER))];
+        let mut left = len;
+        while left > 0 {
+            let n = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+            file.read_exact(&mut buf[..n]).map_err(io_err)?;
+            sink.write(&buf[..n])?;
+            left -= n as u64;
+        }
+        Ok(())
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+    fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
         Ok(self.pack_path(key).exists())
     }
 
@@ -1880,8 +1971,9 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"hello packfile content";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
-        let got = t.download_pack(&key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let got = t.download_blob(&key, None, u64::MAX).unwrap();
         assert_eq!(got, data);
     }
 
@@ -1890,7 +1982,7 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = pack_key_for(b"nonexistent pack");
-        let err = t.download_pack(&key).unwrap_err();
+        let err = t.download_blob(&key, None, u64::MAX).unwrap_err();
         assert!(matches!(err, TransportError::PackNotFound));
     }
 
@@ -1901,7 +1993,8 @@ mod tests {
         assert!(!dir.path().join("packs").exists());
         let data = b"first pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         assert!(dir.path().join("packs").is_dir());
     }
 
@@ -1912,14 +2005,15 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"real pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         let outside = dir.path().join("outside");
         fs::write(&outside, b"secret").unwrap();
         let link = t.pack_path(&key);
         fs::remove_file(&link).unwrap();
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         assert!(matches!(
-            t.download_pack(&key),
+            t.download_blob(&key, None, u64::MAX),
             Err(TransportError::RemoteError(_))
         ));
     }
@@ -2008,12 +2102,78 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
 
+    /// A body of `len` zero bytes that holds none of them.
+    struct Zeros(u64);
+
+    impl PackBody for Zeros {
+        fn len(&self) -> u64 {
+            self.0
+        }
+        fn read_from(&self, offset: u64) -> io::Result<Box<dyn io::Read + Send + '_>> {
+            Ok(Box::new(io::Read::take(io::repeat(0), self.0 - offset)))
+        }
+    }
+
+    /// The upload copies the body one buffer at a time: a pack is stored
+    /// whole and byte for byte, and a body that fails to read leaves nothing.
+    #[test]
+    fn upload_pack_streams_the_body_and_a_failed_read_stores_nothing() {
+        /// A body that claims more bytes than it gives.
+        struct Short;
+        impl PackBody for Short {
+            fn len(&self) -> u64 {
+                10
+            }
+            fn read_from(&self, _: u64) -> io::Result<Box<dyn io::Read + Send + '_>> {
+                Ok(Box::new(&b"abc"[..]))
+            }
+        }
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let bytes: Vec<u8> = (0..3 * SPOOL_BUFFER + 7)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let key = PackKey::new([0x58u8; 32]);
+        t.upload_pack(&kit_core::protocol::SliceBody(&bytes), &key, None)
+            .unwrap();
+        assert_eq!(fs::read(t.pack_path(&key)).unwrap(), bytes);
+
+        let other = PackKey::new([0x59u8; 32]);
+        assert!(matches!(
+            t.upload_pack(&Short, &other, None),
+            Err(TransportError::ProtocolError)
+        ));
+        assert!(!t.pack_exists(&other, None).unwrap());
+        let leftovers = fs::read_dir(t.pack_path(&other).parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(leftovers, 1, "only the first pack is in its directory");
+    }
+
+    /// The download declares the pack's length before any byte, so a sink
+    /// with a smaller limit refuses it with no byte read.
+    #[test]
+    fn download_pack_declares_the_length_before_the_body() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let key = PackKey::new([0x5au8; 32]);
+        t.upload_pack(&kit_core::protocol::SliceBody(&[7u8; 100]), &key, None)
+            .unwrap();
+        let mut sink = kit_core::protocol::MemorySink::new(99);
+        assert!(matches!(
+            t.download_pack(&key, None, &mut sink),
+            Err(TransportError::PayloadTooLarge(_))
+        ));
+        assert_eq!(t.download_blob(&key, None, 100).unwrap(), [7u8; 100]);
+    }
+
     #[test]
     fn download_pack_refuses_a_pack_over_the_body_limit() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x55u8; 32]);
-        t.upload_pack(b"seed", &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"seed"), &key, None)
+            .unwrap();
         // A sparse file, so the test writes no data.
         let f = fs::OpenOptions::new()
             .write(true)
@@ -2021,7 +2181,7 @@ mod tests {
             .unwrap();
         f.set_len(PACK_BODY_LIMIT + 1).unwrap();
         assert!(matches!(
-            t.download_pack(&key),
+            t.download_blob(&key, None, u64::MAX),
             Err(TransportError::PayloadTooLarge(_))
         ));
     }
@@ -2033,13 +2193,11 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x56u8; 32]);
-        // Zeroed memory is mapped lazily, so the test commits none of it.
-        let over = vec![0_u8; PACK_BODY_LIMIT_USIZE + 1];
         assert!(matches!(
-            t.upload_pack(&over, &key),
+            t.upload_pack(&Zeros(PACK_BODY_LIMIT + 1), &key, None),
             Err(TransportError::PayloadTooLarge(_))
         ));
-        assert!(!t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
     }
 
     /// A pack of exactly the limit is one `download_pack` accepts, so the
@@ -2051,9 +2209,8 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x57u8; 32]);
-        let exact = vec![0_u8; PACK_BODY_LIMIT_USIZE];
-        t.upload_pack(&exact, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
+        t.upload_pack(&Zeros(PACK_BODY_LIMIT), &key, None).unwrap();
+        assert!(t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
@@ -2077,8 +2234,9 @@ mod tests {
 
         let remote = tmp();
         let t = FileTransport::new(remote.path());
-        t.upload_pack(&pack, &key).unwrap();
-        let fetched = t.download_pack(&key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(&pack), &key, None)
+            .unwrap();
+        let fetched = t.download_blob(&key, None, u64::MAX).unwrap();
         assert_eq!(fetched, pack);
 
         let local = tmp();
@@ -2093,9 +2251,10 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"exists test";
         let key = pack_key_for(data);
-        assert!(!t.pack_exists(&key).unwrap());
-        t.upload_pack(data, &key).unwrap();
-        assert!(t.pack_exists(&key).unwrap());
+        assert!(!t.pack_exists(&key, None).unwrap());
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert!(t.pack_exists(&key, None).unwrap());
     }
 
     #[test]
@@ -2103,9 +2262,11 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
         let key = PackKey::new([0x77u8; 32]);
-        t.upload_pack(b"first", &key).unwrap();
-        t.upload_pack(b"second", &key).unwrap();
-        assert_eq!(t.download_pack(&key).unwrap(), b"second");
+        t.upload_pack(&kit_core::protocol::SliceBody(b"first"), &key, None)
+            .unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"second"), &key, None)
+            .unwrap();
+        assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), b"second");
     }
 
     #[test]
@@ -2114,7 +2275,8 @@ mod tests {
         let t = FileTransport::new(dir.path());
         let data = b"hex filename test";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         let expected_name = key.to_hex();
         assert!(dir.path().join("packs").join(&expected_name).exists());
         assert_eq!(expected_name.len(), 64);
@@ -2478,7 +2640,8 @@ mod tests {
         // Upload a pack (creates packs/ directory).
         let data = b"some pack";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
         // list_refs("") should not return the pack hex file as a ref.
         t.write_ref("refs/heads/main", &blake3_hash(b"m")).unwrap();
         let all = t.list_refs("").unwrap();
@@ -2911,9 +3074,9 @@ mod tests {
         // pack upload → write_atomic → sync_parent(parent)?
         let data = b"durable pack payload";
         let key = pack_key_for(data);
-        t.upload_pack(data, &key)
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
             .expect("upload_pack must succeed through the propagated parent fsync");
-        assert_eq!(t.download_pack(&key).unwrap(), data);
+        assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), data);
 
         // Missing → write_create_new → sync_parent(parent)? on the link arm
         let h0 = blake3_hash(b"durable-missing");
@@ -3814,7 +3977,8 @@ mod tests {
         assert_eq!(t.list_refs("").unwrap().len(), 1);
         // Packs are shared with the server and still upload.
         let key = PackKey(blake3_hash(b"pack"));
-        t.upload_pack(b"pack", &key).unwrap();
+        t.upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
     }
 
     #[test]

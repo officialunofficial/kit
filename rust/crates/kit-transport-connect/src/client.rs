@@ -19,8 +19,9 @@ use http::Uri;
 use kit_client::{Client, Destination};
 use kit_core::hash::Hash;
 use kit_core::protocol::{
-    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, CommitOutcome, PackKey,
-    RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult, UploadLimits,
+    AdvanceOutcome as CoreAdvanceOutcome, BackoffIterator, CommitOutcome, PackBody, PackKey,
+    PackSink, RefWriteCondition, RepositoryAddress, Transport, TransportError, TransportResult,
+    UploadLimits,
 };
 use kit_core::refs::Ref;
 use kit_core::repo_identity::{IdentityError, RemoteIdentity, RepositoryIdentity};
@@ -1025,31 +1026,69 @@ impl ConnectTransport {
     }
 }
 impl Transport for ConnectTransport {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.with_client_source(|source| source.upload_pack_unhinted(bytes, key))
-            .map_err(super::host::upload_error)
+    /// Reads the whole pack into memory before it is sent: the Connect
+    /// client takes a pack as one buffer.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        head_ref: Option<&str>,
+    ) -> TransportResult<()> {
+        let uploaded = match head_ref {
+            Some(name) => self.with_client_source(|source| source.upload_pack(pack, key, name)),
+            None => {
+                let bytes = kit_core::protocol::read_body(pack)?;
+                self.with_client_source(|source| source.upload_pack_unhinted(&bytes, key))
+            }
+        };
+        uploaded.map_err(super::host::upload_error)
     }
-    fn upload_pack_via_ref(&self, bytes: &[u8], key: &PackKey, name: &str) -> TransportResult<()> {
-        self.with_client_source(|source| source.upload_pack_via_ref(bytes, key, name))
-            .map_err(super::host::upload_error)
+    fn upload_blob(
+        &self,
+        bytes: &[u8],
+        key: &PackKey,
+        head_ref: Option<&str>,
+    ) -> TransportResult<()> {
+        self.upload_pack(&kit_core::protocol::SliceBody(bytes), key, head_ref)
     }
-    fn upload_blob_via_ref(&self, bytes: &[u8], key: &PackKey, name: &str) -> TransportResult<()> {
-        self.upload_pack_via_ref(bytes, key, name)
+    /// Receives the whole pack into memory, then writes it to `sink`: the
+    /// Connect client returns a pack as one buffer.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        match ref_hint {
+            Some(name) => self.with_client_source(|source| source.download_pack(key, name, sink)),
+            None => {
+                let bytes = self.with_client_source(|source| source.download_pack_unhinted(key))?;
+                kit_core::protocol::write_body(sink, &bytes)
+            }
+        }
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.with_client_source(|source| source.download_pack_unhinted(key))
+    /// A hinted node download keeps the client's own node bound, which is
+    /// tighter than any `max` a caller passes.
+    fn download_blob(
+        &self,
+        key: &PackKey,
+        ref_hint: Option<&str>,
+        max: u64,
+    ) -> TransportResult<Vec<u8>> {
+        let bytes = match ref_hint {
+            Some(name) => self.with_client_source(|source| source.download_blob(key, name))?,
+            None => self.with_client_source(|source| source.download_pack_unhinted(key))?,
+        };
+        if bytes.len() as u64 > max {
+            return Err(TransportError::PayloadTooLarge(bytes.len()));
+        }
+        Ok(bytes)
     }
-    fn download_pack_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<Vec<u8>> {
-        self.with_client_source(|source| source.download_pack_via_ref(key, name))
-    }
-    fn download_blob_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<Vec<u8>> {
-        self.download_pack_via_ref(key, name)
-    }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.with_client_source(|source| source.pack_exists(key))
-    }
-    fn pack_exists_via_ref(&self, key: &PackKey, name: &str) -> TransportResult<bool> {
-        self.with_client_source(|source| source.pack_exists_via_ref(key, name))
+    fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool> {
+        match ref_hint {
+            Some(name) => self.with_client_source(|source| source.pack_exists_via_ref(key, name)),
+            None => self.with_client_source(|source| source.pack_exists(key)),
+        }
     }
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
         Some(RepositoryAddress::new(&self.repository_text, &self.origin))

@@ -333,7 +333,7 @@ impl generated::TransportService for TestService {
         let bytes: Vec<u8> = parts.into_values().flatten().collect();
         let key = PackKey::new(kit_core::hash::hash(&bytes));
         self.inner
-            .upload_pack(&bytes, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&bytes), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::CompleteUploadResponse::default()))
     }
@@ -472,7 +472,10 @@ impl generated::TransportService for TestService {
         self.capture(&ctx, "PackExists")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let exists = self.inner.pack_exists(&key).map_err(to_connect_error)?;
+        let exists = self
+            .inner
+            .pack_exists(&key, None)
+            .map_err(to_connect_error)?;
         Ok(Response::new(generated::PackExistsResponse {
             exists: Some(exists),
             ..Default::default()
@@ -529,7 +532,7 @@ impl generated::TransportService for TestService {
         }
         let key = PackKey::new(to_hash(Some(pack_id))?);
         self.inner
-            .upload_pack(&buf, &key)
+            .upload_pack(&kit_core::protocol::SliceBody(&buf), &key, None)
             .map_err(to_connect_error)?;
         Ok(Response::new(generated::UploadPackResponse::default()))
     }
@@ -542,7 +545,10 @@ impl generated::TransportService for TestService {
         self.capture(&ctx, "DownloadPack")?;
         let msg = request.to_owned_message();
         let key = PackKey::new(to_hash(msg.pack_id)?);
-        let bytes = self.inner.download_pack(&key).map_err(to_connect_error)?;
+        let bytes = self
+            .inner
+            .download_blob(&key, None, u64::MAX)
+            .map_err(to_connect_error)?;
 
         #[allow(clippy::cast_possible_truncation)]
         let total_bytes = bytes.len() as u64;
@@ -1396,14 +1402,14 @@ fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<kit_core::Hash, V
     let mut node = transport.read_ref("refs/kit/packmap/main").unwrap();
     while let Some(id) = node {
         let body = transport
-            .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+            .download_blob(&PackKey::from(id), Some("refs/heads/main"), u64::MAX)
             .unwrap();
         let decoded = kit_core::transfer::decode_packlist(&body).unwrap();
         for pack in decoded.packs {
             bytes.insert(
                 pack,
                 transport
-                    .download_pack_via_ref(&PackKey::from(pack), "refs/heads/main")
+                    .download_blob(&PackKey::from(pack), Some("refs/heads/main"), u64::MAX)
                     .unwrap(),
             );
         }
@@ -1683,7 +1689,7 @@ fn cli_https_latency_comparison() {
             let mut depth = 0;
             while let Some(id) = node {
                 let bytes = backend
-                    .download_blob_via_ref(&PackKey::from(id), "refs/heads/main")
+                    .download_blob(&PackKey::from(id), Some("refs/heads/main"), u64::MAX)
                     .unwrap();
                 node = kit_core::transfer::decode_packlist(&bytes).unwrap().prev;
                 depth += 1;
@@ -1805,21 +1811,38 @@ impl ResetBeforeAdvance<'_> {
             )
             .unwrap();
             let key = self.competing.read_ref(PACKMAP).unwrap().unwrap();
-            let bytes = self.competing.download_pack(&PackKey::new(key)).unwrap();
+            let bytes = self
+                .competing
+                .download_blob(&PackKey::new(key), None, u64::MAX)
+                .unwrap();
             assert!(decode_packlist(&bytes).unwrap().prev.is_none());
         }
     }
 }
 
 impl Transport for ResetBeforeAdvance<'_> {
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
-        self.inner.upload_pack(bytes, key)
+    fn upload_pack(
+        &self,
+        bytes: &dyn kit_core::protocol::PackBody,
+        key: &kit_core::protocol::PackKey,
+        head_ref: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.upload_pack(bytes, key, head_ref)
     }
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
-        self.inner.download_pack(key)
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> kit_core::protocol::TransportResult<()> {
+        self.inner.download_pack(key, ref_hint, sink)
     }
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
-        self.inner.pack_exists(key)
+    fn pack_exists(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        ref_hint: Option<&str>,
+    ) -> kit_core::protocol::TransportResult<bool> {
+        self.inner.pack_exists(key, ref_hint)
     }
     fn update_ref(
         &self,

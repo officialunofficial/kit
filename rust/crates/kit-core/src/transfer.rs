@@ -92,6 +92,13 @@ pub const PACKLIST_MAX_ENTRIES: u32 = 1_000_000;
 /// `commonware-codec` and is variable-length.
 const PACKLIST_HEADER_LEN: usize = 4 + 1;
 
+/// The most bytes a packlist node can take: the header, a present `prev`,
+/// the longest count prefix and [`PACKLIST_MAX_ENTRIES`] keys, about 32 MB.
+/// A download of a node refuses anything longer, so a remote cannot make a
+/// client hold a pack-sized "node".
+pub const MAX_PACKLIST_NODE_BYTES: u64 = (PACKLIST_HEADER_LEN + 1 + hash::HASH_LEN + 5) as u64
+    + PACKLIST_MAX_ENTRIES as u64 * hash::HASH_LEN as u64;
+
 /// A single node in a branch's packlist chain.
 ///
 /// The push path appends one node per push: `prev` points at the previous
@@ -1157,6 +1164,16 @@ mod tests {
         vec![[1u8; 32]; over_cap - 1].write(&mut at_cap);
         let decoded = decode_packlist(&at_cap).expect("at-cap list must decode");
         assert_eq!(decoded.packs.len(), PACKLIST_MAX_ENTRIES as usize);
+    }
+
+    /// The largest node `encode_packlist` makes, with a `prev`, fits the
+    /// download bound exactly.
+    #[test]
+    fn the_largest_node_fits_the_node_download_bound() {
+        let packs = vec![[1u8; 32]; PACKLIST_MAX_ENTRIES as usize];
+        let node = encode_packlist(Some([2u8; 32]), &packs).unwrap();
+        assert!(node.len() as u64 <= MAX_PACKLIST_NODE_BYTES);
+        assert!(MAX_PACKLIST_NODE_BYTES - (node.len() as u64) < 8);
     }
 
     #[test]

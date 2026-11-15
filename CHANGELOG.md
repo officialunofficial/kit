@@ -22,8 +22,35 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SPOOL_BUFFER` name its bounds. `transfer::DeltaSpool` keeps a push's
   delta streams in a file and encodes each pair of target and base once
   across plans.
+- Transfer bodies in `kit-core`: the `PackBody` and `PackSink` traits,
+  `SliceBody`, `MemorySink`, `read_body`, `write_body` and
+  `saturating_usize`; `SpooledPack` is a `PackBody` and `PackSpool` a
+  `PackSink`. `CountingWriter` sizes a pack without keeping it.
+  `ObjectStore::spool_dir`, `pack::sweep_spool_dir`,
+  `transfer::MAX_PACKLIST_NODE_BYTES` and `delta::max_encoded_len`. The
+  `fault-injection` feature (`kit_core::fault`) fails writes for tests.
 
 ### Changed
+
+- Fetch and push stream packs through files. `Transport::upload_pack`
+  reads a `PackBody` and `download_pack` writes a `PackSink`; both take the
+  ref hint, so the `*_via_ref` verbs, `upload_pack_streaming`,
+  `download_pack_streaming`, `protocol::PackChunk` and
+  `PACK_BODY_LIMIT_USIZE` are gone. `download_blob` takes the largest
+  length it accepts. A fetch spools each pack into an unnamed file in
+  `.kit/tmp/` and unpacks it by window; a push seals each pack into one and
+  uploads it from there, with its delta streams in the push's delta spool.
+  The memory and file transports copy in 1 MiB chunks; ssh, S3 and Connect
+  hold one pack in memory on upload, and S3 and Connect on download
+  (SPEC-TRANSPORT §1.1). A push and a fetch of one 1 GiB pack each hold
+  under 96 MiB of heap.
+- A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
+  a sink that failed refuses every later attempt (`PackSink::failed`).
+  `SyncError` maps `PackError::Io` and store I/O errors to `SyncError::Io`.
+- The signature check after an unpack reads only the commits, remixes and
+  tags the pack stored, in runs whose objects stay within 256 MiB.
+- Delta encoders of a push start in runs whose memory stays within 256 MiB.
+- Fetch, push and gc remove files left in `.kit/tmp/` when they start.
 
 - A pack writer refuses a frame over `MAX_FRAME_PAYLOAD` (SPEC-PACKFILE §5).
   No kit writer made one.

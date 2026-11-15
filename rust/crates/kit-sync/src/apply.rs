@@ -1,18 +1,23 @@
 //! Downloading and applying the packs of a chain.
 //!
-//! Each pack is downloaded, checked against its key, unpacked into the object
-//! store, signature-checked and recorded as applied, then dropped, in chain
-//! order. Nothing is staged on disk and no repository lock is held, so a
-//! chain of any size needs one pack of memory. The caller holds a
-//! [`kit_core::store::PruneGuard`] for the whole fetch: the objects of a pack
-//! applied here are unreferenced until the fetch publishes its ref, and the
-//! guard keeps gc from deleting them.
+//! Each pack is downloaded into an unnamed spool file in the store's spool
+//! directory (`.kit/tmp/`), checked against its length, key and trailer as it
+//! arrives, unpacked from that file into the object store by window,
+//! signature-checked and recorded as applied, then dropped, in chain order.
+//! No repository lock is held, and memory does not grow with the pack: a
+//! chain of any size needs one spool on disk and one window in memory. The
+//! caller holds a [`kit_core::store::PruneGuard`] for the whole fetch: the
+//! objects of a pack applied here are unreferenced until the fetch publishes
+//! its ref, and the guard keeps gc from deleting them.
+
+use std::path::Path;
 
 use kit_core::hash::Hash;
-use kit_core::pack::PackReader;
-use kit_core::protocol::PackKey;
+use kit_core::pack::{PackError, PackReader, PackSpool, VerifiedPack};
+use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
 use kit_core::store::ObjectStore;
 
+use crate::SourceError;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
@@ -31,14 +36,39 @@ pub(crate) struct ChainApplied {
     pub(crate) objects: usize,
 }
 
-/// Download one pack and check its size and its bytes against `key`.
-fn download_checked_pack(
+/// A local I/O error on the spool in `dir`, named by that directory.
+pub(crate) fn spool_error(dir: &Path, kind: std::io::ErrorKind, detail: &str) -> SyncError {
+    SyncError::Io(std::io::Error::new(
+        kind,
+        format!("pack spool in {}: {detail}", dir.display()),
+    ))
+}
+
+/// Download one pack into a spool in `store`'s spool directory, checking its
+/// length, its key and its trailer as it arrives. Only a pack that passes all
+/// three comes back, as a [`VerifiedPack`]; the spool of any other is closed
+/// and, being unnamed, leaves nothing on disk.
+///
+/// A local disk error on the spool (out of space, say) is
+/// [`SyncError::Io`] whatever the transport made of it: it is checked
+/// before the transport's error is mapped, and no transport retries it.
+fn download_verified_pack(
+    store: &ObjectStore,
     source: &dyn RemoteSource,
     head_ref: &str,
     key: &PackKey,
-) -> Result<Vec<u8>, SyncError> {
-    let pack = match source.download_pack_via_ref(key, head_ref) {
-        Ok(b) => b,
+) -> Result<VerifiedPack, SyncError> {
+    let dir = store.spool_dir();
+    let mut spool = PackSpool::create(&dir, PACK_BODY_LIMIT).map_err(|error| match error {
+        PackError::Io(io) => spool_error(&dir, io.kind(), &io.to_string()),
+        error => error.into(),
+    })?;
+    let downloaded = source.download_pack(key, head_ref, &mut spool);
+    if let Some(kind) = spool.failed() {
+        return Err(spool_error(&dir, kind, "write failed"));
+    }
+    match downloaded {
+        Ok(()) => {}
         Err(error) if error.is_not_found() => {
             return Err(SyncError::AdvertisedPackMissing {
                 branch: chain_label(head_ref).to_owned(),
@@ -46,13 +76,17 @@ fn download_checked_pack(
                 source: error,
             });
         }
-        Err(e) => return Err(e.into()),
-    };
-    if pack.len() as u64 > kit_core::protocol::PACK_BODY_LIMIT {
-        return Err(crate::SourceError::PayloadTooLarge(pack.len()).into());
+        Err(error) => return Err(error.into()),
     }
-    key.verify_bytes(&pack).map_err(crate::SourceError::from)?;
-    Ok(pack)
+    spool.finish(key).map_err(|error| match error {
+        // Bytes that are not the requested pack, whole or in part, are an
+        // invalid response, as a digest mismatch always was.
+        PackError::KeyMismatch | PackError::UnexpectedEof | PackError::PackfileTooShort => {
+            SourceError::InvalidResponse.into()
+        }
+        PackError::Io(io) => spool_error(&dir, io.kind(), &io.to_string()),
+        error => error.into(),
+    })
 }
 
 /// Download and apply every pack of `chain`, the chain of `head_ref`, oldest
@@ -64,11 +98,11 @@ fn download_checked_pack(
 /// The caller MUST hold a [`kit_core::store::PruneGuard`] across this call and
 /// through the ref publish that makes the written objects reachable.
 ///
-/// One pack is held in memory at a time, and so are the ids of one pack's
-/// stored objects: the full history's ids are never accumulated. The record
-/// holds a pack only after its digest, unpack and signature checks succeed, so
-/// a failed or killed fetch leaves the record naming only packs whose objects
-/// are in the store.
+/// One pack is spooled at a time, and the ids of one pack's signed objects are
+/// held: the full history's ids are never accumulated. The record holds a pack
+/// only after its digest, unpack and signature checks succeed, so a failed or
+/// killed fetch leaves the record naming only packs whose objects are in the
+/// store.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_pack_chain(
     store: &ObjectStore,
@@ -90,7 +124,7 @@ pub(crate) fn apply_pack_chain(
             done.skipped += 1;
             continue;
         }
-        let pack = download_checked_pack(source, head_ref, &key)?;
+        let pack = download_verified_pack(store, source, head_ref, &key)?;
         done.objects += apply_pack(
             store,
             observer,
@@ -106,24 +140,24 @@ pub(crate) fn apply_pack_chain(
 }
 
 /// Unpack `pack`, already checked against `key`, check the signatures of the
-/// objects it stored, and record it as applied. Returns the objects it wrote.
-/// A record that cannot be appended is reported and does not fail the fetch:
-/// the objects landed, and the record is a cache.
+/// commits, remixes and tags it stored, and record it as applied. Returns the
+/// objects it wrote. A record that cannot be appended is reported and does
+/// not fail the fetch: the objects landed, and the record is a cache.
 fn apply_pack(
     store: &ObjectStore,
     observer: &dyn Observer<SyncEvent>,
     remote: &str,
     key: &PackKey,
-    pack: &[u8],
+    pack: &VerifiedPack,
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, SyncError> {
-    let report = PackReader::read(pack, store)?;
+    let report = PackReader::read_verified(pack, store)?;
     let unpacked = (report.raw_count + report.delta_count) as usize;
     if unpacked > 0 {
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
     }
-    verify_new_object_signatures(store, &report.stored, require_signed)?;
+    verify_new_object_signatures(store, &report.signed, require_signed)?;
     if let Err(e) = applied.record_applied(key) {
         observer.event(&SyncEvent::AppliedPacksPersistFailed {
             remote: remote.to_owned(),
@@ -143,7 +177,7 @@ mod tests {
     use kit_core::layout::RepoLayout;
     use kit_core::object::Object;
     use kit_core::pack;
-    use kit_core::protocol::Transport as _;
+    use kit_core::protocol::{PackSink, SliceBody, Transport as _};
     use kit_core::transfer;
     use kit_transport_memory::MemoryTransport;
 
@@ -181,7 +215,8 @@ mod tests {
         }
         let bytes = writer.finish().unwrap();
         let key = pack::pack_key(&bytes);
-        tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
+        tx.upload_pack(&SliceBody(&bytes), &PackKey::from_hash(key), None)
+            .unwrap();
         key
     }
 
@@ -231,7 +266,8 @@ mod tests {
         let key = pack::pack_key(&a);
         assert_ne!(key, pack::pack_key(&b));
         let tx = MemoryTransport::new();
-        tx.upload_pack(&b, &PackKey::from_hash(key)).unwrap();
+        tx.upload_pack(&SliceBody(&b), &PackKey::from_hash(key), None)
+            .unwrap();
         let (_td, _layout, store, mut applied) = store_and_record();
 
         assert!(matches!(
@@ -256,7 +292,7 @@ mod tests {
         let a = transfer::encode_packlist(None, &[h("pack-a")]).unwrap();
         let b = transfer::encode_packlist(None, &[h("pack-b")]).unwrap();
         let key = hash::hash(&a);
-        tx.upload_blob(&b, &PackKey::from_hash(key)).unwrap();
+        tx.upload_blob(&b, &PackKey::from_hash(key), None).unwrap();
         assert!(matches!(
             download_packlist_node(&TransportSource::new(&tx), key, "refs/heads/main"),
             Err(SyncError::Source(crate::SourceError::InvalidResponse))
@@ -314,9 +350,9 @@ mod tests {
         assert!(!reloaded.contains(&PackKey::from_hash(missing)));
     }
 
-    /// A source whose every pack is `len` zero bytes.
+    /// A source whose every pack is `len` zero bytes, declared up front.
     struct ZeroPacks {
-        len: usize,
+        len: u64,
     }
 
     impl RemoteSource for ZeroPacks {
@@ -329,54 +365,55 @@ mod tests {
         fn read_ref(&self, _: &str) -> Result<Option<Hash>, crate::SourceError> {
             Ok(None)
         }
-        fn download_blob_via_ref(
-            &self,
-            _: &PackKey,
-            _: &str,
-        ) -> Result<Vec<u8>, crate::SourceError> {
+        fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, crate::SourceError> {
             Err(crate::SourceError::ProtocolError)
         }
-        fn download_pack_via_ref(
+        fn download_pack(
             &self,
             _: &PackKey,
             _: &str,
-        ) -> Result<Vec<u8>, crate::SourceError> {
-            Ok(vec![0; self.len])
+            sink: &mut dyn PackSink,
+        ) -> Result<(), crate::SourceError> {
+            sink.begin(Some(self.len))?;
+            let zeros = vec![0u8; 1 << 20];
+            let mut left = self.len;
+            while left > 0 {
+                let n = left.min(zeros.len() as u64);
+                sink.write(&zeros[..usize::try_from(n).unwrap()])?;
+                left -= n;
+            }
+            Ok(())
         }
     }
 
-    fn download_zero_pack(len: usize) -> Result<Vec<u8>, SyncError> {
-        download_checked_pack(
+    fn download_zero_pack(len: u64) -> Result<VerifiedPack, SyncError> {
+        let (_td, _layout, store, _applied) = store_and_record();
+        download_verified_pack(
+            &store,
             &ZeroPacks { len },
             "refs/heads/main",
             &PackKey::from_hash(h("zero pack")),
         )
     }
 
-    fn body_limit() -> usize {
-        kit_core::protocol::PACK_BODY_LIMIT_USIZE
-    }
-
     #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn a_pack_above_the_body_limit_is_refused_before_it_is_hashed() {
-        let len = body_limit() + 1;
-        let error = download_zero_pack(len).unwrap_err();
+    fn a_pack_above_the_body_limit_is_refused_before_any_byte() {
+        let error = download_zero_pack(PACK_BODY_LIMIT + 1).unwrap_err();
         assert!(
             matches!(
                 error,
-                SyncError::Source(crate::SourceError::PayloadTooLarge(n)) if n == len
+                SyncError::Source(crate::SourceError::PayloadTooLarge(_))
             ),
             "{error:?}"
         );
     }
 
     /// A pack of exactly the limit is within it, so only its digest, not its
-    /// size, can refuse it. Hashing it reads 4 GiB.
+    /// size, can refuse it. It spools 4 GiB.
     #[test]
-    #[ignore = "reads a 4 GiB buffer"]
+    #[ignore = "spools 4 GiB"]
     fn a_pack_of_exactly_the_body_limit_is_checked_against_its_key() {
-        let error = download_zero_pack(body_limit()).unwrap_err();
+        let error = download_zero_pack(PACK_BODY_LIMIT).unwrap_err();
         // The size is within the limit, so what refuses it is its digest.
         assert!(
             matches!(
@@ -397,6 +434,59 @@ mod tests {
         }
     }
 
+    /// The signature check after an unpack reads the commits the pack stored
+    /// and none of its blobs.
+    #[test]
+    fn the_signature_check_of_a_pack_of_large_blobs_reads_no_blob() {
+        let (_td, _layout, store, mut applied) = store_and_record();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let mut writer = pack::PackWriter::new();
+        let mut blobs = Vec::new();
+        for i in 0..4u8 {
+            let blob = blob(&vec![i; 4 << 20]);
+            let bytes = kit_core::serialize::serialize(&blob).unwrap();
+            blobs.push(blob.id().unwrap());
+            writer.push_raw(blob.id().unwrap(), &bytes).unwrap();
+        }
+        let mut commits = Vec::new();
+        for i in 0..3u64 {
+            let mut commit = kit_core::object::Commit::new_unannotated(
+                blobs[0],
+                Vec::new(),
+                kit_core::object::Identity::ed25519(kp.public.0),
+                kp.public.0,
+                format!("large blobs #{i}").into_bytes(),
+                1_700_000_000 + i,
+                [0u8; 64],
+            );
+            commit.signature = kit_core::sign::sign_commit(&commit, &kp).unwrap().0;
+            let commit = Object::Commit(commit);
+            let bytes = kit_core::serialize::serialize(&commit).unwrap();
+            commits.push(commit.id().unwrap());
+            writer.push_raw(commit.id().unwrap(), &bytes).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let key = PackKey::from_hash(pack::pack_key(&bytes));
+        let mut spool = PackSpool::create(&store.spool_dir(), PACK_BODY_LIMIT).unwrap();
+        kit_core::protocol::write_body(&mut spool, &bytes).unwrap();
+        let verified = spool.finish(&key).unwrap();
+
+        let unpacked = apply_pack(
+            &store,
+            &NoopObserver,
+            "origin",
+            &key,
+            &verified,
+            &mut applied,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(unpacked, 7);
+        assert_eq!(crate::verify::test_counts::reads_of(&blobs), 0);
+        assert_eq!(crate::verify::test_counts::reads_of(&commits), 3);
+    }
+
     #[test]
     fn an_empty_pack_reports_no_unpacked_objects_and_a_full_one_reports_its_count() {
         let (_td, _layout, store, mut applied) = store_and_record();
@@ -413,9 +503,20 @@ mod tests {
             }
             let bytes = writer.finish().unwrap();
             let key = PackKey::from_hash(pack::pack_key(&bytes));
+            let mut spool = PackSpool::create(&store.spool_dir(), PACK_BODY_LIMIT).unwrap();
+            kit_core::protocol::write_body(&mut spool, &bytes).unwrap();
+            let verified = spool.finish(&key).unwrap();
             let events = Events::default();
-            let unpacked =
-                apply_pack(&store, &events, "origin", &key, &bytes, &mut applied, false).unwrap();
+            let unpacked = apply_pack(
+                &store,
+                &events,
+                "origin",
+                &key,
+                &verified,
+                &mut applied,
+                false,
+            )
+            .unwrap();
             assert_eq!(unpacked, expected.unwrap_or(0));
             let counts: Vec<usize> = events
                 .0

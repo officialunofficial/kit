@@ -90,7 +90,9 @@ const MULTIPART_PART_SIZE: usize = 64 * 1024 * 1024;
 pub const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 
 // Body-size cap for a pack download. Canonical value lives in kit-core.
-use kit_core::protocol::{PACK_BODY_LIMIT, PACK_BODY_LIMIT_USIZE};
+use kit_core::protocol::{
+    PACK_BODY_LIMIT, PackBody, PackSink, read_body, saturating_usize, write_body,
+};
 use kit_core::ref_listing::{MAX_PAGES, RefListing};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
@@ -837,7 +839,14 @@ impl Transport for S3Transport {
         RepoCursor::new(&digest.finalize()).map(Some)
     }
 
-    fn upload_pack(&self, bytes: &[u8], key: &PackKey) -> TransportResult<()> {
+    /// Buffers the body: a single PUT or the multipart parts slice one
+    /// in-memory pack.
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        _head_ref: Option<&str>,
+    ) -> TransportResult<()> {
         // PACK_BODY_LIMIT is the absolute pack-body ceiling enforced on
         // every transport (it bounds `download_pack`'s in-memory buffer
         // too — see kit-core::protocol's doc comment); multipart upload
@@ -845,9 +854,11 @@ impl Transport for S3Transport {
         // here rather than uploading something that can never be read
         // back. This is unconditional and independent of
         // S3_SINGLE_PUT_MAX below.
-        if bytes.len() as u64 > PACK_BODY_LIMIT {
+        if pack.len() > PACK_BODY_LIMIT {
             return Err(TransportError::ServerError { status: 413 });
         }
+        let bytes = read_body(pack)?;
+        let bytes = bytes.as_slice();
         let object_key = Self::pack_object_key(key.as_bytes());
         if bytes.len() as u64 > S3_SINGLE_PUT_MAX {
             return self.upload_pack_multipart(bytes, &object_key);
@@ -867,7 +878,13 @@ impl Transport for S3Transport {
         }
     }
 
-    fn download_pack(&self, key: &PackKey) -> TransportResult<Vec<u8>> {
+    /// Buffers the body: the response is read whole, then written to `sink`.
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        _ref_hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
         let object_key = Self::pack_object_key(key.as_bytes());
         let resp = self.http_request(
             &Method::GET,
@@ -875,17 +892,17 @@ impl Transport for S3Transport {
             "",
             None,
             &[],
-            Some(PACK_BODY_LIMIT_USIZE),
+            Some(saturating_usize(PACK_BODY_LIMIT)),
         )?;
         match resp.status {
-            200 => Ok(resp.body),
+            200 => write_body(sink, &resp.body),
             404 => Err(TransportError::PackNotFound),
             403 | 401 => Err(TransportError::AccessDenied),
             s => Err(TransportError::ServerError { status: s }),
         }
     }
 
-    fn pack_exists(&self, key: &PackKey) -> TransportResult<bool> {
+    fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
         let object_key = Self::pack_object_key(key.as_bytes());
         let resp = self.http_request(&Method::HEAD, &object_key, "", None, &[], None)?;
         match resp.status {
@@ -1261,7 +1278,8 @@ fn parse_list_page(xml: &[u8]) -> ListPage {
 #[cfg(feature = "sparse-checkout")]
 mod sparse_fetch {
     use super::{
-        Hash, Method, PACK_BODY_LIMIT_USIZE, S3Transport, TransportError, TransportResult, to_hex,
+        Hash, Method, PACK_BODY_LIMIT, S3Transport, TransportError, TransportResult,
+        saturating_usize, to_hex,
     };
     use kit_core::sparse::{
         SPARSE_WIRE_MAX_BYTES, VerifiedSparseTree, decode_sparse_response, hash_filter,
@@ -1303,11 +1321,11 @@ mod sparse_fetch {
             let filter_hash = hash_filter(filter);
             let key = Self::sparse_object_key(tree_hash, &filter_hash);
             // Cap body size at the wire-format max — far smaller than
-            // the pack-body limit. PACK_BODY_LIMIT_USIZE is the
+            // the pack-body limit. PACK_BODY_LIMIT is the
             // existing transport-side ceiling, used here for parity
             // when SPARSE_WIRE_MAX_BYTES would otherwise allow a
             // non-pack body larger than any pack we'd accept.
-            let cap = SPARSE_WIRE_MAX_BYTES.min(PACK_BODY_LIMIT_USIZE);
+            let cap = SPARSE_WIRE_MAX_BYTES.min(saturating_usize(PACK_BODY_LIMIT));
             let resp = self.http_request_pub(&Method::GET, &key, "", None, &[], Some(cap))?;
             match resp.status_pub() {
                 200 => {

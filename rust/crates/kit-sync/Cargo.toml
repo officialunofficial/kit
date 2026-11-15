@@ -72,6 +72,7 @@ connect-native = [
 ]
 
 [dev-dependencies]
+kit-core = { path = "../kit-core", default-features = false, features = ["fault-injection"] }
 proptest = "1.12.0"
 kit-transport-connect = { path = "../kit-transport-connect" }
 kit-test-util = { path = "../kit-test-util" }

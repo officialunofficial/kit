@@ -380,6 +380,8 @@ impl<'s> WriteBatch<'s> {
             .to_string_lossy();
         let mut tmp = temp_file_in(&shard_dir, &file_name)?;
         for p in parts {
+            #[cfg(feature = "fault-injection")]
+            crate::fault::check(crate::fault::Site::Store)?;
             tmp.as_file_mut().write_all(p)?;
         }
         let syncer = self.store.syncer();

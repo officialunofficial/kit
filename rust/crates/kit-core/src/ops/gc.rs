@@ -756,6 +756,9 @@ fn run_gc_with_hook(
     // safe but we reject uniformly so a preview matches the real run.)
     reject_symlink(layout.common_dir())?;
     reject_symlink(store.objects_root())?;
+    if !dry_run {
+        crate::pack::sweep_spool_dir(&store.spool_dir());
+    }
 
     // Compute the keep-set FIRST, to the end; if this fails we list and
     // delete nothing.

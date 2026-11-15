@@ -75,7 +75,12 @@ fn upload_pack_200_ok() {
         .with_status(200)
         .create();
     let t = build_transport(&server.url());
-    t.upload_pack(b"pack-bytes", &sample_key()).unwrap();
+    t.upload_pack(
+        &kit_core::protocol::SliceBody(b"pack-bytes"),
+        &sample_key(),
+        None,
+    )
+    .unwrap();
     m.assert();
 }
 
@@ -88,7 +93,12 @@ fn upload_pack_uses_url_prefix_namespace() {
         .with_status(200)
         .create();
     let t = build_transport_with_prefix(&server.url(), "repo-a");
-    t.upload_pack(b"pack-bytes", &sample_key()).unwrap();
+    t.upload_pack(
+        &kit_core::protocol::SliceBody(b"pack-bytes"),
+        &sample_key(),
+        None,
+    )
+    .unwrap();
     m.assert();
 }
 
@@ -100,7 +110,8 @@ fn upload_pack_201_created() {
         .with_status(201)
         .create();
     let t = build_transport(&server.url());
-    t.upload_pack(b"x", &sample_key()).unwrap();
+    t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None)
+        .unwrap();
     m.assert();
 }
 
@@ -113,7 +124,7 @@ fn upload_pack_403_access_denied() {
         .create();
     let t = build_transport(&server.url());
     assert!(matches!(
-        t.upload_pack(b"x", &sample_key()),
+        t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None),
         Err(TransportError::AccessDenied)
     ));
 }
@@ -130,7 +141,7 @@ fn upload_pack_5xx_retries_then_fails() {
         .expect(6) // initial attempt + 5 retries
         .create();
     let t = build_transport(&server.url());
-    match t.upload_pack(b"x", &sample_key()) {
+    match t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None) {
         Err(TransportError::ServerError { status: 500 }) => {}
         other => panic!("expected ServerError 500, got {other:?}"),
     }
@@ -148,7 +159,8 @@ fn upload_pack_5xx_then_200_succeeds() {
         .with_status(200)
         .create();
     let t = build_transport(&server.url());
-    t.upload_pack(b"x", &sample_key()).unwrap();
+    t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None)
+        .unwrap();
 }
 
 #[test]
@@ -173,7 +185,7 @@ fn upload_pack_rejects_over_pack_body_limit() {
     let t = build_transport(&server.url());
     let over_cap = usize::try_from(PACK_BODY_LIMIT).unwrap() + 1;
     let body = vec![0u8; over_cap];
-    match t.upload_pack(&body, &sample_key()) {
+    match t.upload_pack(&kit_core::protocol::SliceBody(&body), &sample_key(), None) {
         Err(TransportError::ServerError { status: 413 }) => {}
         other => panic!("expected the 413 oversize guard, got {other:?}"),
     }
@@ -200,7 +212,7 @@ fn download_pack_200_returns_body() {
         .with_body(b"pack-body")
         .create();
     let t = build_transport(&server.url());
-    let got = t.download_pack(&sample_key()).unwrap();
+    let got = t.download_blob(&sample_key(), None, u64::MAX).unwrap();
     assert_eq!(got, b"pack-body");
 }
 
@@ -213,7 +225,7 @@ fn download_pack_404_pack_not_found() {
         .create();
     let t = build_transport(&server.url());
     assert!(matches!(
-        t.download_pack(&sample_key()),
+        t.download_blob(&sample_key(), None, u64::MAX),
         Err(TransportError::PackNotFound)
     ));
 }
@@ -227,7 +239,7 @@ fn download_pack_403_access_denied() {
         .create();
     let t = build_transport(&server.url());
     assert!(matches!(
-        t.download_pack(&sample_key()),
+        t.download_blob(&sample_key(), None, u64::MAX),
         Err(TransportError::AccessDenied)
     ));
 }
@@ -242,7 +254,7 @@ fn pack_exists_true() {
         .with_status(200)
         .create();
     let t = build_transport(&server.url());
-    assert!(t.pack_exists(&sample_key()).unwrap());
+    assert!(t.pack_exists(&sample_key(), None).unwrap());
 }
 
 #[test]
@@ -253,7 +265,7 @@ fn pack_exists_false_404() {
         .with_status(404)
         .create();
     let t = build_transport(&server.url());
-    assert!(!t.pack_exists(&sample_key()).unwrap());
+    assert!(!t.pack_exists(&sample_key(), None).unwrap());
 }
 
 #[test]
@@ -265,7 +277,7 @@ fn pack_exists_403_access_denied() {
         .create();
     let t = build_transport(&server.url());
     assert!(matches!(
-        t.pack_exists(&sample_key()),
+        t.pack_exists(&sample_key(), None),
         Err(TransportError::AccessDenied)
     ));
 }
@@ -686,7 +698,7 @@ fn retry_429_then_200() {
         .with_body(b"pack")
         .create();
     let t = build_transport(&server.url());
-    let got = t.download_pack(&sample_key()).unwrap();
+    let got = t.download_blob(&sample_key(), None, u64::MAX).unwrap();
     assert_eq!(got, b"pack");
 }
 
@@ -750,7 +762,7 @@ fn retry_order_calls_server_enough_times() {
         })
         .create();
     let t = build_transport(&server.url());
-    match t.download_pack(&sample_key()) {
+    match t.download_blob(&sample_key(), None, u64::MAX) {
         Err(TransportError::ServerError { status: 502 }) => {}
         other => panic!("expected the terminal 502 after retries, got {other:?}"),
     }
@@ -961,7 +973,7 @@ fn redirects_are_not_followed() {
 
     let t = build_transport(&server.url());
     assert!(matches!(
-        t.download_pack(&sample_key()),
+        t.download_blob(&sample_key(), None, u64::MAX),
         Err(TransportError::ServerError { status: 307 })
     ));
     evil.assert();

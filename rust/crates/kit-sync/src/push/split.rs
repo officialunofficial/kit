@@ -46,12 +46,11 @@ use kit_core::protocol::UploadLimits;
 use kit_core::refs::RefWriteCondition;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer::walk::{ChunkMemory, HeldCommits, PushWalk};
-use kit_core::transfer::{self, MAX_PUSH_WALK, PUSH_WALK_LIMIT, PackPlan, WalkLimits};
+use kit_core::transfer::{MAX_PUSH_WALK, PUSH_WALK_LIMIT, PackPlan, WalkLimits};
 
-use super::{
-    PackSink, PushError, build_and_upload_packs, effective_payload_cap,
-    encode_delta_candidates_batch, estimate_pack_sizes,
-};
+#[cfg(test)]
+use super::encode_delta_candidates_batch;
+use super::{DeltaEncoder, PushError, dry_seal, effective_payload_cap, estimate_pack_sizes};
 
 /// Most advances one push may be split into.
 pub const MAX_SPLIT_STEPS: usize = 1_000;
@@ -363,6 +362,7 @@ enum Cut {
 struct Cutter<'a> {
     observer: &'a dyn crate::Observer<crate::SyncEvent>,
     store: &'a ObjectStore,
+    deltas: &'a DeltaEncoder,
     chain: &'a Chain,
     weights: &'a [u64],
     remote_tip: Option<Hash>,
@@ -384,13 +384,10 @@ impl Cutter<'_> {
             0 => self.remote_tip,
             from => Some(self.chain.commits[from - 1]),
         };
-        let plan = transfer::plan_pack_with(
-            self.store,
-            self.chain.commits[to - 1],
-            base,
-            encode_delta_candidates_batch,
-        )
-        .map_err(walk_error)?;
+        let plan = self
+            .deltas
+            .plan(self.store, self.chain.commits[to - 1], base)
+            .map_err(walk_error)?;
         let packs =
             estimate_pack_sizes(self.store, &plan, self.cap, self.limits.max_pack_bytes)?.len();
         Ok((plan, packs))
@@ -503,14 +500,7 @@ impl Cutter<'_> {
         holds_remote_head: bool,
     ) -> Result<Option<Overflow>, PushError> {
         let weight = plan_weight(self.store, &plan)?;
-        match build_and_upload_packs(
-            PackSink::Count,
-            self.store,
-            plan,
-            self.cap,
-            self.limits,
-            self.observer,
-        ) {
+        match dry_seal(self.store, plan, self.cap, self.limits, self.observer) {
             Ok(_) => Ok(None),
             Err(PushError::PushTooLarge { packs, limit, .. }) => Ok(Some(Overflow {
                 weight,
@@ -638,6 +628,7 @@ pub fn plan_push_steps(
 ) -> Result<Vec<Hash>, PushError> {
     plan_split(
         store,
+        &DeltaEncoder::new(store.spool_dir()),
         tip,
         remote_tip,
         limits,
@@ -653,6 +644,7 @@ pub fn plan_push_steps(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_split(
     store: &ObjectStore,
+    deltas: &DeltaEncoder,
     tip: Hash,
     remote_tip: Option<Hash>,
     limits: UploadLimits,
@@ -686,6 +678,7 @@ pub(super) fn plan_split(
     let mut cutter = Cutter {
         observer: ctl.observer,
         store,
+        deltas,
         chain: &chain,
         weights: &weights,
         remote_tip,
@@ -780,6 +773,7 @@ mod tests {
     use kit_core::object::{Blob, Commit, EntryMode, Identity, Tree, TreeEntry};
     use kit_core::ops::graph::reachable_objects;
     use kit_core::serialize;
+    use kit_core::transfer;
     use proptest::prelude::*;
     use tempfile::TempDir;
 
@@ -1142,15 +1136,7 @@ mod tests {
         })
         .unwrap();
         let cap = effective_payload_cap(cap, limits.max_pack_bytes).unwrap();
-        build_and_upload_packs(
-            PackSink::Count,
-            store,
-            plan,
-            cap,
-            limits,
-            &crate::NoopObserver,
-        )
-        .map_or(usize::MAX, |keys| keys.len())
+        dry_seal(store, plan, cap, limits, &crate::NoopObserver).unwrap_or(usize::MAX)
     }
 
     #[test]
@@ -1196,6 +1182,7 @@ mod tests {
         let limits = ticketed(None);
         let plan = plan_split(
             &store,
+            &DeltaEncoder::new(store.spool_dir()),
             merged,
             Some(remote),
             limits,
@@ -1262,6 +1249,7 @@ mod tests {
             let limits = ticketed(max);
             let plan = plan_split(
                 &store,
+                &DeltaEncoder::new(store.spool_dir()),
                 tip,
                 Some(remote),
                 limits,
@@ -1344,6 +1332,7 @@ mod tests {
     ) -> Result<SplitPlan, PushError> {
         plan_split(
             store,
+            &DeltaEncoder::new(store.spool_dir()),
             tip,
             None,
             limits,
@@ -1361,15 +1350,7 @@ mod tests {
         })
         .unwrap();
         let cap = effective_payload_cap(cap, limits.max_pack_bytes).unwrap();
-        build_and_upload_packs(
-            PackSink::Count,
-            store,
-            plan,
-            cap,
-            limits,
-            &crate::NoopObserver,
-        )
-        .map_or(usize::MAX, |keys| keys.len())
+        dry_seal(store, plan, cap, limits, &crate::NoopObserver).unwrap_or(usize::MAX)
     }
 
     #[test]
@@ -1619,6 +1600,7 @@ mod tests {
         let split_at = |remote: Option<Hash>, condition| {
             plan_split(
                 &store,
+                &DeltaEncoder::new(store.spool_dir()),
                 merge,
                 remote,
                 ticketed(None),
@@ -1695,9 +1677,9 @@ mod tests {
             };
             let cap = effective_payload_cap(payload_cap, max_pack).unwrap();
             let estimate = estimate_pack_sizes(&store, &plan, cap, max_pack).unwrap().len();
-            let keys = build_and_upload_packs(PackSink::Count, &store, plan, cap, limits, &crate::NoopObserver)
+            let keys = dry_seal(&store, plan, cap, limits, &crate::NoopObserver)
                 .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
-            prop_assert!(keys.len() <= estimate, "{} > {estimate}", keys.len());
+            prop_assert!(keys <= estimate, "{keys} > {estimate}");
             let held = HeldCommits::collect(&store, base, MAX_PUSH_WALK).unwrap();
             let chain = Chain { commits: vec![tip], held };
             let weight = *cumulative_weights(&store, &chain, &PushControl::default())
@@ -1722,6 +1704,7 @@ mod step_fit_tests {
         Blob, ChunkedBlob, Commit, EntryMode, Identity, ObjectType, Tree, TreeEntry,
     };
     use kit_core::serialize;
+    use kit_core::transfer;
     use tempfile::TempDir;
 
     fn store() -> (TempDir, ObjectStore) {
@@ -1820,15 +1803,7 @@ mod step_fit_tests {
         let plan =
             transfer::plan_pack_with(store, tip, base, encode_delta_candidates_batch).unwrap();
         let cap = effective_payload_cap(cap, limits.max_pack_bytes).unwrap();
-        build_and_upload_packs(
-            PackSink::Count,
-            store,
-            plan,
-            cap,
-            limits,
-            &crate::NoopObserver,
-        )
-        .map_or(usize::MAX, |keys| keys.len())
+        dry_seal(store, plan, cap, limits, &crate::NoopObserver).unwrap_or(usize::MAX)
     }
 
     fn split(
@@ -1840,6 +1815,7 @@ mod step_fit_tests {
     ) -> Result<SplitPlan, PushError> {
         plan_split(
             store,
+            &DeltaEncoder::new(store.spool_dir()),
             tip,
             Some(remote),
             limits,
@@ -2094,6 +2070,7 @@ mod step_fit_tests {
             };
             plan_split(
                 &store,
+                &DeltaEncoder::new(store.spool_dir()),
                 tip,
                 Some(remote),
                 limits,
@@ -2125,6 +2102,7 @@ mod cut_tests {
     use kit_core::object::{Blob, Commit, EntryMode, Identity, Remix, Tree, TreeEntry};
     use kit_core::ops::graph::reachable_objects;
     use kit_core::serialize;
+    use kit_core::transfer;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
@@ -2237,9 +2215,11 @@ mod cut_tests {
         budget: usize,
     ) -> (usize, usize) {
         let probes = Probes::default();
+        let deltas = DeltaEncoder::new(store.spool_dir());
         let cutter = Cutter {
             observer: &probes,
             store,
+            deltas: &deltas,
             chain,
             weights,
             remote_tip: None,
@@ -2257,9 +2237,11 @@ mod cut_tests {
     /// The data packs the estimate counts for a step that starts at the
     /// remote's empty history and ends at chain position `to`.
     fn packs_to(store: &ObjectStore, chain: &Chain, to: usize) -> usize {
+        let deltas = DeltaEncoder::new(store.spool_dir());
         let cutter = Cutter {
             observer: &crate::NoopObserver,
             store,
+            deltas: &deltas,
             chain,
             weights: &[],
             remote_tip: None,
@@ -2292,9 +2274,11 @@ mod cut_tests {
             .unwrap()
             .cumulative;
         let budget = 6;
+        let deltas = DeltaEncoder::new(store.spool_dir());
         let cutter = Cutter {
             observer: &crate::NoopObserver,
             store: &store,
+            deltas: &deltas,
             chain: &chain,
             weights: &weights,
             remote_tip: None,

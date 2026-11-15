@@ -160,10 +160,15 @@ impl Fixture {
                 .unwrap();
             let bytes = writer.finish().unwrap();
             let key = pack::pack_key(&bytes);
-            tx.upload_pack(&bytes, &PackKey::from_hash(key)).unwrap();
+            tx.upload_pack(
+                &kit_core::protocol::SliceBody(&bytes),
+                &PackKey::from_hash(key),
+                None,
+            )
+            .unwrap();
             let node = kit_core::transfer::encode_packlist(Some(packmap), &[key]).unwrap();
             let node_key = hash::hash(&node);
-            tx.upload_blob(&node, &PackKey::from_hash(node_key))
+            tx.upload_blob(&node, &PackKey::from_hash(node_key), None)
                 .unwrap();
             node_key
         } else {

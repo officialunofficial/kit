@@ -86,6 +86,9 @@ pub mod worktree;
 // Transport trait surface (vtable + SSH framing + retry policy).
 pub mod protocol;
 
+#[cfg(feature = "fault-injection")]
+pub mod fault;
+
 // Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the
 // `commonware-storage` dep tree only materialises for downstream callers
@@ -187,8 +190,8 @@ pub use worktree::{
 // directly.
 pub use protocol::{
     AdvanceOutcome, BACKOFF_CAP, BACKOFF_INITIAL, BACKOFF_MAX_ATTEMPTS, BackoffIterator,
-    CommitOutcome, PackKey, Transport, TransportError, TransportResult, UploadLimits, is_retryable,
-    pack_key_from_hex,
+    CommitOutcome, PackBody, PackKey, PackSink, SliceBody, Transport, TransportError,
+    TransportResult, UploadLimits, is_retryable, pack_key_from_hex,
 };
 
 // Ops re-exports (OPS1: diff/graph/merge/cherry_pick).

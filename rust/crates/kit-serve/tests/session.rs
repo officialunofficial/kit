@@ -853,7 +853,7 @@ fn invalid_upload_is_rejected_before_storage() {
     );
     assert!(
         !FileTransport::new(fx.root())
-            .pack_exists(&PackKey::new(bogus))
+            .pack_exists(&PackKey::new(bogus), None)
             .unwrap()
     );
     assert!(
@@ -868,7 +868,11 @@ fn rejected_upload_does_not_overwrite_an_existing_pack() {
     let fx = Fixture::new();
     let (bytes, id) = valid_pack();
     FileTransport::new(fx.root())
-        .upload_pack(&bytes, &PackKey::new(id))
+        .upload_pack(
+            &kit_core::protocol::SliceBody(&bytes),
+            &PackKey::new(id),
+            None,
+        )
         .unwrap();
     let (end, frames) = fx.run([
         upload_header(&id, Some(5)),

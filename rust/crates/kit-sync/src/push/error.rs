@@ -117,7 +117,7 @@ impl From<kit_core::store::StoreError> for PushError {
 
 impl From<kit_core::pack::PackError> for PushError {
     fn from(error: kit_core::pack::PackError) -> Self {
-        Self::Sync(crate::SyncError::Pack(error))
+        Self::Sync(crate::SyncError::from(error))
     }
 }
 

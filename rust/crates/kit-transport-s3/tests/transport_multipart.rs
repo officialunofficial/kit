@@ -121,7 +121,12 @@ fn multipart_upload_round_trips_above_single_put_cap() {
         .create();
 
     let t = build_transport(&server.url());
-    t.upload_pack(&payload, &sample_key()).unwrap();
+    t.upload_pack(
+        &kit_core::protocol::SliceBody(&payload),
+        &sample_key(),
+        None,
+    )
+    .unwrap();
 
     m_init.assert();
     for m in &m_parts {
@@ -136,7 +141,7 @@ fn multipart_upload_round_trips_above_single_put_cap() {
         .with_status(200)
         .with_body(payload.clone())
         .create();
-    let downloaded = t.download_pack(&sample_key()).unwrap();
+    let downloaded = t.download_blob(&sample_key(), None, u64::MAX).unwrap();
     assert_eq!(
         downloaded, payload,
         "multipart round-trip must be byte-exact"
@@ -197,7 +202,11 @@ fn multipart_upload_aborts_on_part_failure() {
         .create();
 
     let t = build_transport(&server.url());
-    match t.upload_pack(&payload, &sample_key()) {
+    match t.upload_pack(
+        &kit_core::protocol::SliceBody(&payload),
+        &sample_key(),
+        None,
+    ) {
         Err(TransportError::ServerError { status: 500 }) => {}
         other => panic!("expected the exhausted-retry 500 to propagate, got {other:?}"),
     }
@@ -250,7 +259,11 @@ fn multipart_upload_412_on_complete_is_idempotent_success() {
         .create();
 
     let t = build_transport(&server.url());
-    t.upload_pack(&payload, &sample_key())
-        .expect("412-already-exists on complete must surface as Ok(()), not an error");
+    t.upload_pack(
+        &kit_core::protocol::SliceBody(&payload),
+        &sample_key(),
+        None,
+    )
+    .expect("412-already-exists on complete must surface as Ok(()), not an error");
     m_abort.assert();
 }

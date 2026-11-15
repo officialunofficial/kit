@@ -385,6 +385,7 @@ pub(crate) fn fetch_objects(
     lock_wait: &LockWait,
 ) -> Result<(FetchReport, VerifiedHistory), SyncError> {
     let _prune_guard = store.prune_guard()?;
+    kit_core::pack::sweep_spool_dir(&store.spool_dir());
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
     // The tips earlier signed fetches recorded: a history walk stops at them.

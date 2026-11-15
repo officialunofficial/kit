@@ -238,7 +238,12 @@ fn session_2_matches_the_capture() {
     ] {
         tx.update_ref(name, RefWriteCondition::Any, &id).unwrap();
     }
-    tx.upload_pack(&big, &PackKey::new(big_id)).unwrap();
+    tx.upload_pack(
+        &kit_core::protocol::SliceBody(&big),
+        &PackKey::new(big_id),
+        None,
+    )
+    .unwrap();
     std::fs::write(fx.root().join("refs/heads/README"), b"not a ref\n").unwrap();
     assert_same(&replay(&fx, None, &input), SESSION_2_OUT);
 }

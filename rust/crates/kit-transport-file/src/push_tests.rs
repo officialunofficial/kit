@@ -92,9 +92,12 @@ fn chain(remote: &FileTransport) -> Vec<transfer::PackListNode> {
     let mut nodes = Vec::new();
     let mut cursor = remote.read_ref(&packmap_ref("main")).unwrap();
     while let Some(key) = cursor {
-        let node =
-            transfer::decode_packlist(&remote.download_blob(&PackKey::from_hash(key)).unwrap())
-                .unwrap();
+        let node = transfer::decode_packlist(
+            &remote
+                .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+                .unwrap(),
+        )
+        .unwrap();
         cursor = node.prev;
         nodes.push(node);
     }
@@ -107,7 +110,9 @@ fn rebuilds(remote: &FileTransport, head: Hash) -> bool {
     let mut nodes = chain(remote);
     nodes.reverse();
     for key in nodes.iter().flat_map(|node| &node.packs) {
-        let bytes = remote.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let bytes = remote
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         if PackReader::read(&bytes, &fresh).is_err() {
             return false;
         }

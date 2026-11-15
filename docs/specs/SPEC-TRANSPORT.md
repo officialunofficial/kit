@@ -38,11 +38,11 @@ internal `Mutex` so the trait object remains object-safe.
 
 | Verb | Purpose |
 |---|---|
-| `upload_pack(bytes, key)` | Store a packfile keyed by its 32-byte BLAKE3 digest (`PackKey`). |
-| `download_pack(key)` | Fetch a packfile by digest. |
-| `pack_exists(key)` | HEAD-check a pack by digest. |
-| `upload_blob(bytes, key)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
-| `download_blob(key)` | Fetch an auxiliary blob by digest. Default impl delegates to `download_pack`. |
+| `upload_pack(pack, key, head_ref)` | Store a packfile keyed by its 32-byte BLAKE3 digest (`PackKey`). `pack` is a `PackBody` (§1.1). `head_ref` names the branch the pack is for, a hint for a transport that authorizes uploads by ref. |
+| `download_pack(key, ref_hint, sink)` | Fetch a packfile by digest into a `PackSink` (§1.1). `ref_hint` names the ref the caller reads it for. |
+| `pack_exists(key, ref_hint)` | HEAD-check a pack by digest. |
+| `upload_blob(bytes, key, head_ref)` | Store an auxiliary content-addressed blob &mdash; transfer metadata that is NOT a packfile (for example a packlist chain node). Shares the digest-keyed store with packs; a default trait impl delegates to `upload_pack`, so the verb only marks the *kind* explicit at the call site. |
+| `download_blob(key, ref_hint, max)` | Fetch an auxiliary blob of at most `max` bytes. The default runs `download_pack` into an in-memory sink of limit `max`, so a blob whose length the transport knows first is refused before any byte of it is read. |
 | `update_ref(name, condition, hash)` | CAS ref write. |
 | `advance_refs(head, head_condition, head_value, packmap, packmap_condition, packmap_value)` | Move a branch head and its packmap together (§7.2). The default writes the packmap, then the head, each under its own condition. |
 | `read_ref(name)` | Read a ref's current hash, or `None` if absent. |
@@ -57,29 +57,46 @@ returned byte sequence, including a pack's trailer. A transport's internal
 checks, a valid pack trailer, or a content-addressed lookup URL do not replace
 this consumer-boundary check. Mismatch is `InvalidResponse` and is not retryable.
 
-### 1.1 Streaming pack transfer (additive, opt-in)
+### 1.1 Pack bodies and sinks
 
-`upload_pack_streaming(key, total_bytes, chunks)` and
-`download_pack_streaming(key)` are additive verbs alongside
-`upload_pack`/`download_pack`: they move a pack as a sequence of
-bounded-size `PackChunk { offset, data, last }` segments (the same
-shape `ssh.proto`'s `PackChunk` already defines) instead of one
-`Vec<u8>`, so a transport that forwards chunks straight to its own
-wire never holds more than roughly one chunk in memory regardless of
-total pack size. Both have default trait implementations expressed in
-terms of the whole-buffer verbs &mdash; buffer-then-delegate for upload,
-delegate-then-wrap-as-one-chunk for download &mdash; so **no transport is
-required to change**; a caller may always use the streaming entry
-point, even against a transport that has not opted into real
-streaming.
+`upload_pack` reads a pack from a `PackBody` and `download_pack` writes one
+to a `PackSink`, so neither verb needs the whole pack in memory. A push
+seals each pack into an unnamed spool file in `.kit/tmp/` and hands that
+file to the transport as the body. A fetch hands the transport a sink that
+spools the pack into an unnamed file in `.kit/tmp/` and checks its length,
+key and trailer as it arrives (Pack-chain fetch, below).
 
-The SSH transport overrides both methods to expose the
-`PackChunk` frame loop it already ran internally for the
-whole-buffer path (§4.2, §6). The Connect transport streams packs through a
-client-streaming `UploadPack` and a server-streaming `DownloadPack` RPC
-on the `kit.transport.v1` service
-([SPEC-TRANSPORT-CONNECT](SPEC-TRANSPORT-CONNECT.md) §6), which reuses
-this same `PackChunk` shape on the wire.
+A `PackBody` has a length, and its bytes can be read from any offset as
+often as the transport needs: once per attempt, per part, per hash pass.
+Every read sees the same bytes, so every attempt sends the same pack.
+
+A `PackSink` takes one body:
+
+- `begin(declared)` starts a body, or starts it again after a failed
+  attempt; bytes taken earlier are discarded. A declared length over the
+  sink's limit is refused with `PayloadTooLarge` before any byte. A
+  transport that learns the length before the body (a file's size, the SSH
+  `DownloadPackHeader.total_bytes`, an HTTP `Content-Length`) MUST pass it
+  to `begin` before it reads the body.
+- `write(bytes)` appends. A byte past the declared length or the limit is
+  refused with `PayloadTooLarge`.
+- `failed()` names the local I/O error that ended the sink, a full disk say.
+  It stays set: after it, `begin` and `write` return `ProtocolError`, which
+  no transport retries. A caller checks `failed()` before it retries, falls
+  back to another location or maps an error, and reports the local error,
+  not a transport failure.
+
+The memory and file transports copy bodies in chunks of `SPOOL_BUFFER`
+(1 MiB). The SSH, S3 and Connect transports still hold one pack in memory
+on upload. On download, SSH passes the header's `total_bytes` to `begin`
+and writes each `PackChunk` frame to the sink as it arrives; S3 and Connect
+read the response whole, then write it to the sink.
+
+Spool files have no name: `O_TMPFILE` or unlinked on creation on Unix,
+deleted on close on Windows. Only the handle that wrote one reaches it, and
+a crash on Unix leaves nothing on disk. Fetch, push and gc remove every file
+in `.kit/tmp/` when they start, which clears what a power loss leaves on
+Windows. A spool that another process holds open is left alone.
 
 `update_ref`'s condition is one of:
 
@@ -965,7 +982,8 @@ except over a broken chain, and a force push appends on the ordered path.
 
 ## 8. Pack format
 
-`upload_pack` and `download_pack` move opaque pack bytes. The pack
+`upload_pack` and `download_pack` move opaque pack bytes, through a
+`PackBody` and a `PackSink` (§1.1). The pack
 format itself (object index, delta encoding, and chunk store) is
 defined in [SPEC-PACKFILE](SPEC-PACKFILE.md). Transport
 implementations MUST NOT inspect or rewrite pack bytes.
@@ -1015,9 +1033,10 @@ These hold for every conformant transport, regardless of scheme:
 | Ref CAS conflicts surface, never silently clobber | `Missing`/`Match` encodings per transport (§4.2.1, §6.3); conflict → `RefConflict`; 409/412 never retried (§6.5, §7.1) |
 | A retry never duplicates a conditional ref write | a landed attempt falsifies the precondition its re-issue carries; 4xx is not retryable; on `RefConflict` (or an `advance_refs` conflict outcome) callers MUST `read_ref` before reporting a conflict (§7) |
 | `upload_pack` is idempotent across retries | content-addressed keys: same bytes → same digest → server-side no-op (§7) |
-| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` used by the SSH frame loop (§4.4); `PACK_BODY_LIMIT` 4 GiB with pre-check and running-total streaming counters (§4.4, §6.4); ref/list body caps (§6.4) |
-| `*_streaming` is additive &mdash; no transport is forced to implement real streaming | default trait impls express both streaming verbs in terms of the existing whole-buffer verbs (§1.1) |
-| A `PackChunk` stream never ends silently without a `last = true` item | `upload_pack_streaming` (all overrides) rejects a stream that ends without one; `download_pack_streaming` overrides read the server's own `last` flag (§1.1, §4.2, §6) |
+| A misbehaving peer cannot exhaust memory | `MAX_FRAME_BYTES` 1 MiB, `MAX_FRAMES_PER_CONN`, `MAX_BYTES_PER_CONN` used by the SSH frame loop (§4.4); `PACK_BODY_LIMIT` 4 GiB checked before the body and against the bytes taken (§4.4, §6.4); ref/list body caps (§6.4) |
+| A body over a sink's limit is refused before its first byte when its length is known | transports pass a known length to `PackSink::begin` before they read the body (§1.1) |
+| A download never ends silently short | a sink takes exactly the declared length; SSH reads the server's `last` flag (§1.1, §4.2) |
+| A local disk error is never retried and never falls back | `PackSink::failed()` stays set and `begin` refuses after it with `ProtocolError`, which is not retryable (§1.1, §7) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 
 Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
@@ -1027,11 +1046,14 @@ the normative summary is the table in §7.1.
 
 Fetch MUST authenticate each requested pack and pack-list node before decoding
 or applying it. The CLI downloads the missing packs of a chain one at a time
-in chain order. It authenticates each pack, unpacks it into the object store,
-checks the signatures of the objects it wrote, records it as applied, and
-drops it before the next download. Nothing is staged on disk, and no
-repository lock is held while the packs download and apply, so other commands
-run during a fetch of any size. The CLI limits chain packs to one million and
+in chain order. It spools each pack into an unnamed file in `.kit/tmp/`,
+checking its length, its digest and its trailer as the bytes arrive. Only a
+pack that passes all three is read: it is unpacked into the object store one
+window at a time, the signatures of the objects it wrote are checked, it is
+recorded as applied, and its file is closed before the next download. A
+partial spool is never read, and a killed fetch leaves nothing in
+`.kit/tmp/` (§1.1). No repository lock is held while the packs download and
+apply, so other commands run during a fetch of any size. The CLI limits chain packs to one million and
 pack-list nodes to 100,000.
 
 The fetch takes the repository's prune guard, a shared lock on the `format`
@@ -1053,7 +1075,9 @@ is then stale, and the next fetch repairs the store: when a run that skipped
 a recorded pack finds an object missing, whether a delta base during unpack
 or an object of the tip's closure, it clears the record and applies the whole
 chain again, once. Every other failure propagates. A failed download, digest
-check, write or apply publishes no ref.
+check, write or apply publishes no ref. A local disk error on the spool or on
+a store write, a full disk say, ends the fetch as a local I/O error; the spool
+error names `.kit/tmp/`. It is not retried, and no other location is tried.
 
 Stored-object ID lists are checked per pack and are not accumulated over the
 chain. The closure check before ref publication reads the type of each chunk
@@ -1068,6 +1092,8 @@ on a branch chain downloads only its own nodes and packs. The tag phase
 self-heals at most once per fetch, so a remote whose every tag lacks an object
 costs one full walk, not one per tag.
 
-Unpack working memory remains bounded by one pack, rather than total
-chain payload size. This is not a chunk-streaming pack parser and does not
-claim a small fixed RSS ceiling.
+A fetch holds one window of one pack, not the pack. The signature check
+reads only the commits, remixes and tags a pack stored, in runs whose
+objects together stay within 256 MiB, charged twice their size; one object
+over that is checked alone. What still grows with a pack is per-object
+bookkeeping, a few hundred bytes for each entry.

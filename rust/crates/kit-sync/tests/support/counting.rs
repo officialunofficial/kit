@@ -36,7 +36,7 @@ impl kit_sync::RemoteSource for CountingSource<'_> {
         self.calls.borrow_mut().push(format!("ReadRef {name}"));
         self.inner.read_ref(name)
     }
-    fn download_blob_via_ref(
+    fn download_blob(
         &self,
         key: &kit_core::protocol::PackKey,
         name: &str,
@@ -45,13 +45,14 @@ impl kit_sync::RemoteSource for CountingSource<'_> {
             "Node {}",
             kit_core::hash::to_hex(&key.into_hash())
         ));
-        self.inner.download_blob_via_ref(key, name)
+        self.inner.download_blob(key, name)
     }
-    fn download_pack_via_ref(
+    fn download_pack(
         &self,
         key: &kit_core::protocol::PackKey,
         name: &str,
-    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+    sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
         self.calls.borrow_mut().push(format!(
             "Pack {}",
             kit_core::hash::to_hex(&key.into_hash())
@@ -59,7 +60,7 @@ impl kit_sync::RemoteSource for CountingSource<'_> {
         if let Some(barrier) = self.before_pack {
             barrier.wait();
         }
-        self.inner.download_pack_via_ref(key, name)
+        self.inner.download_pack(key, name, sink)
     }
     fn repository_address(&self) -> Option<(String, String)> {
         self.address.clone()

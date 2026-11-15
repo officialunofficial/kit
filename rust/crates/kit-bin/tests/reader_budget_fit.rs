@@ -34,7 +34,9 @@ fn remote_packs(tx: &dyn Transport, branch: &str) -> Vec<Vec<Hash>> {
     let mut nodes: Vec<PackListNode> = Vec::new();
     let mut cursor = tx.read_ref(&format!("refs/kit/packmap/{branch}")).unwrap();
     while let Some(key) = cursor {
-        let bytes = tx.download_blob(&PackKey::from_hash(key)).unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(key), None, u64::MAX)
+            .unwrap();
         let node = transfer::decode_packlist(&bytes).unwrap();
         cursor = node.prev;
         nodes.push(node);
@@ -75,7 +77,9 @@ impl ObjectSink for StoreSink<'_> {
 fn read_back(tx: &dyn Transport, store: &ObjectStore, packs: &[Hash]) -> usize {
     let mut deltas = 0;
     for key in packs {
-        let pack = tx.download_pack(&PackKey::from_hash(*key)).unwrap();
+        let pack = tx
+            .download_blob(&PackKey::from_hash(*key), None, u64::MAX)
+            .unwrap();
         let mut sink = StoreSink { store, stored: 0 };
         let unpacked = unpack(
             key,
