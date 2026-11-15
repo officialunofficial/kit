@@ -2377,7 +2377,7 @@ mod cut_tests {
         let delta = |len: usize| transfer::PlannedDelta {
             target: [1; HASH_LEN],
             base: [2; HASH_LEN],
-            stream: vec![0; len],
+            stream: vec![0; len].into(),
         };
         let plan = PackPlan {
             raw: vec![raw],

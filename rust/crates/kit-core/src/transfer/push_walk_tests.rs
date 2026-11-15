@@ -92,7 +92,7 @@ fn assert_applies(src: &ObjectStore, plan: &PackPlan, seed: &[(Hash, Vec<u8>)], 
         w.push_raw(*h, &src.read(h).unwrap()).unwrap();
     }
     for d in &plan.deltas {
-        w.push_delta(&d.base, &d.stream).unwrap();
+        w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
     }
     let pack = w.finish().unwrap();
     let (_d, dst) = store();
@@ -1822,7 +1822,7 @@ mod random_histories {
             w.push_raw(*h, &src.read(h).unwrap()).unwrap();
         }
         for d in &plan.deltas {
-            w.push_delta(&d.base, &d.stream).unwrap();
+            w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
         }
         PackReader::read(&w.finish().unwrap(), dst).unwrap();
     }
