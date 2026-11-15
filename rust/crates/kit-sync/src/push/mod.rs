@@ -131,8 +131,9 @@ pub struct PushOptions<'a> {
 }
 
 /// The default payload bound of one pushed pack, 256 MiB. A push spools each
-/// pack to disk, so the bound sets the size of each upload, not the memory a
-/// push needs.
+/// pack to disk, so the bound sets the size of each upload, not the memory
+/// the push itself needs; a transport that buffers the body (SPEC-TRANSPORT
+/// §1.1) holds a pack of up to this size.
 pub const DEFAULT_PACK_PAYLOAD_CAP: u64 = 256 * 1024 * 1024;
 
 impl PushOptions<'_> {
