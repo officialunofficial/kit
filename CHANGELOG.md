@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-15
+
 ### Security
 
 - A fetch that verifies signatures now checks every commit, remix and tag in
@@ -57,6 +59,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chunks at a time, not one after another, so they no longer wait on the disk
   once per chunk. A refused chunk is reported as before: the first one in the
   manifest.
+- A signed release tag now publishes the workspace crates to crates.io from
+  the release workflow, through trusted publishing, as it already publishes
+  the npm package. The GitHub Release waits for a dry-run build of the crates,
+  so a crate that fails to build stops all three publishes.
 
 ### Fixed
 

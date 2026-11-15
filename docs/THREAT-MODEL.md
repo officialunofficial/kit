@@ -101,6 +101,10 @@ kit defends:
   explicit and user-scoped only (`--no-verify-signatures` / the
   user-scoped `pull.require_signed = false` config, never settable from
   a cloned repo's own `.kit/config` &mdash; see §4).
+  A tracking ref that an opt-out fetch published is unverified until the next
+  signed fetch, which checks it again; commands that read a tracking ref
+  directly, such as `kit merge default/main`, use whatever the last fetch
+  published.
 
 kit does NOT defend:
 
