@@ -328,6 +328,10 @@ impl<S: FrameSink> Decoder<S> {
             if !matches!(self.header[0], 0 | 2) {
                 return Err(Error::Invalid("Connect frame flags/order"));
             }
+            if self.payload.is_empty() {
+                // Grow once to the checked size, not by doubling past it.
+                self.payload.reserve_exact(size);
+            }
             let take = (size - self.payload.len()).min(bytes.len());
             self.payload.extend_from_slice(&bytes[..take]);
             bytes = &bytes[take..];

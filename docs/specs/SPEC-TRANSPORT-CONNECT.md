@@ -2115,9 +2115,10 @@ also injectable. A streaming request body does not fit that boundary by
 default: the transport must replay the exact request bytes after an ambiguous
 failure, and browser fetch cannot stream request bodies portably, so a channel
 that does not override `send_stream` buffers each request body (bounded per
-part by the ticket part size). The native channel streams request bodies, and
-every channel hands `DownloadPack` response frames and location bytes to the
-caller's pack sink one bounded frame at a time (§6.2). Exact-byte replay applies
+part by the ticket part size). The native channel streams request bodies. The
+client hands each decoded `DownloadPack` frame, of at most 4 MiB, to the
+caller's pack sink, and passes location bytes through as the channel writes
+them (§6.2). Exact-byte replay applies
 to retained requests; reconstructing a request with the same identity preserves
 its authenticated operation and body. No result claims eternal replay retention
 or proves
