@@ -170,9 +170,10 @@ pub use layout::RepoLayout;
 pub use refs::{
     ATTESTATIONS_REF, BRANCH_REF_PREFIX, HEAD_FILE, HEADS_DIR, Head, MAX_BRANCH_NAME_BYTES,
     MAX_REF_NAME_BYTES, MAX_TAG_NAME_BYTES, PACKMAP_REF_PREFIX, REFS_DIR, Ref, RefError,
-    RefNameKind, RefResult, RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGS_DIR,
-    check_new_name, check_new_ref_name, check_pushable_branch, decode_ref_wire, encode_ref_wire,
-    validate_ref_name, validate_ref_name_grammar, validate_ref_prefix,
+    RefNameKind, RefResult, RefWriteCondition, SHALLOW_FILE, TAG_REF_PREFIX, TAGMAP_REF_PREFIX,
+    TAGS_DIR, check_new_name, check_new_ref_name, check_pushable_branch, check_pushable_tag,
+    decode_ref_wire, encode_ref_wire, validate_ref_name, validate_ref_name_grammar,
+    validate_ref_prefix,
 };
 pub use repo_lock::{DEFAULT_TIMEOUT as LOCK_DEFAULT_TIMEOUT, LockError, LockResult, RepoLock};
 pub use worktree::{

@@ -735,6 +735,9 @@ impl RemoteSource for HostSource<'_> {
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
         self.0.list_branches().map_err(|e| self.failure(e, false))
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+        self.0.list_refs(prefix).map_err(|e| self.failure(e, false))
+    }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         self.0.read_ref(name).map_err(|e| self.failure(e, false))
     }

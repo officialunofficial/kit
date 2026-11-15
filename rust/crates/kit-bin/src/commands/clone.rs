@@ -60,6 +60,8 @@ struct CloneOpts {
     /// `pull.require_signed = false` config, is the only way to opt out.
     #[arg(long = "no-verify-signatures")]
     no_verify_signatures: bool,
+    #[command(flatten)]
+    tags: super::fetched_tags::TagFlags,
     /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -160,6 +162,7 @@ pub fn run(args: &[String]) -> u8 {
                         &origin_name,
                         opts.branch.as_deref(),
                         require_signed,
+                        opts.tags.fetch_tags(),
                         progress.terminal(),
                     )
                 })
@@ -169,8 +172,8 @@ pub fn run(args: &[String]) -> u8 {
         }
         Err(e) => return emit_err(&format!("open remote: {e}"), exit::PROTOCOL_ERROR),
     };
-    let n = match pull_outcome {
-        Ok(report) => report.fetch.branches_fetched,
+    let fetch = match pull_outcome {
+        Ok(report) => report.fetch,
         Err(libkit::transfer::Error::Interrupted) => {
             return emit_err("clone: interrupted", exit::TEMPFAIL);
         }
@@ -191,12 +194,17 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     let mut stderr = std::io::stderr().lock();
+    super::fetched_tags::print_new(&fetch, &mut stderr);
+    // A refused tag fails the clone only after the branches and the
+    // checkout are in place.
+    let code = super::fetched_tags::print_problems(&fetch, &mut stderr);
     let _ = writeln!(
         stderr,
-        "cloned {n} ref(s) from {url} into {}",
+        "cloned {} ref(s) from {url} into {}",
+        fetch.branches_fetched,
         target.display()
     );
-    exit::OK
+    code
 }
 
 /// Persist the supplied sparse patterns to `.kit/sparse-checkout` and

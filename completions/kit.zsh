@@ -327,6 +327,8 @@ _kit() {
                         '--all[pull from every configured remote]' \
                         '(--rebase --no-ff)--rebase[replay the current branch onto the fetched branch]' \
                         '(--rebase --no-ff)--no-ff[always create a merge commit]' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
                         '--format[output format]:format:(default json)' \
                         '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
@@ -337,6 +339,8 @@ _kit() {
                     _arguments \
                         '--all[fetch from every configured remote]' \
                         '(-p --prune)'{-p,--prune}'[delete remote-tracking refs gone from the remote]' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--no-verify-signatures[skip signature verification of fetched objects]' \
                         '--format[output format]:format:(default json)' \
                         '(-q --quiet)'{-q,--quiet}'[suppress transfer progress output]' \
@@ -356,6 +360,8 @@ _kit() {
                 clone)
                     _arguments \
                         '--sparse[sparse-checkout pattern]:pattern:' \
+                        '(--tags --no-tags)--tags[fetch every remote tag (the default)]' \
+                        '(--tags --no-tags)--no-tags[fetch no tags]' \
                         '--help[show help]'
                     ;;
                 branch)

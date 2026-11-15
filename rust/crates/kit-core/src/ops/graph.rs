@@ -390,8 +390,37 @@ where
         Chunks::Check {
             memory: chunk_memory,
         },
+        &|_| false,
     )
     .map(|(_out, truncated)| truncated)
+}
+
+/// [`check_closure_present`] from `root`, down to the objects `known`
+/// accepts: such an object is neither checked nor walked, so its own closure
+/// is taken as present. Returns the objects the walk checked, chunks aside,
+/// and `true` when `cap` cut the walk, so objects past it went unchecked.
+///
+/// A fetch uses it to check a tag's closure only down to the history that
+/// local refs already reach.
+///
+/// # Errors
+/// As [`check_closure_present`].
+pub fn check_closure_present_above(
+    store: &ObjectStore,
+    root: &Hash,
+    known: &dyn Fn(&Hash) -> bool,
+    cap: usize,
+) -> Result<(BTreeSet<Hash>, bool), StoreError> {
+    walk_closure(
+        store,
+        std::iter::once(root),
+        ClosureMode::History,
+        cap,
+        Chunks::Check {
+            memory: MAX_CHECKED_CHUNKS,
+        },
+        known,
+    )
 }
 
 /// What a closure walk does with the chunks of a chunked blob.
@@ -413,15 +442,17 @@ fn reachable_with_mode<'a, I>(
 where
     I: IntoIterator<Item = &'a Hash>,
 {
-    walk_closure(store, roots, mode, cap, Chunks::Retain)
+    walk_closure(store, roots, mode, cap, Chunks::Retain, &|_| false)
 }
 
+/// The closure walk. An object `known` accepts is skipped with its closure.
 fn walk_closure<'a, I>(
     store: &ObjectStore,
     roots: I,
     mode: ClosureMode,
     cap: usize,
     chunks: Chunks,
+    known: &dyn Fn(&Hash) -> bool,
 ) -> Result<(BTreeSet<Hash>, bool), StoreError>
 where
     I: IntoIterator<Item = &'a Hash>,
@@ -435,7 +466,7 @@ where
     let mut checked_chunks: BTreeMap<Hash, u64> = BTreeMap::new();
     let mut truncated = false;
     while let Some(h) = queue.pop_front() {
-        if out.contains(&h) {
+        if out.contains(&h) || known(&h) {
             continue;
         }
         if out.len() >= cap {
@@ -616,6 +647,34 @@ mod tests {
         };
         let bytes = serialize::serialize(&Object::Commit(c)).unwrap();
         s.write(&bytes).unwrap()
+    }
+
+    /// The closure check stops at the objects `known` accepts: below them
+    /// it neither reads nor reports, and it returns what it checked. A
+    /// missing object above them still fails, and the cap still counts.
+    #[test]
+    fn check_closure_present_above_stops_at_known_objects() {
+        let (_d, s) = store();
+        let t1 = make_single_file_tree(&s, b"f", b"one");
+        let c1 = make_commit(&s, t1, &[], "c1");
+        let t2 = make_single_file_tree(&s, b"f", b"two");
+        let c2 = make_commit(&s, t2, &[c1], "c2--");
+        s.remove_object(&t1).unwrap();
+        assert!(matches!(
+            check_closure_present(&s, [&c2]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        let (checked, truncated) = check_closure_present_above(&s, &c2, &|h| *h == c1, 10).unwrap();
+        assert!(!truncated);
+        assert_eq!(checked.len(), 3, "c2, its tree and its blob");
+        assert!(checked.contains(&c2) && !checked.contains(&c1));
+        let (_, truncated) = check_closure_present_above(&s, &c2, &|h| *h == c1, 2).unwrap();
+        assert!(truncated);
+        s.remove_object(&t2).unwrap();
+        assert!(matches!(
+            check_closure_present_above(&s, &c2, &|h| *h == c1, 10),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     // =================================================================

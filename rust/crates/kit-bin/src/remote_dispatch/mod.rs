@@ -448,42 +448,43 @@ fn push_inputs<'a>(
 }
 
 /// Fetch the remote and fast-forward the current branch; see
-/// [`transfer::pull_with_source`].
+/// [`transfer::pull_with_source`]. `tags` takes the remote's tags too.
 pub(crate) fn pull_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     target_branch: Option<&str>,
     require_signed: bool,
+    tags: bool,
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
     let options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
         .with_verify_signatures(require_signed)
+        .with_tags(tags)
         .with_sync_policy(sync_policy(&layout));
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
-/// Fetch the remote; see [`transfer::fetch_with_source`].
+/// Fetch the remote; see [`transfer::fetch_with_source`]. `tags` takes the
+/// remote's tags too, and the report names each tag published or refused.
 pub(crate) fn fetch_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     require_signed: bool,
     prune: bool,
+    tags: bool,
     terminal: &Terminal,
-) -> Result<usize, Error> {
+) -> Result<kit_sync::FetchReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    transfer::fetch_with_source(
-        cwd,
-        source,
-        remote,
-        require_signed,
-        prune,
-        sync_policy(&layout),
-        terminal,
-    )
+    let options = kit_sync::SyncOptions::default()
+        .with_verify_signatures(require_signed)
+        .with_prune(prune)
+        .with_tags(tags)
+        .with_sync_policy(sync_policy(&layout));
+    Ok(kit_sync::fetch(cwd, source, remote, &options, terminal)?)
 }
 
 #[cfg(test)]

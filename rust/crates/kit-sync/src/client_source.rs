@@ -387,6 +387,10 @@ impl<
         self.list_branches_with_page_limit(kit_core::ref_listing::MAX_PAGES)
     }
 
+    fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+        Self::list_refs(self, prefix)
+    }
+
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         match self.write_call("ReadRef", false, None, |identity| {
             self.executor.block_on(self.client.read_ref(name, identity))

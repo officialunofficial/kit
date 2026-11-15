@@ -60,7 +60,15 @@ refs/heads/<name>                  branch refs
 refs/tags/<name>                   tag refs
 refs/remotes/<remote>/<name>       remote-tracking branch refs
 refs/kit/packmap/<name>           pack map of branch <name> (pushed with it)
+refs/kit/tagmap/<name>            tag map of tag <name> (pushed with it)
 ```
+
+A **tag map** `refs/kit/tagmap/<t>` is valued like a pack map: the
+BLAKE3 of a packlist node whose chain rebuilds the closure of the value
+of `refs/tags/<t>` (SPEC-TRANSPORT §7.2). A writer writes it before the
+tag and only ever grows it, so it covers every value the tag held. A
+fetch reads it only for a tag whose closure it lacks (SPEC-TRANSPORT
+§1.3).
 
 **Served names.** A transport server (`kit serve` or any Connect server) MUST serve only ref names under `refs/`. It MUST refuse
 any other name that passes the §3 grammar (for example `main`,
@@ -74,8 +82,8 @@ not restricted: a prefix outside `refs/` lists nothing. A name that
 fails the §3 grammar is refused as §3 says. The local and client-side
 transports (file, s3, memory) are not servers and are unaffected.
 
-*Informative.* Every kit client writes only `refs/heads/`, `refs/tags/`
-and `refs/kit/packmap/` names. A third-party client could have left a
+*Informative.* Every kit client writes only `refs/heads/`, `refs/tags/`,
+`refs/kit/packmap/` and `refs/kit/tagmap/` names. A third-party client could have left a
 grammar-valid name as a file at the served root (`main` as
 `<root>/main`). The server does not serve such files, and `docs/CLI.md`
 ("Refs outside `refs/`") says how an operator finds and moves them.
@@ -163,12 +171,15 @@ Plus these rejections:
 *Informative: derived local bounds.* A local branch or tag name is
 short; its wire name adds a prefix. A push of branch `b` writes both
 `refs/heads/<b>` and `refs/kit/packmap/<b>`, so a new branch name is at
-most 512 − 17 = **495 bytes** (`MAX_BRANCH_NAME_BYTES`); a tag's wire
-name is `refs/tags/<t>`, so a new tag name is at most 512 − 10 = **502
-bytes** (`MAX_TAG_NAME_BYTES`). `kit` refuses to create a longer one and
-says which bound applies. A branch created before these bounds, up to
-512 bytes, can still be committed to, renamed and deleted locally, but a
-push of it fails with "ref name too long", naming the wire name.
+most 512 − 17 = **495 bytes** (`MAX_BRANCH_NAME_BYTES`). A tag `t`
+travels as `refs/tags/<t>` and `refs/kit/tagmap/<t>` (§2), so a new tag
+name is at most 512 − 16 = **496 bytes** (`MAX_TAG_NAME_BYTES`) and at
+most 29 segments (`check_pushable_tag`). `kit` refuses to create a longer
+one and says which bound applies. A branch or tag created before these
+bounds, up to 512 bytes, can still be used, renamed (a branch) and
+deleted locally. A push of such a branch fails with "ref name too long",
+naming the wire name, and a fetch skips a remote tag with such a name
+with a warning.
 
 **Notable divergences from Git ref naming:**
 

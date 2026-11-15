@@ -6,7 +6,7 @@
 //! publishes, is checked with the same function `kit verify` uses, failing
 //! closed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Object, ObjectType};
@@ -252,6 +252,16 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
 /// 32 bytes of id per signed object it delivered.
 pub(crate) type VerifiedHistory = HashSet<Hash>;
 
+/// The signature failures one fetch found in history walks: each object
+/// whose history holds an object that failed its signature check, mapped to
+/// that object's hex id and the failure. A walk that reaches one of them
+/// fails at once with the same failure, so many tags over one bad history
+/// cost one walk. It lives for one fetch.
+/// Checks the signatures of one chunk of a history walk.
+type ChunkCheck<'a> = dyn Fn(&[(Hash, Object)]) -> Result<(), SyncError> + 'a;
+
+pub(crate) type FailedHistory = HashMap<Hash, (String, String)>;
+
 /// Verify the signature of every commit, remix and tag in the history of
 /// `tip`: `tip` itself, the parents of each commit and remix, and the target
 /// of each tag, recursively. Trees and blobs carry no signature and name no
@@ -285,54 +295,141 @@ pub(crate) fn verify_history_signatures(
     tip: &Hash,
     verified: &mut VerifiedHistory,
 ) -> Result<(), SyncError> {
-    let cap = kit_core::ops::graph::MAX_REACHABLE;
-    let chunk = verify_chunk_size();
-    let check = |entries: &[(Hash, Object)]| {
-        verify_entries(entries, entries.len() >= verify_fanout_threshold())
+    let mut walk = HistoryWalk {
+        verified,
+        failed: None,
+        cap: kit_core::ops::graph::MAX_REACHABLE,
+        read: 0,
     };
-    let mut seen: HashSet<Hash> = HashSet::new();
-    let mut pending = vec![*tip];
-    let mut entries: Vec<(Hash, Object)> = Vec::new();
-    while let Some(h) = pending.pop() {
-        if verified.contains(&h) || !seen.insert(h) {
-            continue;
-        }
-        if seen.len() > cap {
-            return Err(SyncError::ClosureTooLarge(cap));
-        }
-        // A leaf carries no signature and names no signed object, so only
-        // its type prologue is read, like the closure check does: a parent or
-        // tag target that is a large blob costs no full read.
-        if !matches!(
-            store.object_type(&h)?,
-            ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
-        ) {
-            continue;
-        }
-        let obj = store.read_object(&h)?;
-        match &obj {
-            Object::Commit(c) => pending.extend(&c.parents),
-            Object::Remix(r) => pending.extend(&r.parents),
-            // The target is followed whatever type the tag declares: the
-            // walk decides by the type of the object it reads, so a tag
-            // that calls a commit a tree does not hide it.
-            Object::Tag(t) => pending.push(t.target),
-            Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+    walk.run(store, observer, tip)
+}
+
+/// One [`verify_history_signatures`] walk, with the knobs the tag phase of a
+/// fetch adds: a memory of failures and a cap it can lower in a test.
+pub(crate) struct HistoryWalk<'a> {
+    pub(crate) verified: &'a mut VerifiedHistory,
+    /// When set, a walk fails at once on an object it holds, and a failed
+    /// walk adds the failing object and the objects on its walk path to it.
+    pub(crate) failed: Option<&'a mut FailedHistory>,
+    /// The most objects one walk visits.
+    pub(crate) cap: usize,
+    /// Commits, remixes and tags the walk read in full, counted on success
+    /// and failure.
+    pub(crate) read: usize,
+}
+
+impl HistoryWalk<'_> {
+    /// Walk the history of `tip` as [`verify_history_signatures`] describes.
+    pub(crate) fn run(
+        &mut self,
+        store: &ObjectStore,
+        observer: &dyn Observer<SyncEvent>,
+        tip: &Hash,
+    ) -> Result<(), SyncError> {
+        let chunk = verify_chunk_size();
+        let check = |entries: &[(Hash, Object)]| {
+            verify_entries(entries, entries.len() >= verify_fanout_threshold())
+        };
+        let tracking = self.failed.is_some();
+        // The object that first named each one, to find the walk path to a
+        // failing object. Kept only when failures are remembered.
+        let mut via: HashMap<Hash, Hash> = HashMap::new();
+        let mut seen: HashSet<Hash> = HashSet::new();
+        let mut pending = vec![*tip];
+        let mut entries: Vec<(Hash, Object)> = Vec::new();
+        while let Some(h) = pending.pop() {
+            if self.verified.contains(&h) || !seen.insert(h) {
                 continue;
             }
-        }
-        entries.push((h, obj));
-        if entries.len() >= chunk {
-            check(&entries)?;
-            entries.clear();
-            if observer.cancelled() {
-                return Err(SyncError::Interrupted);
+            if let Some(failed) = self.failed.as_deref_mut()
+                && let Some((hash, reason)) = failed.get(&h).cloned()
+            {
+                remember_failure(failed, &via, h, &hash, &reason, self.cap);
+                return Err(SyncError::UnsignedOrInvalidObject { hash, reason });
+            }
+            if seen.len() > self.cap {
+                return Err(SyncError::ClosureTooLarge(self.cap));
+            }
+            // A leaf carries no signature and names no signed object, so only
+            // its type prologue is read, like the closure check does: a parent or
+            // tag target that is a large blob costs no full read.
+            if !matches!(
+                store.object_type(&h)?,
+                ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
+            ) {
+                continue;
+            }
+            let obj = store.read_object(&h)?;
+            self.read += 1;
+            let before = pending.len();
+            match &obj {
+                Object::Commit(c) => pending.extend(&c.parents),
+                Object::Remix(r) => pending.extend(&r.parents),
+                // The target is followed whatever type the tag declares: the
+                // walk decides by the type of the object it reads, so a tag
+                // that calls a commit a tree does not hide it.
+                Object::Tag(t) => pending.push(t.target),
+                Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
+                    continue;
+                }
+            }
+            if tracking {
+                for child in &pending[before..] {
+                    via.entry(*child).or_insert(h);
+                }
+            }
+            entries.push((h, obj));
+            if entries.len() >= chunk {
+                self.check_chunk(&entries, &check, &via)?;
+                entries.clear();
+                if observer.cancelled() {
+                    return Err(SyncError::Interrupted);
+                }
             }
         }
+        self.check_chunk(&entries, &check, &via)?;
+        self.verified.extend(seen);
+        Ok(())
     }
-    check(&entries)?;
-    verified.extend(seen);
-    Ok(())
+
+    /// Check one chunk, and remember a signature failure when failures are
+    /// remembered.
+    fn check_chunk(
+        &mut self,
+        entries: &[(Hash, Object)],
+        check: &ChunkCheck<'_>,
+        via: &HashMap<Hash, Hash>,
+    ) -> Result<(), SyncError> {
+        let result = check(entries);
+        if let Err(SyncError::UnsignedOrInvalidObject { hash, reason }) = &result
+            && let Some(failed) = self.failed.as_deref_mut()
+            && let Some(at) = kit_core::refs::parse_lowercase_hash(hash.as_bytes())
+        {
+            remember_failure(failed, via, at, hash, reason, self.cap);
+        }
+        result
+    }
+}
+
+/// Add `at` and every object on the walk path from the walk's tip to it to
+/// `failed`, each with the failure of `hash`. `failed` holds at most `cap`
+/// objects; past that it is cleared, which makes later walks longer only.
+fn remember_failure(
+    failed: &mut FailedHistory,
+    via: &HashMap<Hash, Hash>,
+    at: Hash,
+    hash: &str,
+    reason: &str,
+    cap: usize,
+) {
+    let mut next = Some(at);
+    while let Some(h) = next {
+        if failed.len() >= cap {
+            failed.clear();
+        }
+        failed.insert(h, (hash.to_owned(), reason.to_owned()));
+        next = via.get(&h).copied();
+    }
 }
 
 #[cfg(test)]

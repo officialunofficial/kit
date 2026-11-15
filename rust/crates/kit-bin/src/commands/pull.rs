@@ -54,11 +54,14 @@ struct PullOpts {
     /// `--abort`. Does not combine with `--all` or `--rebase`.
     #[arg(long = "no-ff", conflicts_with_all = ["all", "rebase"])]
     no_ff: bool,
+    #[command(flatten)]
+    tags: super::fetched_tags::TagFlags,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
-    /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`. With
-    /// `--all`, one JSON object is printed per remote pulled. With
-    /// `--rebase`, the object is the one that `kit rebase` prints.
+    /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`, plus
+    /// the tag fields of `kit fetch --format=json`. With `--all`, one JSON
+    /// object is printed per remote pulled. With `--rebase`, the object is
+    /// the one that `kit rebase` prints.
     #[arg(long, value_enum, default_value = "default")]
     format: PullFormat,
     /// Suppress transfer progress output on stderr.
@@ -171,9 +174,10 @@ fn pull_one(
                                 &resolved.name,
                                 require_signed,
                                 false,
+                                opts.tags.fetch_tags(),
                                 progress.terminal(),
                             )
-                            .map(|_| None)
+                            .map(|fetch| (fetch, None))
                         } else {
                             remote_dispatch::pull_all_with_source(
                                 cwd,
@@ -181,9 +185,10 @@ fn pull_one(
                                 &resolved.name,
                                 None,
                                 require_signed,
+                                opts.tags.fetch_tags(),
                                 progress.terminal(),
                             )
-                            .map(Some)
+                            .map(|report| (report.fetch, Some(report.outcome)))
                         }
                     })
                     .and_then(|result| result);
@@ -194,10 +199,26 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
-                Ok(None) if opts.no_ff => merge_fetched(layout, &resolved.name, json),
-                Ok(None) => rebase_onto_fetched(layout, &resolved.name, json),
-                Ok(Some(report)) => {
-                    report_fast_forward(layout, &resolved.name, endpoint, report.outcome, json)
+                Ok((fetch, outcome)) => {
+                    let tags = {
+                        let mut stderr = std::io::stderr().lock();
+                        super::fetched_tags::print_new(&fetch, &mut stderr);
+                        super::fetched_tags::print_problems(&fetch, &mut stderr)
+                    };
+                    let code = match outcome {
+                        None if opts.no_ff => merge_fetched(layout, &resolved.name, json),
+                        None => rebase_onto_fetched(layout, &resolved.name, json),
+                        Some(outcome) => report_fast_forward(
+                            layout,
+                            &resolved.name,
+                            endpoint,
+                            outcome,
+                            &fetch,
+                            json,
+                        ),
+                    };
+                    // A refused tag fails the pull only after the branch moved.
+                    if code == exit::OK { tags } else { code }
                 }
                 Err(libkit::transfer::Error::Interrupted) => {
                     emit_err_json("pull: interrupted", exit::TEMPFAIL, json)
@@ -222,6 +243,7 @@ fn report_fast_forward(
     remote: &str,
     endpoint: &str,
     outcome: kit_sync::PullOutcome,
+    fetch: &kit_sync::FetchReport,
     json: bool,
 ) -> u8 {
     let (branch, old_tip, new_tip, up_to_date) = match outcome {
@@ -249,13 +271,14 @@ fn report_fast_forward(
     report_pull(layout, endpoint, old_tip, new_tip, up_to_date);
     if json {
         let mut obj = JsonObject::new();
-        obj.field_bool("ok", true)
+        obj.field_bool("ok", !fetch.tags_incomplete())
             .field_str("remote", remote)
             .field_str("endpoint", endpoint)
             .field_opt_str("branch", branch.as_deref())
             .field_opt_hash("old", old_tip.as_ref())
             .field_opt_hash("new", new_tip.as_ref())
             .field_bool("up_to_date", up_to_date);
+        super::fetched_tags::json_fields(&mut obj, fetch);
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }

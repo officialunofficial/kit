@@ -997,9 +997,20 @@ an empty
 and refs outside
 .Pa refs/heads/
 are errors.
-.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Op Ar remote
-.It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Op Ar remote
+.It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
+.It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 Download or download-and-merge from the remote.
+Both take every remote tag after the branches unless
+.Fl Fl no-tags
+is given;
+.Fl Fl tags
+says so explicitly, and the last of the two wins.
+A tag publishes only once its closure is local, its tag object carries its
+name and its history verifies.
+A refused tag prints
+.Ql ! [rejected]
+with its reason, never moves a local tag and never stops the branches; the
+command then exits 1.
 .Cm pull Fl Fl rebase
 replays the current branch onto the fetched branch, as
 .Cm rebase
@@ -1015,8 +1026,10 @@ or
 .Cm fetch Fl Fl prune
 then deletes the remote-tracking refs whose branch is gone from the remote;
 it deletes no local branch and no tag.
-.It Cm clone Op Fl Fl sparse ... Ar url
-Clone a remote into a new working directory.
+.It Cm clone Oo Fl Fl sparse ... Oc Oo Fl Fl tags | Fl Fl no-tags Oc Ar url
+Clone a remote into a new working directory, with its tags unless
+.Fl Fl no-tags
+is given.
 .It Cm remote Oo Cm add | Cm set | Cm remove | Cm rename Oc Op Ar args ...
 Show or configure remotes. With no subcommand, lists the configured
 remotes.

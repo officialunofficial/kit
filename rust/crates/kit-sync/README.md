@@ -67,6 +67,8 @@ let pulled = pull(&dir, &source, "default", &SyncOptions::default(), &NoopObserv
 * `target_branch`: land on this branch. It must exist on the remote; there is
   no silent fallback (`SyncError::RemoteBranchMissing`).
 * `sync_policy`: object-store durability (`Batch` by default).
+* `tags` (default `true`): after the branches, fetch the remote's tags (see
+  "Tags" below). `false` skips the tag phase, as `--no-tags` does.
 
 `SyncOptions` is `#[non_exhaustive]`: start from `SyncOptions::default()` and
 use the `with_*` setters.
@@ -75,10 +77,13 @@ use the `with_*` setters.
 
 When the remote offers a repository cursor (SPEC-TRANSPORT §1.2), fetch reads
 it before it lists the branches. After a fetch that completes, it records the
-cursor, a digest of the remote-tracking refs and whether it verified
-signatures. The next fetch makes no other request when all of these hold: the
-fresh cursor equals the recorded one, the tracking refs still match the
-digest, the object of every tracked tip is in the store, a fetch that verifies
+cursor, a digest of the remote-tracking refs, whether it verified
+signatures, whether it fetched tags, and a digest of the local tags. A fetch
+that refused a tag or could not list the tags records nothing. The next fetch
+makes no other request when all of these hold: the fresh cursor equals the
+recorded one, the tracking refs and the local tags still match their digests,
+it fetches tags exactly when the recorded one did, the object of every tracked
+tip and every local tag is in the store, a fetch that verifies
 signatures follows one that did and finds every tracked tip recorded as
 verified (see "Verified tips" below), and a named target branch has a tracking
 ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
@@ -88,10 +93,11 @@ does work, not on this one.
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an
 eight-byte little-endian byte-length prefix (empty when the source has no
-address). File contents are five LF-separated fields, without a final LF:
-`kit-fetch-cursor-v1`, the cursor in lowercase hex, the lowercase tracking
-digest, `1` or `0` for signature verification, and lowercase BLAKE3 of the
-preceding four fields including their three separators. Readers cap input at
+address). File contents are seven LF-separated fields, without a final LF:
+`kit-fetch-cursor-v2`, the cursor in lowercase hex, the lowercase tracking
+digest, `1` or `0` for signature verification, `1` or `0` for the tag phase,
+the lowercase tag digest, and lowercase BLAKE3 of the preceding six fields
+including their five separators. A record of another version is invalid. Readers cap input at
 512 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
 delete these files.
 
@@ -124,6 +130,30 @@ remote until `--prune` removes that ref. You can delete these files; they
 never pin objects for GC. A pruned tracking ref takes its record with it.
 Renaming or removing a remote leaves its records behind; they stay true and
 only stop a later walk sooner.
+
+### Tags
+
+After it publishes the branches, a fetch lists `refs/tags/` and publishes each
+remote tag it does not hold (SPEC-TRANSPORT §1.4). A tag publishes only whole
+and proved. Its closure must be in the store and its outermost tag object must
+carry its name. With `verify_signatures`, every commit, remix and tag in its
+history must also pass its signature check, down to the tips in "Verified
+tips". That check is the same range walk over the same record that the branch
+path runs, so a tag never trusts history that a branch would check.
+
+A tag whose closure is local publishes with no further request. Otherwise the
+fetch lists `refs/kit/tagmap/` once and applies the tag's chain. The walk stops
+at the nodes of the chains this fetch applied and at checkpoint heads, so a tag
+grafted on a branch chain downloads only its own nodes and packs. An object
+still missing after a strong re-read of both refs triggers one self-heal for
+the whole tag phase (`TAG_SELF_HEALS_PER_FETCH`).
+
+`FetchReport` names the outcome: `tags_fetched`, `tags_rejected` (each a
+`TagRejection` with its `TagRejectReason`), `tag_warnings` for remote names that
+cannot be pushed, and `tag_listing_failed`. `FetchReport::tags_incomplete` is
+true for a refusal or a failed listing, and the CLI then exits 1. A refused tag
+never fails the branches. An existing local tag with another value is refused
+and never moved, and no fetch deletes a tag.
 
 ### Incremental fetch checkpoints
 

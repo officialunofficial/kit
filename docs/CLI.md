@@ -1147,8 +1147,10 @@ Remote / sync:
   the flat default remote). `kit remote set-url <name> <url>` &mdash; change an
   existing remote's URL (validated like `remote add`).
 - `kit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
-  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]` &mdash; clone a repository
-  into `<dir>` (defaults to the final URL path segment). `--sparse
+  [--tags | --no-tags] [--no-verify-signatures] [-q|--quiet] <url> [<dir>]`
+  &mdash; clone a repository into `<dir>` (defaults to the final URL path
+  segment). The clone takes the remote's tags as `kit fetch` does; a refused
+  tag prints its line and the clone exits 1 after the checkout. `--sparse
   <pattern>...` persists the patterns and materializes only the
   matching files via the verifiable sparse-checkout pipeline (requires
   a build with `--features sparse-checkout`). Note this is an
@@ -1168,8 +1170,23 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
-- `kit fetch [<remote>] [--all] [-p|--prune] [--no-verify-signatures]
-  [--format=json] [-q|--quiet]` &mdash; download from remote without merging.
+- `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
+  [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
+  remote without merging. After the branches it takes every remote tag
+  (SPEC-TRANSPORT §1.4); `--tags` says so explicitly, and `--no-tags` skips
+  them. The last of the two flags wins. A tag publishes to `refs/tags/<t>` only
+  once its closure is local, its tag object carries its name and, with
+  signature checks on, its history verifies. Each new tag prints
+  ` * [new tag]         <t> -> <t>`. A refused tag prints
+  ` ! [rejected]        <t> -> <t> (<reason>)`: a local tag with another value
+  (`would clobber existing tag`, never moved), a signature failure, a name
+  mismatch, a missing tag map or object, or a history past the check's bound.
+  A remote tag name that kit cannot push prints a `warning:` line and is not a
+  refusal. A tag listing that fails, for example one too large for one
+  `kit serve` frame, prints `error: tag listing failed (possibly too many
+  tags): <error>`. A refused tag or a failed listing never stops the branches
+  or the other tags, and the fetch then exits 1 after everything else is
+  published; the next fetch tries the tag again.
   `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
   branch the remote lost, and prints ` - [deleted]         (none) ->
   <remote>/<branch>` for each. It runs only after every remote branch was
@@ -1186,11 +1203,16 @@ Remote / sync:
   others &mdash; `fetch --all` continues through the full list and exits
   non-zero if any remote failed. `--format=json` emits one JSON object
   per remote fetched to stdout: `{"ok":true,"remote":"...","endpoint":"...",
-  "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}]}` on
-  success, or `{"ok":false,"error":"..."}` on failure.
-- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--no-verify-signatures]
-  [--format=json] [-q|--quiet]` &mdash; fetch, then fast-forward the current
-  branch from `refs/remotes/<remote>/<branch>`. The fast-forward writes only
+  "updated":[{"name":"...","old":"<hex>|null","new":"<hex>"}],"tags":["..."],
+  "tags_rejected":[{"name":"...","reason":"..."}],"tag_warnings":[...],
+  "tag_listing_failed":"..."|null}` on success, with `"ok":false` when a tag
+  was refused or the listing failed, or `{"ok":false,"error":"..."}` on
+  failure.
+- `kit pull [<remote>] [--all] [--rebase | --no-ff] [--tags | --no-tags]
+  [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
+  fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
+  fetch takes tags and reports them as `kit fetch` does; a refused tag makes
+  the pull exit 1 after the branch moved. The fast-forward writes only
   the files the new tip changed; the others keep their inode and mtime.
   Divergent histories are
   refused; use `--rebase`, `--no-ff` or an explicit merge after resolving the
@@ -1215,8 +1237,8 @@ Remote / sync:
   an explicit `<remote>` argument. `--format=json` emits one JSON object
   per remote pulled: `{"ok":true,"remote":"...","endpoint":"...",
   "branch":"...","old":"<hex>|null","new":"<hex>|null",
-  "up_to_date":<bool>}` on success, or `{"ok":false,"error":"..."}` on
-  failure.
+  "up_to_date":<bool>}` plus the tag fields of `kit fetch` on success, or
+  `{"ok":false,"error":"..."}` on failure.
 - **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `kit verify <rev>` runs manually
@@ -1363,8 +1385,9 @@ Remote / sync:
   `.kit/server-meta` (exit 78), because the refs of that root live in a
   database. A session may send at most 10,000 frames after `Hello`; the
   server refuses the next one with an error that names the limit. An
-  unchanged fetch costs one frame plus at least two per branch, so one
-  session fetches at most 4,999 branches (SPEC-TRANSPORT §4.4).
+  unchanged fetch costs two frames (the branch and tag listings) plus at
+  least two per branch, so one session fetches at most 4,999 branches
+  (SPEC-TRANSPORT §4.4).
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
   bearer token by `kit+https://` remotes.

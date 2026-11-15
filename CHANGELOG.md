@@ -64,6 +64,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `kit fetch`, `kit pull` and `kit clone` take the remote's tags after the
+  branches (SPEC-TRANSPORT §1.4). `--tags` says so explicitly and `--no-tags`
+  skips them. A tag publishes to `refs/tags/<t>` only once its closure is in
+  the store, its tag object carries its name and, with signature checks on,
+  its history verifies with the same walk and the same verified tips as a
+  branch. A tag whose closure is local costs no download. Otherwise the fetch
+  applies the chain that `refs/kit/tagmap/<t>` names and stops at the nodes it
+  already applied. A local tag with another value is refused and never moved,
+  and no fetch deletes a tag. Each refused tag prints
+  ` ! [rejected]        <t> -> <t> (<reason>)`. The command exits 1 after the
+  branches and the other tags are published, and the next fetch tries the tag
+  again. `FetchReport` gains `tags_fetched`, `tags_rejected`, `tag_warnings`
+  and `tag_listing_failed`, and `SyncOptions` gains `tags`.
+- `RemoteSource::list_refs(prefix)` is a required method. Every source of
+  this repository implements it.
 - `kit push <remote> <branch>` pushes the local branch `<branch>` under its
   own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
   be the current one. Like any refspec push, it records an upstream only with
@@ -72,6 +87,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A tag name is pushable only when `refs/kit/tagmap/<name>` is a valid ref
+  name: at most 496 bytes and 29 segments (SPEC-REFS §3).
+  `kit_core::refs::check_pushable_tag` checks it, and `kit tag` refuses a new
+  name past it. A tag stored before stays readable, writable and deletable. A
+  fetch skips a remote tag past it with a warning.
+- The fetch cursor record is `kit-fetch-cursor-v2`. It also records whether
+  the fetch took tags and a digest of the local tags. A v1 record is invalid,
+  so the first fetch after an upgrade lists the remote once.
+- A fetch sends one more request, the `ListRefs` of `refs/tags/`, and one
+  `ListRefs` of `refs/kit/tagmap/` when some tag is not yet local. An
+  unchanged `kit serve` fetch still fits 4,999 branches in one session.
 - The error for a repository in the `bmt-v1` format, and for any other
   unreadable `.kit/format`, now says how to move a 0.7.3 repository: run
   `kit git export` with kit 0.7.3, then `kit git import` with this kit, or

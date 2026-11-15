@@ -25,6 +25,10 @@ impl kit_sync::RemoteSource for CountingSource<'_> {
         self.calls.borrow_mut().push("ListRefs".into());
         self.inner.list_branches()
     }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.calls.borrow_mut().push(format!("ListRefs {prefix}"));
+        self.inner.list_refs(prefix)
+    }
     fn read_ref(
         &self,
         name: &str,
