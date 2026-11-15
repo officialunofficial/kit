@@ -42,6 +42,21 @@
 //! This holds on every filesystem; it does not depend on ext4
 //! ordered-data journaling.
 //!
+//! # Batches of small objects on Linux
+//!
+//! On ext4, the `fdatasync` of a newly written file waits for a journal
+//! commit, and concurrent calls share one commit. A clone or an add of
+//! many small files therefore runs at the pace of the barrier pool:
+//! the more barriers wait at once, the fewer commits the batch costs.
+//! On Linux, the barrier of a small object (at most 16 KiB, header
+//! included) may grow the pool from 64 to 256 workers, and a batch that
+//! stages at least 64 small objects renames them on a pool of 64
+//! threads. Every flush is still per file, so the batch waits for its
+//! own files only, not for other programs' writes to the same
+//! filesystem. A large object never grows the pool past 64 workers, and
+//! a batch of large objects renames them on one thread. Other platforms
+//! use the 64-worker pool and serial renames for every batch.
+//!
 //! Workloads that prefer the historical schedule can select
 //! [`SyncPolicy::PerObject`] (config key `durability.objects =
 //! per-object`), which reproduces the old write path exactly.
@@ -236,6 +251,9 @@ struct BatchState {
     /// (`TempPath`) so a large batch does not exhaust the fd limit;
     /// deletion-on-drop is retained for abort cleanup.
     staged: HashMap<Hash, TempPath>,
+    /// How many of `staged` hold at most [`SMALL_OBJECT_BYTES`]. Picks
+    /// the rename schedule at the next checkpoint.
+    small_staged: usize,
     /// Shard directories whose dirents this batch must flush at commit.
     /// Includes dedup hits: an object made visible by another process
     /// may not have a durable dirent yet, and our commit is about to
@@ -380,13 +398,18 @@ impl<'s> WriteBatch<'s> {
                 // would re-serialise the batch on device latency
                 // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
                 // ~8s for a 100 MiB ingest).
-                let mut st = self.inner.lock().expect("batch state mutex poisoned");
+                let small = total_len <= SMALL_OBJECT_BYTES;
+                let mut guard = self.inner.lock().expect("batch state mutex poisoned");
+                let st = &mut *guard;
                 // Lost race against a concurrent writer of the same
                 // object within this batch: keep theirs, drop our tmp
                 // (content-addressed — byte-identical by construction).
                 let staged_path = match st.staged.entry(h) {
                     std::collections::hash_map::Entry::Occupied(_) => None,
                     std::collections::hash_map::Entry::Vacant(slot) => {
+                        if small {
+                            st.small_staged += 1;
+                        }
                         let path = tmp.into_temp_path();
                         let owned = path.to_path_buf();
                         slot.insert(path);
@@ -395,12 +418,12 @@ impl<'s> WriteBatch<'s> {
                 };
                 st.touched_shards.insert(shard_dir.clone());
                 st.created_shards.insert(shard_dir);
-                drop(st);
+                drop(guard);
                 // Start this file's barrier now, on a background
                 // worker, so its device latency overlaps the caller's
                 // chunking and hashing instead of piling up at commit.
                 if let Some(path) = staged_path {
-                    self.early.submit(path);
+                    self.early.submit(path, small);
                 }
             }
         }
@@ -484,10 +507,11 @@ impl<'s> WriteBatch<'s> {
         // reached (none could be spawned) come back to be barriered
         // here.
         let leftover = self.early.quiesce()?;
-        let (staged, touched_shards) = {
+        let (staged, small_staged, touched_shards) = {
             let mut st = self.inner.lock().expect("batch state mutex poisoned");
             (
                 std::mem::take(&mut st.staged),
+                std::mem::take(&mut st.small_staged),
                 std::mem::take(&mut st.touched_shards),
             )
         };
@@ -523,8 +547,15 @@ impl<'s> WriteBatch<'s> {
                 //    their bytes are durable — another process's dedup
                 //    can never reference a non-durable object. Final
                 //    paths derive from the hashes (single layout rule).
-                for (h, tmp) in staged {
-                    syncer.rename(tmp, &store.path_for(&h))?;
+                //    The renames are independent of each other, so a
+                //    batch of many small objects runs them on a pool;
+                //    the pool is joined before step 4 either way.
+                if parallel_renames(small_staged) {
+                    rename_parallel(store, syncer.as_ref(), staged)?;
+                } else {
+                    for (h, tmp) in staged {
+                        syncer.rename(tmp, &store.path_for(&h))?;
+                    }
                 }
                 // 4. Dirent barriers, once per touched shard dir,
                 //    concurrently (sorted first so the work list is
@@ -542,6 +573,45 @@ impl<'s> WriteBatch<'s> {
             }
         }
     }
+}
+
+/// Whether a checkpoint that took `small_staged` small objects renames
+/// them on a pool. Linux only, the platform the gain was measured on;
+/// other platforms rename on one thread.
+fn parallel_renames(small_staged: usize) -> bool {
+    cfg!(target_os = "linux") && small_staged >= PARALLEL_RENAME_MIN
+}
+
+/// Rename every staged file into its final path on up to
+/// [`MAX_SYNC_WORKERS`] threads, and return once all of them are done.
+///
+/// The caller has made every staged byte durable first, so each rename
+/// publishes durable bytes and the order among them does not matter.
+/// After the first error no worker takes another file, as the serial
+/// loop stops at its first error; renames already in flight finish. The
+/// files no worker took are dropped with the queue, which unlinks them.
+fn rename_parallel(
+    store: &ObjectStore,
+    syncer: &dyn Syncer,
+    staged: Vec<(Hash, TempPath)>,
+) -> io::Result<()> {
+    let count = staged.len();
+    let queue = Mutex::new(staged.into_iter());
+    let stop = AtomicBool::new(false);
+    parallel_io(count, |_| {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let next = queue.lock().expect("rename queue poisoned").next();
+        let Some((h, tmp)) = next else {
+            return Ok(());
+        };
+        let result = syncer.rename(tmp, &store.path_for(&h));
+        if result.is_err() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        result
+    })
 }
 
 /// Open a staged temp file and issue its write barrier.
@@ -564,7 +634,10 @@ fn barrier_path(syncer: &dyn Syncer, path: &Path) -> io::Result<()> {
 ///
 /// Workers are spawned lazily, one more whenever a path is queued and
 /// none is idle, up to [`MAX_SYNC_WORKERS`], so a small batch costs one
-/// thread or none. If a thread cannot be spawned (wasm, resource
+/// thread or none. The barrier of a small object may grow the pool up to
+/// [`small_object_sync_workers`] instead (Linux only; see the module
+/// docs). Workers stay until the next checkpoint and take any queued
+/// file, small or large. If a thread cannot be spawned (wasm, resource
 /// limits), queued paths are handed back to `commit`, which barriers
 /// them itself.
 #[derive(Debug)]
@@ -603,14 +676,21 @@ impl EarlyBarriers {
     }
 
     /// Queue `path` for a barrier, spawning a worker if none is idle.
-    fn submit(&self, path: PathBuf) {
+    /// `small` says the file holds at most [`SMALL_OBJECT_BYTES`], which
+    /// raises the worker cap on Linux.
+    fn submit(&self, path: PathBuf, small: bool) {
         let mut st = self.shared.state.lock().expect("barrier queue poisoned");
         st.queue.push_back(path);
         let want_worker = st.idle == 0;
         drop(st);
         if want_worker {
             let mut workers = self.workers.lock().expect("barrier workers poisoned");
-            if workers.len() < MAX_SYNC_WORKERS {
+            let cap = if small {
+                small_object_sync_workers()
+            } else {
+                MAX_SYNC_WORKERS
+            };
+            if workers.len() < cap {
                 let shared = Arc::clone(&self.shared);
                 // A failed spawn is not an error: the path stays queued
                 // and `finish` hands it back to `commit`.
@@ -725,9 +805,88 @@ fn barrier_worker(shared: &EarlyShared) {
 /// gated by filesystem journal serialization, not raw device queue
 /// depth, so diminishing (and possibly reversing) returns somewhere
 /// past 64 is expected in principle even if this data can't yet pin
-/// down exactly where. Linux/ext4 numbers are not gathered at all; re-tune
-/// if they diverge meaningfully from the macOS data.
+/// down exactly where.
+///
+/// On Linux/ext4, a pool of 256 was no faster than 64 for objects of
+/// 64 KiB and up, which the disk bandwidth limits, so large objects stay
+/// at 64. Small objects use [`SMALL_OBJECT_SYNC_WORKERS`].
 const MAX_SYNC_WORKERS: usize = 64;
+
+/// Objects of at most this many bytes, header included, are small, and
+/// their barriers may use the larger pool on Linux. It is the chunker's
+/// minimum chunk size ([`crate::chunker::MIN_SIZE`]). A chunk object is
+/// at least that many content bytes plus its header, so no chunk of a
+/// large file but its last counts as small. A plain file counts as small
+/// up to 16,374 bytes.
+///
+/// Measured on Linux/ext4 with adds of 2,000 files (median of 4 runs),
+/// with a 256-worker pool for every object against the 64-worker pool:
+/// files of 4 KiB and 16 KiB were 14% and 20% faster, and files of
+/// 64 KiB and 256 KiB were level, within 0.2%.
+const SMALL_OBJECT_BYTES: u64 = crate::chunker::MIN_SIZE as u64;
+
+/// Worker cap for the barriers of small objects on Linux, before the
+/// open-file limit (see [`small_object_sync_workers`]).
+///
+/// Measured on Linux/ext4 with 10k files of 1 KiB (median of 4 runs):
+/// with 64 workers and serial renames, a clone took 1.04 s and an add
+/// 0.91 s. With renames on a pool, 128 workers took 0.80 s and 0.64 s,
+/// 256 took 0.72 s and 0.51 s, and 512 took 0.62 s and 0.51 s. 1,024
+/// workers ran out of descriptors under the default soft limit of
+/// 1,024. 256 takes most of the gain and holds at most a quarter of that
+/// limit open.
+const SMALL_OBJECT_SYNC_WORKERS: usize = 256;
+
+/// A checkpoint that took at least this many small objects renames
+/// them on a pool (Linux only). It is one rename per thread of the pool;
+/// below it, spawning the threads is estimated to cost more than the
+/// renames save (not measured).
+const PARALLEL_RENAME_MIN: usize = 64;
+
+/// The worker cap for the barriers of small objects.
+///
+/// Each busy worker holds one open file, so the pool stays within a
+/// quarter of the process's soft open-file limit (see
+/// [`cap_for_soft_limit`]). The limit is read once per process. The cap
+/// holds per batch, so a process that runs several batches at once can
+/// hold that many files open for each. Off Linux, or when the limit
+/// cannot be read, it is [`MAX_SYNC_WORKERS`].
+fn small_object_sync_workers() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        static CAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *CAP.get_or_init(|| soft_open_file_limit().map_or(MAX_SYNC_WORKERS, cap_for_soft_limit))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        MAX_SYNC_WORKERS
+    }
+}
+
+/// A quarter of the soft open-file limit `soft`, held between
+/// [`MAX_SYNC_WORKERS`] and [`SMALL_OBJECT_SYNC_WORKERS`].
+#[cfg(any(target_os = "linux", test))]
+fn cap_for_soft_limit(soft: u64) -> usize {
+    usize::try_from(soft / 4)
+        .unwrap_or(usize::MAX)
+        .clamp(MAX_SYNC_WORKERS, SMALL_OBJECT_SYNC_WORKERS)
+}
+
+/// The process's soft limit on open files, `RLIM_INFINITY` (`u64::MAX`)
+/// when there is none.
+#[cfg(target_os = "linux")]
+fn soft_open_file_limit() -> Option<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit(2)` writes one `struct rlimit` through its
+    // pointer argument and reads no other memory. The pointer is to a
+    // live, writable local of exactly that type, borrowed for the call.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) };
+    (rc == 0).then_some(limit.rlim_cur)
+}
 
 /// Run `op(0..count)` across a pool of up to [`MAX_SYNC_WORKERS`] scoped
 /// threads, joining them all before returning. Concurrency overlaps
@@ -813,6 +972,8 @@ pub(crate) mod testing {
     pub(crate) struct RecordingSyncer {
         events: Mutex<Vec<Ev>>,
         fail_barriers: std::sync::atomic::AtomicBool,
+        /// Renames still allowed to succeed; `None` allows every one.
+        renames_left: Mutex<Option<usize>>,
     }
 
     impl RecordingSyncer {
@@ -824,6 +985,12 @@ pub(crate) mod testing {
         pub(crate) fn fail_barriers(&self) {
             self.fail_barriers
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Let `n` more renames succeed, then fail every later one: a
+        /// crash in the middle of the renames, seen from the store.
+        pub(crate) fn fail_renames_after(&self, n: usize) {
+            *self.renames_left.lock().unwrap() = Some(n);
         }
     }
 
@@ -848,6 +1015,12 @@ pub(crate) mod testing {
         }
 
         fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
+            if let Some(left) = self.renames_left.lock().unwrap().as_mut() {
+                if *left == 0 {
+                    return Err(io::Error::other("injected rename failure"));
+                }
+                *left -= 1;
+            }
             self.events.lock().unwrap().push(Ev::Rename {
                 tmp: tmp.to_path_buf(),
                 dst: final_path.to_path_buf(),
@@ -1069,10 +1242,19 @@ mod tests {
     // ---- Cycle 2: flush ordering (the O(1) proof) ----------------------
 
     fn fifty_distinct_objects() -> Vec<Vec<u8>> {
-        (0u32..50)
+        distinct_objects(50)
+    }
+
+    fn distinct_objects(count: u32) -> Vec<Vec<u8>> {
+        (0..count)
             .map(|i| format!("object #{i}").into_bytes())
             .collect()
     }
+
+    /// Object counts for the ordering tests: one batch below
+    /// `PARALLEL_RENAME_MIN`, which renames serially, and one above it,
+    /// which renames on a pool on Linux.
+    const ORDERING_COUNTS: [u32; 2] = [50, 300];
 
     #[test]
     fn batch_commit_full_flush_count_is_constant() {
@@ -1104,9 +1286,15 @@ mod tests {
 
     #[test]
     fn every_rename_is_preceded_by_its_barrier_and_the_full_flush() {
+        for count in ORDERING_COUNTS {
+            assert_renames_follow_barriers_and_full_flush(count);
+        }
+    }
+
+    fn assert_renames_follow_barriers_and_full_flush(count: u32) {
         let (_dir, store, rec) = recording_store();
         let batch = store.batch();
-        for bytes in fifty_distinct_objects() {
+        for bytes in distinct_objects(count) {
             batch.write(&bytes).unwrap();
         }
         batch.commit().unwrap();
@@ -1147,10 +1335,16 @@ mod tests {
 
     #[test]
     fn dir_syncs_come_after_all_renames_and_are_deduped() {
+        for count in ORDERING_COUNTS {
+            assert_dir_syncs_follow_renames(count);
+        }
+    }
+
+    fn assert_dir_syncs_follow_renames(count: u32) {
         let (_dir, store, rec) = recording_store();
         let batch = store.batch();
         let mut shards = HashSet::new();
-        for bytes in fifty_distinct_objects() {
+        for bytes in distinct_objects(count) {
             let h = batch.write(&bytes).unwrap();
             shards.insert(store.path_for(&h).parent().unwrap().to_path_buf());
         }
@@ -1437,7 +1631,7 @@ mod tests {
         let early = EarlyBarriers::new(syncer.clone());
         let count = MAX_SYNC_WORKERS + 16;
         for path in staged_files(dir.path(), count) {
-            early.submit(path);
+            early.submit(path, false);
         }
         let spawned = early.workers.lock().unwrap().len();
         let all_busy = wait_for(|| syncer.started() >= spawned);
@@ -1449,6 +1643,219 @@ mod tests {
     }
 
     #[test]
+    fn small_object_barriers_grow_the_pool_to_the_small_cap() {
+        // On Linux a small object's barrier may spawn workers past
+        // MAX_SYNC_WORKERS, up to the small-object cap; elsewhere the two
+        // caps are equal.
+        let dir = TempDir::new().unwrap();
+        let syncer = Arc::new(GatedSyncer::default());
+        syncer.set_closed(true);
+        let early = EarlyBarriers::new(syncer.clone());
+        let cap = small_object_sync_workers();
+        let count = cap + 16;
+        for path in staged_files(dir.path(), count) {
+            early.submit(path, true);
+        }
+        let spawned = early.workers.lock().unwrap().len();
+        let all_busy = wait_for(|| syncer.started() >= spawned);
+        syncer.set_closed(false);
+        assert_eq!(spawned, cap);
+        assert!(all_busy, "every worker took a file");
+        assert!(early.quiesce().unwrap().is_empty());
+        assert_eq!(syncer.finished(), count, "every file got its barrier");
+        assert!((MAX_SYNC_WORKERS..=SMALL_OBJECT_SYNC_WORKERS).contains(&cap));
+        if !cfg!(target_os = "linux") {
+            assert_eq!(cap, MAX_SYNC_WORKERS);
+        }
+    }
+
+    #[test]
+    fn a_large_object_barrier_does_not_grow_the_pool_past_the_default_cap() {
+        // Workers spawned for small objects stay, but a large object
+        // never adds one past MAX_SYNC_WORKERS.
+        let dir = TempDir::new().unwrap();
+        let syncer = Arc::new(GatedSyncer::default());
+        syncer.set_closed(true);
+        let early = EarlyBarriers::new(syncer.clone());
+        for path in staged_files(dir.path(), MAX_SYNC_WORKERS + 8) {
+            early.submit(path, false);
+        }
+        let spawned = early.workers.lock().unwrap().len();
+        syncer.set_closed(false);
+        assert_eq!(spawned, MAX_SYNC_WORKERS);
+        assert!(early.quiesce().unwrap().is_empty());
+    }
+
+    #[test]
+    fn small_object_cap_is_a_quarter_of_the_open_file_limit() {
+        assert_eq!(cap_for_soft_limit(0), MAX_SYNC_WORKERS);
+        assert_eq!(cap_for_soft_limit(256), MAX_SYNC_WORKERS);
+        assert_eq!(cap_for_soft_limit(600), 150);
+        assert_eq!(cap_for_soft_limit(1024), SMALL_OBJECT_SYNC_WORKERS);
+        assert_eq!(cap_for_soft_limit(u64::MAX), SMALL_OBJECT_SYNC_WORKERS);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_open_file_limit_reads() {
+        assert!(soft_open_file_limit().is_some_and(|soft| soft > 0));
+    }
+
+    #[test]
+    fn only_a_batch_of_many_small_objects_renames_on_a_pool() {
+        assert!(!parallel_renames(0));
+        assert!(!parallel_renames(PARALLEL_RENAME_MIN - 1));
+        assert_eq!(
+            parallel_renames(PARALLEL_RENAME_MIN),
+            cfg!(target_os = "linux")
+        );
+
+        // Objects above SMALL_OBJECT_BYTES (the chunks of a large file)
+        // do not count toward the threshold.
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let big = usize::try_from(SMALL_OBJECT_BYTES).unwrap() + 1;
+        for i in 0u8..3 {
+            batch.write(&vec![i; big]).unwrap();
+        }
+        let at_limit = usize::try_from(SMALL_OBJECT_BYTES).unwrap();
+        batch.write(&vec![7u8; at_limit]).unwrap();
+        batch.write(b"small").unwrap();
+        assert_eq!(batch.inner.lock().unwrap().small_staged, 2);
+        batch.checkpoint().unwrap();
+        assert_eq!(
+            batch.inner.lock().unwrap().small_staged,
+            0,
+            "a checkpoint resets the count"
+        );
+        batch.commit().unwrap();
+    }
+
+    #[test]
+    fn a_failure_in_the_middle_of_the_renames_publishes_only_durable_objects() {
+        // A crash during the renames, injected as a rename failure after
+        // 100 of 300: the batch has already flushed every staged file, so
+        // each object that became visible reads back and passes the hash
+        // check. No directory flush and no device flush follow, the
+        // commit fails, so the caller writes no ref, and the files no
+        // worker renamed are unlinked.
+        let (_dir, store, rec) = recording_store();
+        rec.fail_renames_after(100);
+        let batch = store.batch();
+        let objects = distinct_objects(300);
+        let hashes: Vec<Hash> = objects.iter().map(|b| batch.write(b).unwrap()).collect();
+        assert!(batch.commit().is_err(), "a failed rename fails the commit");
+
+        let evs = rec.events();
+        let full_pos = evs
+            .iter()
+            .position(|e| matches!(e, Ev::Full(_)))
+            .expect("the data flush ran before the renames");
+        let renames: Vec<usize> = evs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, Ev::Rename { .. }).then_some(i))
+            .collect();
+        assert_eq!(renames.len(), 100);
+        assert!(renames.iter().all(|&i| i > full_pos));
+        assert_eq!(
+            evs.iter().filter(|e| matches!(e, Ev::Full(_))).count(),
+            1,
+            "no terminal device flush after a failed rename"
+        );
+        assert!(!evs.iter().any(|e| matches!(e, Ev::DirBarrier(_))));
+
+        let visible: Vec<(&Hash, &Vec<u8>)> = hashes
+            .iter()
+            .zip(&objects)
+            .filter(|(h, _)| store.contains(h))
+            .collect();
+        assert_eq!(visible.len(), 100);
+        for (h, bytes) in visible {
+            assert_eq!(
+                &store.read(h).unwrap(),
+                bytes,
+                "a visible object reads back"
+            );
+        }
+        assert_eq!(any_file_count(&store), 100, "no temp file is left behind");
+    }
+
+    /// Syncer whose first rename fails at once and whose later renames
+    /// each take 100 ms, so a pool that kept renaming after the failure
+    /// would rename far more files than it has workers.
+    #[derive(Debug, Default)]
+    struct FirstRenameFails {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Syncer for FirstRenameFails {
+        fn barrier(&self, _file: &File, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn full(&self, _file: &File, _path: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(io::Error::other("injected rename failure"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            tmp.persist(final_path).map_err(|e| e.error)?;
+            Ok(())
+        }
+
+        fn dir_sync(&self, _dir: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn dir_barrier(&self, _dir: &Path) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_rename_stops_the_renames_that_have_not_started() {
+        // As in the serial loop, no worker takes a file after a rename
+        // fails. Only renames already in flight finish: about one per
+        // other worker. The bound allows a second round in case the
+        // failing worker stalls before it sets the stop. Without the
+        // stop, the pool would rename all but one of the 300 files.
+        let (_dir, mut store) = fresh_store();
+        let syncer = Arc::new(FirstRenameFails::default());
+        store.set_syncer(syncer.clone());
+        let batch = store.batch();
+        let objects = distinct_objects(300);
+        let hashes: Vec<Hash> = objects.iter().map(|b| batch.write(b).unwrap()).collect();
+        assert!(batch.commit().is_err(), "a failed rename fails the commit");
+
+        let visible: Vec<(&Hash, &Vec<u8>)> = hashes
+            .iter()
+            .zip(&objects)
+            .filter(|(h, _)| store.contains(h))
+            .collect();
+        assert!(
+            visible.len() < 2 * MAX_SYNC_WORKERS,
+            "{} files renamed after the first rename failed",
+            visible.len()
+        );
+        for (h, bytes) in &visible {
+            assert_eq!(&store.read(h).unwrap(), *bytes);
+        }
+        assert_eq!(
+            any_file_count(&store),
+            visible.len(),
+            "no temp file is left"
+        );
+    }
+
+    #[test]
     fn woken_worker_is_no_longer_counted_idle() {
         // A worker that wakes for a file and blocks on its barrier is
         // busy. The next file must get a new worker instead of waiting
@@ -1457,12 +1864,12 @@ mod tests {
         let files = staged_files(dir.path(), 3);
         let syncer = Arc::new(GatedSyncer::default());
         let early = EarlyBarriers::new(syncer.clone());
-        early.submit(files[0].clone());
+        early.submit(files[0].clone(), false);
         assert!(wait_for(|| early.shared.state.lock().unwrap().idle == 1));
         syncer.set_closed(true);
-        early.submit(files[1].clone());
+        early.submit(files[1].clone(), false);
         assert!(wait_for(|| syncer.started() == 2));
-        early.submit(files[2].clone());
+        early.submit(files[2].clone(), false);
         let workers = early.workers.lock().unwrap().len();
         let overlapped = wait_for(|| syncer.started() == 3);
         syncer.set_closed(false);

@@ -20,12 +20,13 @@
 //! no `anyhow`, no panics on unchecked input.
 
 // `deny(unsafe_code)` rather than `forbid` so a small, justified set of
-// `#[allow(unsafe_code)]` callsites can call into libc. There are two
+// `#[allow(unsafe_code)]` callsites can call into libc. There are three
 // today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
-// and `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
-// on macOS/iOS. Every other module remains under the same prohibition; a
-// code-review gate (CONTRIBUTING) requires SAFETY notes on any new
-// `unsafe` block.
+// `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
+// on macOS/iOS, and `batch::soft_open_file_limit` uses
+// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Linux. Every other module
+// remains under the same prohibition; a code-review gate (CONTRIBUTING)
+// requires SAFETY notes on any new `unsafe` block.
 #![deny(unsafe_code)]
 // `ed25519-dalek` v2.2 still pulls in older sha2/cpufeatures (and
 // rand_core 0.6 which transitively wants getrandom 0.2). These are

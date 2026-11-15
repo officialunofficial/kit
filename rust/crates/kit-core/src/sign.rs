@@ -681,9 +681,8 @@ pub fn load_raw_32(path: &Path) -> Result<zeroize::Zeroizing<[u8; 32]>, KitError
 
         // SAFETY: `geteuid(2)` is a parameterless syscall that always
         // succeeds, never reads or writes user memory, and is reentrant
-        // and async-signal-safe per POSIX. This is one of two reviewed
-        // `unsafe` blocks in `kit-core` (the other being the
-        // `F_BARRIERFSYNC` fcntl in `batch.rs`); the crate keeps
+        // and async-signal-safe per POSIX. The header of `lib.rs` lists
+        // every reviewed `unsafe` site in `kit-core`; the crate keeps
         // `deny(unsafe_code)` so each opt-out is reviewable.
         let euid = effective_uid();
         if meta.uid() != euid {
