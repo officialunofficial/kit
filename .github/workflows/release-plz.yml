@@ -3,8 +3,8 @@
 # The PR bumps the shared workspace version and updates CHANGELOG.md from
 # Conventional Commits. This workflow does not publish to crates.io, create a
 # tag or create a GitHub release. A maintainer cuts the signed tag that
-# release.yml verifies. A maintainer then publishes the crates by hand. See
-# docs/RELEASE.md and rust/release-plz.toml.
+# release.yml verifies. The tag then runs release.yml, which publishes the
+# crates. See docs/RELEASE.md and rust/release-plz.toml.
 #
 # The workflow runs only on manual dispatch. It does nothing until the
 # repository variable KIT_RELEASE_PLZ_ENABLED is `true`.
