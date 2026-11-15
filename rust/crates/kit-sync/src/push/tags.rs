@@ -38,8 +38,8 @@ use kit_core::ops::graph::{MAX_REACHABLE, check_closure_present};
 use kit_core::protocol::{AdvanceOutcome, CommitOutcome, PackKey, RefListing, UploadLimits};
 use kit_core::refs::{self, RefWriteCondition, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
 use kit_core::store::{ObjectStore, StoreError};
+use kit_core::transfer::PackPlan;
 use kit_core::transfer::packmap::{ChainState, PlanError, plan_advance};
-use kit_core::transfer::{MAX_PEELED_TAGS, PackPlan};
 
 use super::packmap::PACKMAP_CAS_ATTEMPTS;
 use super::{
@@ -543,21 +543,9 @@ fn parents(store: &ObjectStore, id: &Hash) -> Result<Vec<Hash>, PushError> {
     })
 }
 
-/// `id` with its annotated tags peeled, at most [`MAX_PEELED_TAGS`] deep.
+/// `id` with its annotated tags peeled, as the planner peels them.
 fn peel(store: &ObjectStore, id: Hash) -> Result<Hash, PushError> {
-    let mut id = id;
-    for _ in 0..MAX_PEELED_TAGS {
-        match store.object_type(&id) {
-            Ok(ObjectType::Tag) => {}
-            Ok(_) | Err(StoreError::ObjectNotFound(_)) => break,
-            Err(error) => return Err(error.into()),
-        }
-        let Object::Tag(tag) = store.read_object(&id)? else {
-            break;
-        };
-        id = tag.target;
-    }
-    Ok(id)
+    Ok(kit_core::transfer::peeled_tip(store, id)?)
 }
 
 /// The tags `selection` names, sorted by name.
@@ -643,9 +631,13 @@ enum Advance {
     /// The remote refused the write: `scope` when it refused this caller's
     /// access to the ref, as a grant whose scopes miss it does.
     Refused { message: String, scope: bool },
-    /// The remote refused the upload tickets the write carried, as it does
-    /// once they expire.
+    /// The remote refused the upload the write carried: its tickets
+    /// expired, or its packs are not in the repository. It may be sent
+    /// again once.
     Stale(String),
+    /// The remote lacks a delta base the upload used. It may be planned
+    /// again once, self-contained (SPEC-TRANSPORT-CONNECT §7.6).
+    LostBase(String),
 }
 
 /// Whether a failed write is the remote's refusal of this write, which
@@ -656,7 +648,7 @@ fn refusal(error: &SourceError) -> bool {
         SourceError::AccessDenied | SourceError::InvalidRef(_) | SourceError::Vetoed(_) => true,
         SourceError::Remote(remote) => matches!(
             remote.code.as_str(),
-            "invalid_argument" | "permission_denied" | "failed_precondition" | "unauthenticated"
+            "invalid_argument" | "permission_denied" | "failed_precondition"
         ),
         _ => false,
     }
@@ -816,7 +808,17 @@ impl TagPush<'_, '_> {
             CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
                 return Ok(Advance::Landed { committed: true });
             }
+            // The tag map's condition failed: this write may have landed
+            // already, through the retry ladder, or another push may have
+            // placed the same value.
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
+                let state = self.read_state(local)?;
+                if state.tag == Some(local.value) {
+                    return Ok(Advance::Landed { committed: false });
+                }
+                if state.map == Some(map) && state.tag.is_none() {
+                    return self.place_tag(local, tag_condition);
+                }
                 return Ok(Advance::Conflict);
             }
             CommitOutcome::Advanced(AdvanceOutcome::HeadConflict) => None,
@@ -832,14 +834,28 @@ impl TagPush<'_, '_> {
         }
         Ok(match refused {
             None => Advance::Conflict,
-            Some(PushError::TicketRejected) => {
-                Advance::Stale(PushError::TicketRejected.to_string())
+            Some(error @ (PushError::TicketRejected | PushError::PacklistNotInRepository)) => {
+                Advance::Stale(error.to_string())
             }
-            Some(error) => Advance::Refused {
-                message: error.to_string(),
-                scope: false,
-            },
+            Some(error) => Advance::LostBase(error.to_string()),
         })
+    }
+
+    /// Write only the tag, when its tag map already holds the node this push
+    /// wrote, or one equal to it.
+    fn place_tag(&self, local: &Local, condition: RefWriteCondition) -> Result<Advance, PushError> {
+        match self
+            .tx
+            .update_ref(&local.tag_ref(), condition, &local.value)
+        {
+            Ok(()) => Ok(Advance::Landed { committed: false }),
+            Err(SourceError::RefConflict) => Ok(Advance::Conflict),
+            Err(error) if refusal(&error) => Ok(Advance::Refused {
+                message: error.to_string(),
+                scope: scope_refusal(&error),
+            }),
+            Err(error) => Err(repository_operation_error(self.tx, error)),
+        }
     }
 
     /// Move only the tag, when its tag map already rebuilds the new value.
@@ -882,7 +898,9 @@ impl TagPush<'_, '_> {
         match advance {
             Advance::Landed { .. } => self.finish(local, row.landed(local.value)),
             Advance::Conflict => self.retry.push(local.clone()),
-            Advance::Refused { message, .. } | Advance::Stale(message) => {
+            Advance::Refused { message, .. }
+            | Advance::Stale(message)
+            | Advance::LostBase(message) => {
                 self.reject(local, TagPushRejection::Refused(message));
             }
         }
@@ -912,7 +930,7 @@ impl TagPush<'_, '_> {
         }));
         tips.sort_unstable();
         tips.dedup();
-        let plan = self
+        let mut plan = self
             .tx
             .deltas
             .plan_tips(self.store, &tips, base.map(|base| base.head))?;
@@ -941,14 +959,15 @@ impl TagPush<'_, '_> {
             // A ticket binds an upload to its head ref, so until an advance
             // commits, each ticket-carrying tag uploads the group again.
             if chain.is_none() || (ticketed && !landed) {
-                if lost {
+                let uploads = base.is_none() || !plan.is_empty();
+                if lost && uploads {
                     if self.reuploads == PACKMAP_CAS_ATTEMPTS {
                         self.reject(&local, TagPushRejection::Contended);
                         continue;
                     }
                     self.reuploads += 1;
-                    lost = false;
                 }
+                lost = false;
                 chain = Some(match base {
                     Some(base) if plan.is_empty() => (base.packmap, Vec::new()),
                     _ => {
@@ -992,9 +1011,26 @@ impl TagPush<'_, '_> {
                         members.push_front((local, row));
                         continue;
                     }
+                    // A lost delta base: the group is planned again once,
+                    // self-contained, and the same tag uploads it.
+                    Advance::LostBase(_) if !renewed => {
+                        renewed = true;
+                        plan = self.tx.deltas.plan_tips(self.store, &tips, None)?;
+                        if !self.fits_one_advance(&plan)? {
+                            self.reject(&local, TagPushRejection::TooLarge);
+                            while let Some((local, _)) = members.pop_front() {
+                                self.reject(&local, TagPushRejection::TooLarge);
+                            }
+                            return Ok(());
+                        }
+                        members.push_front((local, row));
+                        continue;
+                    }
                     // Any other refusal of the ticket-carrying advance
                     // refuses the whole group: its packs are not members.
-                    Advance::Refused { message, .. } | Advance::Stale(message) => {
+                    Advance::Refused { message, .. }
+                    | Advance::Stale(message)
+                    | Advance::LostBase(message) => {
                         let message = message.clone();
                         self.refuse_group(&local, &mut members, &message);
                         return Ok(());
@@ -1016,7 +1052,7 @@ impl TagPush<'_, '_> {
         };
         // Plan against the old value only when its whole closure is here;
         // otherwise send the new value's whole closure.
-        let base = match old {
+        let mut base = match old {
             Some(old) if store_holds_closure(self.store, old)? => Some(peel(self.store, old)?),
             _ => None,
         };
@@ -1030,31 +1066,46 @@ impl TagPush<'_, '_> {
             self.record(local, row, advance);
             return Ok(());
         }
-        if !self.fits_one_advance(&plan)? {
-            self.reject(local, TagPushRejection::TooLarge);
-            return Ok(());
-        }
-        let uploaded = self.upload(
-            &local.tag_ref(),
-            plan,
-            ChainState::Append {
-                head: map,
-                packs: HashSet::new(),
-            },
-        );
-        let (node, keys) = match uploaded {
-            Ok(uploaded) => uploaded,
-            Err(error) => match refused_upload(&error) {
-                Some((message, _)) => {
-                    self.reject(local, TagPushRejection::Refused(message));
+        let mut plan = Some(plan);
+        // A refused upload goes again once: as it was, or self-contained
+        // after a lost delta base.
+        for again in [false, true] {
+            let plan = match plan.take() {
+                Some(plan) => plan,
+                None => self.tx.deltas.plan_tips(self.store, &[local.value], base)?,
+            };
+            if !self.fits_one_advance(&plan)? {
+                self.reject(local, TagPushRejection::TooLarge);
+                return Ok(());
+            }
+            let uploaded = self.upload(
+                &local.tag_ref(),
+                plan,
+                ChainState::Append {
+                    head: map,
+                    packs: HashSet::new(),
+                },
+            );
+            let (node, keys) = match uploaded {
+                Ok(uploaded) => uploaded,
+                Err(error) => match refused_upload(&error) {
+                    Some((message, _)) => {
+                        self.reject(local, TagPushRejection::Refused(message));
+                        return Ok(());
+                    }
+                    None => return Err(error),
+                },
+            };
+            match self.advance(local, row, node, &keys)? {
+                Advance::Stale(_) if !again => {}
+                Advance::LostBase(_) if !again => base = None,
+                advance => {
+                    self.record(local, row, advance);
                     return Ok(());
                 }
-                None => return Err(error),
-            },
-        };
-        let advance = self.advance(local, row, node, &keys)?;
-        self.record(local, row, advance);
-        Ok(())
+            }
+        }
+        unreachable!("the second attempt records its outcome")
     }
 }
 

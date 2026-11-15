@@ -1259,6 +1259,131 @@ fn a_lost_ticketed_advance_uploads_again_under_the_next_tag() {
     assert_eq!(report.tags_fetched, ["a", "b", "c"]);
 }
 
+/// A ticketed group whose two tags `a` and `b` share one commit.
+fn ticketed_pair<'a>(tx: &'a dyn Transport, work: &Work) -> Wire<'a> {
+    let wire = Wire::new(tx);
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    work.tag("a", c[1]);
+    work.tag("b", c[1]);
+    wire.limits.set(UploadLimits {
+        max_pack_bytes: None,
+        data_packs_per_advance: Some(6),
+        ticket_threshold_bytes: Some(0),
+    });
+    wire
+}
+
+/// Ticketed Connect: expired tickets send the group again once under the
+/// same tag; expired again, the group is refused.
+#[test]
+fn expired_tickets_upload_the_group_again_once() {
+    let (tx, _root) = transport(Kind::Memory);
+    let work = Work::new();
+    let expired = Cell::new(0);
+    let wire = ticketed_pair(&*tx, &work);
+    let expired = &expired;
+    *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
+        (head == "refs/tags/a" && expired.replace(expired.get() + 1) == 0)
+            .then_some(Ok(CommitOutcome::TicketRejected))
+    }));
+    let results = work.push_tags(&wire, false);
+    assert_created(&results, "a");
+    assert_created(&results, "b");
+    assert_eq!(wire.uploaded_for(), ["refs/tags/a", "refs/tags/a"]);
+
+    let (tx, _root) = transport(Kind::Memory);
+    let work = Work::new();
+    let wire = ticketed_pair(&*tx, &work);
+    *wire.before.borrow_mut() = Some(Box::new(|head: &str| {
+        (head == "refs/tags/a").then_some(Ok(CommitOutcome::TicketRejected))
+    }));
+    let results = work.push_tags(&wire, false);
+    for t in ["a", "b"] {
+        assert!(
+            matches!(rejection(&results, t), TagPushRejection::Refused(_)),
+            "{results:?}"
+        );
+    }
+    assert_eq!(wire.uploaded_for(), ["refs/tags/a", "refs/tags/a"]);
+    assert_eq!(wire.read("refs/tags/a"), None);
+}
+
+/// Ticketed Connect: a lost delta base plans the group again once, with no
+/// base, and the same tag sends it (SPEC-TRANSPORT-CONNECT §7.6).
+#[test]
+fn a_lost_delta_base_plans_the_group_again_self_contained() {
+    let (tx, _root) = transport(Kind::Memory);
+    let work = Work::new();
+    let lost = Cell::new(false);
+    let wire = ticketed_pair(&*tx, &work);
+    let lost = &lost;
+    *wire.before.borrow_mut() = Some(Box::new(move |head: &str| {
+        (head == "refs/tags/a" && !lost.replace(true))
+            .then_some(Ok(CommitOutcome::DeltaBaseUnavailable))
+    }));
+    let results = work.push_tags(&wire, false);
+    assert_created(&results, "a");
+    assert_created(&results, "b");
+    assert_eq!(wire.uploaded_for(), ["refs/tags/a", "refs/tags/a"]);
+    let packs = wire.packs.borrow();
+    let count = |bytes: &[u8]| {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        PackReader::read(bytes, &store).unwrap().stored.len()
+    };
+    assert!(
+        count(&packs[1].1) > count(&packs[0].1),
+        "the second plan is the whole closure"
+    );
+    drop(packs);
+    let (_dir, report, _) = clone_of(&wire);
+    assert_eq!(report.tags_fetched, ["a", "b"]);
+}
+
+/// Ticketed Connect: a ticket-carrying tag that keeps losing its race sends
+/// the group again at most `PACKMAP_CAS_ATTEMPTS` times in one round, and
+/// every tag that never lands is refused as contended.
+#[test]
+fn ticketed_tags_that_always_lose_are_contended_after_a_bounded_upload_count() {
+    let (tx, _root) = transport(Kind::Memory);
+    let wire = Wire::new(&*tx);
+    let work = Work::new();
+    let c = work.commits(None, 2);
+    work.branch("main", c[0]);
+    work.push_branch(&wire, "main");
+    wire.take_objects();
+    let names: Vec<String> = (0..12).map(|n| format!("t{n:02}")).collect();
+    for name in &names {
+        work.tag(name, c[1]);
+    }
+    wire.limits.set(UploadLimits {
+        max_pack_bytes: None,
+        data_packs_per_advance: Some(6),
+        ticket_threshold_bytes: Some(0),
+    });
+    *wire.before.borrow_mut() = Some(Box::new(|head: &str| {
+        head.starts_with("refs/tags/")
+            .then_some(Ok(CommitOutcome::Advanced(
+                kit_core::protocol::AdvanceOutcome::PackmapConflict,
+            )))
+    }));
+    let results = work.push_tags(&wire, false);
+    for name in &names {
+        assert_eq!(
+            rejection(&results, name),
+            &TagPushRejection::Contended,
+            "{name}"
+        );
+    }
+    let uploads = wire.uploaded_for().len();
+    // One first upload per round, and at most eight more across the push.
+    assert!(uploads <= 2 * 8, "{uploads} uploads");
+    assert_eq!(wire.read("refs/tags/t00"), None);
+}
+
 /// Ticketed Connect: a server that refuses the ticket-carrying advance (a
 /// pairing rule that knows only heads) refuses the whole group.
 #[test]
@@ -1324,7 +1449,7 @@ fn a_tag_past_the_listing_bound_is_refused_where_the_listing_is_one_frame() {
     let results = work.push_tag(&wire, "v1", false);
     assert_eq!(rejection(&results, "v1"), &TagPushRejection::TooManyTags);
 
-    // One entry less leaves room.
+    // Two entries less leave room.
     wire.padding.borrow_mut().pop();
     wire.padding.borrow_mut().pop();
     assert_created(&work.push_tag(&wire, "v1", false), "v1");

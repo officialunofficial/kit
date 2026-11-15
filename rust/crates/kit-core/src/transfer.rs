@@ -835,8 +835,12 @@ fn plan_pack_capped(
 pub const MAX_PEELED_TAGS: usize = 16;
 
 /// The object a tip's tree comes from: the tip with its annotated tags
-/// peeled, at most [`MAX_PEELED_TAGS`] deep.
-fn peeled_tip(store: &ObjectStore, tip: Hash) -> Result<Hash, StoreError> {
+/// peeled, at most [`MAX_PEELED_TAGS`] deep. A tag whose target this store
+/// lacks peels to that target.
+///
+/// # Errors
+/// A store read that fails other than for a missing object.
+pub fn peeled_tip(store: &ObjectStore, tip: Hash) -> Result<Hash, StoreError> {
     let mut id = tip;
     for _ in 0..MAX_PEELED_TAGS {
         match store.object_type(&id) {
@@ -870,7 +874,12 @@ fn plan_tips_capped(
     let mut base_map = HashMap::new();
     if let Some(old) = held.tip() {
         for &tip in new_tips {
-            for (target, base) in select_chunk_delta_bases(store, peeled_tip(store, tip)?, old)? {
+            // A tip the head holds sends no blob, so it needs no delta base.
+            let peeled = peeled_tip(store, tip)?;
+            if held.contains(&peeled) {
+                continue;
+            }
+            for (target, base) in select_chunk_delta_bases(store, peeled, old)? {
                 base_map.entry(target).or_insert(base);
             }
         }
