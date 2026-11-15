@@ -1215,17 +1215,22 @@ check, write or apply publishes no ref. A local disk error on the spool or on
 a store write, a full disk say, ends the fetch as a local I/O error; the spool
 error names `.kit/tmp/`. It is not retried, and no other location is tried.
 
-The closure check before ref publication stops at its anchors: the tips of
-the remote's tracking refs that the store holds, read once the prune guard is
-held, and the tips the fetch has published. An anchor's closure is in the
-store, because a tracking ref names only such a tip (a fetch writes one after
-this check, a push after it uploaded the tip from the store), gc keeps what a ref reaches and cannot run while a ref moves, and the
-guard keeps gc from deleting anything after the read. The check also skips
-each ID listed by a tree of an anchor's closure that it reads while comparing
-each new commit's tree with its parents' trees, by path. Every other object of
-the tip's closure is checked. A fetch with no anchor, and the retry of a
-repair, check the whole closure. Another remote's tracking refs, local
-branches and tags are not anchors.
+The closure check before ref publication stops at its anchors. With
+signature checking on, an anchor is the tip of a tracking ref of the fetched
+remote when the record of verified tips names that tip for the same branch
+and the store holds it, read once the prune guard is held. A tip the fetch
+has published is one too. A fetch writes that record only right after it
+published the ref over a checked closure; a push, a `git import` or a fetch
+with the opt-out moves the ref and not the record. gc keeps what a ref
+reaches, and the guard keeps gc from deleting anything after the read, so an
+anchor's closure is in the store. The check walks the commit history of the
+tip and of the anchors together, newest first, and stops when every commit
+still queued is an ancestor of an anchor; those ancestors are not read. It
+also skips each ID listed by a tree of an anchor's closure that it reads
+while comparing each new commit's tree with its parents' trees, by path.
+Every other object of the tip's closure is checked. A fetch with no anchor,
+one with signature checking off, and the retry of a repair check the whole
+closure.
 
 Stored-object ID lists are checked per pack and are not accumulated over the
 chain. The closure check before ref publication reads the type of each chunk

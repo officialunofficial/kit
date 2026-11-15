@@ -335,7 +335,7 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// 2. walk its chain oldest-first, then download, check, unpack and record
 ///    each pack the applied-pack record does not already have, one at a time,
 ///    with no repo lock held, and assert the tip's closure is fully present,
-///    down to the tips of this remote's tracking refs and the tips this call
+///    down to the tracking tips a signed fetch recorded and the tips this call
 ///    published ([`crate::closure`]),
 /// 3. when signatures are required, verify every commit, remix and tag in
 ///    the tip's history, whether or not this run downloaded it,
@@ -480,7 +480,7 @@ fn fetch_objects_inner(
     // The tracking refs this fetch published, with the tip it gave each.
     let mut published: Vec<(String, Hash)> = Vec::new();
     // The tips a closure check stops at. Read under the prune guard.
-    let mut anchors = Anchors::load(store, layout, remote)?;
+    let mut anchors = Anchors::load(store, layout, remote, require_signed)?;
     // The nodes of the chains this fetch applied and checked.
     let mut stop = StopSet::default();
     let result: Result<(), SyncError> = (|| {

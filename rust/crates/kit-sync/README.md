@@ -7,8 +7,8 @@ Native clone, fetch, pull, and push for `.kit` repositories, as a library.
 downloads the packs it does not already have, and unpacks and records each one
 as it arrives, with no repository lock held and one spool file in `.kit/tmp/`
 at a time. It verifies the signature of every commit, remix and tag it introduced, checks
-the tip's closure is complete down to the tips of the remote's tracking refs,
-verifies the signature of every commit, remix
+the tip's closure is complete down to the tracking tips an earlier signed
+fetch checked, verifies the signature of every commit, remix
 and tag in the tip's history down to the tips earlier signed fetches
 verified, publishes the remote-tracking ref under the
 repository lock, and (for `pull`) fast-forwards the branch, HEAD and worktree
@@ -229,8 +229,10 @@ For `k` appended nodes containing `p` missing packs, incremental fetch costs
 branches, and recovery reads add their own calls. The report continues to count
 packs in the verified prefix as already applied; CLI output and exit codes stay
 the same. These formulas concern network calls. The local closure check reads
-the objects the new commits add, down to the remote's tracking tips; a clone,
-or a fetch whose history shares nothing with them, reads the whole closure.
+the objects the new commits add, down to the tracking tips an earlier signed
+fetch checked and their history. A clone, a fetch with signature checking
+off, or one whose history shares nothing with those tips reads the whole
+closure.
 
 ### Pushing a repository
 

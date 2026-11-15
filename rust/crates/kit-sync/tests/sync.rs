@@ -1428,6 +1428,62 @@ fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
     );
 }
 
+/// A tracking ref that a fetch with the opt-out moved is no anchor: the record
+/// of verified tips still names the old tip, so the next fetch that verifies
+/// reads the closure below the ref again.
+#[test]
+fn a_tracking_tip_the_verified_record_does_not_name_is_no_anchor() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_verify_signatures(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(second)
+    );
+    let bee = Object::Blob(Blob {
+        data: b"bee\n".to_vec(),
+    })
+    .id()
+    .unwrap();
+    std::fs::remove_file(object_file(&target, &bee)).unwrap();
+
+    let third = remote.publish(Some(second), &[("a.txt", b"three\n")], true);
+    let observer = Recorder::default();
+    fetch(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &observer,
+    )
+    .unwrap();
+    assert!(
+        observer
+            .events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, SyncEvent::AppliedPacksStale { .. })),
+        "the check read below the moved ref and repaired the store"
+    );
+    assert!(object_file(&target, &bee).exists());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(third)
+    );
+}
+
 /// After a forced update the old tip is no anchor: gc may prune its history,
 /// and a later tip over that history is refused while the history is gone.
 #[test]

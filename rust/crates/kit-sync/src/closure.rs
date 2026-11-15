@@ -1,30 +1,33 @@
 //! The closure check a fetch runs before it publishes a tracking ref, down to
 //! the tips whose closure an earlier check covered.
 //!
-//! An anchor is the tip of a tracking ref of the fetched remote, taken while
-//! the fetch holds its [`kit_core::store::PruneGuard`], or a tip this fetch
-//! published. Its closure is in the store:
+//! An anchor is a tip whose closure is in the store. There are two kinds:
 //!
-//! - A fetch publishes a tracking ref only after the closure of its tip
-//!   passed this check, and a push or `git import` only for a tip whose
-//!   objects this store wrote or holds. `update-ref` cannot write one.
-//! - gc keeps everything a tracking ref reaches. It holds every worktree lock
-//!   while it marks and prunes, and a fetch moves a tracking ref only under
-//!   one, so a ref cannot move under a running gc.
-//! - From the moment the fetch takes its guard, gc deletes nothing.
-//! - A tip the store lacks, as after `.kit/objects` was wiped, is no anchor.
+//! - The tip of a tracking ref of the fetched remote that its record of
+//!   verified tips ([`crate::anchor`]) also names, when the store holds it.
+//!   Only a fetch that verified signatures writes that record, right after it
+//!   published the ref, so the closure of the tip passed this check then. The
+//!   ref has named the tip ever since, or the two would differ: a push, a
+//!   `git import` or a fetch with the opt-out moves the ref and not the
+//!   record. gc keeps all that a ref reaches, and the fetch reads the anchors
+//!   only once it holds its [`kit_core::store::PruneGuard`], after which gc
+//!   deletes nothing.
+//! - A tip this fetch checked and published. The guard keeps its closure.
 //!
-//! The check reads no object at or below an anchor. It also skips each id
-//! that a tree of an anchor's closure lists, found by comparing the tree of
-//! each new commit with the trees of its parents, by path, down the paths
-//! that differ ([`covered`]). Such an id is in that anchor's closure, so its
-//! own closure is present and passed the check when the anchor did: every
-//! property the check tests depends on the id alone. Every other object the
-//! tip reaches is checked as a full check would.
+//! An ancestor of an anchor is in its closure too. The check walks the commit
+//! history from the tip and the anchors at once, newest first, until every
+//! commit still queued is an ancestor of an anchor ([`split`]). Those
+//! ancestors are not read again. Neither is an id that a tree of an anchor's
+//! closure lists, found by comparing the tree of each new commit with the
+//! trees of its parents, by path, down the paths that differ ([`covered`]).
+//! Such an object passed the check when the anchor did: every property the
+//! check tests depends on the id alone. Every other object the tip reaches is
+//! checked as a full check would. A timestamp out of order, a cap reached or
+//! an object that cannot be read only make the check read more.
 //!
 //! With no anchor the check is the full walk.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use kit_core::hash::{Hash, to_hex};
 use kit_core::layout::RepoLayout;
@@ -35,18 +38,17 @@ use kit_core::store::{ObjectStore, StoreError};
 
 use crate::error::SyncError;
 
-/// The most ids [`covered`] collects. Past it, it stops, which only makes
-/// the check read more.
-const MAX_COVERED: usize = 2_097_152;
+/// The most ids [`covered`] collects. Past it, it stops.
+const MAX_COVERED: usize = 1_048_576;
 
-/// The most new commits [`covered`] reads. Past it, it gives up: a fetch of
-/// that much history checks most of its closure anyway.
+/// The most commits [`split`] reads. Past it, it stops.
 const MAX_COMMITS: usize = 65_536;
 
 /// The most trees [`covered`] reads.
 const MAX_TREE_READS: usize = 262_144;
 
-/// How often [`covered`] polls for cancellation, in objects read.
+/// How often [`split`] and [`covered`] poll for cancellation, in objects
+/// read.
 const POLL_OBJECTS: usize = 4096;
 
 /// The tips whose closure a check of this fetch may stop at.
@@ -54,20 +56,28 @@ const POLL_OBJECTS: usize = 4096;
 pub(crate) struct Anchors(HashSet<Hash>);
 
 impl Anchors {
-    /// The tips of the tracking refs of `remote` that the store holds. The
-    /// caller holds the store's prune guard.
+    /// The tips of the tracking refs of `remote` that its record of verified
+    /// tips names and the store holds. A fetch that does not verify signatures
+    /// starts with none. The caller holds the store's prune guard.
     pub(crate) fn load(
         store: &ObjectStore,
         layout: &RepoLayout,
         remote: &str,
+        require_signed: bool,
     ) -> Result<Self, SyncError> {
-        Ok(Self(
-            refs::list_remote_refs(layout, remote)?
-                .into_iter()
-                .filter_map(|r| r.hash)
-                .filter(|tip| store.contains(tip))
-                .collect(),
-        ))
+        if !require_signed {
+            return Ok(Self::default());
+        }
+        let mut tips = HashSet::new();
+        for r in refs::list_remote_refs(layout, remote)? {
+            if let Some(tip) = r.hash
+                && crate::anchor::names(layout, remote, &r.name, &tip)
+                && store.contains(&tip)
+            {
+                tips.insert(tip);
+            }
+        }
+        Ok(Self(tips))
     }
 
     /// Whether there is no anchor, so a check walks the whole closure.
@@ -95,9 +105,14 @@ pub(crate) fn check_above(
     anchors: &Anchors,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<usize, SyncError> {
-    let covered = covered(store, tip, &anchors.0, cancelled)?;
+    let mut poll = Poll {
+        reads: 0,
+        cancelled,
+    };
+    let split = split(store, tip, &anchors.0, &mut poll)?;
+    let covered = covered(store, &split, &mut poll)?;
     let known = |h: &Hash| {
-        if anchors.0.contains(h) || covered.contains(h) {
+        if anchors.0.contains(h) || split.old.contains(h) || covered.contains(h) {
             Known::Present
         } else {
             Known::Unknown
@@ -126,51 +141,191 @@ pub(crate) fn closure_error(error: StoreError) -> SyncError {
     }
 }
 
-/// Ids in the closure of an anchor that the tip's new trees list, so the
-/// check need not read them.
+/// Counts reads and polls for cancellation every [`POLL_OBJECTS`] of them.
+struct Poll<'a> {
+    reads: usize,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl Poll<'_> {
+    fn read(&mut self) -> Result<(), SyncError> {
+        self.reads += 1;
+        if self.reads.is_multiple_of(POLL_OBJECTS) && (self.cancelled)() {
+            return Err(SyncError::Interrupted);
+        }
+        Ok(())
+    }
+}
+
+/// A commit or remix, as [`split`] read it.
+struct Header {
+    timestamp: u64,
+    tree: Hash,
+    parents: Vec<Hash>,
+}
+
+/// The commit history between a tip and the anchors.
+#[derive(Default)]
+struct Split {
+    /// Commits reached from an anchor through parents: anchors and their
+    /// ancestors.
+    old: HashSet<Hash>,
+    /// Commits reached from the tip and not from an anchor, newest first.
+    new: Vec<Hash>,
+    /// Every commit read.
+    headers: HashMap<Hash, Header>,
+}
+
+/// Painted from the tip.
+const NEW: u8 = 1;
+/// Painted from an anchor.
+const OLD: u8 = 2;
+
+/// Walk the history of `tip` and of the anchors together, newest first,
+/// painting each commit with the side it is reached from, until no commit
+/// still queued is reached from the tip alone.
 ///
-/// It reads the commits `tip` reaches above the anchors, then compares the
-/// tree of each one with the tree of each parent, parents first, by path,
-/// down the paths that differ. The tree of an anchor parent is in that
-/// anchor's closure, and so is every id that a tree in it lists: those trees'
-/// entries are collected. A tree or commit it cannot read only means it
-/// learns less, as does reaching [`MAX_COMMITS`] or [`MAX_TREE_READS`]: the
-/// check that follows reads the same objects and reports them.
-fn covered(
+/// A commit is `old` only when a chain of parents leads to it from an
+/// anchor, so it is in that anchor's closure. A commit that cannot be read
+/// ends its chain. Timestamps only order the walk: one out of order, or
+/// [`MAX_COMMITS`] reads, stop it early, and a commit then counts as new
+/// although it is an ancestor of an anchor.
+fn split(
     store: &ObjectStore,
     tip: &Hash,
     anchors: &HashSet<Hash>,
-    cancelled: &dyn Fn() -> bool,
+    poll: &mut Poll<'_>,
+) -> Result<Split, SyncError> {
+    let mut split = Split::default();
+    if anchors.is_empty() || anchors.contains(tip) {
+        return Ok(split);
+    }
+    let mut walk = Paint {
+        store,
+        flags: HashMap::new(),
+        queue: BinaryHeap::new(),
+        queued: HashSet::new(),
+        new_only: 0,
+        headers: &mut split.headers,
+    };
+    walk.paint(*tip, NEW, poll)?;
+    for anchor in anchors {
+        walk.paint(*anchor, OLD, poll)?;
+    }
+    while walk.new_only > 0 && walk.headers.len() < MAX_COMMITS {
+        let Some((_, id)) = walk.queue.pop() else {
+            break;
+        };
+        walk.queued.remove(&id);
+        let flags = walk.flags[&id];
+        if flags == NEW {
+            walk.new_only -= 1;
+            split.new.push(id);
+        }
+        let parents = walk.headers.get(&id).map(|h| h.parents.clone());
+        for parent in parents.into_iter().flatten() {
+            walk.paint(parent, flags, poll)?;
+        }
+    }
+    // A commit queued when the walk stopped is new unless an anchor reaches it.
+    split.new.extend(
+        walk.queue
+            .iter()
+            .map(|(_, id)| *id)
+            .filter(|id| walk.flags[id] == NEW),
+    );
+    split.old = walk
+        .flags
+        .into_iter()
+        .filter(|(_, flags)| flags & OLD != 0)
+        .map(|(id, _)| id)
+        .collect();
+    // A commit popped as new may have been reached from an anchor since.
+    split.new.retain(|id| !split.old.contains(id));
+    Ok(split)
+}
+
+/// The state of [`split`]'s walk.
+struct Paint<'a> {
+    store: &'a ObjectStore,
+    flags: HashMap<Hash, u8>,
+    /// Commits to visit, by timestamp. Each at most once at a time.
+    queue: BinaryHeap<(u64, Hash)>,
+    queued: HashSet<Hash>,
+    /// Queued commits painted [`NEW`] alone.
+    new_only: usize,
+    headers: &'a mut HashMap<Hash, Header>,
+}
+
+impl Paint<'_> {
+    /// Add `side` to the paint of `id`, and queue it if that changed it.
+    fn paint(&mut self, id: Hash, side: u8, poll: &mut Poll<'_>) -> Result<(), SyncError> {
+        let before = self.flags.get(&id).copied().unwrap_or(0);
+        let after = before | side;
+        if after == before {
+            return Ok(());
+        }
+        self.flags.insert(id, after);
+        if self.queued.contains(&id) {
+            if before == NEW {
+                self.new_only -= 1;
+            }
+            return Ok(());
+        }
+        if !self.headers.contains_key(&id) {
+            if self.headers.len() >= MAX_COMMITS {
+                return Ok(());
+            }
+            poll.read()?;
+            let header = match self.store.read_object(&id) {
+                Ok(Object::Commit(c)) => Header {
+                    timestamp: c.timestamp,
+                    tree: c.tree_hash,
+                    parents: c.parents,
+                },
+                Ok(Object::Remix(r)) => Header {
+                    timestamp: r.timestamp,
+                    tree: r.tree_hash,
+                    parents: r.parents,
+                },
+                Ok(_) | Err(_) => return Ok(()),
+            };
+            self.headers.insert(id, header);
+        }
+        self.queue.push((self.headers[&id].timestamp, id));
+        self.queued.insert(id);
+        if after == NEW {
+            self.new_only += 1;
+        }
+        Ok(())
+    }
+}
+
+/// Ids in the closure of an anchor that the trees of the new commits list,
+/// so the check need not read them.
+///
+/// It compares the tree of each new commit with the tree of each parent it
+/// read, oldest commit first, by path, down the paths that differ. The tree
+/// of an old parent is in an anchor's closure, and so is every id that a tree
+/// of an anchor's closure lists: such trees' entries are collected. A tree it
+/// cannot read only means it learns less, as does reaching [`MAX_COVERED`]
+/// or [`MAX_TREE_READS`].
+fn covered(
+    store: &ObjectStore,
+    split: &Split,
+    poll: &mut Poll<'_>,
 ) -> Result<HashSet<Hash>, SyncError> {
     let mut covered = HashSet::new();
-    if anchors.is_empty() || anchors.contains(tip) {
-        return Ok(covered);
-    }
-    let mut reads = 0usize;
-    let mut poll = || {
-        reads += 1;
-        if reads.is_multiple_of(POLL_OBJECTS) && cancelled() {
-            return Err(SyncError::Interrupted);
-        }
-        Ok(reads)
-    };
-    let Some(commits) = new_commits(store, tip, anchors, &mut poll)? else {
-        return Ok(covered);
-    };
-    let trees: HashMap<Hash, Hash> = commits.iter().map(|c| (c.id, c.tree)).collect();
     let mut tree_reads = 0usize;
-    for commit in &commits {
+    for id in split.new.iter().rev() {
+        let Some(commit) = split.headers.get(id) else {
+            continue;
+        };
         for parent in &commit.parents {
-            let old = match trees.get(parent) {
-                Some(tree) => *tree,
-                None if anchors.contains(parent) => match store.read_object(parent) {
-                    Ok(Object::Commit(c)) => c.tree_hash,
-                    Ok(Object::Remix(r)) => r.tree_hash,
-                    Ok(_) | Err(_) => continue,
-                },
-                None => continue,
+            let Some(old) = split.headers.get(parent).map(|h| h.tree) else {
+                continue;
             };
-            if anchors.contains(parent) {
+            if split.old.contains(parent) {
                 covered.insert(old);
             }
             let mut stack = vec![(commit.tree, old)];
@@ -178,17 +333,20 @@ fn covered(
                 if new == old {
                     continue;
                 }
-                if tree_reads >= MAX_TREE_READS || covered.len() >= MAX_COVERED {
+                if tree_reads >= MAX_TREE_READS {
                     return Ok(covered);
                 }
                 tree_reads += 2;
-                poll()?;
+                poll.read()?;
                 let (Ok(Object::Tree(old_tree)), Ok(Object::Tree(new_tree))) =
                     (store.read_object(&old), store.read_object(&new))
                 else {
                     continue;
                 };
                 if covered.contains(&old) {
+                    if covered.len() + old_tree.entries.len() > MAX_COVERED {
+                        return Ok(covered);
+                    }
                     covered.extend(old_tree.entries.iter().map(|e| e.object_hash));
                 }
                 for entry in &new_tree.entries {
@@ -205,67 +363,6 @@ fn covered(
         }
     }
     Ok(covered)
-}
-
-/// A commit above the anchors, read once.
-struct NewCommit {
-    id: Hash,
-    tree: Hash,
-    parents: Vec<Hash>,
-}
-
-/// The commits and remixes `tip` reaches without passing an anchor, parents
-/// first. A commit it cannot read ends its path. `None` past
-/// [`MAX_COMMITS`].
-fn new_commits(
-    store: &ObjectStore,
-    tip: &Hash,
-    anchors: &HashSet<Hash>,
-    poll: &mut dyn FnMut() -> Result<usize, SyncError>,
-) -> Result<Option<Vec<NewCommit>>, SyncError> {
-    let mut order = Vec::new();
-    let mut seen = HashSet::from([*tip]);
-    // Each commit with how many of its parents were visited.
-    let mut frames: Vec<(NewCommit, usize)> = Vec::new();
-    let mut next = Some(*tip);
-    loop {
-        if let Some(id) = next.take() {
-            poll()?;
-            if seen.len() > MAX_COMMITS {
-                return Ok(None);
-            }
-            match store.read_object(&id) {
-                Ok(Object::Commit(c)) => frames.push((
-                    NewCommit {
-                        id,
-                        tree: c.tree_hash,
-                        parents: c.parents,
-                    },
-                    0,
-                )),
-                Ok(Object::Remix(r)) => frames.push((
-                    NewCommit {
-                        id,
-                        tree: r.tree_hash,
-                        parents: r.parents,
-                    },
-                    0,
-                )),
-                Ok(_) | Err(_) => {}
-            }
-        }
-        let Some((commit, cursor)) = frames.last_mut() else {
-            return Ok(Some(order));
-        };
-        if let Some(parent) = commit.parents.get(*cursor) {
-            *cursor += 1;
-            if !anchors.contains(parent) && seen.insert(*parent) {
-                next = Some(*parent);
-            }
-        } else if let Some((done, _)) = frames.pop() {
-            order.push(done);
-        }
-    }
 }
 
 /// The entry of `tree` named `name`. Entries are sorted by name.
@@ -290,6 +387,8 @@ mod tests {
         store: ObjectStore,
         /// Skip writing these blobs, so a test can leave one missing.
         withheld: HashSet<Vec<u8>>,
+        /// The timestamp of the next commit.
+        clock: std::cell::Cell<u64>,
     }
 
     impl Repo {
@@ -300,6 +399,7 @@ mod tests {
                 _dir: dir,
                 store,
                 withheld: HashSet::new(),
+                clock: std::cell::Cell::new(1_700_000_000),
             }
         }
 
@@ -350,7 +450,7 @@ mod tests {
                 Identity::ed25519([7; 32]),
                 [7; 32],
                 b"c".to_vec(),
-                1_700_000_000 + parents.len() as u64,
+                self.clock.replace(self.clock.get() + 1),
                 [0; 64],
             )))
         }
@@ -426,6 +526,23 @@ mod tests {
         assert_eq!(repo.check(tip, &[base]).unwrap(), 6 + 4);
         // With `side` an anchor too, its tree, `d4` and its file are not read.
         assert_eq!(repo.check(tip, &[base, side]).unwrap(), 4 + 2);
+    }
+
+    #[test]
+    fn history_below_an_anchor_is_not_read_when_a_merge_reaches_it_from_a_fork() {
+        let repo = Repo::new();
+        let base = repo.commit(&files(), &[]);
+        let one = with(files(), "d1/f1", b"one");
+        let fork = repo.commit(&one, &[base]);
+        let two = with(one.clone(), "d2/f2", b"two");
+        let anchor = repo.commit(&two, &[fork]);
+        let side = with(one, "d3/f3", b"side");
+        let feature = repo.commit(&side, &[fork]);
+        let tip = repo.commit(&with(two, "d3/f3", b"side"), &[anchor, feature]);
+
+        // The merge and the feature commit with their root trees, and `d3`
+        // with its new file. `fork` and `base` are ancestors of the anchor.
+        assert_eq!(repo.check(tip, &[anchor]).unwrap(), 6);
     }
 
     #[test]

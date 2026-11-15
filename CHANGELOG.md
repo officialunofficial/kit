@@ -57,11 +57,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- A fetch checks the closure of a new tip only down to the tips of the
-  remote's tracking refs, so a fetch of one commit reads what that commit
-  added, not every object of the repository. A fetch no longer finds or
-  repairs an object lost from the store below a tracking tip; `kit closure
-  verify` finds it, and a fetch after `kit remote remove` repairs it.
+- A fetch that verifies signatures checks the closure of a new tip only down
+  to the tracking tips an earlier such fetch checked, and their history, so a
+  fetch of one commit reads what that commit added, not every object of the
+  repository. It no longer finds or repairs an object lost from the store
+  below such a tip; `kit closure verify` finds it, and a fetch after `kit
+  remote remove` and `kit remote add` repairs it.
 - `Transport::delete_ref` is a required verb: an implementation outside kit
   adds it, refusing with `TransportError::Unsupported` when it cannot delete
   under a condition. `kit serve` answers an `UpdateRef` with an empty
