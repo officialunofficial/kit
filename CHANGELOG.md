@@ -40,11 +40,20 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   length it accepts. A fetch spools each pack into an unnamed file in
   `.kit/tmp/` and unpacks it by window; a push seals each pack into one and
   uploads it from there, with its delta streams in the push's delta spool.
-  The memory and file transports copy in 1 MiB chunks; ssh, S3 and Connect
-  hold one pack in memory on upload, and S3 and Connect on download
-  (SPEC-TRANSPORT §1.1). Over the file transport, a push and a fetch of
-  one 1 GiB pack each hold under 96 MiB of heap and a few hundred bytes per
-  entry.
+  The memory and file transports copy in 1 MiB chunks; Connect holds one
+  pack in memory on upload and on download (SPEC-TRANSPORT §1.1). Over the
+  file transport, a push and a fetch of one 1 GiB pack each hold under
+  96 MiB of heap and a few hundred bytes per entry.
+- The ssh and S3 transports stream packs both ways. ssh reads each 800 KiB
+  chunk of an upload from the pack's body as it sends it (SPEC-TRANSPORT
+  §4.2). S3 hashes the body once for the SigV4 payload hash, then sends it
+  in one sized `PUT`, and writes a `200` answer's body to the sink as it
+  arrives (§6.7). A retry reads the body again from offset 0. A body over
+  `PACK_BODY_LIMIT` is refused with `PayloadTooLarge` before it is read;
+  S3 used to answer `ServerError { status: 413 }`. An S3 pack `PUT` gets
+  60 s plus one second per MiB of the pack to send it and get its answer,
+  in place of 60 s. A push and a fetch of a pack of about 1 GiB each hold
+  under 96 MiB of heap over ssh and S3 as well.
 - A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
   a sink that failed refuses every later attempt (`PackSink::failed`).
   `SyncError` maps `PackError::Io` and `PackError::Store(StoreError::Io)`
@@ -70,6 +79,19 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gets its own `fdatasync` before its rename. A large object never grows the
   pool past 64 threads, a batch of only large objects renames them on one
   thread, and other platforms are unchanged.
+
+### Removed
+
+- S3 multipart upload, with `S3_SINGLE_PUT_MAX` and the
+  `test-small-multipart-caps` feature of `kit-transport-s3`. It never ran:
+  a pack is at most 4 GiB, and one S3 `PUT` takes up to 5 GiB.
+
+### Fixed
+
+- The S3 transport no longer reads an error answer's body. A missing ref's
+  `404` from a store that names the key, request and host in its error
+  document (MinIO does, in about 350 bytes) failed `read_ref` with
+  `PayloadTooLarge`, so a push to a new S3 remote failed.
 
 ## [0.8.1] - 2026-11-15
 

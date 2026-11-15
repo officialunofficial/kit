@@ -66,7 +66,7 @@ use kit_rpc::{
 
 pub use crate::url::{KIT_SSH_PREFIX, SshTarget, parse_kit_ssh_url, validate_ssh_path};
 
-use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, read_body};
+use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
 
 /// Client identification string sent in the `Hello` frame. Inherited
 /// from the workspace version, so a release bump propagates
@@ -341,61 +341,49 @@ impl Transport for SshTransport {
         })
     }
 
-    /// Buffers the body: the ssh upload frames slice one in-memory pack.
+    /// Streams the body: the header announces `pack.len()`, then each
+    /// `PackChunk` carries up to `CHUNK_DATA_MAX` bytes read from `pack`.
+    /// Every attempt, after a reconnect too, reads `pack` again from offset
+    /// 0, so the server receives the same bytes and checks them against the
+    /// key. A body over [`PACK_BODY_LIMIT`] is refused before any read and
+    /// any frame.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
         key: &PackKey,
         _head_ref: Option<&str>,
     ) -> TransportResult<()> {
-        let bytes = read_body(pack)?;
+        let total = pack.len();
+        if total > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
+        }
         self.with_retry(|io| {
-            // Header frame announces the pack id + advertised total length.
+            // Opened before the header, so a body that cannot be opened
+            // leaves the connection idle and usable.
+            let mut body = pack
+                .read_from(0)
+                .map_err(|_| TransportError::ProtocolError)?;
             let header = SshFrame {
                 body: Some(ssh_frame::Body::UploadPack(Box::new(
                     UploadPack::default()
                         .with_pack_id(key.as_bytes().to_vec())
-                        .with_total_bytes(bytes.len() as u64),
+                        .with_total_bytes(total),
                 ))),
                 ..Default::default()
             };
             write_child_frame_or_err(io, header)?;
-
-            // Body chunks. The per-frame data cap lives in `kit_rpc::CHUNK_DATA_MAX`.
-            let mut offset = 0u64;
-            let total = bytes.len();
-            let mut iter_pos = 0usize;
-            while iter_pos < total {
-                let end = core::cmp::min(iter_pos + CHUNK_DATA_MAX, total);
-                let chunk = SshFrame {
-                    body: Some(ssh_frame::Body::PackChunk(Box::new(
-                        PackChunk::default()
-                            .with_pack_id(key.as_bytes().to_vec())
-                            .with_offset(offset)
-                            .with_data(bytes[iter_pos..end].to_vec())
-                            .with_last(end == total),
-                    ))),
-                    ..Default::default()
-                };
-                write_child_frame_or_err(io, chunk)?;
-                offset += (end - iter_pos) as u64;
-                iter_pos = end;
-            }
-            if total == 0 {
-                // Empty packs still need a final last=true chunk so the
-                // server knows the upload is complete.
-                let chunk = SshFrame {
-                    body: Some(ssh_frame::Body::PackChunk(Box::new(
-                        PackChunk::default()
-                            .with_pack_id(key.as_bytes().to_vec())
-                            .with_offset(0)
-                            .with_data(Vec::new())
-                            .with_last(true),
-                    ))),
-                    ..Default::default()
-                };
-                write_child_frame_or_err(io, chunk)?;
-            }
+            send_pack_chunks(&mut body, total, key, |chunk| {
+                write_child_frame_or_err(io, chunk)
+            })
+            .map_err(|e| match e {
+                // The server waits for chunks this upload will not
+                // send: the connection cannot carry another verb.
+                SendError::Local => {
+                    abandon_child(io);
+                    TransportError::ProtocolError
+                }
+                SendError::Wire(e) => e,
+            })?;
 
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
@@ -652,6 +640,50 @@ fn abandon_child(io: &mut ChildIo) {
     io.closed = true;
     let _ = io.stdin_tx.take();
     terminate_child_now(&mut io.child);
+}
+
+/// How sending a pack's chunks stopped short.
+#[derive(Debug)]
+enum SendError {
+    /// The pack could not be read, or held fewer bytes than its length: a
+    /// local failure, never retried.
+    Local,
+    /// A frame could not be sent.
+    Wire(TransportError),
+}
+
+/// Send the `total` bytes of `body`, a pack read from offset 0, as
+/// `PackChunk` frames of at most [`CHUNK_DATA_MAX`] bytes through `send`,
+/// the last one marked. An empty pack is one empty last chunk. One chunk is
+/// held at a time.
+fn send_pack_chunks(
+    reader: &mut dyn io::Read,
+    total: u64,
+    key: &PackKey,
+    mut send: impl FnMut(SshFrame) -> TransportResult<()>,
+) -> Result<(), SendError> {
+    let mut offset = 0u64;
+    loop {
+        let len = saturating_usize(total - offset).min(CHUNK_DATA_MAX);
+        let mut data = vec![0u8; len];
+        reader.read_exact(&mut data).map_err(|_| SendError::Local)?;
+        let last = offset + len as u64 == total;
+        let chunk = SshFrame {
+            body: Some(ssh_frame::Body::PackChunk(Box::new(
+                PackChunk::default()
+                    .with_pack_id(key.as_bytes().to_vec())
+                    .with_offset(offset)
+                    .with_data(data)
+                    .with_last(last),
+            ))),
+            ..Default::default()
+        };
+        send(chunk).map_err(SendError::Wire)?;
+        if last {
+            return Ok(());
+        }
+        offset += len as u64;
+    }
 }
 
 #[cfg(test)]
@@ -1168,6 +1200,70 @@ mod tests {
         };
         assert!(!kit_core::protocol::is_retryable(&error), "{error:?}");
         assert_eq!(sink.failed(), Some(io::ErrorKind::StorageFull));
+    }
+
+    /// The chunk frames `send_pack_chunks` sends for `pack`.
+    fn sent_chunks(pack: &dyn PackBody) -> (Result<(), SendError>, Vec<PackChunk>) {
+        let mut chunks = Vec::new();
+        let mut body = pack.read_from(0).unwrap();
+        let result = send_pack_chunks(&mut body, pack.len(), &PackKey::new([7; 32]), |frame| {
+            match frame.body {
+                Some(ssh_frame::Body::PackChunk(c)) => chunks.push(*c),
+                other => panic!("expected a chunk, got {other:?}"),
+            }
+            Ok(())
+        });
+        (result, chunks)
+    }
+
+    /// A pack goes out in order, in chunks of at most `CHUNK_DATA_MAX`
+    /// bytes, with only the last one marked.
+    #[test]
+    fn upload_sends_the_body_in_marked_chunks() {
+        let bytes: Vec<u8> = (0..2 * CHUNK_DATA_MAX + 5)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let (result, chunks) = sent_chunks(&kit_core::protocol::SliceBody(&bytes));
+        result.unwrap();
+        let offsets: Vec<u64> = chunks.iter().map(|c| c.offset.unwrap()).collect();
+        assert_eq!(
+            offsets,
+            [0, CHUNK_DATA_MAX as u64, 2 * CHUNK_DATA_MAX as u64]
+        );
+        let lasts: Vec<bool> = chunks.iter().map(|c| c.last.unwrap()).collect();
+        assert_eq!(lasts, [false, false, true]);
+        let sent: Vec<u8> = chunks.into_iter().flat_map(|c| c.data.unwrap()).collect();
+        assert_eq!(sent, bytes);
+    }
+
+    /// An empty pack is one empty last chunk.
+    #[test]
+    fn upload_of_an_empty_pack_sends_one_last_chunk() {
+        let (result, chunks) = sent_chunks(&kit_core::protocol::SliceBody(&[]));
+        result.unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].last, Some(true));
+        assert!(chunks[0].data.as_deref().unwrap_or_default().is_empty());
+    }
+
+    /// A body shorter than its length stops the upload as a local error,
+    /// never with a last chunk.
+    #[test]
+    fn upload_of_a_short_body_is_a_local_error() {
+        struct Short<'a>(&'a [u8]);
+        impl PackBody for Short<'_> {
+            fn len(&self) -> u64 {
+                self.0.len() as u64 + 1
+            }
+            fn read_from(&self, offset: u64) -> io::Result<Box<dyn io::Read + Send + '_>> {
+                Ok(Box::new(&self.0[usize::try_from(offset).unwrap()..]))
+            }
+        }
+        let bytes = vec![1u8; CHUNK_DATA_MAX + 10];
+        let (result, chunks) = sent_chunks(&Short(&bytes));
+        assert!(matches!(result, Err(SendError::Local)), "{result:?}");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].last, Some(false));
     }
 
     /// A sink whose first write fails like a full disk.

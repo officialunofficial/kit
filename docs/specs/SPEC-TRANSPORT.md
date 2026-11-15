@@ -87,10 +87,14 @@ A `PackSink` takes one body:
   not a transport failure.
 
 The memory and file transports copy bodies in chunks of `SPOOL_BUFFER`
-(1 MiB). The SSH, S3 and Connect transports still hold one pack in memory
-on upload. On download, SSH passes the header's `total_bytes` to `begin`
-and writes each `PackChunk` frame to the sink as it arrives; S3 and Connect
-read the response whole, then write it to the sink.
+(1 MiB). SSH sends a body as `PackChunk` frames read from it one at a time
+(§4.2), and S3 streams it in one sized `PUT` (§6.7); both read it again
+from offset 0 on every attempt. On download, SSH passes the header's
+`total_bytes` to `begin` and writes each `PackChunk` frame to the sink as
+it arrives; S3 passes a `200` answer's `Content-Length` to `begin` and
+writes its body to the sink as it arrives (§6.7). Connect still holds one
+pack in memory on upload, and reads a download's response whole before it
+writes it to the sink.
 
 Spool files have no name on Unix (`O_TMPFILE`, or unlinked on creation); on
 Windows they are `.tmp` files deleted on close. Only the handle that wrote
@@ -373,6 +377,17 @@ server sees an unambiguous end-of-stream. The server emits
 `UploadPackResponse{}` once `last=true` is observed and the bytes
 verify against the announced digest.
 
+The reference client reads each chunk from the pack's body (§1.1) as it
+sends it, so it holds one chunk, not the pack. `total_bytes` is the body's
+length. A body longer than `PACK_BODY_LIMIT` is refused with
+`PayloadTooLarge` before any byte of it is read and before any frame. A
+retried upload reconnects (§4.5) and reads the body again from offset 0, so
+every attempt sends the same bytes. A body that cannot be read, or ends
+before its length, is a local failure: the upload ends with
+`ProtocolError`, which is not retried. The client opens the body before it
+sends the header; once the header is sent, a failure makes it close the
+connection, since the server still waits for the rest of the upload.
+
 The server MUST reject malformed upload streams before storing bytes:
 `total_bytes` is required and MUST be within the server upload cap;
 every `PackChunk.pack_id` MUST match the `UploadPack.pack_id`; every
@@ -596,6 +611,7 @@ that finds the connection `closed` first respawns `ssh` from the
 original `target`/`options` and redoes the `Hello` handshake before
 re-issuing the verb against the fresh child. `upload_pack` is
 content-addressed and safe to resend in full on the new connection;
+each new attempt reads the pack's body again from offset 0.
 `update_ref` is not idempotent across retries per §7, so a CAS write
 that returns `RefConflict` still requires the caller's `read_ref`
 disambiguation.
@@ -684,33 +700,22 @@ surfaces `TransportError::AccessDenied`.
 |---|---|---|
 | `Any`        | (none) | Last writer wins. |
 | `Missing`    | `If-None-Match: *` | The store MUST honor this for conditional create. |
-| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. Multipart uploads break the equivalence (a multipart `ETag` is derived from the parts' ETags, not the body MD5), which is why §6.4's single-PUT cap gates `upload_pack` into the multipart path of §6.7 instead. |
+| `Match(h)`   | `If-Match: "<md5-of-expected-wire>"` | The store MUST return the body MD5 as the ETag on a single `PUT`; matching against that value is how kit gets CAS without server-side hash awareness. |
 
 `409` and `412` → `RefConflict`; never retried.
 
 `upload_pack` carries no `RefWriteCondition` &mdash; packs are content-addressed
-and every write is either a plain unconditional `PUT` (below the
-single-PUT cap) or the multipart path of §6.7, which uses
-`If-None-Match: *` on `CompleteMultipartUpload` rather than any
-`Match(h)`-style condition. See §7.1 for the resulting CAS-guarantee
-note on large packs.
+and every write is one plain unconditional `PUT` (§6.7).
 
 ### 6.4 Limits
 
-- `S3_SINGLE_PUT_MAX = 5 GiB` &mdash; packs at or below this go through a
-  single `PUT`; anything larger goes through the multipart path (§6.7).
 - `PACK_BODY_LIMIT = 4 GiB` &mdash; the absolute pack-body ceiling enforced
   on both `upload_pack` and `download_pack` (every transport that
   ingests or emits pack bytes shares this limit; see
   [`kit_core::protocol::PACK_BODY_LIMIT`](../../rust/crates/kit-core/src/protocol.rs)).
-  On a 64-bit target this is smaller than `S3_SINGLE_PUT_MAX`, so in
-  today's builds it &mdash; not the single-PUT cap &mdash; is what actually bounds
-  a pack's size; §6.7's multipart path exists for API correctness and
-  for targets/future revisions where `PACK_BODY_LIMIT` is raised or
-  not the binding constraint (for example a 32-bit target, where
-  `PACK_BODY_LIMIT` widens to `usize::MAX` and `S3_SINGLE_PUT_MAX`
-  becomes the real gate). Raising `PACK_BODY_LIMIT` itself is the
-  streaming/constant-memory `Transport` redesign, which is out of scope here.
+  `upload_pack` refuses a longer body with `PayloadTooLarge` before it
+  reads it. The limit is below S3's 5 GiB cap on one `PUT`, so every pack
+  goes up in one `PUT` (§6.7).
   A writer applies the limit whether or not the remote advertises
   `max_pack_bytes`: it seals no pack above `min(advertised, PACK_BODY_LIMIT)`,
   so a pack that was uploaded can be fetched. The `kit+file://` transport
@@ -719,7 +724,14 @@ note on large packs.
   body other than the 65-byte ref wire is rejected after it.
 - `REF_LIST_BODY_LIMIT = 16 MiB` for the `ListObjectsV2` XML
   response.
-- HTTP timeout: 60 s per request.
+- These limits bound a success's body. An error answer's body is never
+  read: the status alone gives the error. A store's error document can be
+  longer than the success it stands for (a missing ref's `NoSuchKey`
+  document names the key, the request and the host), and a limit must not
+  turn a `404` into `PayloadTooLarge`.
+- HTTP timeout: 60 s for a request up to its response headers, and 60 s
+  for each read of a response body. A pack `PUT` sends its body before it
+  awaits the answer, so it gets 60 s plus one second per MiB of the pack.
 
 ### 6.5 Retry
 
@@ -753,44 +765,30 @@ bucket. The client runs `verify_sparse` on the decoded result.
 The object key already encodes the filter hash, so the client sends no
 `?sparse=<filter-hex>` query. The SigV4 canonical request stays tight.
 
-### 6.7 Multipart upload
+### 6.7 Pack transfer
 
-`upload_pack` for a pack larger than `S3_SINGLE_PUT_MAX` (§6.4) uses
-the standard S3 multipart-upload API instead of a single `PUT`:
+Neither direction holds a pack in memory.
 
-1. `POST <key>?uploads` &mdash; `CreateMultipartUpload`. The response body's
-   `<UploadId>` addresses the rest of the sequence.
-2. `PUT <key>?partNumber=<n>&uploadId=<id>` once per fixed-size part
-   (`n` starting at 1), body = that part's raw bytes. The response
-   `ETag` header is recorded for step 3. Each part is retried
-   independently through the same backoff ladder as every other S3
-   call (§6.5/§7) &mdash; a transient failure on one part does not require
-   restarting the upload from part one.
-3. `POST <key>?uploadId=<id>` &mdash; `CompleteMultipartUpload`, body a
-   `<CompleteMultipartUpload>` manifest listing every part number and
-   its `ETag`. Carries `If-None-Match: *` (see §6.3's note on why
-   `Match(h)` doesn't apply here).
-4. On any terminal failure in steps 2–3 &mdash; a part exhausting its
-   retries, or `CompleteMultipartUpload` failing for a reason other
-   than `409`/`412` &mdash; `DELETE <key>?uploadId=<id>` (`AbortMultipartUpload`)
-   before returning the error, so a partial attempt does not leave
-   orphaned parts (and their storage cost) in the bucket. `409`/`412`
-   on `CompleteMultipartUpload` also triggers the abort (the object
-   was never materialized), but is not itself an error &mdash; see below.
+**Upload.** `upload_pack` makes one pass over the pack's body (§1.1) to
+compute its SHA-256, the SigV4 payload hash (`x-amz-content-sha256`). It
+then sends one `PUT` of `Content-Length` equal to the body's length, whose
+body streams from the pack's body read again from offset 0. Every attempt
+of the §6.5 ladder reads the body again from offset 0 and sends the same
+bytes under the same payload hash. The store checks the bytes it receives
+against that hash, so a body that changed between the hash pass and the
+send is refused (`400`), and nothing is stored. A body that cannot be read,
+or ends before its length, during either pass is a local failure:
+`upload_pack` returns `ProtocolError`, which is not retried, and a `PUT`
+in progress ends unfinished. The reference client reads the body in
+256 KiB chunks and keeps at most two queued ahead of the request.
 
-Every part except the last MUST be at least 5 MiB (an S3 API
-requirement); the implementation's fixed part size (64 MiB in
-production) satisfies this for any part but the last.
-
-**Idempotency and the `409`/`412` case:** because pack objects are
-content-addressed and immutable, an existing object at the target key
-is guaranteed to hold identical bytes to whatever this upload would
-have produced. A `409`/`412` on `CompleteMultipartUpload` (the
-`If-None-Match: *` precondition losing a race against an earlier,
-identical upload of the same digest) is therefore treated as the
-idempotent no-op that SPEC-TRANSPORT §7 requires of `upload_pack`,
-not a caller-visible error &mdash; matching the single-PUT path's
-unconditional-overwrite behavior for the same scenario.
+**Download.** `download_pack` sends one `GET`. Only a `200` answer's body
+reaches the sink: its `Content-Length`, when present, goes to `begin`
+before any byte is read, so a pack over `PACK_BODY_LIMIT` or the sink's
+limit is refused unread, and each piece of the body is written to the sink
+as it arrives. Any other answer's body is never read (§6.4). A retried
+attempt begins the sink again. `download_blob` is the same `GET` into a
+sink limited to the caller's bound.
 
 ### 6.8 Repository cursor
 
@@ -896,22 +894,14 @@ concerns.
 |---|---|---|---|
 | Memory | `Mutex`-protected read-then-write | `Mutex`-protected | N/A (test only) |
 | File   | `link(2)` after `write_atomic` (atomic per POSIX) | OS exclusive lock on the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock` (via `std::fs::File::lock`), with the repo lock `<root>/.kit/refs/.lock` held shared, wraps a read-then-`write_atomic` (SPEC-REFS §5.1.1); in-process locks keep multi-threaded callers within one process from contending on the OS locks | Yes |
-| S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes (S3 multipart breaks `Match` &mdash; see §6.3) |
+| S3     | `If-None-Match: *` enforced by the store | `If-Match: "<md5-of-wire>"` enforced by the store | Yes |
 | SSH    | Server-enforced via `expectation = REF_EXPECTATION_MISSING` | Server-enforced via `expectation = REF_EXPECTATION_MATCH` plus 32-byte `expected_id` | Depends on server-side ref-store atomicity |
 
 `upload_pack` itself carries no `RefWriteCondition` (it addresses
 content by digest, not by a caller-supplied CAS condition), so the
 table above &mdash; `Missing`/`Match(h)` &mdash; describes `update_ref` only.
-For packs large enough to cross `S3_SINGLE_PUT_MAX` (§6.4), the S3
-transport's multipart path (§6.7) downgrades even the informal
-CAS-adjacent guarantee the single-PUT path gets for free: a plain
-`PUT` is atomic (the object either fully exists with the uploaded
-bytes or doesn't exist at all), while a multipart upload's
-`CompleteMultipartUpload` only supports `If-None-Match: *`
-(existence-only) &mdash; never `If-Match(h)` &mdash; because a multipart `ETag`
-is not the body MD5. This is an accepted downgrade specific to large
-S3 packs; content-addressing (§8) makes it safe (see §6.7's
-idempotency note).
+An S3 pack is one `PUT` (§6.7), which is atomic: the object either holds
+all the uploaded bytes or does not exist.
 
 ### 7.2 Two-ref advance and the packmap reset
 
@@ -1040,8 +1030,8 @@ These hold for every conformant transport, regardless of scheme:
 | A local disk error is never retried and never falls back | `PackSink::failed()` stays set and `begin` refuses after it with `ProtocolError`, which is not retryable (§1.1, §7) |
 | Pack and blob bytes cross transports opaque and unmodified | transports MUST NOT inspect or rewrite them (§8) |
 
-Per-transport CAS strength differs (AWS S3 multipart breaks `Match`);
-the normative summary is the table in §7.1.
+Per-transport CAS strength differs; the normative summary is the table
+in §7.1.
 
 ### Pack-chain fetch
 

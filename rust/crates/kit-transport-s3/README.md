@@ -19,3 +19,9 @@ Retry policy mirrors SPEC-TRANSPORT §7 via
 `kit_core::protocol::BackoffIterator`: `5xx` and HTTP `429` retry up to 5
 attempts; `412 Precondition Failed` never retries, so CAS writes can't
 silently turn into duplicate `PUT`s.
+
+Packs stream both ways (SPEC-TRANSPORT §6.7). An upload hashes the pack's
+body once for the `SigV4` payload hash, then sends it in one sized `PUT`,
+reading it again from offset 0 on every attempt. A download writes only a
+`200` answer's body to the sink, as it arrives. Neither holds the pack in
+memory.
