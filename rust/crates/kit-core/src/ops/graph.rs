@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
+use super::chunk_heads::{LenCache, for_each_checked_chunk};
 use crate::hash::{self, Hash};
 use crate::object::{ChunkedBlob, EntryMode, KitError, Object, ObjectType};
 use crate::store::{ObjectSource, ObjectStore, StoreError};
@@ -485,7 +486,8 @@ where
 /// bytes. A chunk is a `Blob`; any other object is [`KitError::ChunkNotBlob`].
 /// The caller compares the length with the manifest's span
 /// ([`ChunkedBlob::check_chunk_length`]). The push plan and the closure
-/// presence check both read a chunk through this one function.
+/// presence check both read a chunk through this one function, by way of
+/// [`super::chunk_heads`].
 ///
 /// # Errors
 /// [`StoreError::ObjectNotFound`] and the errors of
@@ -495,34 +497,44 @@ pub(crate) fn chunk_blob_len(
     chunk: &Hash,
     index: u32,
 ) -> Result<u64, StoreError> {
-    #[cfg(test)]
-    CHUNK_TYPE_READS.with(|reads| reads.set(reads.get() + 1));
     let (_, len) = store.object_head(chunk)?;
     Ok(len.ok_or(KitError::ChunkNotBlob { index })?)
 }
 
+/// The lengths a presence check has measured, up to a bound.
+struct CheckedChunks<'a> {
+    seen: &'a mut BTreeMap<Hash, u64>,
+    limit: usize,
+}
+
+impl LenCache for CheckedChunks<'_> {
+    fn len_of(&self, chunk: &Hash) -> Option<u64> {
+        self.seen.get(chunk).copied()
+    }
+
+    fn remember(&mut self, chunk: Hash, len: u64) {
+        if self.seen.len() < self.limit {
+            self.seen.entry(chunk).or_insert(len);
+        }
+    }
+}
+
 /// Check each chunk of `manifest` against its span: it is a `Blob` whose
 /// content length is `end - start`. Reads the first 10 bytes of a chunk not
-/// already in `checked`, and remembers at most `memory` chunks.
+/// already in `checked`, and remembers at most `memory` chunks. The reads of a
+/// window of chunks run in parallel; the result and the error are those of
+/// reading them in manifest order.
 fn check_manifest_chunks(
     store: &ObjectStore,
     manifest: &ChunkedBlob,
     memory: usize,
     checked: &mut BTreeMap<Hash, u64>,
 ) -> Result<(), StoreError> {
-    for (index, (chunk, _end)) in (0u32..).zip(manifest.entries()) {
-        let len = if let Some(&len) = checked.get(&chunk) {
-            len
-        } else {
-            let len = chunk_blob_len(store, &chunk, index)?;
-            if checked.len() < memory {
-                checked.insert(chunk, len);
-            }
-            len
-        };
-        manifest.check_chunk_length(index, len)?;
-    }
-    Ok(())
+    let mut cache = CheckedChunks {
+        seen: checked,
+        limit: memory,
+    };
+    for_each_checked_chunk(store, manifest, &mut cache, |_, _| true, |_, _, _| Ok(()))
 }
 
 #[cfg(test)]

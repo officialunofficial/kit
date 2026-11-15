@@ -27,7 +27,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::{PUSH_WALK_LIMIT, WalkLimits};
 use crate::hash::{Hash, to_hex};
 use crate::object::{ChunkedBlob, EntryMode, Object, ObjectType, Tree, TreeEntry};
-use crate::ops::graph::{ClosureMode, children, chunk_blob_len};
+use crate::ops::chunk_heads::{LenCache, for_each_checked_chunk};
+use crate::ops::graph::{ClosureMode, children};
 use crate::store::{ObjectStore, StoreError};
 
 /// Most trees the held filter reads from the remote head's snapshot. Past
@@ -157,23 +158,6 @@ impl ChunkMemory {
         }
     }
 
-    /// The length of a chunk's blob, read once while it stays in memory.
-    fn blob_len(
-        &mut self,
-        store: &ObjectStore,
-        chunk: &Hash,
-        index: u32,
-    ) -> Result<u64, StoreError> {
-        if let Some(&(len, _)) = self.seen.get(chunk) {
-            return Ok(len);
-        }
-        let len = chunk_blob_len(store, chunk, index)?;
-        if self.seen.len() < self.limit {
-            self.seen.insert(*chunk, (len, false));
-        }
-        Ok(len)
-    }
-
     /// `true` the first time a chunk is seen. Past the bound a chunk is
     /// reported as new again.
     fn first_sight(&mut self, chunk: &Hash) -> bool {
@@ -184,6 +168,18 @@ impl ChunkMemory {
                 true
             }
             None => true,
+        }
+    }
+}
+
+impl LenCache for ChunkMemory {
+    fn len_of(&self, chunk: &Hash) -> Option<u64> {
+        self.seen.get(chunk).map(|&(len, _)| len)
+    }
+
+    fn remember(&mut self, chunk: Hash, len: u64) {
+        if self.seen.len() < self.limit {
+            self.seen.entry(chunk).or_insert((len, false));
         }
     }
 }
@@ -352,22 +348,27 @@ impl PushWalk {
                 Some(Ok(_) | Err(StoreError::ObjectNotFound(_))) | None => SpanLengths::default(),
                 Some(Err(error)) => return Err(error),
             };
-            for (index, chunk) in (0u32..).zip(blob.chunks().iter().copied()) {
-                // The replaced manifest gives the chunk the same span length,
-                // so the chunk holds what it says (see `replaced_spans`). The
-                // head is read in every other case.
-                let span_len = blob.span(index).map(|(start, end)| end - start);
-                let listed = replaced.get(&chunk).copied();
-                if span_len.is_none() || listed != span_len {
-                    let len = memory.blob_len(store, &chunk, index)?;
-                    blob.check_chunk_length(index, len)?;
-                }
-                if listed.is_some() || self.objects.contains(&chunk) || !memory.first_sight(&chunk)
-                {
-                    continue;
-                }
-                f(&manifest.commit, &blob, index, chunk)?;
-            }
+            // The replaced manifest gives a chunk the same span length, so
+            // the chunk holds what it says (see `replaced_spans`). The head is
+            // read in every other case, a window of chunks at a time.
+            for_each_checked_chunk(
+                store,
+                &blob,
+                memory,
+                |index, chunk| {
+                    let span_len = blob.span(index).map(|(start, end)| end - start);
+                    span_len.is_none() || replaced.get(chunk).copied() != span_len
+                },
+                |memory, index, chunk| {
+                    if replaced.contains_key(&chunk)
+                        || self.objects.contains(&chunk)
+                        || !memory.first_sight(&chunk)
+                    {
+                        return Ok(());
+                    }
+                    f(&manifest.commit, &blob, index, chunk)
+                },
+            )?;
         }
         Ok(())
     }
