@@ -802,6 +802,40 @@ mod tests {
         ));
     }
 
+    /// `push --delete` sends the head and its chain ref, both as deletes.
+    /// The pair needs `d` on the branch or tag (§8.2), and the chain ref
+    /// adds no flag of its own (§8.3).
+    #[test]
+    fn a_delete_with_its_chain_ref_needs_d() {
+        for (head, map, pattern) in [
+            ("refs/heads/main", "refs/kit/packmap/main", "refs/heads/*"),
+            ("refs/tags/v1", "refs/kit/tagmap/v1", "refs/tags/*"),
+        ] {
+            let select = |flags: &str, refs: &[GrantRef<'_>]| {
+                let grant = header(
+                    &format!("{NS}/photos"),
+                    "write",
+                    &format!("{pattern}={flags}"),
+                    NOW,
+                    NOW + 100_000,
+                    "https://git.example.com",
+                    KEY,
+                );
+                LocalGrants::from_headers(vec![grant])
+                    .select_at(&request(GrantOperation::Write { refs }), NOW)
+                    .is_some()
+            };
+            let pair = [
+                GrantRef::new(head, GrantCondition::Delete),
+                GrantRef::new(map, GrantCondition::Delete),
+            ];
+            assert!(select("d", &pair), "{head}");
+            assert!(!select("cuf", &pair), "{head}");
+            assert!(select("d", &pair[..1]), "{head} alone");
+            assert!(!select("cufd", &pair[1..]), "{map} without {head}");
+        }
+    }
+
     /// The same header with a different epoch (the statement bytes change;
     /// the fake signature is irrelevant to selection).
     fn at_epoch(header: &str, epoch: u64) -> String {

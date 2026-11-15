@@ -106,6 +106,11 @@ pub enum TransportError {
     /// transported in the clear.
     #[error("insecure scheme: plain http:// is allowed only for loopback hosts")]
     InsecureScheme,
+
+    /// The transport cannot do this operation safely, so it refused it
+    /// before it wrote anything. The text says which operation.
+    #[error("{0}")]
+    Unsupported(&'static str),
 }
 
 /// One opaque challenge advertised by the remote.
@@ -846,6 +851,49 @@ pub trait Transport: Send + Sync {
         hash: &Hash,
     ) -> TransportResult<()>;
 
+    /// Delete `name` if it holds `expected` (SPEC-TRANSPORT §1). A ref that
+    /// is absent or holds another value is [`TransportError::RefConflict`],
+    /// and nothing is deleted. No transport offers an unconditional delete;
+    /// one that cannot condition a delete refuses every delete before it
+    /// writes anything.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()>;
+
+    /// Delete a head ref, then its chain ref (`refs/kit/packmap/<b>` or
+    /// `refs/kit/tagmap/<t>`), each under `Match` (SPEC-TRANSPORT §7.3).
+    /// With `map_expected` `None` the head has no chain ref, and only the
+    /// head is deleted.
+    ///
+    /// [`AdvanceOutcome::HeadConflict`] means the head did not hold
+    /// `head_expected` and nothing was deleted. A transport that deletes both
+    /// refs in one transaction reports a moved chain ref as
+    /// [`AdvanceOutcome::PackmapConflict`], with nothing deleted.
+    ///
+    /// The default deletes the head and then the chain ref, one
+    /// [`Self::delete_ref`] each. Once the head is gone the delete has
+    /// happened, so a failed chain-ref delete, a lost CAS or any other
+    /// error, still reports [`AdvanceOutcome::Committed`], as a crash
+    /// between the two would. The chain ref it leaves behind is harmless: a
+    /// fetch reads it as a stale listing, and the next push of that name
+    /// appends to it.
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> TransportResult<AdvanceOutcome> {
+        match self.delete_ref(head, head_expected) {
+            Ok(()) => {}
+            Err(TransportError::RefConflict) => return Ok(AdvanceOutcome::HeadConflict),
+            Err(e) => return Err(e),
+        }
+        if let Some(expected) = map_expected {
+            // The head is gone: a chain ref left behind is a leftover.
+            let _ = self.delete_ref(map, expected);
+        }
+        Ok(AdvanceOutcome::Committed)
+    }
+
     /// Read the current value of a ref, or `None` if it does not exist.
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>>;
 
@@ -1186,6 +1234,12 @@ mod tests {
         uploaded: std::sync::Mutex<Option<Upload>>,
         stored: std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<u8>>>,
         atomic: bool,
+        /// Every ref a delete removed, in order.
+        deleted: std::sync::Mutex<Vec<String>>,
+        /// A ref whose delete loses its CAS.
+        conflict_on: Option<&'static str>,
+        /// A ref whose delete fails with another error.
+        fail_on: Option<&'static str>,
     }
 
     impl Transport for RecordingTransport {
@@ -1230,6 +1284,17 @@ mod tests {
             unimplemented!("not exercised by these tests")
         }
 
+        fn delete_ref(&self, name: &str, _expected: &Hash) -> TransportResult<()> {
+            if self.conflict_on == Some(name) {
+                return Err(TransportError::RefConflict);
+            }
+            if self.fail_on == Some(name) {
+                return Err(TransportError::ConnectionFailed);
+            }
+            self.deleted.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+
         fn read_ref(&self, _name: &str) -> TransportResult<Option<Hash>> {
             unimplemented!("not exercised by these tests")
         }
@@ -1241,6 +1306,80 @@ mod tests {
         fn supports_atomic_advance(&self) -> bool {
             self.atomic
         }
+    }
+
+    const HEAD: &str = "refs/heads/main";
+    const MAP: &str = "refs/kit/packmap/main";
+
+    fn delete_pair(transport: &RecordingTransport, map: Option<&Hash>) -> AdvanceOutcome {
+        transport.delete_refs(HEAD, &[1; 32], MAP, map).unwrap()
+    }
+
+    /// The default delete removes the head, then its chain ref.
+    #[test]
+    fn default_delete_removes_the_head_then_its_chain_ref() {
+        let transport = RecordingTransport::default();
+        assert_eq!(
+            delete_pair(&transport, Some(&[2; 32])),
+            AdvanceOutcome::Committed
+        );
+        assert_eq!(*transport.deleted.lock().unwrap(), [HEAD, MAP]);
+    }
+
+    /// A head without a chain ref is deleted alone.
+    #[test]
+    fn default_delete_of_a_head_without_a_chain_ref_deletes_the_head_only() {
+        let transport = RecordingTransport::default();
+        assert_eq!(delete_pair(&transport, None), AdvanceOutcome::Committed);
+        assert_eq!(*transport.deleted.lock().unwrap(), [HEAD]);
+    }
+
+    /// A head that lost its CAS is a conflict, and the chain ref is never
+    /// touched.
+    #[test]
+    fn default_delete_with_a_stale_head_deletes_nothing() {
+        let transport = RecordingTransport {
+            conflict_on: Some(HEAD),
+            ..RecordingTransport::default()
+        };
+        assert_eq!(
+            delete_pair(&transport, Some(&[2; 32])),
+            AdvanceOutcome::HeadConflict
+        );
+        assert!(transport.deleted.lock().unwrap().is_empty());
+    }
+
+    /// Once the head is gone the delete has happened: a lost CAS or another
+    /// failure on the chain ref leaves it behind and still reports success.
+    #[test]
+    fn default_delete_succeeds_once_the_head_is_gone() {
+        for (conflict_on, fail_on) in [(Some(MAP), None), (None, Some(MAP))] {
+            let transport = RecordingTransport {
+                conflict_on,
+                fail_on,
+                ..RecordingTransport::default()
+            };
+            assert_eq!(
+                delete_pair(&transport, Some(&[2; 32])),
+                AdvanceOutcome::Committed
+            );
+            assert_eq!(*transport.deleted.lock().unwrap(), [HEAD]);
+        }
+    }
+
+    /// A head delete that fails for another reason is surfaced, and the
+    /// chain ref is never touched.
+    #[test]
+    fn default_delete_surfaces_a_failed_head_delete() {
+        let transport = RecordingTransport {
+            fail_on: Some(HEAD),
+            ..RecordingTransport::default()
+        };
+        assert!(matches!(
+            transport.delete_refs(HEAD, &[1; 32], MAP, Some(&[2; 32])),
+            Err(TransportError::ConnectionFailed)
+        ));
+        assert!(transport.deleted.lock().unwrap().is_empty());
     }
 
     /// Every atomic advance is serialized; an ordered one is neither.

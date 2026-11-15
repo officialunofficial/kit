@@ -744,6 +744,39 @@ impl FileTransport {
         Ok(f(&LockedRefs { tx: self }))
     }
 
+    /// Delete the ref `name` if it holds `expected`: the read, the check and
+    /// the removal are one step under the exclusive ref lock
+    /// ([`Self::with_ref_lock`]), so the directories the removal leaves empty
+    /// can be pruned while no other writer is creating a file in them. The
+    /// stripe of `name` is counted, so the repository cursor changes.
+    ///
+    /// The inner result is `Err(current)` when the ref held another value,
+    /// or was absent (`None`); nothing was removed then.
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`], [`RefFileError::Escape`],
+    /// [`RefFileError::MetaElsewhere`], a ref file that holds no id, or I/O.
+    pub fn delete_ref_if(
+        &self,
+        name: &str,
+        expected: &Hash,
+    ) -> Result<Result<(), Option<Hash>>, RefFileError> {
+        if !validate_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        self.with_ref_lock(|refs| {
+            let current = refs.read_ref(name)?;
+            if current != Some(*expected) {
+                return Ok(Err(current));
+            }
+            Ok(if refs.delete_ref(name)? {
+                Ok(())
+            } else {
+                Err(None)
+            })
+        })?
+    }
+
     /// Run `f` holding the lock of the ref `name` only: the repo lock
     /// shared and the exclusive lock of the ref's stripe, each after its
     /// in-process mirror. What `f` reads and writes through [`LockedRef`]
@@ -1819,6 +1852,17 @@ impl Transport for FileTransport {
             Some(digest) => RepoCursor::new(&digest).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// [`Self::delete_ref_if`]: under the exclusive ref lock, so a delete
+    /// never interleaves with another write and prunes the directories it
+    /// leaves empty.
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        if !validate_ref_name(name) {
+            return Err(TransportError::InvalidRef(name.to_owned()));
+        }
+        self.delete_ref_if(name, expected)?
+            .map_err(|_| TransportError::RefConflict)
     }
 
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
@@ -4007,6 +4051,37 @@ mod tests {
             .unwrap();
     }
 
+    /// A delete removes the ref only while it holds the expected value. It
+    /// prunes the directories it empties, so a ref named like one of them
+    /// can be created next.
+    #[test]
+    fn transport_delete_needs_the_expected_value_and_prunes() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let (a, b) = (blake3_hash(b"a"), blake3_hash(b"b"));
+        let name = "refs/heads/team/a";
+        assert!(matches!(
+            t.delete_ref(name, &a),
+            Err(TransportError::RefConflict)
+        ));
+        t.update_ref(name, RefWriteCondition::Missing, &a).unwrap();
+        assert!(matches!(
+            t.delete_ref(name, &b),
+            Err(TransportError::RefConflict)
+        ));
+        assert_eq!(t.read_ref(name).unwrap(), Some(a));
+        assert_eq!(t.delete_ref_if(name, &b).unwrap(), Err(Some(a)));
+        t.delete_ref(name, &a).unwrap();
+        assert_eq!(t.read_ref(name).unwrap(), None);
+        assert_eq!(t.delete_ref_if(name, &a).unwrap(), Err(None));
+        t.update_ref("refs/heads/team", RefWriteCondition::Missing, &b)
+            .unwrap();
+        assert!(matches!(
+            t.delete_ref("refs/heads/team/../x", &a),
+            Err(TransportError::InvalidRef(_))
+        ));
+    }
+
     #[test]
     fn delete_ref_removes_the_file_once_and_prunes_empty_dirs() {
         let dir = tmp();
@@ -4306,6 +4381,11 @@ mod tests {
                 .unwrap()
         );
         assert!(seen.insert(cursor(&tx)), "a delete");
+        tx.update_ref(name, RefWriteCondition::Missing, &value(2, 0))
+            .unwrap();
+        assert!(seen.insert(cursor(&tx)), "a re-create");
+        tx.delete_ref(name, &value(2, 0)).unwrap();
+        assert!(seen.insert(cursor(&tx)), "a conditioned delete");
         // A failed CAS changes no ref. Its temporary file may still move a
         // directory time, and with it the cursor, which only costs a fetch.
         let failed = tx.update_ref("refs/heads/b", RefWriteCondition::Missing, &value(1, 1));

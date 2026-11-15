@@ -1270,7 +1270,8 @@ Remote / sync:
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
 - `kit push [<remote> [<src>:<dst>|<branch>|<tag>]] [--all | --tags]
-  [--force|--force-with-lease] [--dry-run] [--format=json] [-q|--quiet]`
+  [--force|--force-with-lease] [--dry-run] [--format=json] [-q|--quiet]`,
+  `kit push --delete <remote> <branch>|<tag>`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
@@ -1281,7 +1282,7 @@ Remote / sync:
   ref. A refspec push goes through the same path as a plain push, so the
   lease and the non-fast-forward check apply, and it records an upstream only
   with `-u`. kit rejects a wildcard, a leading `+` (use `--force`), an empty
-  `<src>` (a remote delete), a ref outside `refs/heads/` and a refspec with
+  `<src>` (use `--delete`), a ref outside `refs/heads/` and a refspec with
   `--all`. The default push is
   CAS-protected: a non-fast-forward is rejected using the remote-tracking
   ref as the lease. `--all` mirrors every `refs/heads/*` (also CAS-safe).
@@ -1357,6 +1358,27 @@ Remote / sync:
   tags. A refused tag does not stop the others, and the push exits 1.
   `--format=json` prints `{"ok":<bool>,"remote":"...","endpoint":"...",
   "tags_pushed":<n>,"tags_rejected":<n>}`.
+
+  `--delete <remote> <name>` deletes one remote branch or tag together with
+  its chain ref, `refs/kit/packmap/<b>` or `refs/kit/tagmap/<t>`
+  (SPEC-TRANSPORT §7.3). A short name is the remote's branch or tag of that
+  name; a name the remote holds as both is refused, so name
+  `refs/heads/<n>` or `refs/tags/<n>`. A branch is deleted only while it
+  holds its tracking ref's value, and its tracking ref goes too; a branch
+  with no tracking ref is refused (fetch first). A tag is deleted only while
+  it holds the value the push just read. A remote branch that moved since
+  the last fetch is not deleted, and the push exits 1. A tag the remote does
+  not hold is an error; a branch the remote no longer holds, or a tag
+  another writer deletes while this one runs, counts as deleted, and a
+  branch's tracking ref goes. The local branch or tag stays. On
+  success the push prints `To <url>` and ` - [deleted]         <ref>`. An
+  S3 remote refuses every delete. `--delete` needs a ref and conflicts with
+  `--all`, `--tags`, `--force`, `--force-with-lease` and `-u` (exit 64).
+  `--dry-run` names the delete and contacts nothing. `--format=json` prints
+  `{"ok":true,"remote":"...","endpoint":"...","deleted":"<ref>",
+  "old":"<hex>|null"}`, where `old` is null when the ref was already gone,
+  and under `--dry-run` `{"ok":true,"dry_run":true,"remote":"...",
+  "endpoint":"...","delete":"<name>"}`.
 - **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the

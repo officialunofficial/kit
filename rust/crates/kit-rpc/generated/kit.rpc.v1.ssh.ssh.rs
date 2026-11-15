@@ -1679,7 +1679,7 @@ pub struct UpdateRef {
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `expected_id`
     pub expected_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    /// empty new_id deletes the ref
+    /// empty new_id deletes the ref, under MATCH only
     ///
     /// Field 3: `new_id`
     pub new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,

@@ -90,6 +90,9 @@ pub enum PushError {
     DeltaBaseUnavailable,
     #[error("packlist still names a pack absent from this repository after retry")]
     PacklistNotInRepository,
+    /// `push --delete` deleted nothing.
+    #[error(transparent)]
+    Delete(#[from] super::DeleteError),
 }
 
 fn resume_hint(cause: &PushError) -> &'static str {

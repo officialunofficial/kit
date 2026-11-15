@@ -333,7 +333,8 @@ the server returns the identical receipt envelope bytes.
 A server offering atomic advance MUST commit both writes atomically and MUST
 advertise `atomic_advance = true` through `GetServerInfo` (§2.1). A server that
 does not offer atomic advance MUST NOT advertise it; its fallback writes the
-packmap before the head. That fallback is available only to writes outside the
+packmap before the head, and for a paired deletion (§7.8) deletes the head
+before the packmap. That fallback is available only to writes outside the
 signed replay-protected write contract. Every accepted signed ref write MUST
 satisfy atomic acceptance (§7.1), including both sides of an
 `AdvanceRefs` or paired deletion.
@@ -1747,8 +1748,9 @@ A transactional outbox retains pending outcome-delivery responsibility.
 - On `UpdateRef`, `delete` is valid only with `REF_EXPECTATION_MATCH`
   and an empty `new_id`. The server removes the ref if its current
   value equals `expected_id`.
-- On `AdvanceRefs`, `delete` removes the branch head and its packmap
-  together, under the same rules for each: both expectations are
+- On `AdvanceRefs`, `delete` removes a head and its chain ref together,
+  a branch with its packmap or a tag with its tag map (§4), under the same
+  rules for each: both expectations are
   `MATCH`, and both new ids are empty. A conflict is a typed outcome
   (§4), as for any advance.
 - A `delete` with any other expectation or a nonempty new id is
@@ -1757,14 +1759,19 @@ A transactional outbox retains pending outcome-delivery responsibility.
   tickets.
 - Deleting an absent ref is a CAS conflict: `failed_precondition` on
   `UpdateRef`.
+- A server without atomic advance (§4) deletes the head before its chain
+  ref, so that no reader sees a head whose chain ref is gone.
 
 The write policy authorizes deletion (§7.5). A grant authorizes
 deletion only through its `delete` flag
 ([SPEC-WRITE-GRANTS §8](SPEC-WRITE-GRANTS.md#8-ref-scopes-and-packmap-coverage)).
 A deployment MAY refuse deletion entirely with `permission_denied`.
 
-This document requires no client command for deletion (informative: a
-`push --delete` command is a separate change).
+`kit push --delete` (SPEC-TRANSPORT §7.3) sends one `AdvanceRefs` with
+`delete` for a head and its chain ref, and an `UpdateRef` with `delete` for
+a head that has no chain ref. On `PackmapConflict` it reads the chain ref
+again and retries; on `HeadConflict` it reads the head, and a head already
+gone counts as deleted.
 
 ### 7.9 Consistency and paging
 

@@ -140,6 +140,9 @@ impl Transport for CountingTransport {
         self.inner.update_ref(name, condition, hash)
     }
 
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
     }
@@ -658,6 +661,9 @@ impl Transport for StaleListing {
         self.inner.update_ref(name, condition, hash)
     }
 
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         if self.head_read_fails && name == format!("refs/heads/{}", self.ghost.name) {
             return Err(kit_core::protocol::TransportError::RemoteError(

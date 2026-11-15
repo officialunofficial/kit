@@ -99,6 +99,9 @@ pub const DEFAULT_REGION: &str = "us-east-1";
 // Connect / construction
 // ---------------------------------------------------------------------------
 
+/// Why the s3 transport refuses every ref delete.
+pub const S3_DELETE_REFUSED: &str = "the s3 transport cannot delete a ref conditionally";
+
 /// The transport implementation. Clone-safe — the underlying reqwest
 /// client is cheap to share across threads.
 pub struct S3Transport {
@@ -886,6 +889,15 @@ impl Transport for S3Transport {
             403 | 401 => Err(TransportError::AccessDenied),
             s => Err(TransportError::ServerError { status: s }),
         }
+    }
+
+    /// Refused, with no request sent (SPEC-TRANSPORT §6.3). A conditional
+    /// `DELETE` is not something every S3 store honours, and one that
+    /// ignores `If-Match` would delete without the check. So this transport
+    /// deletes nothing, and the default [`Transport::delete_refs`] refuses
+    /// at its first step, before any write.
+    fn delete_ref(&self, _name: &str, _expected: &Hash) -> TransportResult<()> {
+        Err(TransportError::Unsupported(S3_DELETE_REFUSED))
     }
 
     fn update_ref(

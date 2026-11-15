@@ -9,7 +9,8 @@
 //! | `ReadRef` | any other | `INTERNAL "read ref failed"` |
 //! | `UpdateRef` | a name over 512 bytes | `INVALID_REQUEST "ref name too long"` |
 //! | `UpdateRef` | a valid name outside `refs/` | `INVALID_REQUEST`, [`REF_NAME_OUTSIDE_REFS`] |
-//! | `UpdateRef` | a CAS conflict | [`cas_conflict_body`] |
+//! | `UpdateRef` | an empty `new_id` (a delete) under `ANY` or `MISSING` | `INVALID_REQUEST`, [`DELETE_NEEDS_MATCH`] |
+//! | `UpdateRef` | a CAS conflict, a delete's included | [`cas_conflict_body`] |
 //! | `UpdateRef` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
 //! | `ListRefs` | any | `INTERNAL "list refs failed"` |
@@ -81,6 +82,20 @@ fn decode_update_ref(req: &UpdateRef) -> Result<(String, RefWriteCondition, Hash
     let condition =
         condition(expectation, req.expected_id.as_deref().unwrap_or_default()).map_err(bad)?;
     Ok((req.name.clone().unwrap_or_default(), condition, new))
+}
+
+/// The reply to a delete (an empty `new_id`) under `ANY` or `MISSING`.
+pub const DELETE_NEEDS_MATCH: &str = "a delete (empty new_id) requires a MATCH expectation";
+
+/// A decoded delete, an `UpdateRef` with an empty `new_id` (SPEC-TRANSPORT
+/// §4.2.1): the name and the value the ref must hold. Only `MATCH` deletes.
+fn decode_delete_ref(req: &UpdateRef) -> Result<(String, Hash), VerbError> {
+    let bad = |message| (ErrorCode::InvalidRequest, message);
+    let expectation = req.expectation.map_or(0, |e| e.to_i32());
+    match condition(expectation, req.expected_id.as_deref().unwrap_or_default()).map_err(bad)? {
+        RefWriteCondition::Match(expected) => Ok((req.name.clone().unwrap_or_default(), expected)),
+        _ => Err(bad(DELETE_NEEDS_MATCH)),
+    }
 }
 
 /// The reply to a failed CAS (SPEC-TRANSPORT §4.2.1): `Error{INVALID_REQUEST}`
@@ -216,6 +231,9 @@ impl<'r> Verbs<'r> {
     }
 
     fn update_ref(&self, req: &UpdateRef) -> Result<Body, VerbError> {
+        if req.new_id.as_deref().unwrap_or_default().is_empty() {
+            return self.delete_ref(req);
+        }
         let failed = (ErrorCode::InvalidRequest, "update ref failed");
         let (name, condition, new) = decode_update_ref(req)?;
         check_name(&name)?;
@@ -226,6 +244,26 @@ impl<'r> Verbs<'r> {
             return Err(WRITE_NOT_PERMITTED);
         }
         match self.repo.update_ref(&name, condition, &new) {
+            Ok(RefUpdate::Committed) => Ok(Body::UpdateRefResponse(Box::default())),
+            Ok(RefUpdate::Conflict { current }) => Ok(cas_conflict_body(current)),
+            Err(_) => Err(failed),
+        }
+    }
+
+    /// `UpdateRef` with an empty `new_id`: delete the ref if it holds
+    /// `expected_id`. An absent ref or another value is a CAS conflict, and
+    /// nothing is deleted.
+    fn delete_ref(&self, req: &UpdateRef) -> Result<Body, VerbError> {
+        let failed = (ErrorCode::InvalidRequest, "update ref failed");
+        let (name, expected) = decode_delete_ref(req)?;
+        check_name(&name)?;
+        if !is_served_ref_name(&name) {
+            return Err(failed);
+        }
+        if !self.may_write() {
+            return Err(WRITE_NOT_PERMITTED);
+        }
+        match self.repo.delete_ref(&name, &expected) {
             Ok(RefUpdate::Committed) => Ok(Body::UpdateRefResponse(Box::default())),
             Ok(RefUpdate::Conflict { current }) => Ok(cas_conflict_body(current)),
             Err(_) => Err(failed),

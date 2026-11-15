@@ -2195,6 +2195,71 @@ fn eight_distinct_ticket_ids_fail_before_advance() {
     assert_eq!(served.calls("AdvanceRefs"), 0);
 }
 
+/// A grant source that records the refs of each write it is asked about.
+#[derive(Default)]
+struct RecordingGrant(Mutex<Vec<Vec<(String, kit_transport_connect::GrantCondition)>>>);
+impl GrantSource for RecordingGrant {
+    fn select(&self, request: &GrantRequest<'_>) -> Option<String> {
+        if let kit_transport_connect::GrantOperation::Write { refs } = request.operation {
+            self.0.lock().unwrap().push(
+                refs.iter()
+                    .map(|r| (r.name.to_owned(), r.condition))
+                    .collect(),
+            );
+        }
+        Some("grant-value".into())
+    }
+}
+
+/// A delete asks for a grant for a delete of each ref it sends, and sends
+/// both refs in one `AdvanceRefs` with `delete`, under `MATCH`.
+#[test]
+fn a_delete_asks_for_a_delete_grant_on_each_ref() {
+    use kit_transport_connect::GrantCondition::Delete;
+    let served = Served::new(State::default());
+    let uri = format!(
+        "http://127.0.0.1:{}/0x8ba1f109551bd432803012645ac136ddd64dba72/photos",
+        served.port,
+    )
+    .parse()
+    .unwrap();
+    let grants = Arc::new(RecordingGrant::default());
+    let client = ConnectTransport::connect_for_test_with_signer(uri, Some(Arc::new(DigestSigner)))
+        .with_grant_source(grants.clone());
+    let (head, map) = ("refs/tags/v1", "refs/kit/tagmap/v1");
+    let outcome = client
+        .delete_refs(head, &hash(b"tag"), map, Some(&hash(b"map")))
+        .unwrap();
+    assert_eq!(outcome, AdvanceOutcome::Committed);
+    client.delete_ref(head, &hash(b"tag")).unwrap();
+    assert_eq!(
+        *grants.0.lock().unwrap(),
+        [
+            vec![(head.to_owned(), Delete), (map.to_owned(), Delete)],
+            vec![(head.to_owned(), Delete)],
+        ]
+    );
+    let state = served.state.lock().unwrap();
+    let advance = state
+        .requests
+        .iter()
+        .find_map(|r| r.advance.clone())
+        .unwrap();
+    assert_eq!(advance.delete, Some(true));
+    assert_eq!(advance.head_expected_id.as_deref(), Some(&hash(b"tag")[..]));
+    assert_eq!(
+        advance.packmap_expected_id.as_deref(),
+        Some(&hash(b"map")[..])
+    );
+    assert!(
+        state
+            .requests
+            .iter()
+            .filter(|r| matches!(r.rpc, "AdvanceRefs" | "UpdateRef"))
+            .all(|r| r.grant.as_deref() == Some("grant-value"))
+    );
+}
+
 #[test]
 fn ticketed_upload_pack_carries_no_write_grant() {
     let served = Served::new(State::default());

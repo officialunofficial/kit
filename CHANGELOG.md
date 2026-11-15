@@ -38,9 +38,27 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `transfer::plan_pack_tips`, `packmap::ChainState::Graft` and
   `protocol::RefListing`; in libkit, `transfer::push_tags_with_source` and
   `push::resolve_push_name`.
+- `kit push --delete <remote> <branch>|<tag>` deletes a remote branch with
+  its packmap, or a tag with its tag map, each under `Match`, the head first
+  (SPEC-TRANSPORT §7.3). A branch's lease is its tracking ref, which goes
+  too. It works over file, ssh and Connect; S3 refuses every delete before
+  any write. `kit serve` deletes on an `UpdateRef` with an empty `new_id`
+  under `MATCH`; a `kit serve` that predates deletes refuses with
+  "new_id must be 32 bytes", which the client surfaces. In kit-core, the
+  required `Transport::delete_ref`, the default `Transport::delete_refs` and
+  `TransportError::Unsupported`; in kit-sync, `RemoteSource::delete_refs`,
+  `PushTarget::Delete`, `DeleteTarget`, `DeletedRef`, `DeleteError`,
+  `PushReport::deleted` and `SourceError::Unsupported`; in libkit,
+  `transfer::push_delete_with_source`; in kit-transport-file,
+  `FileTransport::delete_ref_if`.
 
 ### Changed
 
+- `Transport::delete_ref` is a required verb: an implementation outside kit
+  adds it, refusing with `TransportError::Unsupported` when it cannot delete
+  under a condition. `kit serve` answers an `UpdateRef` with an empty
+  `new_id` as a delete, or with "a delete (empty new_id) requires a MATCH
+  expectation", where it used to refuse it as a malformed id.
 - `kit_sync::PushReport` is no longer `Copy`: it carries the per-tag results
   in `tags`. `RemoteSource` gains `inspection_max_objects` and `ref_listing`.
   A ticketed Connect advance may pair `refs/tags/<t>` with

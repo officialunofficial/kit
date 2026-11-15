@@ -100,6 +100,9 @@ impl Transport for CountingTransport {
     ) -> TransportResult<()> {
         self.inner.update_ref(name, condition, hash)
     }
+    fn delete_ref(&self, name: &str, expected: &hash::Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
         self.inner.read_ref(name)
     }
@@ -362,6 +365,9 @@ impl Transport for PackmapBlockingTransport {
         }
         self.inner.update_ref(name, condition, hash)
     }
+    fn delete_ref(&self, name: &str, expected: &hash::Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
         self.inner.read_ref(name)
     }
@@ -540,6 +546,9 @@ impl Transport for DropPackTransport {
     }
     fn update_ref(&self, name: &str, c: RefWriteCondition, h: &hash::Hash) -> TransportResult<()> {
         self.inner.update_ref(name, c, h)
+    }
+    fn delete_ref(&self, name: &str, expected: &hash::Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
     }
     fn read_ref(&self, name: &str) -> TransportResult<Option<hash::Hash>> {
         self.inner.read_ref(name)

@@ -335,7 +335,7 @@ fn update_ref_field_errors_keep_their_messages() {
         update(main, &[1; 32], None, None),
         update(main, &[1; 32], Some(RefExpectation::Match), None),
         update(main, &[1; 32], Some(RefExpectation::Match), Some(&[2; 31])),
-        // `new_id` is checked before the expectation.
+        // An empty `new_id` is a delete, which needs an expectation.
         update(main, &[], None, None),
         update(
             "refs/heads/.hidden",
@@ -350,7 +350,7 @@ fn update_ref_field_errors_keep_their_messages() {
         "UpdateRef.expectation is required",
         "MATCH expectation requires a 32-byte expected_id",
         "MATCH expectation requires a 32-byte expected_id",
-        "new_id must be 32 bytes",
+        "UpdateRef.expectation is required",
         "update ref failed",
     ];
     assert_eq!(frames.len(), want.len());
@@ -451,6 +451,79 @@ fn cas_conflict_carries_current_id_in_details() {
     );
     let tx = FileTransport::new(fx.root());
     assert_eq!(tx.read_ref(main).unwrap(), Some(winner));
+}
+
+/// SPEC-TRANSPORT §4.2.1: an empty `new_id` deletes the ref under `MATCH`
+/// only. Another value is a conflict whose `details` is the current id; an
+/// absent ref is a conflict with empty `details`. Nothing else deletes.
+#[test]
+fn an_empty_new_id_deletes_under_match_only() {
+    let fx = Fixture::new();
+    let (current, stale) = ([0x11u8; 32], [0x22u8; 32]);
+    let (main, tag) = ("refs/heads/main", "refs/tags/v1");
+    fx.seed(&[(main, current), (tag, current)], &[]);
+    let (end, frames) = fx.run([
+        update(main, &[], Some(RefExpectation::Any), None),
+        update(main, &[], Some(RefExpectation::Missing), None),
+        update(main, &[], Some(RefExpectation::Match), Some(&[1; 5])),
+        update(main, &[], Some(RefExpectation::Match), Some(&stale)),
+        update(main, &[], Some(RefExpectation::Match), Some(&current)),
+        update(main, &[], Some(RefExpectation::Match), Some(&current)),
+        update("main", &[], Some(RefExpectation::Match), Some(&current)),
+        read_ref(main),
+        read_ref(tag),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(
+        &frames[0],
+        ErrorCode::InvalidRequest,
+        kit_serve::DELETE_NEEDS_MATCH,
+    );
+    assert_error(
+        &frames[1],
+        ErrorCode::InvalidRequest,
+        kit_serve::DELETE_NEEDS_MATCH,
+    );
+    assert_error(
+        &frames[2],
+        ErrorCode::InvalidRequest,
+        "MATCH expectation requires a 32-byte expected_id",
+    );
+    let stale_reply = error(&frames[3]);
+    assert_eq!(stale_reply.details.as_deref(), Some(&current[..]));
+    assert!(matches!(
+        kit_rpc::map_update_ref_error(stale_reply.clone(), RefWriteCondition::Match(stale), "ssh"),
+        TransportError::RefConflict
+    ));
+    assert!(matches!(frames[4].body, Some(Body::UpdateRefResponse(_))));
+    let absent = error(&frames[5]);
+    assert!(absent.code.is_some_and(|c| c == ErrorCode::InvalidRequest));
+    assert!(absent.details.as_deref().unwrap_or_default().is_empty());
+    assert_error(&frames[6], ErrorCode::InvalidRequest, REF_NAME_OUTSIDE_REFS);
+    let read = |f: &kit_rpc::kit::rpc::v1::ssh::SshFrame| match &f.body {
+        Some(Body::ReadRefResponse(r)) => r.object_id.clone(),
+        other => panic!("expected ReadRefResponse, got {other:?}"),
+    };
+    assert_eq!(read(&frames[7]), Some(Vec::new()), "main is deleted");
+    assert_eq!(read(&frames[8]), Some(current.to_vec()), "the tag stays");
+}
+
+/// A read-only server refuses a delete as it refuses any write.
+#[test]
+fn a_read_only_server_refuses_a_delete() {
+    let fx = Fixture::with_policy(kit_serve::WritePolicy::ReadOnly);
+    let main = "refs/heads/main";
+    FileTransport::new(fx.root())
+        .update_ref(main, RefWriteCondition::Any, &[0x11; 32])
+        .unwrap();
+    let (_, frames) = fx.run([
+        update(main, &[], Some(RefExpectation::Match), Some(&[0x11; 32])),
+        read_ref(main),
+    ]);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "write not permitted");
+    assert!(
+        matches!(&frames[1].body, Some(Body::ReadRefResponse(r)) if r.object_id.as_deref() == Some(&[0x11; 32][..]))
+    );
 }
 
 #[test]

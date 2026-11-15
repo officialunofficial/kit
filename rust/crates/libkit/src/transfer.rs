@@ -195,6 +195,30 @@ pub fn push_tags_with_source(
     Ok(kit_sync::push(cwd, source, &options)?.tags)
 }
 
+/// Delete one remote branch or tag with its chain ref, each under `Match`
+/// (SPEC-TRANSPORT §7.3). A branch's lease is its tracking ref, which goes
+/// too; a tag's expected value is the one read just before.
+///
+/// # Errors
+/// As [`push_all_with_source`], and [`Error::Delete`] when nothing was
+/// deleted: a stale lease, no tracking ref, a name the remote does not hold
+/// or holds twice, or a refusal (an s3 remote refuses every delete).
+pub fn push_delete_with_source(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    target: kit_sync::push::DeleteTarget,
+    settings: &PushSettings<'_>,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::push::DeletedRef, Error> {
+    let mut options = settings.options(observer);
+    options.remote_name = remote;
+    options.target = PushTarget::Delete(target);
+    kit_sync::push(cwd, source, &options)?
+        .deleted
+        .ok_or(Error::NotCommit)
+}
+
 /// Fetch the refs of `remote`, then fast-forward the current branch from its
 /// tracking ref.
 ///

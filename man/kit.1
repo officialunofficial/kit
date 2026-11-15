@@ -976,6 +976,7 @@ and
 .Fl Fl abort
 after a conflict.
 .It Cm push Oo Fl Fl dry-run Oc Oo Fl Fl tags Oc Op Ar remote Op Ar src Ns : Ns Ar dst | Ar branch | Ar tag
+.It Cm push Oo Fl Fl dry-run Oc Fl Fl delete Ar remote Ar branch | Ar tag
 Push HEAD's commit chain to the configured remote. With
 .Ar remote
 and
@@ -1006,6 +1007,15 @@ branch and a tag is an error. A remote tag with another value is refused
 unless
 .Fl Fl force ,
 and an unsigned annotated tag is refused.
+.Fl Fl delete
+deletes one remote branch or tag with its packmap or tag map.
+A branch is deleted only while it holds its remote-tracking ref's value,
+and that ref goes too; a tag only while it holds the value just read.
+A name the remote holds as both a branch and a tag needs
+.Pa refs/heads/
+or
+.Pa refs/tags/ .
+An S3 remote refuses every delete.
 .It Cm pull Oo Fl Fl all Oc Oo Fl Fl rebase | Fl Fl no-ff Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 .It Cm fetch Oo Fl Fl all Oc Oo Fl p | Fl Fl prune Oc Oo Fl Fl tags | Fl Fl no-tags Oc Op Ar remote
 Download or download-and-merge from the remote.

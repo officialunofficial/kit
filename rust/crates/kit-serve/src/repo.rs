@@ -195,6 +195,22 @@ impl Repo {
         Ok(out)
     }
 
+    /// Delete the ref `name` if it holds `expected`. The check and the
+    /// removal are one step under the exclusive ref lock.
+    pub(crate) fn delete_ref(
+        &self,
+        name: &str,
+        expected: &Hash,
+    ) -> Result<RefUpdate, RefFileError> {
+        if !is_served_ref_name(name) {
+            return Err(RefFileError::InvalidName(name.to_owned()));
+        }
+        Ok(match self.tx.delete_ref_if(name, expected)? {
+            Ok(()) => RefUpdate::Committed,
+            Err(current) => RefUpdate::Conflict { current },
+        })
+    }
+
     /// Set the ref `name` to `new` if `condition` holds. The check and the
     /// write are one step under the lock of that ref.
     pub(crate) fn update_ref(
@@ -287,6 +303,24 @@ mod tests {
         );
         assert_eq!(update(RefWriteCondition::Any, &c), RefUpdate::Committed);
         assert_eq!(r.read_ref(MAIN).unwrap(), Some(c));
+    }
+
+    #[test]
+    fn delete_needs_the_current_value() {
+        let td = tempfile::tempdir().unwrap();
+        let r = repo(&td);
+        let (a, b) = ([1; 32], [2; 32]);
+        assert_eq!(
+            r.delete_ref(MAIN, &a).unwrap(),
+            RefUpdate::Conflict { current: None }
+        );
+        r.update_ref(MAIN, RefWriteCondition::Missing, &a).unwrap();
+        assert_eq!(
+            r.delete_ref(MAIN, &b).unwrap(),
+            RefUpdate::Conflict { current: Some(a) }
+        );
+        assert_eq!(r.delete_ref(MAIN, &a).unwrap(), RefUpdate::Committed);
+        assert_eq!(r.read_ref(MAIN).unwrap(), None);
     }
 
     #[test]

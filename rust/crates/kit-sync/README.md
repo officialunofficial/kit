@@ -280,6 +280,19 @@ everything the chain held, so every source and every head condition allows
 it. A chain that holds more than 4,096 packs with the new ones keeps
 appending. A force push on an atomic or serialized source appends.
 
+`PushTarget::Delete(DeleteTarget)` deletes one remote branch or tag with its
+chain ref (SPEC-TRANSPORT §7.3), through `RemoteSource::delete_refs`. A
+branch's lease is its tracking ref, which the delete removes; a tag's
+expected value is the one just read. A branch with no tracking ref, a remote
+ref at another value, or a short name the remote holds as both a branch and
+a tag is a `PushError::Delete`, and nothing is deleted. Once the head is
+gone the delete has happened, so a chain ref left by a crash still reports
+success, and the next push of that name appends to it. `PushReport::deleted`
+names the ref and the value removed, `None` when the head was already gone
+when the delete reached it.
+`delete_refs` refuses by default, so a read-only source needs nothing new;
+an S3 transport refuses every delete.
+
 `PushReport` contains the completed ref count, advance count, and optional
 single-branch tip. `PushError` preserves push-specific refusals and carries
 filesystem and backend failures through `PushError::Sync`; backend failures

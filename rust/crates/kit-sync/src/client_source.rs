@@ -271,6 +271,19 @@ impl<
         self.list_refs_with_page_limit("refs/heads/", max_pages)
     }
 
+    /// Delete the ref `name` if it holds `expected`: `UpdateRef` with
+    /// `delete` (SPEC-TRANSPORT-CONNECT §7.8). Another value or an absent ref
+    /// is [`SourceError::RefConflict`].
+    ///
+    /// # Errors
+    /// Writes are disabled, the ref moved, or the remote refused.
+    pub fn delete_ref(&self, name: &str, expected: &Hash) -> Result<(), SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_delete_ref(name, expected)
+    }
+
     /// List every ref under `prefix`, following bounded, ordered pages.
     ///
     /// # Errors
@@ -390,6 +403,21 @@ impl<
             node,
             keys,
         )
+    }
+
+    /// One `AdvanceRefs` with `delete`, or `UpdateRef` with `delete` for a
+    /// head without a chain ref (SPEC-TRANSPORT-CONNECT §7.8).
+    fn delete_refs(
+        &self,
+        head: &str,
+        head_expected: &Hash,
+        map: &str,
+        map_expected: Option<&Hash>,
+    ) -> Result<kit_core::protocol::AdvanceOutcome, SourceError> {
+        if !self.client.supports_writes() {
+            return Err(SourceError::ProtocolError);
+        }
+        self.write_delete_refs(head, head_expected, map, map_expected)
     }
 
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {

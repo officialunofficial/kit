@@ -229,6 +229,9 @@ pub enum Error {
     /// A tag the push names is not a local tag.
     #[error("tag '{0}' does not exist")]
     NoSuchTag(String),
+    /// `push --delete` deleted nothing.
+    #[error(transparent)]
+    Delete(kit_sync::push::DeleteError),
     /// Force push refused before upload because discovery was unavailable.
     #[error(
         "force push requires successful atomic-advance capability discovery; reconnect and retry"
@@ -356,6 +359,7 @@ impl From<kit_sync::SourceError> for Error {
             S::ProtocolError => TransportError::ProtocolError,
             S::PayloadTooLarge(value) => TransportError::PayloadTooLarge(value),
             S::InsecureScheme => TransportError::InsecureScheme,
+            S::Unsupported(what) => TransportError::Unsupported(what),
             S::AdmissionRequired { challenges } => TransportError::AdmissionRequired(challenges),
             other => return Self::Source(other),
         };
@@ -470,6 +474,20 @@ impl From<kit_sync::PushError> for Error {
             P::TicketRejected => Self::TicketRejected,
             P::DeltaBaseUnavailable => Self::DeltaBaseUnavailable,
             P::PacklistNotInRepository => Self::PacklistNotInRepository,
+            // A delete refused for admission keeps the admission exit code
+            // and hint of any other push.
+            P::Delete(kit_sync::push::DeleteError::Failed {
+                source:
+                    source @ (kit_sync::SourceError::AdmissionRequired { .. }
+                    | kit_sync::SourceError::AdmissionConfiguration(_)),
+                ..
+            }) => Self::from(source),
+            // So does a delete interrupted while a Connect write was pending.
+            P::Delete(kit_sync::push::DeleteError::Failed {
+                source: kit_sync::SourceError::RemoteError(message),
+                ..
+            }) if message == PENDING_INTERRUPTED_MESSAGE => Self::Interrupted,
+            P::Delete(error) => Self::Delete(error),
         }
     }
 }
@@ -637,5 +655,44 @@ mod tests {
             assert_eq!(error.to_string().as_bytes(), expected.as_bytes());
             assert!(matches!(error, Error::Transport(_)));
         }
+    }
+
+    /// A delete refused for admission is an admission error, and one
+    /// interrupted while a write was pending is an interrupt, as for any
+    /// other push; any other failed delete keeps the ref it names.
+    #[test]
+    fn a_delete_refused_for_admission_keeps_its_admission_error() {
+        use kit_core::protocol::{AdmissionRequired, TransportError};
+        use kit_sync::push::DeleteError;
+        let failed = |source| {
+            Error::from(kit_sync::PushError::from(DeleteError::Failed {
+                name: "refs/heads/main".into(),
+                source,
+            }))
+        };
+        let required = AdmissionRequired::new(Vec::new(), "admit".into(), Vec::new(), Vec::new());
+        assert!(matches!(
+            failed(kit_sync::SourceError::from(
+                TransportError::AdmissionRequired(Box::new(required))
+            )),
+            Error::Transport(TransportError::AdmissionRequired(_))
+        ));
+        assert!(matches!(
+            failed(kit_sync::SourceError::AdmissionConfiguration("bad".into())),
+            Error::Transport(TransportError::AdmissionConfiguration(_))
+        ));
+        assert!(matches!(
+            failed(kit_sync::SourceError::RemoteError(
+                PENDING_INTERRUPTED_MESSAGE.into()
+            )),
+            Error::Interrupted
+        ));
+        let other = failed(kit_sync::SourceError::RefConflict);
+        assert!(matches!(other, Error::Delete(_)));
+        assert!(
+            other
+                .to_string()
+                .starts_with("deleting `refs/heads/main` failed: ")
+        );
     }
 }

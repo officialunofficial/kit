@@ -10,12 +10,14 @@ use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
 use std::path::Path;
+mod delete;
 mod deltas;
 mod error;
 mod force;
 mod packmap;
 mod split;
 mod tags;
+pub use delete::{DeleteError, DeleteTarget, DeletedRef};
 use deltas::DeltaEncoder;
 #[cfg(test)]
 use deltas::encode_delta_candidates_batch;
@@ -118,6 +120,9 @@ pub enum PushTarget {
         selection: TagSelection,
         force: bool,
     },
+    /// Delete one remote branch or tag, with its chain ref, under `Match`
+    /// (SPEC-TRANSPORT §7.3). A deleted branch's tracking ref goes too.
+    Delete(DeleteTarget),
 }
 /// Caller-supplied policy. Nothing is loaded from config or the environment.
 #[derive(Debug)]
@@ -169,8 +174,8 @@ impl Default for PushOptions<'_> {
         }
     }
 }
-/// Completed branches, advances, the selected single-branch tip, and the
-/// result of each pushed tag.
+/// Completed branches, advances, the selected single-branch tip, the
+/// result of each pushed tag, and the ref a delete removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PushReport {
@@ -182,6 +187,8 @@ pub struct PushReport {
     pub tip: Option<Hash>,
     /// One result per tag of a tag push, sorted by name.
     pub tags: Vec<TagPushResult>,
+    /// The ref a delete removed.
+    pub deleted: Option<DeletedRef>,
 }
 
 impl PushReport {
@@ -209,6 +216,7 @@ pub fn push(
     let tx = PushContext::new(source, options.control.observer, &store);
     push_refs(&layout, &store, &tx, options)
 }
+#[allow(clippy::too_many_lines)] // one arm per push target
 fn push_refs(
     layout: &kit_core::layout::RepoLayout,
     store: &ObjectStore,
@@ -225,6 +233,7 @@ fn push_refs(
                 steps: 0,
                 tip: None,
                 tags: Vec::new(),
+                deleted: None,
             };
             let result: Result<(), PushError> = (|| {
                 for r in refs_list {
@@ -306,11 +315,19 @@ fn push_refs(
                 steps,
                 tip: Some(tip),
                 tags: Vec::new(),
+                deleted: None,
             })
         }
         PushTarget::Tags { selection, force } => {
             push_tag_report(layout, store, tx, options, selection, *force)
         }
+        PushTarget::Delete(target) => Ok(PushReport {
+            refs: 0,
+            steps: 0,
+            tip: None,
+            tags: Vec::new(),
+            deleted: Some(delete::delete(layout, tx, options.remote_name, target)?),
+        }),
     }
 }
 
@@ -336,6 +353,7 @@ fn push_tag_report(
         steps: 0,
         tip: None,
         tags,
+        deleted: None,
     })
 }
 fn repository_control<'a>(

@@ -46,9 +46,8 @@ These divergences stay while kit uses BLAKE3.
 - Hooks, including `core.hooksPath`.
 - The full refspec grammar. `push` takes `<src>:<dst>` and a lone `<branch>` for branches,
   a lone tag name or `refs/tags/<t>` for one tag, and nothing else: no
-  wildcard, no leading `+`, no renamed tag and no other ref. `push` does not
-  take `--delete`; a remote delete needs a transport verb that kit does not
-  have.
+  wildcard, no leading `+`, no renamed tag and no other ref. `push --delete`
+  takes one branch or tag, never an empty `<src>`.
 - Git wire protocol v2 and smart-HTTP negotiation.
 - `git notes`.
 - Shallow clone. `clone --depth` is a usage error. A clone holds the full
@@ -249,8 +248,8 @@ The summaries have the shape of the Git summaries:
 
 - `push` prints `To <url>`, then one line for each ref. It prints
   `* [new branch]`, `<old>..<new>`, `+ <old>...<new> (forced update)` or
-  `! [rejected] ... (non-fast-forward)`. It prints `Everything up-to-date`
-  when nothing changes.
+  `! [rejected] ... (non-fast-forward)`, and ` - [deleted]` for
+  `push --delete`. It prints `Everything up-to-date` when nothing changes.
 - `pull` prints `Updating <a>..<b>`, `Fast-forward` and a diffstat. It prints
   `Already up to date.` when nothing changes.
 - `fetch` prints `From <url>` and one line for each ref. It prints nothing
@@ -332,7 +331,7 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   `<branch>` under its own name, the current branch or not. Both sides must be branches, as a
   name or as `refs/heads/<name>`. A refspec push records no upstream unless
   `-u` is set. Git also takes a tag, a wildcard, a leading `+` and an empty
-  `<src>`; kit rejects each of them.
+  `<src>`; kit rejects each of them, and deletes through `--delete`.
 - **`fetch --prune`.** `fetch --prune` deletes the tracking refs of one
   remote whose branch the remote lost. It deletes a ref only after a complete
   fetch, and only when a fresh read of the remote branch finds nothing. It
@@ -347,6 +346,18 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   unsigned annotated tag and an annotated tag
   whose object names another tag. Each tag is reported on its own line, and
   the push exits 1 if any was refused.
+- **`push --delete`.** `push --delete <remote> <name>` deletes one remote
+  branch or tag, as Git's does, and takes `refs/heads/<n>` or
+  `refs/tags/<n>` for a name the remote holds as both. Unlike Git, a branch
+  is deleted only while it holds its tracking ref's value, the lease of a
+  push, and a branch with no tracking ref is refused. The tracking ref goes
+  with it. Git refuses to delete a ref the remote does not hold; kit does
+  so for a tag, but reports a tracked branch the remote no longer holds as
+  deleted. The branch's packmap or the tag's tag map goes too
+  (SPEC-TRANSPORT §7.3). Git takes several refs and `:<dst>`; kit takes one
+  ref, and refuses `--delete` with `--all`, `--tags`, `--force`,
+  `--force-with-lease` and `-u`. An S3 remote refuses every delete, since
+  kit cannot delete there under a condition.
 - **Tags on `fetch`, `pull` and `clone`.** kit takes every remote tag by
   default, as Git's `--tags` does; Git follows only the tags that point into
   the fetched history. `--tags` is accepted and means the same, and

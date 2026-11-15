@@ -120,6 +120,9 @@ impl Transport for Remote<'_> {
     ) -> TransportResult<()> {
         self.inner.update_ref(name, condition, hash)
     }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.inner.delete_ref(name, expected)
+    }
     fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
         self.inner.read_ref(name)
     }
