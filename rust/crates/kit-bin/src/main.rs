@@ -12,9 +12,9 @@ use kit_bin::{dispatch, signal};
 /// The size in bytes above which glibc serves an allocation by `mmap`, and
 /// the free space at the top of the heap above which it gives memory back.
 ///
-/// By default glibc raises both whenever a large `mmap`ed block is freed, up
-/// to 32 MiB, and from then on keeps the memory of freed blocks below that
-/// size. A clone of a large file decodes one multi-megabyte manifest per
+/// By default glibc raises the first whenever a large `mmap`ed block is
+/// freed, up to 32 MiB, and the second with it (to twice that), and from then
+/// on keeps the memory of freed blocks below those sizes. A clone of a large file decodes one multi-megabyte manifest per
 /// step, so its peak memory grew with the file's size. Fixing the two values
 /// stops that and costs no measurable time.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

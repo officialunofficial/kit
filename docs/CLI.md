@@ -227,7 +227,7 @@ Working-tree commands:
   `.kit/worktrees/<id>/`. `kit gc` keeps what every tree reaches: it takes
   each tree's `HEAD`, index, stash and in-progress operation state as roots,
   together with the shared refs. If a tree's state cannot be read, gc stops
-  before it removes anything and names that tree.
+  before it removes anything and names the linked tree.
 - `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
   changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops

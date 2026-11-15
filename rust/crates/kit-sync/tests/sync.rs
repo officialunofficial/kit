@@ -345,8 +345,8 @@ fn a_clone_leaves_a_stat_cache_the_first_status_trusts() {
         true,
     );
     let dir = tempfile::tempdir().unwrap();
-    // The index used to land a few milliseconds after the newest file, inside
-    // the racy window, in most runs but not all of them.
+    // Many rounds, because the gap between the newest file and the index is
+    // a few milliseconds and varies from run to run.
     for round in 0..20 {
         let target = dir.path().join(format!("work{round}"));
         clone_into(&remote, &target);
