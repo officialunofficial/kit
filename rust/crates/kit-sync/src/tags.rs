@@ -251,11 +251,13 @@ impl TagProver {
         name: &str,
         value: Hash,
     ) -> Result<Proof, SyncError> {
-        if let Some(proof) = self.peel(store, name, value)? {
-            return Ok(proof);
-        }
+        // `R` is read at the first proof, before any tag chain is applied, so
+        // it holds only what local refs reached before the tag phase.
         if self.trusted.is_none() {
             self.trusted = Some(self.trusted_set(store, layout, observer, verified)?);
+        }
+        if let Some(proof) = self.peel(store, name, value)? {
+            return Ok(proof);
         }
         let Self {
             require_signed,
@@ -671,10 +673,6 @@ impl TagPhase<'_> {
                 }
                 Ok(Outcome::Skip) => {}
                 Ok(Outcome::Refused(reason)) => self.refuse(name, reason),
-                Err(Ok(_)) if self.observer.cancelled() => {
-                    fatal = Some(SyncError::Interrupted);
-                    break;
-                }
                 Err(Ok(failed)) => {
                     self.listing_failed(&failed);
                     break;
@@ -687,6 +685,11 @@ impl TagPhase<'_> {
         }
         // The tags proved before a failure publish, as the branches before a
         // failed branch do. An interrupt publishes nothing more.
+        // A failure while the fetch is cancelled may be the interrupt itself,
+        // as a transport cut short by it.
+        if self.observer.cancelled() {
+            return Err(SyncError::Interrupted);
+        }
         if let Some(e) = fatal {
             if !matches!(e, SyncError::Interrupted) {
                 // The first failure is the one to report; a failed publish
@@ -913,6 +916,8 @@ impl TagPhase<'_> {
                     // directory, as a case-folding file system shows `V1/rc`
                     // to `v1`.
                     let reason = match refs::read_tag(self.layout, &name) {
+                        // Another fetch published the same tag meanwhile.
+                        Ok(Some(local)) if local == value => continue,
                         Ok(Some(_)) => TagRejectReason::WouldClobber,
                         Err(e) if !is_name_clash(&e) => TagRejectReason::WouldClobber,
                         _ => TagRejectReason::NameConflict { other: None },

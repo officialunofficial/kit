@@ -217,13 +217,14 @@ branch or another tag.
 - **Failure scope.** A refusal names the tag and its reason. The fetch reports
   it and goes on. A failed tag listing stops the tag phase with "tag listing
   failed (possibly too many tags): `<error>`", and the branches stay
-  published. An interrupt, a transport failure other than a bad reply, or a
-  local I/O error, including one while a tag's pack is written, fails the
-  fetch, as for a branch. The tags proved before such a failure still
-  publish, unless it is an interrupt.
+  published. An interrupt, a transport failure other than a bad reply to a
+  node or pack download, or a local I/O error, including one while a tag's
+  pack is written, fails the fetch, as for a branch. The tags proved before
+  such a failure still publish, unless the fetch was interrupted.
 - **Publish.** The tags publish under the worktree lock, each with a create
   that fails when the tag exists. A tag that appears locally during the fetch
-  is refused as one that would clobber.
+  with the same value is up to date, and one with another value is refused
+  as one that would clobber.
 
 The CLI prints `! [rejected] <t> -> <t> (<reason>)` for each refused tag. It
 exits 1 after everything else is published. `clone` and `pull` do the same.

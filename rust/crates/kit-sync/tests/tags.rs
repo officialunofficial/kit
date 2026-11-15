@@ -1197,3 +1197,87 @@ fn a_fatal_error_in_the_tag_phase_keeps_the_tags_proved_before_it() {
     assert_eq!(local_tag(&target, "a"), Some(c1));
     assert_eq!(local_tag(&target, "b"), None);
 }
+
+/// A source whose tag map listing fails as the user interrupts the fetch, as
+/// a transport cut short by the interrupt does.
+struct CancelOnTagmaps<'a> {
+    inner: &'a dyn RemoteSource,
+    cancelled: &'a Cell<bool>,
+}
+
+impl RemoteSource for CancelOnTagmaps<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        if prefix == refs::TAGMAP_REF_PREFIX {
+            self.cancelled.set(true);
+            return Err(kit_sync::SourceError::ConnectionFailed);
+        }
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_blob_via_ref(key, name)
+    }
+    fn download_pack_via_ref(
+        &self,
+        key: &PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_pack_via_ref(key, name)
+    }
+    fn supports_push(&self) -> bool {
+        false
+    }
+}
+
+struct Cancel<'a>(&'a Cell<bool>);
+
+impl kit_sync::Observer<kit_sync::SyncEvent> for Cancel<'_> {
+    fn cancelled(&self) -> bool {
+        self.0.get()
+    }
+}
+
+/// An interrupt in the tag phase publishes nothing, not even the tags proved
+/// before it, and the fetch fails with the interrupt, not a failed listing.
+#[test]
+fn an_interrupt_in_the_tag_phase_publishes_no_tag() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    remote.push_tag("a", &[], c1, Some(main));
+    let (tag, b) = remote.tag_object("b", c1, true);
+    remote.push_tag("b", std::slice::from_ref(&tag), b, Some(main));
+    let (_dir, target) = work();
+    clone_with(
+        &remote.source(),
+        &target,
+        &SyncOptions::default().with_tags(false),
+    );
+
+    let source = remote.source();
+    let cancelled = Cell::new(false);
+    let cancelling = CancelOnTagmaps {
+        inner: &source,
+        cancelled: &cancelled,
+    };
+    let error = fetch(
+        &target,
+        &cancelling,
+        "default",
+        &SyncOptions::default(),
+        &Cancel(&cancelled),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, SyncError::Interrupted), "{error:?}");
+    assert_eq!(local_tag(&target, "a"), None);
+    assert_eq!(local_tag(&target, "b"), None);
+}
