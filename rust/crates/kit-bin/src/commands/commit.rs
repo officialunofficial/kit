@@ -17,7 +17,7 @@ use libkit::signer::{self, Signer};
 
 use crate::clap_args;
 use crate::config::Config;
-use crate::editor::{COMMIT_EDITMSG_TEMPLATE, spawn_editor};
+use crate::editor::{COMMIT_EDITMSG_TEMPLATE, check_usable, spawn_editor};
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -129,14 +129,20 @@ pub fn run(args: &[String]) -> u8 {
                 Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
                 Err(e) => return emit_err(&format!("read message file: {e}"), exit::NOINPUT),
             },
-            None => match pending.default_message() {
-                Some(m) => m,
-                None => match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
-                    Ok(m) if !m.is_empty() => m,
-                    Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
-                    Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
-                },
-            },
+            None => {
+                if let Some(m) = pending.default_message() {
+                    m
+                } else {
+                    if let Err(e) = check_usable() {
+                        return emit_err(&format!("commit: {e}, or pass -m <msg>"), exit::USAGE);
+                    }
+                    match spawn_editor(COMMIT_EDITMSG_TEMPLATE) {
+                        Ok(m) if !m.is_empty() => m,
+                        Ok(_) => return emit_err("empty commit message — aborting", exit::USAGE),
+                        Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
+                    }
+                }
+            }
         },
     };
 

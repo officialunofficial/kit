@@ -131,6 +131,11 @@ pub fn run(args: &[String]) -> u8 {
         Err(code) => return code,
     };
     let json = matches!(opts.format, RebaseFormat::Json);
+    if opts.interactive
+        && let Err(e) = editor::check_usable()
+    {
+        return emit_err(&format!("rebase -i: {e}"), exit::USAGE);
+    }
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
         Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),

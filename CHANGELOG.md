@@ -178,6 +178,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that writes into a directory removes the temp files it left there.
 - `kit gc` checks the chunks of large files 32 at a time, so its mark no
   longer waits on a cold disk for one chunk after another.
+- `kit commit` without `-m`, `kit tag -a` without `-m` and `kit rebase -i`
+  fail at once when no editor is set and stdin is not a terminal, where
+  they started `vi`, which waited for a terminal. An editor set in
+  `GIT_EDITOR`, `EDITOR` or `VISUAL` still runs, terminal or not.
 
 ### Removed
 

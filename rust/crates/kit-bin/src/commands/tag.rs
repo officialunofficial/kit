@@ -24,7 +24,7 @@ use kit_core::serialize;
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
-use crate::editor::spawn_editor;
+use crate::editor::{check_usable, spawn_editor};
 use crate::exit;
 use crate::format::{self, JsonObject};
 
@@ -306,13 +306,17 @@ fn create_annotated(layout: &RepoLayout, opts: &TagOpts, name: &str, json: bool)
     };
 
     // ---- Resolve / prompt for message. ----
-    let msg = match &opts.message {
-        Some(m) => m.clone(),
-        None => match spawn_editor(TAG_EDITMSG_TEMPLATE) {
+    let msg = if let Some(m) = &opts.message {
+        m.clone()
+    } else {
+        if let Err(e) = check_usable() {
+            return emit_err(&format!("tag: {e}, or pass -m <msg>"), exit::USAGE);
+        }
+        match spawn_editor(TAG_EDITMSG_TEMPLATE) {
             Ok(m) if !m.is_empty() => m,
             Ok(_) => return emit_err("empty tag message — aborting", exit::USAGE),
             Err(e) => return emit_err(&format!("editor: {e}"), exit::GENERAL_ERROR),
-        },
+        }
     };
 
     // ---- Load signer (also used to derive the tagger fallback). ----

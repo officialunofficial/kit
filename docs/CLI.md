@@ -2106,10 +2106,12 @@ parsing stderr.
 ### Environment variables
 
 - **`GIT_EDITOR` / `EDITOR` / `VISUAL`** &mdash; the editor `kit commit`
-  opens when neither `-m` nor `-F` is supplied, tried in that order. If
-  none is set it falls back to `vi`, matching git. In a headless or
-  non-interactive context (CI, an agent), always pass `-m`/`-F` so the
-  commit never blocks on an editor.
+  opens when neither `-m` nor `-F` is supplied, tried in that order, and
+  the editor of `kit tag -a` and `kit rebase -i`. If none is set it falls
+  back to `vi`, matching git. An editor that is set always runs, terminal
+  or not, so `EDITOR="code --wait"` works from a script. When none is set
+  and stdin is not a terminal (CI, an agent), these commands start no `vi`
+  and fail at once with a message: pass `-m`/`-F`, or set an editor.
 - **`NO_COLOR`** &mdash; if set (any value, including empty) ANSI color on
   stdout is suppressed. See <https://no-color.org>.
 - **`CLICOLOR_FORCE=1`** &mdash; force ANSI color even when stdout is piped.
