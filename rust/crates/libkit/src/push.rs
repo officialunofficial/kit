@@ -58,6 +58,49 @@ pub enum Error {
     /// The source of a refspec is not a local branch.
     #[error("refspec source '{0}' does not match any local branch")]
     NoSuchBranch(String),
+    /// A pushed name is both a local branch and a local tag.
+    #[error("'{0}' is both a branch and a tag; push refs/heads/{0} or refs/tags/{0}")]
+    AmbiguousName(String),
+    /// A pushed `refs/tags/` name is not a local tag.
+    #[error("tag '{0}' does not exist")]
+    NoSuchTag(String),
+}
+
+/// What `kit push <remote> <name>` sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushName {
+    /// A branch, by a refspec.
+    Branch(Refspec),
+    /// A local tag, by its name without `refs/tags/`.
+    Tag(String),
+}
+
+/// Resolve the name of `kit push <remote> <name>`. A `refs/tags/<t>` name, or
+/// a bare name that is a local tag and not a local branch, is a tag. A bare
+/// name that is both is an error naming both full refs, either of which
+/// pushes it. Anything else is a refspec ([`parse_refspec`]), which names
+/// branches only: a tag keeps its name on the remote.
+///
+/// # Errors
+/// [`Error::AmbiguousName`], [`Error::NoSuchTag`], or what
+/// [`parse_refspec`] returns.
+pub fn resolve_push_name(layout: &RepoLayout, spec: &str) -> Result<PushName, Error> {
+    if let Some(tag) = spec.strip_prefix(refs::TAG_REF_PREFIX) {
+        return match refs::read_tag(layout, tag) {
+            Ok(Some(_)) => Ok(PushName::Tag(tag.to_owned())),
+            _ => Err(Error::NoSuchTag(tag.to_owned())),
+        };
+    }
+    if !spec.contains(':') && !spec.starts_with("refs/") {
+        let is_tag = matches!(refs::read_tag(layout, spec), Ok(Some(_)));
+        if is_tag {
+            if matches!(refs::read_ref(layout, spec), Ok(Some(_))) {
+                return Err(Error::AmbiguousName(spec.to_owned()));
+            }
+            return Ok(PushName::Tag(spec.to_owned()));
+        }
+    }
+    parse_refspec(spec).map(PushName::Branch)
 }
 
 /// A push refspec: the local branch `src` goes to the remote branch `dst`.

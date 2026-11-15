@@ -810,6 +810,12 @@ impl RemoteSource for HostSource<'_> {
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
         self.0.upload_limits()
     }
+    fn inspection_max_objects(&self) -> Option<u64> {
+        self.0.inspection_max_objects()
+    }
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        self.0.ref_listing()
+    }
     fn supports_atomic_advance(&self) -> bool {
         self.0.supports_atomic_advance()
     }

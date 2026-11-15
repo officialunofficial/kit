@@ -172,6 +172,29 @@ pub fn push_branch_tracked_with_source(
     Ok((report.tip.ok_or(Error::NotCommit)?, report.steps))
 }
 
+/// Push local tags to the remote, and return one result per tag, sorted by
+/// name. A refused tag is no error: its result says why, and the others
+/// still go. Without `force`, a remote tag that holds another value is
+/// refused; with it, the tag moves from the value the push read.
+///
+/// # Errors
+/// As [`push_all_with_source`], and [`Error::NoSuchTag`] when a named tag is
+/// not a local tag.
+pub fn push_tags_with_source(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    selection: kit_sync::push::TagSelection,
+    force: bool,
+    settings: &PushSettings<'_>,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
+    let mut options = settings.options(observer);
+    options.remote_name = remote;
+    options.target = PushTarget::Tags { selection, force };
+    Ok(kit_sync::push(cwd, source, &options)?.tags)
+}
+
 /// Fetch the refs of `remote`, then fast-forward the current branch from its
 /// tracking ref.
 ///

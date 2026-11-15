@@ -338,9 +338,12 @@ signed replay-protected write contract. Every accepted signed ref write MUST
 satisfy atomic acceptance (§7.1), including both sides of an
 `AdvanceRefs` or paired deletion.
 
-A server MAY require `packmap_ref` to be `refs/kit/packmap/<x>` when
-`head_ref` is `refs/heads/<x>` (SPEC-REFS §2), and answer any other pairing with
-`invalid_argument`; every kit client already sends that pairing.
+A server MAY require one of two pairings, and answer any other with
+`invalid_argument`: `head_ref` `refs/heads/<x>` with `packmap_ref`
+`refs/kit/packmap/<x>`, or `head_ref` `refs/tags/<x>` with `packmap_ref`
+`refs/kit/tagmap/<x>` (SPEC-REFS §2). Every kit client sends one of the
+two. A tag advance moves a tag and its tag map the way a branch advance
+moves a head and its packmap (SPEC-TRANSPORT §7.2).
 
 A server advertises its limit in `max_tickets_per_advance` (§2.1); an absent
 field means seven. A server MUST reject a `ticket_ids` list longer than its
@@ -1346,8 +1349,9 @@ implicit-membership rule in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
 — never by a later session's. The packmap check only refuses: the
-node's `prev` is absent or the packmap value the write replaces, the
-node and every pack it lists — at most 4,096 — are pending in this
+node's `prev` is absent, or the value the write replaces, or, for a tag
+map create, a node of this repository's chains (a graft, SPEC-TRANSPORT
+§7.2); the node and every pack it lists — at most 4,096 — are pending in this
 session or already members (a pending packlist listed as a pack is
 refused: a packlist is a node, not a pack), or the write is refused. The on-disk layout
 under the repository's path is unchanged,
@@ -1588,7 +1592,17 @@ server advertises none (§2.1, §4).
 the request's, and the ticket's `pack_id` and `bytes` MUST equal the
 request's commitment. Otherwise the request is `permission_denied`.
 An `AdvanceRefs` consuming tickets MUST pair `refs/heads/<x>` with
-`refs/kit/packmap/<x>`; any other pairing is `invalid_argument`.
+`refs/kit/packmap/<x>`, or `refs/tags/<x>` with `refs/kit/tagmap/<x>`;
+any other pairing is `invalid_argument`. `BeginUpload` may name a tag
+ref, `refs/tags/<x>`, whose advance then consumes the ticket. A tag
+cannot step through intermediate values the way a branch push splits
+into smaller advances, so a client refuses before upload a tag push whose
+packs or objects exceed one advance's limits (`max_tickets_per_advance`,
+`inspection_max_objects`), and asks the user to push the branch first.
+A tag map node's `prev` may name a packlist node of one of this
+repository's branch chains (a graft, SPEC-TRANSPORT §7.2). A server
+checks that node's membership as it checks any `prev`; it needs no chain
+walk.
 
 **Errors.** An expired or unknown ticket, including a token that fails
 verification, is `failed_precondition`. A ticket, signer, or

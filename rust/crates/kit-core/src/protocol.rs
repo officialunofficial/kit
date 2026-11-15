@@ -854,6 +854,13 @@ pub trait Transport: Send + Sync {
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
 
+    /// How [`Self::list_refs`] answers: an ordered read that pages, by
+    /// default. A transport whose listing comes in one bounded frame, or
+    /// whose listing may lag a write, says so.
+    fn ref_listing(&self) -> RefListing {
+        RefListing::Ordered
+    }
+
     /// Advance a branch by updating its **head ref and its packmap ref
     /// together**, each under its own CAS precondition.
     ///
@@ -1028,6 +1035,21 @@ pub enum CommitOutcome {
     DeltaBaseUnavailable,
     /// The packlist names content not in this repository.
     PacklistNotInRepository,
+}
+
+/// How a remote's ref listing answers, which a tag push needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefListing {
+    /// The listing reflects every write that completed before it, and it
+    /// pages, so its size has no bound of its own.
+    Ordered,
+    /// As [`RefListing::Ordered`], but `kit serve` answers a listing in one
+    /// frame of about 1 MiB. Its `kit+ssh` remotes and `kit+file` roots,
+    /// which `kit serve` may serve, keep each listing within that frame.
+    OneFrame,
+    /// The listing may lag a completed write, as a Connect server's may. A
+    /// strong `read_ref` is the authority.
+    Eventual,
 }
 
 /// Server limits relevant to splitting a push into packs and advances.

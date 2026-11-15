@@ -752,13 +752,27 @@ A branch's packmap ref travels with its head. For a grantee:
 - A scope that matches `refs/heads/<x>` covers `refs/kit/packmap/<x>`.
 - An `AdvanceRefs` is authorized only when its head ref is
   `refs/heads/<x>` and its packmap ref is exactly
-  `refs/kit/packmap/<x>`. The flags are evaluated on the head change
-  only.
+  `refs/kit/packmap/<x>`, or it is the tag pairing below. The flags are
+  evaluated on the head change only.
 - Packmap writes are allowed only together with the covered head, in
   one `AdvanceRefs`. A direct `UpdateRef` on any ref under
   `refs/kit/packmap/` is `permission_denied`.
 - A head-only `UpdateRef` on `refs/heads/<x>` is authorized under the
   head's flags. It consumes no ticket and needs no packmap scope.
+
+A tag's tag map travels with its tag in the same way:
+
+- A scope that matches `refs/tags/<x>` covers `refs/kit/tagmap/<x>`. A
+  pattern MUST NOT begin with `refs/kit/tagmap/`.
+- An `AdvanceRefs` whose head ref is `refs/tags/<x>` and whose packmap
+  ref is exactly `refs/kit/tagmap/<x>` is authorized under the tag's
+  flags: a create needs `c`, any `REF_EXPECTATION_MATCH` move of the tag
+  needs `f`, and a deletion needs `d`.
+- A repair writes `REF_EXPECTATION_MATCH v → v` on the tag together with
+  a tag map create (SPEC-TRANSPORT §7.2). It changes no tag, so it needs
+  `c`, the flag of the tag map it creates, and not `u` or `f`.
+- A direct `UpdateRef` on any ref under `refs/kit/tagmap/` is
+  `permission_denied`.
 
 Why the packmap is not checked as its own ref: a push normally appends
 one node to the packmap chain, but a re-baseline and a reset write a

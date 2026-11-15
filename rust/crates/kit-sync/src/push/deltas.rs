@@ -50,6 +50,19 @@ impl DeltaEncoder {
         })
     }
 
+    /// [`transfer::plan_pack_tips`] for `tips` against `base`, with every
+    /// delta stream in the push's spool, as [`Self::plan`].
+    pub(crate) fn plan_tips(
+        &self,
+        store: &ObjectStore,
+        tips: &[Hash],
+        base: Option<Hash>,
+    ) -> Result<PackPlan, StoreError> {
+        transfer::plan_pack_tips(store, tips, base, |store, candidates| {
+            self.encode(store, candidates)
+        })
+    }
+
     /// The `encode_deltas` callback of a planner: one result per candidate,
     /// in order, each stream in the push's spool.
     pub(crate) fn encode(

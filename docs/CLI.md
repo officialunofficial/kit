@@ -1269,8 +1269,8 @@ Remote / sync:
   remote it iterates.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
-- `kit push [<remote> [<src>:<dst>|<branch>]] [--all] [--force|--force-with-lease]
-  [--dry-run] [--format=json] [-q|--quiet]`
+- `kit push [<remote> [<src>:<dst>|<branch>|<tag>]] [--all | --tags]
+  [--force|--force-with-lease] [--dry-run] [--format=json] [-q|--quiet]`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
   tracking pair), falling back to the configured default remote; an
@@ -1336,6 +1336,27 @@ Remote / sync:
   the parts already accepted, provided the regenerated push plan is identical.
   After an interruption, run `kit push` again to resume; the message reports
   how many parts were saved.
+
+  `--tags` pushes every local tag and nothing else; it conflicts with
+  `--all`, a refspec and `-u`. `kit push <remote> <tag>` pushes one tag.
+  A name that is both a branch and a tag is a usage error (exit 64); name
+  `refs/heads/<n>` or `refs/tags/<n>`. A missing `refs/tags/<t>` exits 65.
+  Each tag goes with its tag map `refs/kit/tagmap/<t>` (SPEC-TRANSPORT
+  §7.2), which grafts on the nearest branch the remote holds, so a tag on a
+  pushed commit uploads only its tag object and a lightweight one uploads
+  nothing. The tags that share a branch upload once. Each tag prints one
+  line: ` * [new tag]`, ` * [tag map]` when only its tag map was missing,
+  ` + <old>...<new> (forced update)`, or ` ! [rejected] <t> -> <t>
+  (<reason>)`. A remote tag with another value is refused unless `--force`
+  or `--force-with-lease`; both condition on the value the push read. A push
+  refuses an unsigned annotated tag (re-create it with `kit tag -s`, or push
+  a lightweight tag), an annotated tag whose object names another tag, and,
+  over `kit+ssh` and `kit+file`, a new tag that would take the remote's tag
+  listing past 960 KiB. On a ticketed Connect remote, tags whose history
+  needs more than one advance are refused: push the branch first, then the
+  tags. A refused tag does not stop the others, and the push exits 1.
+  `--format=json` prints `{"ok":<bool>,"remote":"...","endpoint":"...",
+  "tags_pushed":<n>,"tags_rejected":<n>}`.
 - **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
   live, honest progress line on stderr while the network transfer runs &mdash;
   `Writing objects: N objects, B bytes` while building/uploading the

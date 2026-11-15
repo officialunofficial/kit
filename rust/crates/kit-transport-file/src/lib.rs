@@ -1836,6 +1836,12 @@ impl Transport for FileTransport {
             .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
     }
 
+    /// A file root may also be served by `kit serve`, whose listing is one
+    /// frame.
+    fn ref_listing(&self) -> kit_core::protocol::RefListing {
+        kit_core::protocol::RefListing::OneFrame
+    }
+
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.to_owned()));

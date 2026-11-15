@@ -403,6 +403,21 @@ pub(crate) fn push_all_with_source(
     )
 }
 
+/// Push local tags to the remote; see [`transfer::push_tags_with_source`].
+pub(crate) fn push_tags_with_source(
+    cwd: &Path,
+    source: &dyn kit_sync::RemoteSource,
+    remote: &str,
+    selection: kit_sync::push::TagSelection,
+    force: bool,
+    authority: Option<&dyn StepAuthority>,
+    terminal: &Terminal,
+) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
+    let layout = kit_core::layout::discover(cwd)?;
+    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
+}
+
 /// Push one branch to the remote; see [`transfer::push_branch_tracked_with_source`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_branch_tracked_source(

@@ -1948,6 +1948,81 @@ mod random_histories {
         Ok(())
     }
 
+    /// Several tips, some behind annotated tags, planned at once: the plan
+    /// sends nothing the single-tip plans would not, each object once, and
+    /// it rebuilds every tip.
+    fn run_tips(seed: u64) -> Result<(), String> {
+        let mut rng = Rng(seed);
+        let (_d, s) = store();
+        let count = 2 + rng.below(13);
+        let history = build(&s, &mut rng, count, "main");
+        let tips: Vec<Hash> = (0..=rng.below(4))
+            .map(|n| {
+                let commit = history.commits[rng.below(history.commits.len())];
+                if rng.below(2) == 0 {
+                    return commit;
+                }
+                put(
+                    &s,
+                    &Object::Tag(Tag {
+                        target: commit,
+                        target_type: ObjectType::Commit,
+                        name: format!("t{n}").into_bytes(),
+                        tagger: Identity::ed25519([7; 32]),
+                        signer: [0; 32],
+                        message: Vec::new(),
+                        timestamp: seed,
+                        signature: [0; 64],
+                    }),
+                )
+            })
+            .collect();
+        let remote_tip = match rng.below(3) {
+            0 => None,
+            _ => Some(history.commits[rng.below(history.commits.len())]),
+        };
+        let multi = plan_pack_tips(&s, &tips, remote_tip, sequential)
+            .map_err(|e| format!("plan failed: {e}"))?;
+        let mut union = BTreeSet::new();
+        for tip in &tips {
+            let single = plan_pack_with(&s, *tip, remote_tip, sequential)
+                .map_err(|e| format!("single plan failed: {e}"))?;
+            union.extend(ids(&single));
+        }
+        let sent = ids(&multi);
+        if !sent.is_subset(&union) {
+            return Err(format!(
+                "the plan sends {} objects no single plan sends",
+                sent.difference(&union).count()
+            ));
+        }
+        if multi.raw.len() + multi.deltas.len() != sent.len() {
+            return Err("the plan lists an object twice".into());
+        }
+        let (_r, remote) = store();
+        if let Some(head) = remote_tip {
+            for h in reachable_objects(&s, &head).unwrap() {
+                remote.write(&s.read(&h).unwrap()).unwrap();
+            }
+        }
+        apply(&s, &multi, &remote);
+        if !tips.iter().all(|tip| complete(&remote, tip)) {
+            return Err("the plan leaves a tip incomplete".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn random_tips_plan_within_the_single_tip_plans() {
+        let mut failures = Vec::new();
+        for seed in 0..40 {
+            if let Err(why) = run_tips(seed) {
+                failures.push((seed, why));
+            }
+        }
+        assert!(failures.is_empty(), "failing seeds: {failures:?}");
+    }
+
     /// Run `default_cases` histories, or `HISTORY_CASES` of them from seed
     /// `HISTORY_START`.
     fn run_cases(default_cases: u64) {

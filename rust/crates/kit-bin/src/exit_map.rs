@@ -611,8 +611,10 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
 fn push_exit_code(error: &push::Error) -> u8 {
     match error {
         // The two force switches contradict each other.
-        push::Error::ConflictingForce | push::Error::Refspec(_) => exit::USAGE,
-        push::Error::NoSuchBranch(_) => exit::DATAERR,
+        push::Error::ConflictingForce | push::Error::Refspec(_) | push::Error::AmbiguousName(_) => {
+            exit::USAGE
+        }
+        push::Error::NoSuchBranch(_) | push::Error::NoSuchTag(_) => exit::DATAERR,
         // The branch, the upstream or the remote is missing from the config.
         push::Error::DetachedHead
         | push::Error::ReadHead(_)

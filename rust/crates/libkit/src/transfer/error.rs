@@ -226,6 +226,9 @@ pub enum Error {
     /// Nothing was published.
     #[error("{0}")]
     PushNotAuthorized(String),
+    /// A tag the push names is not a local tag.
+    #[error("tag '{0}' does not exist")]
+    NoSuchTag(String),
     /// Force push refused before upload because discovery was unavailable.
     #[error(
         "force push requires successful atomic-advance capability discovery; reconnect and retry"
@@ -449,6 +452,7 @@ impl From<kit_sync::PushError> for Error {
             },
             P::PushSplitLimit(message) => Self::PushSplitLimit(message),
             P::PushNotAuthorized(message) => Self::PushNotAuthorized(message),
+            P::NoSuchTag(name) => Self::NoSuchTag(name),
             P::ForceCapabilityUnknown => Self::ForceCapabilityUnknown,
             P::SplitInterrupted {
                 branch,

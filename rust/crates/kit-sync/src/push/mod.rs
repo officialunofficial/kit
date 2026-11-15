@@ -15,6 +15,7 @@ mod error;
 mod force;
 mod packmap;
 mod split;
+mod tags;
 use deltas::DeltaEncoder;
 #[cfg(test)]
 use deltas::encode_delta_candidates_batch;
@@ -23,6 +24,10 @@ use deltas::{DELTA_CANDIDATE_BATCH_CAP, cache_delta_bases, delta_plan_fanout_thr
 pub use error::PushError;
 use packmap::{advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
+pub use tags::{
+    MAX_BASE_WALK_COMMITS, MAX_TAG_LISTING_BYTES, TagPushOutcome, TagPushRejection, TagPushResult,
+    TagSelection,
+};
 
 struct PreparedPlan {
     pack: transfer::PackPlan,
@@ -106,6 +111,13 @@ pub enum PushTarget {
         remote: String,
         lease: PushLease,
     },
+    /// Local tags, and no branch. Without `force`, a remote tag that holds
+    /// another value is refused; with it, the tag moves from the value the
+    /// push read.
+    Tags {
+        selection: TagSelection,
+        force: bool,
+    },
 }
 /// Caller-supplied policy. Nothing is loaded from config or the environment.
 #[derive(Debug)]
@@ -157,8 +169,9 @@ impl Default for PushOptions<'_> {
         }
     }
 }
-/// Completed branches, advances and the selected single-branch tip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Completed branches, advances, the selected single-branch tip, and the
+/// result of each pushed tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PushReport {
     /// Completed branches.
@@ -167,6 +180,18 @@ pub struct PushReport {
     pub steps: usize,
     /// Tip of a selected single branch; absent for a mirror push.
     pub tip: Option<Hash>,
+    /// One result per tag of a tag push, sorted by name.
+    pub tags: Vec<TagPushResult>,
+}
+
+impl PushReport {
+    /// Whether the push refused any tag.
+    #[must_use]
+    pub fn tags_rejected(&self) -> bool {
+        self.tags
+            .iter()
+            .any(|tag| matches!(tag.outcome, TagPushOutcome::Rejected(_)))
+    }
 }
 /// Push repository refs and durably record each published tracking ref.
 /// The observer is supplied through `options.control.observer`.
@@ -199,6 +224,7 @@ fn push_refs(
                 refs: 0,
                 steps: 0,
                 tip: None,
+                tags: Vec::new(),
             };
             let result: Result<(), PushError> = (|| {
                 for r in refs_list {
@@ -279,9 +305,38 @@ fn push_refs(
                 refs: 1,
                 steps,
                 tip: Some(tip),
+                tags: Vec::new(),
             })
         }
+        PushTarget::Tags { selection, force } => {
+            push_tag_report(layout, store, tx, options, selection, *force)
+        }
     }
+}
+
+fn push_tag_report(
+    layout: &kit_core::layout::RepoLayout,
+    store: &ObjectStore,
+    tx: &PushContext<'_>,
+    options: &PushOptions<'_>,
+    selection: &TagSelection,
+    force: bool,
+) -> Result<PushReport, PushError> {
+    let tags = tags::push_tags(
+        layout,
+        store,
+        tx,
+        options.remote_name,
+        selection,
+        force,
+        options.pack_payload_cap,
+    )?;
+    Ok(PushReport {
+        refs: 0,
+        steps: 0,
+        tip: None,
+        tags,
+    })
 }
 fn repository_control<'a>(
     layout: &kit_core::layout::RepoLayout,

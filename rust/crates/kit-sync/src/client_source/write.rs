@@ -319,7 +319,7 @@ impl<
     R: WriteRecovery + ?Sized,
 > ClientSource<'_, T, S, C, E, O, P, R>
 {
-    fn write_info(&self) -> Option<GetServerInfoResponse> {
+    pub(super) fn write_info(&self) -> Option<GetServerInfoResponse> {
         self.write_state()
             .info
             .get_or_init(|| {
@@ -902,14 +902,14 @@ impl<
                 "advance contains more than {ticket_limit} or duplicate upload tickets"
             )));
         }
+        // A ticketed advance pairs `refs/heads/<x>` with
+        // `refs/kit/packmap/<x>`, or `refs/tags/<x>` with
+        // `refs/kit/tagmap/<x>` (SPEC-TRANSPORT-CONNECT §4).
         if !ids.is_empty()
-            && head
-                .strip_prefix("refs/heads/")
-                .filter(|branch| !branch.is_empty())
-                .is_none_or(|branch| packmap != crate::packmap::packmap_ref(branch))
+            && (head.ends_with('/') || crate::packmap::chain_ref(head).as_deref() != Some(packmap))
         {
             return Err(SourceError::InvalidRef(
-                "ticketed advance requires paired head and packmap refs".into(),
+                "ticketed advance requires a head or tag paired with its chain ref".into(),
             ));
         }
         let deadline = selected

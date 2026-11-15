@@ -215,6 +215,8 @@ complete -c kit -n "__fish_seen_subcommand_from reflog" \
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l all -d "Mirror every local branch"
 complete -c kit -n "__fish_seen_subcommand_from push" \
+    -l tags -d "Push every local tag"
+complete -c kit -n "__fish_seen_subcommand_from push" \
     -l force -d "Overwrite the remote branch unconditionally (skip CAS)"
 complete -c kit -n "__fish_seen_subcommand_from push" \
     -l force-with-lease -d "Overwrite only if the remote hasn't moved"
