@@ -372,7 +372,7 @@ impl MarkLimits {
 /// - `objects`: commits, trees, tags, remixes, manifests, and blobs reached
 ///   other than as a chunk. The mark caps it at [`MAX_REACHABLE`].
 /// - `chunks`: the ids that manifests list, sorted, without duplicates, and
-///   disjoint from `objects`. Each is a blob or a delta.
+///   disjoint from `objects`. Each is a blob.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LiveSet {
     objects: BTreeSet<Hash>,
@@ -586,7 +586,7 @@ pub(crate) fn live_objects(
 ///
 /// The closure follows commits, trees, tags and parents like
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
-/// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob or a delta.
+/// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
 /// Does not verify leaf (blob/delta) content integrity as part of the
 /// walk — see [`super::graph::reachable_objects`]'s "Content integrity
