@@ -29,6 +29,7 @@
 #![deny(unsafe_code)]
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod anchor;
 mod applied_packs;
 mod checkpoint;
 #[cfg(feature = "client")]
