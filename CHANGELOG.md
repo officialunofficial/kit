@@ -20,9 +20,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that verifies also checks the history of the tip it moves the branch to, so
   a tracking ref its fetch did not publish is checked too. A branch whose
   history holds an unsigned commit now needs `--no-verify-signatures` on every
-  fetch, including after signed commits land on top of it. The walk follows
-  parents and tag targets only, verifies each history once per call, and has
-  the closure check's 10,000,000-object cap.
+  fetch or pull, including after signed commits land on top of it. The walk
+  follows parents and tag targets only, verifies each history once per call,
+  and has the closure check's 10,000,000-object cap.
 
 ## [0.8.0] - 2026-11-14
 

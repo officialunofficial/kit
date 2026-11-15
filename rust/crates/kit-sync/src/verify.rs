@@ -245,7 +245,10 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
 
 /// The objects whose history [`verify_history_signatures`] has verified in
 /// full, which a later walk need not read again. An object enters it only
-/// once the walk that reached it has succeeded.
+/// once the walk that reached it has succeeded. It lives for one fetch (and
+/// the pull after it) and holds the union of the histories that fetch
+/// verified: each walk is capped, the union is not, so a remote with many
+/// unrelated branches costs 32 bytes of id per signed object it delivered.
 pub(crate) type VerifiedHistory = HashSet<Hash>;
 
 /// Verify the signature of every commit, remix and tag in the history of
