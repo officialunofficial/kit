@@ -157,15 +157,15 @@ machine under heavy load from other builds, so they report no times.
 
 ### The pack size of a push
 
-A push builds packs of at most 256 MiB, so it holds one pack of that size and
-one prepared batch in memory. A ticketed advance carries six data packs unless
+A push builds packs of at most 256 MiB. Each pack is written to an unnamed
+spool in `.kit/tmp/`, so memory holds one prepared batch of at most 64 MiB of
+objects, not the pack. A ticketed advance carries six data packs unless
 the server advertises another number, which is about 1.5 GiB of objects. A
 push that has a single commit heavier than that raises the pack size for that
 push, once, to what the commit needs and no further. It never passes the
 format limit of 4 GiB or the largest pack the server accepts. The same objects
-spread over several commits keep packs of 256 MiB. A push of one large commit
-therefore holds a larger pack in memory than a push of many small ones: one
-pack and one prepared batch, each up to the raised size.
+spread over several commits keep packs of 256 MiB. A raised size makes a
+larger spool on disk; the batch in memory stays at 64 MiB.
 
 ### The memory of a proof
 

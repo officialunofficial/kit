@@ -576,11 +576,11 @@ pack data flows through `PackChunk` streams to stay under that limit.
 Client side, the SSH transport applies the
 `PACK_BODY_LIMIT = 4 GiB` cap on `download_pack`. A server-advertised
 `DownloadPackHeader.total_bytes` greater than 4 GiB is rejected
-before any allocation; if the announced size is honest but the
-streamed chunks overshoot, the running total check terminates the
-read mid-stream rather than letting the `Vec` grow without bound.
-Both paths surface as `TransportError::RemoteError` with a message
-mentioning the client cap.
+before the sink's `begin`, as `TransportError::RemoteError` with a
+message mentioning the client cap. The header's length goes to
+`begin`, so a sink with a smaller limit refuses the pack before any
+chunk is read; chunks past the declared length or the sink's limit
+stop at the sink as `TransportError::PayloadTooLarge`.
 
 ### 4.5 Retry / reconnect
 
@@ -1094,7 +1094,8 @@ on a branch chain downloads only its own nodes and packs. The tag phase
 self-heals at most once per fetch, so a remote whose every tag lacks an object
 costs one full walk, not one per tag.
 
-A fetch holds one window of one pack, not the pack. The signature check
+A fetch holds one window of one pack, not the pack, except over a transport
+that buffers the body (§1.1). The signature check
 reads only the commits, remixes and tags a pack stored, in runs whose
 objects together stay within 256 MiB, charged twice their size; one object
 over that is checked alone. What still grows with a pack is per-object

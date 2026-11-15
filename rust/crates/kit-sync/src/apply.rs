@@ -5,7 +5,8 @@
 //! arrives, unpacked from that file into the object store by window,
 //! signature-checked and recorded as applied, then dropped, in chain order.
 //! No repository lock is held, and memory does not grow with the pack: a
-//! chain of any size needs one spool on disk and one window in memory. The
+//! chain of any size needs one spool on disk and one window in memory,
+//! unless the transport itself buffers the body. The
 //! caller holds a [`kit_core::store::PruneGuard`] for the whole fetch: the
 //! objects of a pack applied here are unreferenced until the fetch publishes
 //! its ref, and the guard keeps gc from deleting them.

@@ -2150,8 +2150,6 @@ mod tests {
         assert_eq!(leftovers, 1, "only the first pack is in its directory");
     }
 
-    /// The download declares the pack's length before any byte, so a sink
-    /// with a smaller limit refuses it with no byte read.
     /// A pack whose write fails on the remote leaves no temporary file
     /// there: here the rename fails, because a directory holds its name.
     #[test]
@@ -2172,6 +2170,8 @@ mod tests {
         assert_eq!(names.len(), 1, "only the blocking directory: {names:?}");
     }
 
+    /// The download declares the pack's length before any byte, so a sink
+    /// with a smaller limit refuses it with no byte read.
     #[test]
     fn download_pack_declares_the_length_before_the_body() {
         let dir = tmp();
