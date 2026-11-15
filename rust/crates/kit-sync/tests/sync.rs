@@ -975,6 +975,8 @@ fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at
 
     remote.repoint(forged);
     assert_refused(&target, &remote, forged, first, first);
+    // A refused fetch records nothing.
+    assert_eq!(read_verified_tip(&target, "default", "main"), Some(first));
 
     // A signed descendant does not carry the unsigned commit below it.
     let tip = remote.publish(Some(forged), &[("a.txt", b"signed on top\n")], true);
@@ -1409,6 +1411,7 @@ fn prune_deletes_only_the_tracking_refs_of_branches_the_remote_lost() {
     let (_dir, target, tip) = clone_with_tracking_ghost(&remote);
     let layout = RepoLayout::single(&target);
     refs::write_tag(&layout, "v1", &tip).unwrap();
+    write_verified_tip(&target, "default", "gone", tip);
 
     let kept = fetch(
         &target,
@@ -1437,6 +1440,9 @@ fn prune_deletes_only_the_tracking_refs_of_branches_the_remote_lost() {
         refs::read_remote_ref(&layout, "default", "gone").unwrap(),
         None
     );
+    // The pruned ref takes its verified-tip record with it.
+    assert_eq!(read_verified_tip(&target, "default", "gone"), None);
+    assert_eq!(read_verified_tip(&target, "default", "main"), Some(tip));
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(tip)

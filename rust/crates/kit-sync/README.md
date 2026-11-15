@@ -98,8 +98,9 @@ delete these files.
 ### Verified tips
 
 A fetch that verifies signatures checks the history of each tip before it
-publishes the tip: every commit and remix parent and every tag target, down to
-a tip whose history an earlier signed fetch verified. It then records the tip
+publishes the tip: every commit and remix parent and every tag target, whatever
+type the tag declares, down to a tip whose history an earlier signed fetch
+verified. It then records the tip
 it published, next to the tracking ref. So a fetch verifies only the commits
 between the new tip and what was verified before, and a pull checks the tip it
 moves the branch to the same way. A tip published by a fetch with the opt-out,
@@ -116,7 +117,10 @@ bytes and read at most 65,536 records. A record names content-addressed
 history, so it stays true after the tracking ref moves on, and every record of
 every remote is a stopping point. Missing, unreadable, or invalid records make
 the next walk longer: the first signed fetch after an upgrade walks each
-history once. You can delete these files; they never pin objects for GC. A
+history once. A tracking ref whose tip no signed fetch recorded, such as one a
+fetch with the opt-out left for a branch the remote no longer lists, keeps a
+signed fetch from trusting an unchanged cursor, so each signed fetch lists the
+remote until `--prune` removes that ref. You can delete these files; they never pin objects for GC. A
 pruned tracking ref takes its record with it. Renaming or removing a remote
 leaves its records behind; they stay true and only stop a later walk sooner.
 

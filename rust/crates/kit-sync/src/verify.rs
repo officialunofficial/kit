@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use kit_core::hash::{self, Hash};
-use kit_core::object::{Object, ObjectType};
+use kit_core::object::Object;
 use kit_core::sign;
 use kit_core::store::ObjectStore;
 use rayon::prelude::*;
@@ -304,14 +304,10 @@ pub(crate) fn verify_history_signatures(
         match &obj {
             Object::Commit(c) => pending.extend(&c.parents),
             Object::Remix(r) => pending.extend(&r.parents),
-            Object::Tag(t) => {
-                if matches!(
-                    t.target_type,
-                    ObjectType::Commit | ObjectType::Remix | ObjectType::Tag
-                ) {
-                    pending.push(t.target);
-                }
-            }
+            // The target is followed whatever type the tag declares: the
+            // walk decides by the type of the object it reads, so a tag
+            // that calls a commit a tree does not hide it.
+            Object::Tag(t) => pending.push(t.target),
             Object::Blob(_) | Object::Tree(_) | Object::ChunkedBlob(_) | Object::Delta(_) => {
                 continue;
             }
@@ -334,7 +330,7 @@ pub(crate) fn verify_history_signatures(
 mod tests {
     use super::*;
     use crate::observer::NoopObserver;
-    use kit_core::object::Object;
+    use kit_core::object::{Object, ObjectType};
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
@@ -608,8 +604,9 @@ mod tests {
         assert!(verified.contains(&next));
     }
 
-    /// A tag is checked and so is the commit it names. A tag that names a
-    /// tree is checked itself, and the walk stops there.
+    /// A tag is checked and so is the commit it names, whatever type the tag
+    /// declares for it. A tag that names a tree is checked itself, and the
+    /// walk reads the tree and stops there.
     #[test]
     fn verify_history_signatures_checks_a_tag_and_its_target() {
         use kit_core::object::{Identity, Tag};
@@ -646,14 +643,26 @@ mod tests {
             &mut VerifiedHistory::new(),
         )
         .unwrap();
-        // The tree is never written: reading it would fail the walk.
+        let tree = store
+            .write(
+                &kit_core::serialize::serialize(&Object::Tree(kit_core::object::Tree {
+                    entries: Vec::new(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
         verify_history_signatures(
             &store,
             &NoopObserver,
-            &tag(h("a tree"), ObjectType::Tree),
+            &tag(tree, ObjectType::Tree),
             &mut VerifiedHistory::new(),
         )
         .unwrap();
+        // A tag that declares a tree but names the unsigned commit.
+        assert!(matches!(
+            verify_history_signatures(&store, &NoopObserver, &tag(unsigned, ObjectType::Tree), &mut VerifiedHistory::new()),
+            Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) if got == hash::to_hex(&unsigned)
+        ));
     }
 
     #[test]
