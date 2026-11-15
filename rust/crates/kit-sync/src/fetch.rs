@@ -34,7 +34,7 @@ use crate::packmap::{
     walk_pack_chain_until,
 };
 use crate::source::RemoteSource;
-use crate::verify::verify_history_signatures;
+use crate::verify::{VerifiedHistory, verify_history_signatures};
 
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -330,6 +330,13 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// is applied, and rewritten atomically once after, unconditionally and
 /// best-effort (a pure performance cache whose own I/O must never fail a
 /// fetch whose objects durably landed).
+///
+/// # Signed history
+///
+/// With signatures required, the history of each tip is verified before it
+/// is published. The returned set holds every object whose history this call
+/// verified, so branches that share history walk it once, and a pull does not
+/// walk again a tip this call published.
 pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -338,10 +345,11 @@ pub(crate) fn fetch_objects(
     remote: &str,
     options: &SyncOptions,
     lock_wait: &LockWait,
-) -> Result<FetchReport, SyncError> {
+) -> Result<(FetchReport, VerifiedHistory), SyncError> {
     let _prune_guard = store.prune_guard()?;
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
+    let mut verified = VerifiedHistory::default();
     let result = fetch_objects_inner(
         store,
         layout,
@@ -352,9 +360,10 @@ pub(crate) fn fetch_objects(
         lock_wait,
         &mut applied,
         &mut report,
+        &mut verified,
     );
     persist_record(&mut applied, observer, remote);
-    result.map(|()| report)
+    result.map(|()| (report, verified))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -368,6 +377,7 @@ fn fetch_objects_inner(
     lock_wait: &LockWait,
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
+    verified: &mut VerifiedHistory,
 ) -> Result<(), SyncError> {
     let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
@@ -520,7 +530,7 @@ fn fetch_objects_inner(
             // example objects a refused pack left in the store, so its
             // history is checked here, whatever path it took into the store.
             if require_signed {
-                verify_history_signatures(store, &completed.tip)?;
+                verify_history_signatures(store, observer, &completed.tip, verified)?;
             }
 
             // Step 4: publish under a repo lock acquired fresh for this

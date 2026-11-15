@@ -15,6 +15,7 @@ use kit_core::store::ObjectStore;
 use rayon::prelude::*;
 
 use crate::error::SyncError;
+use crate::observer::{Observer, SyncEvent};
 
 /// Entries-per-thread budget below which [`verify_new_object_signatures`]
 /// checks signatures sequentially instead of fanning out across rayon's
@@ -242,11 +243,17 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
     }
 }
 
+/// The objects whose history [`verify_history_signatures`] has verified in
+/// full, which a later walk need not read again. An object enters it only
+/// once the walk that reached it has succeeded.
+pub(crate) type VerifiedHistory = HashSet<Hash>;
+
 /// Verify the signature of every commit, remix and tag in the history of
 /// `tip`: `tip` itself, the parents of each commit and remix, and the target
-/// of each tag, recursively. Trees, blobs and chunks carry no signature and
-/// name no signed object, so the walk never reads them. Remix `sources` are
-/// foreign-repo pointers and are not followed (SPEC-OBJECTS §6).
+/// of each tag, recursively. Trees and blobs carry no signature and name no
+/// signed object, so the walk reads one only where a parent or `tip` names it
+/// and goes no further. Remix `sources` are foreign-repo pointers and are not
+/// followed (SPEC-OBJECTS §6).
 ///
 /// [`verify_new_object_signatures`] checks the objects of the packs one run
 /// applies, but a ref can name history that no such pack carries: objects a
@@ -255,13 +262,23 @@ fn verify_entries(entries: &[(Hash, Object)], parallel: bool) -> Result<(), Sync
 /// this on each tip right before it publishes the tip, so what a ref names
 /// is checked whatever path its objects took into the store.
 ///
-/// The walk visits at most [`kit_core::ops::graph::MAX_REACHABLE`] objects,
+/// An object in `verified` had its whole history verified by an earlier
+/// walk, so the walk stops there. When the walk succeeds, every object it
+/// visited joins `verified`; when it fails, `verified` is unchanged.
+///
+/// One walk visits at most [`kit_core::ops::graph::MAX_REACHABLE`] objects,
 /// the cap of the closure check fetch runs first over a superset of this
 /// history. A longer history is [`SyncError::ClosureTooLarge`], never a
 /// partial check. The signed objects are checked in chunks of
 /// [`verify_chunk_size`] as the walk reads them, so at most one chunk of
-/// decoded objects is held at a time.
-pub(crate) fn verify_history_signatures(store: &ObjectStore, tip: &Hash) -> Result<(), SyncError> {
+/// decoded objects is held at a time, and `observer` is polled for
+/// cancellation after each full chunk.
+pub(crate) fn verify_history_signatures(
+    store: &ObjectStore,
+    observer: &dyn Observer<SyncEvent>,
+    tip: &Hash,
+    verified: &mut VerifiedHistory,
+) -> Result<(), SyncError> {
     let cap = kit_core::ops::graph::MAX_REACHABLE;
     let chunk = verify_chunk_size();
     let check = |entries: &[(Hash, Object)]| {
@@ -271,7 +288,7 @@ pub(crate) fn verify_history_signatures(store: &ObjectStore, tip: &Hash) -> Resu
     let mut pending = vec![*tip];
     let mut entries: Vec<(Hash, Object)> = Vec::new();
     while let Some(h) = pending.pop() {
-        if !seen.insert(h) {
+        if verified.contains(&h) || !seen.insert(h) {
             continue;
         }
         if seen.len() > cap {
@@ -297,14 +314,20 @@ pub(crate) fn verify_history_signatures(store: &ObjectStore, tip: &Hash) -> Resu
         if entries.len() >= chunk {
             check(&entries)?;
             entries.clear();
+            if observer.cancelled() {
+                return Err(SyncError::Interrupted);
+            }
         }
     }
-    check(&entries)
+    check(&entries)?;
+    verified.extend(seen);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::observer::NoopObserver;
     use kit_core::object::Object;
 
     fn h(seed: &str) -> Hash {
@@ -522,15 +545,61 @@ mod tests {
             (root, tip)
         };
         let (_, clean) = line(true, 0);
-        verify_history_signatures(&store, &clean).expect("every commit is signed");
+        verify_history_signatures(&store, &NoopObserver, &clean, &mut VerifiedHistory::new())
+            .expect("every commit is signed");
         let (unsigned, forged) = line(false, 10_000);
         let merge = history_commit(&store, &kp, 20_000, vec![forged, clean], true);
-        match verify_history_signatures(&store, &merge) {
+        match verify_history_signatures(&store, &NoopObserver, &merge, &mut VerifiedHistory::new())
+        {
             Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) => {
                 assert_eq!(got, hash::to_hex(&unsigned));
             }
             other => panic!("expected UnsignedOrInvalidObject, got {other:?}"),
         }
+    }
+
+    /// A walk that succeeds adds what it visited to the verified set, and a
+    /// later walk stops at it without reading it. A walk that fails leaves
+    /// the set as it was, and a cancelled one stops after a full chunk.
+    #[test]
+    fn verify_history_signatures_reuses_only_a_successful_walk() {
+        struct Cancelled;
+        impl Observer<SyncEvent> for Cancelled {
+            fn event(&self, _: &SyncEvent) {}
+            fn cancelled(&self) -> bool {
+                true
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
+        let kp = kit_core::sign::KeyPair::generate().unwrap();
+        let root = history_commit(&store, &kp, 0, Vec::new(), true);
+        let mut tip = root;
+        for seed in 1..verify_chunk_size() + 8 {
+            tip = history_commit(&store, &kp, seed, vec![tip], true);
+        }
+        assert!(matches!(
+            verify_history_signatures(&store, &Cancelled, &tip, &mut VerifiedHistory::new()),
+            Err(SyncError::Interrupted)
+        ));
+
+        let mut verified = VerifiedHistory::new();
+        verify_history_signatures(&store, &NoopObserver, &tip, &mut verified).unwrap();
+        assert!(verified.contains(&root) && verified.contains(&tip));
+        let before = verified.clone();
+        let unsigned = history_commit(&store, &kp, 20_000, vec![tip], false);
+        assert!(matches!(
+            verify_history_signatures(&store, &NoopObserver, &unsigned, &mut verified),
+            Err(SyncError::UnsignedOrInvalidObject { .. })
+        ));
+        assert_eq!(verified, before);
+
+        // The root is gone, and a walk over the verified history does not
+        // read it.
+        store.remove_object(&root).unwrap();
+        let next = history_commit(&store, &kp, 30_000, vec![tip], true);
+        verify_history_signatures(&store, &NoopObserver, &next, &mut verified).unwrap();
+        assert!(verified.contains(&next));
     }
 
     /// A tag is checked and so is the commit it names. A tag that names a
@@ -560,13 +629,25 @@ mod tests {
         let unsigned = history_commit(&store, &kp, 0, Vec::new(), false);
         let over_unsigned = tag(unsigned, ObjectType::Commit);
         assert!(matches!(
-            verify_history_signatures(&store, &over_unsigned),
+            verify_history_signatures(&store, &NoopObserver, &over_unsigned, &mut VerifiedHistory::new()),
             Err(SyncError::UnsignedOrInvalidObject { hash: got, .. }) if got == hash::to_hex(&unsigned)
         ));
         let signed = history_commit(&store, &kp, 1, Vec::new(), true);
-        verify_history_signatures(&store, &tag(signed, ObjectType::Commit)).unwrap();
+        verify_history_signatures(
+            &store,
+            &NoopObserver,
+            &tag(signed, ObjectType::Commit),
+            &mut VerifiedHistory::new(),
+        )
+        .unwrap();
         // The tree is never written: reading it would fail the walk.
-        verify_history_signatures(&store, &tag(h("a tree"), ObjectType::Tree)).unwrap();
+        verify_history_signatures(
+            &store,
+            &NoopObserver,
+            &tag(h("a tree"), ObjectType::Tree),
+            &mut VerifiedHistory::new(),
+        )
+        .unwrap();
     }
 
     #[test]

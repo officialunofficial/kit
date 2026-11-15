@@ -168,6 +168,13 @@ impl Remote {
             .unwrap();
     }
 
+    /// Point `main` at `tip` with a fresh single-node chain whose one pack
+    /// carries no object, so the fetch downloads nothing that names `tip`.
+    /// A hostile remote does this once the closure of `tip` is local.
+    fn repoint(&self, tip: Hash) {
+        self.publish_pack(&PackWriter::new().finish().unwrap(), tip, true);
+    }
+
     fn source(&self) -> TransportSource<'_> {
         TransportSource::new(&self.tx)
     }
@@ -903,15 +910,6 @@ fn the_explicit_opt_out_accepts_an_unsigned_commit() {
         report.pull.outcome,
         PullOutcome::FastForwarded { new, .. } if new == tip
     ));
-}
-
-impl Remote {
-    /// Point `main` at `tip` with a fresh single-node chain whose one pack
-    /// carries no object, so the fetch downloads nothing that names `tip`.
-    /// A hostile remote does this once the closure of `tip` is local.
-    fn repoint(&self, tip: Hash) {
-        self.publish_pack(&PackWriter::new().finish().unwrap(), tip, true);
-    }
 }
 
 fn signed_fetch(target: &Path, remote: &Remote) -> Result<kit_sync::FetchReport, SyncError> {

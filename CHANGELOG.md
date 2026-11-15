@@ -12,15 +12,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A fetch that verifies signatures now checks every commit, remix and tag in
   the history of each tip before it publishes the remote-tracking ref, not only
   the objects of the packs that fetch applied. Before, a remote could have a
-  ref published over an unsigned commit that was already in the local store:
-  one a refused pack left behind, one another remote wrote, or one an earlier
-  fetch with `--no-verify-signatures` applied. The remote re-pointed the branch
-  at that commit with a pack chain that did not carry it. `clone`, `fetch` and
-  `pull` now refuse it with `SyncError::UnsignedOrInvalidObject`. A `pull`
+  ref published over an unsigned commit that was already in the local store,
+  by re-pointing the branch at it with a pack chain that did not carry it. The
+  commit could be one a refused pack left behind, one another remote wrote, or
+  one an earlier fetch with `--no-verify-signatures` applied. `clone`, `fetch`
+  and `pull` now refuse it with `SyncError::UnsignedOrInvalidObject`. A `pull`
   that verifies also checks the history of the tip it moves the branch to, so
-  a tracking ref its fetch did not publish is checked too. The walk
-  reads only commits, remixes and tags and has the closure check's
-  10,000,000-object cap.
+  a tracking ref its fetch did not publish is checked too. A branch whose
+  history holds an unsigned commit now needs `--no-verify-signatures` on every
+  fetch, including after signed commits land on top of it. The walk follows
+  parents and tag targets only, verifies each history once per call, and has
+  the closure check's 10,000,000-object cap.
 
 ## [0.8.0] - 2026-11-14
 

@@ -95,7 +95,7 @@ pub fn pull(
     }
     let store = open_store(&layout, options)?;
     let lock_wait = LockWait::new(options.lock_wait);
-    let fetch = fetch_objects(
+    let (fetch, mut verified) = fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
@@ -161,9 +161,9 @@ pub fn pull(
     // The fetch checked the history of each tip it published. The tracking
     // ref of `branch` can hold a tip this fetch did not publish, such as one
     // a fetch with the opt-out wrote for a branch this listing omits, so the
-    // tip the branch moves to is checked too.
+    // tip the branch moves to is checked too, unless the fetch just did.
     if options.verify_signatures {
-        verify_history_signatures(&store, &remote_tip)?;
+        verify_history_signatures(&store, observer, &remote_tip, &mut verified)?;
     }
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
@@ -222,6 +222,7 @@ pub fn fetch(
     fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )
+    .map(|(report, _)| report)
 }
 
 fn rollback_pull_ref_and_head(
