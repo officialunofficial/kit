@@ -97,6 +97,12 @@ libc = "0.2.191"
 # without it, `cargo check -p kit-core --no-default-features --target
 # wasm32-unknown-unknown` fails. A wasm32 consumer enables this feature on its root package,
 # which unifies onto this copy. Do not enable on native.
+# `hash::hash` splits a large input across threads. This turns on the
+# `rayon` feature of the `blake3` above. wasm32 has no threads, so it
+# keeps the serial hasher.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+blake3 = { version = "1.8.7", features = ["rayon"] }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4.3", features = ["wasm_js"] }
 
