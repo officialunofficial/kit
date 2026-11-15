@@ -96,8 +96,16 @@ const PACKLIST_HEADER_LEN: usize = 4 + 1;
 /// the longest count prefix and [`PACKLIST_MAX_ENTRIES`] keys, about 32 MB.
 /// A download of a node refuses anything longer, so a remote cannot make a
 /// client hold a pack-sized "node".
-pub const MAX_PACKLIST_NODE_BYTES: u64 = (PACKLIST_HEADER_LEN + 1 + hash::HASH_LEN + 5) as u64
-    + PACKLIST_MAX_ENTRIES as u64 * hash::HASH_LEN as u64;
+pub const MAX_PACKLIST_NODE_BYTES: u64 = packlist_node_bound(PACKLIST_MAX_ENTRIES as u64);
+
+/// The most bytes a packlist node that lists `packs` packs can take: the
+/// header, a present `prev`, the longest count prefix and one key per pack.
+/// A writer sizes a node it will write with this before it knows its `prev`.
+#[must_use]
+pub const fn packlist_node_bound(packs: u64) -> u64 {
+    ((PACKLIST_HEADER_LEN + 1 + hash::HASH_LEN + 5) as u64)
+        .saturating_add(packs.saturating_mul(hash::HASH_LEN as u64))
+}
 
 /// A single node in a branch's packlist chain.
 ///
@@ -1165,6 +1173,30 @@ mod tests {
         let node = decode_packlist(&bytes).unwrap();
         assert_eq!(node.prev, Some(prev));
         assert_eq!(node.packs, packs);
+    }
+
+    /// The bound is the node with a prior pointer, one key per pack and four
+    /// spare bytes beyond a one-byte count prefix: never shorter than the
+    /// node itself.
+    #[test]
+    fn the_packlist_node_bound_covers_every_node_it_sizes() {
+        for packs in [0_usize, 1, 2, 127, 128, 1_000, 16_383, 16_384] {
+            let keys = vec![[7u8; 32]; packs];
+            let node = encode_packlist(Some([1u8; 32]), &keys).unwrap().len() as u64;
+            let prefix = if packs < 128 {
+                1
+            } else if packs < 16_384 {
+                2
+            } else {
+                3
+            };
+            assert_eq!(packlist_node_bound(packs as u64), node + 5 - prefix);
+            assert!(encode_packlist(None, &keys).unwrap().len() as u64 <= node);
+        }
+        assert_eq!(
+            MAX_PACKLIST_NODE_BYTES,
+            packlist_node_bound(u64::from(PACKLIST_MAX_ENTRIES))
+        );
     }
 
     #[test]

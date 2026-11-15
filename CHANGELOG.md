@@ -51,6 +51,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PushReport::deleted` and `SourceError::Unsupported`; in libkit,
   `transfer::push_delete_with_source`; in kit-transport-file,
   `FileTransport::delete_ref_if`.
+- `kit_core::transfer::packlist_node_bound`, the most bytes a packlist node
+  that lists a given number of packs can take. kit-client sizes the node of
+  a plan with it, where it restated the node layout.
 
 ### Changed
 

@@ -143,10 +143,6 @@ impl Plan {
         if limits.payload_bytes == 0 || limits.max_pack_bytes == 0 || limits.max_parts == 0 {
             return Err(Error::Limit("zero pack limit"));
         }
-        // Reserve a prior pointer and the largest u32 length prefix. The
-        // empty canonical node has a one-byte prefix, which can grow by four.
-        let node_overhead =
-            kit_core::transfer::encode_packlist(Some([0; 32]), &[])?.len() as u64 + 4;
         let mut writer = PackWriter::new();
         let mut pending = Pending::new();
         let mut packs = Vec::new();
@@ -192,7 +188,8 @@ impl Plan {
             // Bound memory before accepting an input entry, even if it
             // compresses dramatically. The caller owns its input allocation.
             let pack_count = packs.len().saturating_add(1) as u64;
-            let node_bound = node_overhead.saturating_add(pack_count.saturating_mul(32));
+            // The node with a prior pointer and the longest count prefix.
+            let node_bound = kit_core::transfer::packlist_node_bound(pack_count);
             if pack_count > u64::from(kit_core::transfer::PACKLIST_MAX_ENTRIES)
                 || node_bound > limits.max_pack_bytes
                 || staged
