@@ -772,12 +772,16 @@ fn tags_that_share_a_broken_pack_download_it_once() {
         assert!(report.tags_fetched.is_empty(), "{kind:?}");
         let reasons = rejected(&report);
         assert_eq!(reasons.len(), 3, "{reasons:?}");
-        assert!(
-            reasons
-                .iter()
-                .all(|(_, r)| matches!(r, TagRejectReason::Transfer(_))),
-            "{reasons:?}"
-        );
+        for (name, reason) in &reasons {
+            let TagRejectReason::Transfer(message) = reason else {
+                panic!("{reasons:?}");
+            };
+            assert_eq!(
+                message.contains("failed for tag `r0`"),
+                *name != "r0",
+                "{reasons:?}"
+            );
+        }
         let calls = counted.take();
         assert_eq!(
             count(&calls, &format!("Pack {}", hash::to_hex(&key))),

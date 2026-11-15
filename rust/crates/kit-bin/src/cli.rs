@@ -208,7 +208,7 @@ commands:
                     and the branch need not be the current one; wildcards,
                     a leading `+`, a delete and non-branch refs are errors;
                     --format=json emits a JSON outcome object)
-  pull [<remote>] [--all] [--rebase|--no-ff] [--no-tags] [--format=json]  Pull changes from remote (fast-forward;
+  pull [<remote>] [--all] [--rebase|--no-ff] [--tags|--no-tags] [--format=json]  Pull changes from remote (fast-forward;
                     prints `Updating <a>..<b>`/`Fast-forward`/diffstat, or
                     `Already up to date.`); --all pulls every configured remote;
                     --rebase replays the current branch onto the fetched one;
@@ -242,7 +242,7 @@ commands:
   stash drop [<n>|stash@{n}]   Remove a stash entry without applying
   stash clear       Remove all stash entries
   stash show [<n>|stash@{n}]   Show the diff of a stash entry (default 0)
-  clone [--sparse ...] [-b <branch>] [-o <name>] [--no-tags] <url>  Clone a repository
+  clone [--sparse ...] [-b <branch>] [-o <name>] [--tags|--no-tags] <url>  Clone a repository
                     (-b checks out <branch> instead of the remote default;
                     -o names the cloned remote <name> instead of `default`)
   remote [-v|--verbose] [--format=json]  List remotes (names only; -v adds

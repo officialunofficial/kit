@@ -105,7 +105,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pull_all_with` and `fetch_all` fetch tags and return the reports too, not a
   branch count.
 - `walk_pack_chain` and `resolve_pack_chain` take the full head ref, such as
-  `refs/kit/packmap/<b>` or `refs/kit/tagmap/<t>`, not a branch name.
+  `refs/heads/<b>` or `refs/tags/<t>`, not a branch name.
 - A fetch sends one more request, the `ListRefs` of `refs/tags/`, and one
   `ListRefs` of `refs/kit/tagmap/` when some tag is not yet local. An
   unchanged `kit serve` fetch still fits 4,999 branches in one session.

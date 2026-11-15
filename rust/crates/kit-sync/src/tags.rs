@@ -543,9 +543,26 @@ struct Attempts {
     tagmaps: Option<HashMap<String, Hash>>,
     /// The self-heals run so far.
     heals: usize,
-    /// Each pack whose download or apply this fetch refused, with the
-    /// refusal, so a pack that many tag chains share costs one download.
-    failed_packs: HashMap<Hash, TagRejectReason>,
+    /// Each pack whose download or apply this fetch refused, with the tag
+    /// it was refused for and the refusal, so a pack that many tag chains
+    /// share costs one download.
+    failed_packs: HashMap<Hash, FailedPack>,
+}
+
+/// A pack refused for one tag: the tag and the refusal.
+type FailedPack = (String, TagRejectReason);
+
+/// The refusal of a tag whose chain holds `pack`, refused before for the
+/// tag `first`. A transfer message names the first tag's ref, so it is
+/// given as that tag's.
+fn shared_refusal(pack: &Hash, (first, reason): &FailedPack) -> TagRejectReason {
+    match reason {
+        TagRejectReason::Transfer(message) => TagRejectReason::Transfer(format!(
+            "pack {} failed for tag `{first}`: {message}",
+            to_hex(pack)
+        )),
+        reason => reason.clone(),
+    }
 }
 
 /// A failure of the tag or tag map listing, which stops the phase.
@@ -593,6 +610,8 @@ impl TagPhase<'_> {
     pub(crate) fn run(mut self) -> Result<(), SyncError> {
         let listed = match self.source.list_refs(TAG_REF_PREFIX) {
             Ok(listed) => listed,
+            // A listing cut short by an interrupt is the interrupt.
+            Err(_) if self.observer.cancelled() => return Err(SyncError::Interrupted),
             Err(e) => {
                 self.listing_failed(&ListingFailed(e.to_string()));
                 return Ok(());
@@ -652,6 +671,10 @@ impl TagPhase<'_> {
                 }
                 Ok(Outcome::Skip) => {}
                 Ok(Outcome::Refused(reason)) => self.refuse(name, reason),
+                Err(Ok(_)) if self.observer.cancelled() => {
+                    fatal = Some(SyncError::Interrupted);
+                    break;
+                }
                 Err(Ok(failed)) => {
                     self.listing_failed(&failed);
                     break;
@@ -814,7 +837,7 @@ impl TagPhase<'_> {
         tag_ref: &str,
         map: Hash,
         use_stop: bool,
-        failed_packs: &mut HashMap<Hash, TagRejectReason>,
+        failed_packs: &mut HashMap<Hash, FailedPack>,
     ) -> Result<(bool, Vec<Hash>), (bool, ChainFailure)> {
         let stop = &self.stop;
         let walk = walk_pack_chain_until(self.source, self.observer, tag_ref, map, &|key| {
@@ -824,8 +847,11 @@ impl TagPhase<'_> {
         let stopped = walk.stopped;
         let keys = walk.keys;
         let chain = flatten_oldest_first(walk.nodes);
-        if let Some(reason) = chain.iter().find_map(|pack| failed_packs.get(pack)) {
-            return Err((stopped, ChainFailure::Refused(reason.clone())));
+        if let Some(reason) = chain
+            .iter()
+            .find_map(|pack| Some(shared_refusal(pack, failed_packs.get(pack)?)))
+        {
+            return Err((stopped, ChainFailure::Refused(reason)));
         }
         let mut done = ChainApplied::default();
         let result = apply_pack_chain(
@@ -850,7 +876,8 @@ impl TagPhase<'_> {
             if let ChainFailure::Refused(reason) = &failure
                 && let Some(pack) = chain.get(done.packs + done.skipped)
             {
-                failed_packs.insert(*pack, reason.clone());
+                let name = tag_ref.strip_prefix(TAG_REF_PREFIX).unwrap_or(tag_ref);
+                failed_packs.insert(*pack, (name.to_owned(), reason.clone()));
             }
             return Err((skipped, failure));
         }
@@ -882,10 +909,17 @@ impl TagPhase<'_> {
             match refs::update_tag(self.layout, &name, refs::RefWriteCondition::Missing, &value) {
                 Ok(()) => self.report.tags_fetched.push(name),
                 Err(refs::RefError::Conflict(_)) => {
-                    self.report.tags_rejected.push(TagRejection {
-                        name,
-                        reason: TagRejectReason::WouldClobber,
-                    });
+                    // No tag at the name means the path is another tag's
+                    // directory, as a case-folding file system shows `V1/rc`
+                    // to `v1`.
+                    let reason = match refs::read_tag(self.layout, &name) {
+                        Ok(Some(_)) => TagRejectReason::WouldClobber,
+                        Err(e) if !is_name_clash(&e) => TagRejectReason::WouldClobber,
+                        _ => TagRejectReason::NameConflict { other: None },
+                    };
+                    self.report
+                        .tags_rejected
+                        .push(TagRejection { name, reason });
                 }
                 Err(e) if is_name_clash(&e) => {
                     self.report.tags_rejected.push(TagRejection {
