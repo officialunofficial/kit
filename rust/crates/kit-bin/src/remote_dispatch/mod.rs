@@ -496,7 +496,7 @@ pub(crate) fn pull_all_with_source(
         .with_sync_policy(sync_policy(&layout));
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
-    options.remote_url = attestations.2.to_owned();
+    attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
@@ -521,7 +521,7 @@ pub(crate) fn fetch_all_with_source(
         .with_sync_policy(sync_policy(&layout));
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
-    options.remote_url = attestations.2.to_owned();
+    attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::fetch(cwd, source, remote, &options, terminal)?)
 }
 

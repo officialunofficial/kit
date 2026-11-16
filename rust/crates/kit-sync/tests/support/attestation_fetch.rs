@@ -40,6 +40,7 @@ mod attestation_fetch {
         tx.update_ref("refs/heads/main", RefWriteCondition::Any, &tip).unwrap();
         (tip, tree_id)
     }
+    #[allow(dead_code)] // Some transport harnesses use only publication helpers.
     pub(crate) fn roundtrip(tx: &dyn Transport) {
         let (tip, tree) = code(tx);
         let envelope = envelope(tip);
@@ -49,8 +50,9 @@ mod attestation_fetch {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("clone");
         let source = TransportSource::new(tx);
-        let options = SyncOptions::default();
+        let mut options = SyncOptions::default();
         let descriptor = CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() };
+        options.remote_url.clone_from(&descriptor.url);
         let report = kit_sync::clone(&dir, &source, &descriptor, &options, &NoopObserver).unwrap();
         assert_eq!(report.pull.fetch.attestations_stored, 1);
         assert_eq!(report.pull.fetch.attestations_dropped, 1);
