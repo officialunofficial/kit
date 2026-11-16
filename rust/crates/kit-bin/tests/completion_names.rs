@@ -151,14 +151,21 @@ fn switch_completion_keeps_branch_names_and_previous_head() {
                 "compdef() { :; }; compadd() { print -rl -- $names; }; source \"$1/kit.zsh\"; words=(kit \"$2\" ''); CURRENT=3; PREFIX=''; _kit",
             ),
         ] {
-            let output = Command::new(shell)
+            let result = Command::new(shell)
                 .args(["-c", script, "test"])
                 .arg(&completions)
                 .arg(command)
                 .current_dir(dir.path())
                 .env("PATH", &path)
-                .output()
-                .unwrap();
+                .output();
+            let output = match result {
+                Ok(output) => output,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    eprintln!("{shell} unavailable");
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
             assert!(output.status.success(), "{shell} {command}: {output:?}");
             let names = String::from_utf8(output.stdout).unwrap();
             for expected in ["topic", "-", "@{-1}"] {
