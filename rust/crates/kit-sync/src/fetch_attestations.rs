@@ -20,11 +20,15 @@ use std::{
 #[derive(Clone, Copy)]
 pub(crate) enum Snapshot {
     Unavailable,
+    Unsupported,
     Read(Option<Hash>),
 }
 impl Snapshot {
     pub(crate) fn head(self) -> Option<Hash> {
-        match self { Self::Read(head) => head, Self::Unavailable => None }
+        match self {
+            Self::Read(head) => head,
+            Self::Unavailable | Self::Unsupported => None,
+        }
     }
 }
 
@@ -40,7 +44,7 @@ pub(crate) fn snapshot(
         report
             .attestation_warnings
             .push("remote does not support attestations; skipped".into());
-        return Snapshot::Unavailable;
+        return Snapshot::Unsupported;
     }
     match source.read_ref(ATTESTMAP_REF) {
         Ok(head) => Snapshot::Read(head),
@@ -75,6 +79,7 @@ pub(crate) fn run(
     if !options.attestations {
         return true;
     }
+    if matches!(snapshot, Snapshot::Unsupported) { return true; }
     let Snapshot::Read(head) = snapshot else {
         return false;
     };
@@ -115,7 +120,7 @@ fn process(
         }
     }
     let mut record = load_record(&path);
-    if head.is_some() && head == record.head {
+    if head == record.head && (head.is_some() || record.ids.is_empty()) {
         return Ok(());
     }
     // Enumerate before replacing the checkpoint: removed packs must not accumulate
@@ -159,6 +164,7 @@ fn process(
             continue;
         }
         if observer.cancelled() {
+            persist(&path, &record)?;
             return Err("interrupted".into());
         }
         let result = process_pack(
@@ -218,7 +224,9 @@ struct Reader<'a> {
 }
 impl Read for Reader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = usize::try_from(self.pack.len() - self.offset).unwrap_or(usize::MAX).min(buf.len());
+        let len = usize::try_from(self.pack.len() - self.offset)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
         self.pack.read_at(self.offset, &mut buf[..len])?;
         self.offset += len as u64;
         Ok(len)
@@ -239,10 +247,14 @@ fn process_pack(
 ) -> Result<(), Failure> {
     let mut spool = kit_core::pack::PackSpool::create(&store.spool_dir(), max)?;
     let downloaded = source.download_pack(&PackKey::from_hash(key), ATTESTMAP_REF, &mut spool);
-    if let Some(kind) = spool.failed() { return Err(std::io::Error::from(kind).into()); }
+    if let Some(kind) = spool.failed() {
+        return Err(std::io::Error::from(kind).into());
+    }
     downloaded.map_err(|error| -> Failure {
         match error {
-            crate::SourceError::PayloadTooLarge(_) => kit_attest::pack::PackError::Invalid("wire size limit").into(),
+            crate::SourceError::PayloadTooLarge(_) => {
+                kit_attest::pack::PackError::Invalid("wire size limit").into()
+            }
             other => other.into(),
         }
     })?;
@@ -251,7 +263,13 @@ fn process_pack(
     }
     let pack = spool
         .finish(&PackKey::from_hash(key))
-        .map_err(kit_attest::pack::PackError::from)?;
+        .map_err(|error| -> Failure {
+            match error {
+                kit_core::pack::PackError::Io(error) => error.into(),
+                kit_core::pack::PackError::UnexpectedEof => std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into(),
+                other => kit_attest::pack::PackError::from(other).into(),
+            }
+        })?;
     let mut staged = tempfile::tempfile_in(store.spool_dir())?;
     let mut staging_error = None;
     kit_attest::pack::read(
@@ -292,7 +310,9 @@ fn process_pack(
         staged.read_exact(&mut id)?;
         staged.read_exact(&mut len)?;
         let len = usize::try_from(u64::from_le_bytes(len))?;
-        if len > kit_attest::store::MAX_ENVELOPE_SIZE { return Err("staged envelope size limit".into()); }
+        if len > kit_attest::store::MAX_ENVELOPE_SIZE {
+            return Err("staged envelope size limit".into());
+        }
         let mut bytes = vec![0; len];
         staged.read_exact(&mut bytes)?;
         if !store.contains(&subject) {
@@ -300,6 +320,10 @@ fn process_pack(
             continue;
         }
         let marker = attestation_records::fetched_path(layout, &id);
+        // An envelope already made here keeps its local authorship when it
+        // returns through a remote. Metadata errors never confer authorship.
+        if kit_attest::store::envelope_path(layout, &subject, &id).try_exists()?
+            && !marker.try_exists()? { continue; }
         let parent = marker.parent().ok_or("missing provenance directory")?;
         std::fs::create_dir_all(parent)?;
         crate::applied_packs::write_atomic(&marker, b"")?;

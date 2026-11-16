@@ -150,23 +150,139 @@ fn decoded_budget_defers_without_recording_a_complete_cursor_and_resumes() {
     let (tip, tree) = attestation_fetch::code(&tx);
     let first = attestation_fetch::envelope(tip);
     let second = attestation_fetch::envelope(tree);
-    for env in [&first, &second] { attestation_fetch::append(&tx, &kit_attest::pack::build(&[env], 4096).unwrap()); }
+    for env in [&first, &second] {
+        attestation_fetch::append(&tx, &kit_attest::pack::build(&[env], 4096).unwrap());
+    }
     let temp = tempfile::tempdir().unwrap();
-    let remote = kit_sync::CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() };
+    let remote = kit_sync::CloneRemote {
+        name: "origin".into(),
+        url: "kit+memory://test".into(),
+        kind: "memory".into(),
+    };
     kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
     let source = kit_sync::TransportSource::new(&tx);
     let mut options = kit_sync::SyncOptions::default();
     options.attestation_decode_bytes = (first.len().max(second.len()) + 10) as u64;
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.attestations_stored, 1);
     assert_eq!(report.attestations_rejected, 0);
     assert_eq!(report.attestation_warnings.len(), 1);
     let layout = RepoLayout::single(temp.path());
     let path = kit_sync::attestation_records::path(&layout, &source, "origin", "", false);
-    let record = kit_sync::attestation_records::Record::decode(&std::fs::read(path).unwrap(), kit_sync::attestation_records::RecordKind::Fetch).unwrap();
-    assert!(record.head.is_none()); assert_eq!(record.ids.len(), 1);
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let record = kit_sync::attestation_records::Record::decode(
+        &std::fs::read(path).unwrap(),
+        kit_sync::attestation_records::RecordKind::Fetch,
+    )
+    .unwrap();
+    assert!(record.head.is_none());
+    assert_eq!(record.ids.len(), 1);
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.attestations_stored, 1);
     assert!(report.attestation_warnings.is_empty());
     assert!(kit_sync::attestation_records::fetched_path(&layout, &hash(&second)).exists());
+}
+
+struct ShortOnce<'a> {
+    tx: &'a kit_transport_memory::MemoryTransport,
+    pack: kit_core::hash::Hash,
+    pending: std::cell::Cell<bool>,
+    supported: std::cell::Cell<bool>,
+}
+impl kit_sync::RemoteSource for ShortOnce<'_> {
+    fn supports_attestations(&self) -> bool { self.supported.get() }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> { kit_sync::RemoteSource::repo_cursor(&kit_sync::TransportSource::new(self.tx)) }
+    fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> { kit_sync::RemoteSource::list_branches(&kit_sync::TransportSource::new(self.tx)) }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> { kit_sync::RemoteSource::list_refs(&kit_sync::TransportSource::new(self.tx), prefix) }
+    fn read_ref(&self, name: &str) -> Result<Option<kit_core::hash::Hash>, kit_sync::SourceError> { kit_sync::RemoteSource::read_ref(&kit_sync::TransportSource::new(self.tx), name) }
+    fn download_blob(&self, key: &kit_core::protocol::PackKey, name: &str) -> Result<Vec<u8>, kit_sync::SourceError> { kit_sync::RemoteSource::download_blob(&kit_sync::TransportSource::new(self.tx), key, name) }
+    fn download_pack(&self, key: &kit_core::protocol::PackKey, name: &str, sink: &mut dyn kit_core::protocol::PackSink) -> Result<(), kit_sync::SourceError> {
+        if key.into_hash() == self.pack && self.pending.replace(false) {
+            use kit_core::protocol::Transport;
+            let bytes = self.tx.download_blob(key, Some(name), 4096)?;
+            sink.begin(Some(bytes.len() as u64))?;
+            sink.write(&bytes[..bytes.len()-1])?;
+            return Ok(());
+        }
+        kit_sync::RemoteSource::download_pack(&kit_sync::TransportSource::new(self.tx), key, name, sink)
+    }
+}
+fn descriptor() -> kit_sync::CloneRemote {
+    kit_sync::CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() }
+}
+
+#[test]
+fn short_transfer_warns_then_retries_instead_of_rejecting_the_pack() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let env = attestation_fetch::envelope(tip);
+    let bytes = kit_attest::pack::build(&[&env], 4096).unwrap();
+    attestation_fetch::append(&tx, &bytes);
+    let temp = tempfile::tempdir().unwrap();
+    kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let source = ShortOnce { tx: &tx, pack: kit_core::hash::hash(&bytes), pending: std::cell::Cell::new(true), supported: std::cell::Cell::new(true) };
+    let options = kit_sync::SyncOptions::default();
+    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(report.attestations_rejected, 0); assert_eq!(report.attestation_warnings.len(), 1);
+    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(report.attestations_stored, 1); assert!(report.attestation_warnings.is_empty());
+}
+
+#[test]
+fn unsupported_cursor_is_reusable_but_capability_change_fetches_attestations() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let env = attestation_fetch::envelope(tip);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap(); kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let source = ShortOnce { tx: &tx, pack: [0;32], pending: std::cell::Cell::new(false), supported: std::cell::Cell::new(false) };
+    let options = kit_sync::SyncOptions::default();
+    assert_eq!(kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap().attestation_warnings.len(), 1);
+    assert!(kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap().remote_unchanged);
+    source.supported.set(true);
+    assert_eq!(kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap().attestations_stored, 1);
+}
+
+#[test]
+fn fetching_an_existing_local_envelope_keeps_its_local_authorship() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx); let env = attestation_fetch::envelope(tip);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap(); let layout = kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let (id, _) = kit_attest::store::save(&layout, &tip, &env).unwrap();
+    let source = kit_sync::TransportSource::new(&tx);
+    kit_sync::fetch(temp.path(), &source, "origin", &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    assert!(!kit_sync::attestation_records::fetched_path(&layout, &id).exists());
+}
+
+#[test]
+fn oversized_node_warns_without_replacing_a_completed_checkpoint() {
+    use kit_core::{protocol::{Transport, PackKey}, refs::{ATTESTMAP_REF, RefWriteCondition}};
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx); let env = attestation_fetch::envelope(tip);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap(); let layout = kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let source = kit_sync::TransportSource::new(&tx); let options = kit_sync::SyncOptions::default();
+    kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let path = kit_sync::attestation_records::path(&layout, &source, "origin", "", false);
+    let before = std::fs::read(&path).unwrap();
+    let bytes = vec![0; usize::try_from(kit_sync::attestation_records::NODE_BOUND).unwrap()+1];
+    let key = kit_core::hash::hash(&bytes);
+    tx.upload_blob(&bytes, &PackKey::from_hash(key), None).unwrap(); tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &key).unwrap();
+    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(report.attestation_warnings.len(), 1);
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }

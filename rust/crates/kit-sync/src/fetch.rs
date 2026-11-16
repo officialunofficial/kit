@@ -718,7 +718,7 @@ fn fetch_objects_inner(
                 signed: require_signed,
                 tags: options.tags,
                 tag_digest,
-                attestations: options.attestations,
+                attestations: options.attestations && source.supports_attestations(),
                 attestmap_head: snapshot.head(),
             };
             let _ = record.persist(&cursor_path);
@@ -809,7 +809,7 @@ fn remote_unchanged(
     let Some(record) = crate::cursor::CursorRecord::load(path) else {
         return Ok(false);
     };
-    if options.refetch_attestations || record.attestations != options.attestations {
+    if options.refetch_attestations || record.attestations != (options.attestations && source.supports_attestations()) {
         return Ok(false);
     }
     if options.attestations && source.supports_attestations() {

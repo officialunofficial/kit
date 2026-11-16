@@ -3138,6 +3138,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("record");
         kit_sync::cursor::CursorRecord {
+            attestations: true,
+            attestmap_head: None,
             cursor: kit_core::protocol::RepoCursor::new(&[7u8; 16]).unwrap(),
             tracking: [3u8; 32],
             signed: false,
