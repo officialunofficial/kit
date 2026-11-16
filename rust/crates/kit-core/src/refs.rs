@@ -182,6 +182,9 @@ pub const TAG_REF_PREFIX: &str = "refs/tags/";
 /// The wire name prefix of a tag's transfer chain ref, valued like a packmap
 /// (`refs/kit/tagmap/<tag>`, SPEC-REFS §2).
 pub const TAGMAP_REF_PREFIX: &str = "refs/kit/tagmap/";
+/// Repository-wide pack-list chain of attestation envelopes.
+pub const ATTESTMAP_REF: &str = "refs/kit/attestmap";
+
 /// The ref that carries published bridge attestations on a git mirror
 /// (SPEC-GIT-BRIDGE §11).
 pub const ATTESTATIONS_REF: &str = "refs/kit/attestations";

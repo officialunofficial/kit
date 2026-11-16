@@ -3080,9 +3080,41 @@ pub fn git_claim_one_iteration(input: &[u8]) {
     }
 }
 
+/// Bounded attestation-pack parser invocation.
+pub fn attestation_pack_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(64 * 1024)];
+    let mut reader = input;
+    let _ = kit_sync::attestation_records::Record::decode(
+        input,
+        kit_sync::attestation_records::RecordKind::Fetch,
+    );
+    let _ = kit_sync::attestation_records::Record::decode(
+        input,
+        kit_sync::attestation_records::RecordKind::Push,
+    );
+    let _ = kit_attest::pack::read(
+        &mut reader,
+        input.len() as u64,
+        64 * 1024,
+        kit_core::hash::hash(input),
+        &mut kit_attest::pack::DecodeBudget::new(MAX_INPUT as u64),
+        |_, _, _| {},
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_attestation_pack() {
+        run_iterated_unit(attestation_pack_one_iteration).unwrap();
+        run_one(
+            include_bytes!("../../tests/golden/attest/pack_basic.bin"),
+            attestation_pack_one_iteration,
+        )
+        .unwrap();
+    }
 
     #[test]
     fn unit_git_commit_parse() {

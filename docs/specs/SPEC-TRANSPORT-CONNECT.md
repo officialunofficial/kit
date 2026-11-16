@@ -377,6 +377,39 @@ publication verification still checks the destination.
 
 ---
 
+### 4.1 Attestation log capability
+
+`GetServerInfo` advertises support for ticketed writes of
+`refs/kit/attestmap`. Clients MUST check the capability before publishing
+or fetching attestations; absence means warn and skip. There is no
+fallback to branch pack lists.
+
+A ticketed single-ref write consumes the uploaded attestation-pack and
+KPKL-node tickets atomically with the ref CAS, using the membership,
+replay, and authorization rules of §7.6. It needs the same write grant
+as a branch push, scoped to `refs/kit/attestmap` (SPEC-WRITE-GRANTS §8).
+The server uses its branch-push grant semantics: an oldest-first superset
+of all old pack ids permits `u`, and any replacement needs `f`.
+Compaction therefore needs `f`. Clients use the existing write attempt to
+learn whether it is allowed. A refusal emits one warning that a writer
+with force permission must compact; code push still succeeds. The next
+push holding `f` compacts automatically above 4,096 packs. There is no
+fallback to branch pack lists. Only an exact, not prefix, attestmap scope
+grants this permission. Server decoding also enforces the 64 MiB per-pack
+decoded-byte cap of SPEC-TRANSPORT §1.5; the 512 MiB per-fetch budget is
+reader policy.
+Reads follow repository visibility. A denial or takedown of a commit
+MUST also cover its attestations.
+
+An indexed server MUST run every check in SPEC-TRANSPORT §1.5: bounded
+node and chain walks, pack length and limits, content addresses and
+trailer, plain-blob entry kind, no deltas, pre-inflation size bounds,
+strict in-toto DSSE decoding, and primary-subject membership in the
+repository. It does not check signatures against reader trust roots.
+Attestation packs count toward storage quota, admission, and pack limits.
+The attestmap chain is a remote gc root.
+
+
 ## 5. Error taxonomy &mdash; `TransportError` to Connect code
 
 **Protocol requirement.**
@@ -1347,7 +1380,7 @@ the path names a `<NAMESPACE>/<NAME>` resolved to the directory
 `<DIR>/<NAMESPACE>/<NAME>`, one repository per process, and writes run
 the `ed25519-` owner rule of §7.5 against the `--principal` key the
 sshd configuration asserts (SPEC-TRANSPORT §4.1). SSH carries the
-implicit-membership rule in place of §7.6's upload tickets: packs
+implicit-membership rule, also for `refs/kit/attestmap`, in place of §7.6's upload tickets: packs
 uploaded and verified in a session (at most seven before a packmap
 write) may be consumed into membership by that session's packmap write
 — never by a later session's. The packmap check only refuses: the
@@ -1425,6 +1458,9 @@ repository (`creates_namespace` and `creates_repo`). §5.1 requires the
 server to give both to its admission step.
 
 ### 7.6 Upload tickets and resumable parts
+
+Ticketed attestmap writes follow §4.1 and the rules below.
+
 
 **Protocol requirement.**
 

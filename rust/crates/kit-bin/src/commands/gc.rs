@@ -164,12 +164,19 @@ pub fn run(args: &[String]) -> u8 {
     drop(progress);
     let mut stderr = std::io::stderr().lock();
     for file in &report.skipped_state_files {
-        let _ = writeln!(
-            stderr,
-            "warning: {} names an object, or part of what it reaches, that is no longer in the \
-             store; gc did not keep it (finish or abort the operation to clear the file)",
-            file.display()
-        );
+        if file.starts_with(layout.attestations_dir()) {
+            let _ = writeln!(
+                stderr,
+                "warning: {} has an unavailable attested subject or incomplete closure; gc skipped this attestation root; fetch the subject again or remove this local attestation directory",
+                file.display()
+            );
+        } else {
+            let _ = writeln!(
+                stderr,
+                "warning: {} names an object, or part of what it reaches, that is no longer in the store; gc did not keep it (finish or abort the operation to clear the file)",
+                file.display()
+            );
+        }
     }
     let (prune_verb, expire_verb) = if report.dry_run {
         ("would prune", "would expire")

@@ -180,3 +180,16 @@ threads-required = "num-test-threads"
 filter = 'test(/many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/)'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
+# Large ref-listing fixtures contend with concurrent filesystem barriers on
+# APFS. Reserve the pool for their 1,000 branches or 25,000 tags, as for the
+# other disk-bound fixtures above. Allow the same five-minute ceiling when
+# the workstation is busy with other builds.
+[[profile.default.overrides]]
+filter = '(binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)) or (binary(ssh_tag_fetch) and test(=an_over_size_tag_listing_stops_only_the_tag_phase))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = '(binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)) or (binary(ssh_tag_fetch) and test(=an_over_size_tag_listing_stops_only_the_tag_phase))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 5 }

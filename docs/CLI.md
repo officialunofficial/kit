@@ -757,7 +757,7 @@ Attestations:
   ```
 
 - `kit verify-attest [--commit <hash>] [--trust-roots <path>]
-  [--algorithm <alg>] [--format=json]` &mdash; verify every attestation attached to a
+  [--algorithm <alg>] [--predicate-type <URI>] [--format=json]` &mdash; report every attestation attached to a
   commit. For each envelope, looks each signature's `keyid` up in the
   trust-roots registry and verifies the DSSE PAE. Reports per-
   signature verdicts to stderr; with `--format=json`, also emits one JSON
@@ -766,8 +766,10 @@ Attestations:
   "signatures":[{"keyid":"...","algorithm":"<string>|null","verified":<bool>,
   "reason":"<string>|null"}]}]}` &mdash; the JSON `signatures` list is unfiltered
   (it always carries every signature, independent of `--algorithm`, which
-  only filters the stderr report). Exits `0` iff every listed attestation has
-  at least one verified signature, `65` (`dataerr`) if any failed,
+  only filters the stderr report). Exits `0` iff at least one envelope binds
+  to the commit, has a trusted signature, and matches `--predicate-type` when
+  set. Untrusted envelopes remain in the report. Exits `65` (`dataerr`) if
+  none passes,
   `1` (`general_error`) if the commit has no attestations.
 
   Flags:
@@ -780,6 +782,8 @@ Attestations:
     passed explicitly &mdash; without that gate, a hostile clone could
     ship its own trust-roots and have verification print "ok"
     against attacker keys.
+  - `--predicate-type <URI>` &mdash; require an exact predicate type from the
+    signed statement. Use this in CI to require the intended claim.
   - `--algorithm <alg>` &mdash; filter reported signatures by algorithm
     (`ed25519`, `secp256k1`, `p256`). Unmatched signatures are
     omitted from the report.

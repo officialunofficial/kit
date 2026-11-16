@@ -209,3 +209,15 @@ fn gc_skips_a_bisect_commit_that_is_gone_and_warns_with_the_state_file() {
     let log = run_in(root, &["log", "--oneline"]);
     assert!(String::from_utf8_lossy(&log.stdout).contains("one"));
 }
+
+#[test]
+fn missing_attestation_warns_without_operation_instructions() {
+    let td = init_repo();
+    let directory = td.path().join(".kit/attestations").join("77".repeat(32));
+    fs::create_dir_all(&directory).unwrap();
+    let out = run_in(td.path(), &["gc", "--dry-run"]);
+    assert!(out.status.success(), "{out:?}");
+    let warning = String::from_utf8(out.stderr).unwrap();
+    assert!(warning.contains("attested subject"), "{warning}");
+    assert!(!warning.contains("finish or abort"), "{warning}");
+}
