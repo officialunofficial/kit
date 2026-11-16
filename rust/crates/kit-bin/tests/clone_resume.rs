@@ -211,17 +211,67 @@ fn a_stopped_clone_holding_anything_a_clone_does_not_write_is_refused() {
 }
 
 #[test]
-fn a_stopped_clone_holding_a_ref_a_clone_does_not_write_is_refused() {
+fn resumed_clone_discards_tags_before_fetching_them_again() {
     let (_td, bare, url, tip) = upstream();
     let dest = tempfile::tempdir().unwrap();
     let target = dest.path().join("clone");
     stopped_clone(bare.path(), &url, dest.path(), &target);
-    // A tag the resumed clone would keep: a stopped clone has none.
+    // A fetched or planted tag is discarded; only freshly verified tags return.
     let tags = target.join(".kit/refs/tags");
     fs::write(tags.join("v1"), format!("{tip}\n")).unwrap();
 
     let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);
-    assert_eq!(out.status.code(), Some(73), "{out:?}");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read_ref(&target, "refs/heads/main"), Some(tip));
+    assert!(!tags.join("v1").exists());
+}
+
+#[test]
+fn a_clone_stopped_after_publishing_a_tag_resumes() {
+    let (td, bare, url, tip) = upstream();
+    assert!(run_in(td.path(), &["tag", "v1"]).status.success());
+    assert!(
+        run_in(td.path(), &["push", "origin", "--tags"])
+            .status
+            .success()
+    );
+    fs::write(td.path().join("three.txt"), "three").unwrap();
+    assert!(run_in(td.path(), &["add", "."]).status.success());
+    assert!(
+        run_in(td.path(), &["commit", "-m", "three"])
+            .status
+            .success()
+    );
+    assert!(run_in(td.path(), &["tag", "v2"]).status.success());
+    assert!(
+        run_in(td.path(), &["push", "origin", "--tags"])
+            .status
+            .success()
+    );
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("clone");
+    // The fetch finishes before clone lands HEAD and the worktree. A stop
+    // between those operations leaves local tags in an unfinished clone.
+    let remote = kit_sync::CloneRemote {
+        name: "default".into(),
+        url: url.clone(),
+        kind: "file".into(),
+    };
+    kit_sync::init_clone_dir(&target, &remote).unwrap();
+    let tx = kit_transport_file::FileTransport::new(bare.path());
+    let source = kit_sync::TransportSource::new(&tx);
+    kit_sync::fetch(
+        &target,
+        &source,
+        "default",
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(read_ref(&target, "refs/heads/main"), None);
-    assert!(tags.join("v1").exists());
+    assert!(read_ref(&target, "refs/tags/v1").is_some());
+    let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(read_ref(&target, "refs/heads/main"), Some(tip));
+    assert!(read_ref(&target, "refs/tags/v2").is_some());
 }

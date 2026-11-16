@@ -58,12 +58,12 @@ pub enum CloneInitError {
 /// created so far in place, exactly like a failed `git clone`.
 ///
 /// When `dir` holds an unfinished clone of the same remote (only a
-/// repository directory with what a clone writes before it makes a branch, a
-/// tag or `HEAD`, this remote's config byte for byte and its tracking refs
-/// alone), its layout is returned with its objects and its
+/// repository directory with what a clone writes before it makes a branch
+/// or lands `HEAD`, this remote's config byte for byte, its tracking refs
+/// and fetched tags), its layout is returned with its objects and its
 /// record of applied packs kept, so the pull that follows resumes that clone
 /// without downloading those packs again. Everything else an earlier run
-/// published or recorded is dropped: its remote-tracking refs, its records of
+/// published or recorded is dropped: its remote-tracking refs, tags, records of
 /// verified tips, its fetch checkpoints and cursor records. A clone builds
 /// its trust from nothing, so the resumed pull checks every closure and
 /// history in full, locally, and republishes each branch it lists. When they
@@ -90,8 +90,8 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
     Ok(layout)
 }
 
-/// What the repository directory of a clone holds before it makes a branch,
-/// a tag or `HEAD`, lock files (`*.lock`) aside.
+/// What a clone writes before it makes a branch or lands `HEAD`,
+/// lock files (`*.lock`) aside.
 const UNFINISHED_CLONE_ENTRIES: [&str; 7] = [
     "HEAD",
     "applied-packs",
@@ -103,11 +103,11 @@ const UNFINISHED_CLONE_ENTRIES: [&str; 7] = [
 ];
 
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
-/// it made a branch, a tag or `HEAD`: `dir` holds only the repository
+/// it made a branch or landed `HEAD`: `dir` holds only the repository
 /// directory, which holds only what such a clone writes
 /// ([`UNFINISHED_CLONE_ENTRIES`] and lock files), with the config a clone of `remote`
-/// writes, byte for byte, the `HEAD` a new repository starts with, no branch
-/// or tag, and remote-tracking refs of `remote` alone (a clone publishes each
+/// writes, byte for byte, the `HEAD` a new repository starts with, no branch,
+/// fetched tags and remote-tracking refs of `remote` alone (a clone publishes each
 /// branch's tracking ref as soon as that branch is in, before the next one
 /// downloads).
 ///
@@ -146,15 +146,16 @@ fn unfinished_clone(dir: &Path, remote: &CloneRemote) -> Option<RepoLayout> {
         return None;
     }
     let unpublished = refs::resolve_head(&layout).ok()?.is_none()
-        && only_tracking_refs(&kit.join("refs"), &remote.name)?;
+        && only_clone_refs(&kit.join("refs"), &remote.name)?;
     unpublished.then_some(layout)
 }
 
 /// Whether everything under `refs` is a directory or a regular file, with
-/// every file a remote-tracking ref of `remote`. A link, or a file anywhere
-/// else, is something a clone did not write.
-fn only_tracking_refs(refs: &Path, remote: &str) -> Option<bool> {
+/// every file a remote-tracking ref of `remote` or a fetched tag. A link,
+/// or a file anywhere else, is something a clone did not write.
+fn only_clone_refs(refs: &Path, remote: &str) -> Option<bool> {
     let tracking = refs.join("remotes").join(remote);
+    let tags = refs.join("tags");
     let mut dirs = vec![refs.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).ok()? {
@@ -162,7 +163,9 @@ fn only_tracking_refs(refs: &Path, remote: &str) -> Option<bool> {
             let kind = entry.file_type().ok()?;
             if kind.is_dir() {
                 dirs.push(entry.path());
-            } else if !kind.is_file() || !entry.path().starts_with(&tracking) {
+            } else if !kind.is_file()
+                || !(entry.path().starts_with(&tracking) || entry.path().starts_with(&tags))
+            {
                 return Some(false);
             }
         }
@@ -189,6 +192,8 @@ fn restart(dir: &Path, remote: &CloneRemote) -> Option<RepoLayout> {
         .join("remotes")
         .join(&remote.name);
     crate::anchor::remove_dir_if_present(&tracking).ok()?;
+    crate::anchor::remove_dir_if_present(&dir.join(kit_core::store::KIT_DIR).join("refs/tags"))
+        .ok()?;
     crate::anchor::forget_all(&layout).ok()?;
     crate::checkpoint::forget_all(&layout).ok()?;
     crate::cursor::forget_all(&layout).ok()?;
