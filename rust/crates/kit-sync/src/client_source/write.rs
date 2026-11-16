@@ -1283,10 +1283,10 @@ mod tests {
             match refusal {
                 None => assert!(result.is_ok()),
                 Some("failed_precondition") => {
-                    assert!(matches!(result, Err(SourceError::RefConflict)))
+                    assert!(matches!(result, Err(SourceError::RefConflict)));
                 }
                 Some("permission_denied") => {
-                    assert_eq!(result.unwrap_err().class(), crate::FailureClass::Refusal)
+                    assert_eq!(result.unwrap_err().class(), crate::FailureClass::Refusal);
                 }
                 _ => assert!(result.is_err()),
             }
