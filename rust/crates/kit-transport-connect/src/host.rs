@@ -473,7 +473,7 @@ impl WriteRecovery for HostPolicy<'_> {
         if (matches!(
             error,
             SourceError::PendingVerification { .. } | SourceError::MembershipNotVisible
-        ) && !procedure.ends_with("/AdvanceRefs"))
+        ) && !(procedure.ends_with("/AdvanceRefs") || (procedure.ends_with("/UpdateRef") && self.advance_ticketed.get())))
             || (matches!(error, SourceError::MembershipNotVisible) && !self.advance_ticketed.get())
             || matches!(error, SourceError::RetryAfter { .. })
         {

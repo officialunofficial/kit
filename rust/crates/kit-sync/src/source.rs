@@ -16,10 +16,17 @@ use crate::error::SyncError;
 /// A remote repository. Read-only backends keep the default push refusal.
 pub trait RemoteSource {
     /// Whether the remote supports the attestation log. Unknown sources refuse.
-    fn supports_attestations(&self) -> bool { false }
+    fn supports_attestations(&self) -> bool {
+        false
+    }
 
     /// Publish the attestation log and consume its uploaded pack and node keys.
-    fn write_attestmap(&self, condition: kit_core::refs::RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
         let _ = (condition, tip, keys);
         Err(SourceError::ProtocolError)
     }
@@ -223,9 +230,18 @@ impl<'a> TransportSource<'a> {
 }
 
 impl RemoteSource for TransportSource<'_> {
-    fn supports_attestations(&self) -> bool { self.transport.supports_attestations() }
-    fn write_attestmap(&self, condition: kit_core::refs::RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
-        self.transport.write_attestmap(condition, tip, keys).map_err(Into::into)
+    fn supports_attestations(&self) -> bool {
+        self.transport.supports_attestations()
+    }
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
+        self.transport
+            .write_attestmap(condition, tip, keys)
+            .map_err(Into::into)
     }
 
     fn supports_push(&self) -> bool {

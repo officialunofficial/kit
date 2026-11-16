@@ -115,8 +115,15 @@ impl MemoryTransport {
 }
 
 impl Transport for MemoryTransport {
-    fn supports_attestations(&self) -> bool { true }
-    fn write_attestmap(&self, condition: RefWriteCondition, tip: &Hash, _keys: &[PackKey]) -> TransportResult<()> {
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
         self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
     }
 

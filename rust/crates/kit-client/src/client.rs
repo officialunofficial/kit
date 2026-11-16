@@ -668,12 +668,27 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         identity: Option<&Identity>,
     ) -> Result<Reply<crate::proto::UpdateRefResponse>, Error> {
         self.require_write_auth()?;
-        if matches!(expected, RefWriteCondition::Any) || tickets.len() > 1024
-            || tickets.iter().collect::<std::collections::HashSet<_>>().len() != tickets.len() {
+        if matches!(expected, RefWriteCondition::Any)
+            || tickets.len() > 1024
+            || tickets
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != tickets.len()
+        {
             return Err(Error::Invalid("attestmap CAS or reservation count"));
         }
-        reply(calls::update_ref_committing(&self.rpc(), kit_core::refs::ATTESTMAP_REF,
-            expected, Some(new_id), tickets, identity).await)
+        reply(
+            calls::update_ref_committing(
+                &self.rpc(),
+                kit_core::refs::ATTESTMAP_REF,
+                expected,
+                Some(new_id),
+                tickets,
+                identity,
+            )
+            .await,
+        )
     }
 
     /// `UpdateRef` with `delete`, under the same precondition rules.

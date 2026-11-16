@@ -531,7 +531,11 @@ impl<
         key: &PackKey,
         head: &str,
     ) -> Result<(), SourceError> {
-        if head == kit_core::refs::ATTESTMAP_REF && !self.server_info().is_some_and(|info| info.supports_attestations == Some(true)) {
+        if head == kit_core::refs::ATTESTMAP_REF
+            && self
+                .server_info()
+                .is_none_or(|info| info.supports_attestations != Some(true))
+        {
             return Err(SourceError::ProtocolError);
         }
         let len = pack.len();
@@ -539,10 +543,11 @@ impl<
             return Err(SourceError::PayloadTooLarge(saturating_usize(len)));
         }
         let info = self.write_info();
-        let ticketless = head != kit_core::refs::ATTESTMAP_REF && ((info.is_none() && self.client.public_key().is_none())
-            || info
-                .as_ref()
-                .is_some_and(|info| len < info.begin_upload_threshold_bytes.unwrap_or(0)));
+        let ticketless = head != kit_core::refs::ATTESTMAP_REF
+            && ((info.is_none() && self.client.public_key().is_none())
+                || info
+                    .as_ref()
+                    .is_some_and(|info| len < info.begin_upload_threshold_bytes.unwrap_or(0)));
         if ticketless {
             return self
                 .write_call("UploadPack", false, None, |identity| {
@@ -849,23 +854,60 @@ impl<
         Ok(())
     }
 
-    pub(super) fn write_attestmap_committing(&self, condition: RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+    pub(super) fn write_attestmap_committing(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
         use kit_core::refs::ATTESTMAP_REF;
-        if !self.client.supports_writes() || !self.server_info().is_some_and(|info| info.supports_attestations == Some(true)) || matches!(condition, RefWriteCondition::Any) {
+        if !self.client.supports_writes()
+            || self
+                .server_info()
+                .is_none_or(|info| info.supports_attestations != Some(true))
+            || matches!(condition, RefWriteCondition::Any)
+        {
             return Err(SourceError::ProtocolError);
         }
-        let selected = keys.iter().filter_map(|key| self.write_state().tickets.borrow()
-            .get(&(ATTESTMAP_REF.to_owned(), *key)).cloned().map(|ticket| (*key, ticket))).collect::<Vec<_>>();
-        let ids = selected.iter().map(|(_, t)| t.id.as_deref().unwrap_or_default().try_into().map_err(|_| SourceError::InvalidResponse)).collect::<Result<Vec<Hash>, _>>()?;
-        if ids.len() > self.server_info().as_ref().map_or(DEFAULT_TICKETS_PER_ADVANCE, advance_ticket_limit) as usize || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+        let selected = keys
+            .iter()
+            .filter_map(|key| {
+                self.write_state()
+                    .tickets
+                    .borrow()
+                    .get(&(ATTESTMAP_REF.to_owned(), *key))
+                    .cloned()
+                    .map(|ticket| (*key, ticket))
+            })
+            .collect::<Vec<_>>();
+        let ids = selected
+            .iter()
+            .map(|(_, t)| {
+                t.id.as_deref()
+                    .unwrap_or_default()
+                    .try_into()
+                    .map_err(|_| SourceError::InvalidResponse)
+            })
+            .collect::<Result<Vec<Hash>, _>>()?;
+        if ids.len()
+            > self
+                .server_info()
+                .as_ref()
+                .map_or(DEFAULT_TICKETS_PER_ADVANCE, advance_ticket_limit) as usize
+            || ids.iter().collect::<HashSet<_>>().len() != ids.len()
+        {
             return Err(SourceError::ProtocolError);
         }
         let deadline = selected.iter().filter_map(|(_, t)| t.expires_unix_ms).min();
         let result = self.write_call("UpdateRef", !ids.is_empty(), deadline, |identity| {
-            self.executor.block_on(self.client.write_attestmap(condition, *tip, &ids, identity))
+            self.executor
+                .block_on(self.client.write_attestmap(condition, *tip, &ids, identity))
         });
         match result {
-            Ok(_) => { self.forget_committed_tickets(ATTESTMAP_REF, selected); Ok(()) },
+            Ok(_) => {
+                self.forget_committed_tickets(ATTESTMAP_REF, selected);
+                Ok(())
+            }
             Err(e) if remote_is(&e, "failed_precondition") => Err(SourceError::RefConflict),
             Err(e) => Err(e),
         }
@@ -1126,26 +1168,47 @@ mod tests {
 
     #[test]
     fn attestation_capability_defaults_off_and_is_cached() {
-        use buffa::Message as _;
         use crate::RemoteSource as _;
+        use buffa::Message as _;
         for advertised in [None, Some(false), Some(true)] {
             let info = proto::GetServerInfoResponse {
-                protocol: Some("kit.transport.v1".into()), spec_version: Some(2),
-                part_size: Some(8 << 20), max_parts: Some(1),
-                max_list_refs_page_size: Some(1), supports_attestations: advertised,
+                protocol: Some("kit.transport.v1".into()),
+                spec_version: Some(2),
+                part_size: Some(8 << 20),
+                max_parts: Some(1),
+                max_list_refs_page_size: Some(1),
+                supports_attestations: advertised,
                 ..Default::default()
             };
             let mut response = success();
             *response.body_mut() = info.encode_to_vec();
-            let channel = Channel { replies: RefCell::new([response].into()), nonces: RefCell::new(Vec::new()) };
+            let channel = Channel {
+                replies: RefCell::new([response].into()),
+                nonces: RefCell::new(Vec::new()),
+            };
             let time = Time::default();
-            let client = Client::signed(&channel, Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(), &Key, &time);
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
             let source = ClientSource::new(&client, &super::super::FuturesExecutor);
             assert_eq!(source.supports_attestations(), advertised == Some(true));
             assert_eq!(source.supports_attestations(), advertised == Some(true));
             if advertised != Some(true) {
-                assert!(matches!(source.write_attestmap(RefWriteCondition::Missing, &[4;32], &[]), Err(SourceError::ProtocolError)));
-                assert!(matches!(source.write_upload(&kit_core::protocol::SliceBody(b"unused"), &PackKey::new([3;32]), kit_core::refs::ATTESTMAP_REF), Err(SourceError::ProtocolError)));
+                assert!(matches!(
+                    source.write_attestmap(RefWriteCondition::Missing, &[4; 32], &[]),
+                    Err(SourceError::ProtocolError)
+                ));
+                assert!(matches!(
+                    source.write_upload(
+                        &kit_core::protocol::SliceBody(b"unused"),
+                        &PackKey::new([3; 32]),
+                        kit_core::refs::ATTESTMAP_REF
+                    ),
+                    Err(SourceError::ProtocolError)
+                ));
             }
             assert_eq!(channel.nonces.borrow().len(), 1);
         }
@@ -1153,40 +1216,84 @@ mod tests {
 
     #[test]
     fn attestmap_cas_consumes_only_its_tickets_and_preserves_refusals() {
-        use buffa::Message as _;
         use crate::RemoteSource as _;
-        struct AttestServer { refusal: Option<&'static str>, calls: Cell<usize> }
+        use buffa::Message as _;
+        struct AttestServer {
+            refusal: Option<&'static str>,
+            calls: Cell<usize>,
+        }
         impl HttpTransport for AttestServer {
-            async fn send(&self, request: Request<Vec<u8>>, _: usize) -> Result<Response<Vec<u8>>, String> {
-                self.calls.set(self.calls.get()+1);
+            async fn send(
+                &self,
+                request: Request<Vec<u8>>,
+                _: usize,
+            ) -> Result<Response<Vec<u8>>, String> {
+                self.calls.set(self.calls.get() + 1);
                 let request = proto::UpdateRefRequest::decode_from_slice(request.body()).unwrap();
                 assert_eq!(request.name.as_deref(), Some(kit_core::refs::ATTESTMAP_REF));
-                assert_eq!(request.expectation.and_then(|v|v.as_known()), Some(proto::RefExpectation::Match));
-                assert_eq!(request.expected_id, Some(vec![4;32]));
-                assert_eq!(request.new_id, Some(vec![5;32]));
-                assert_eq!(request.ticket_ids, [vec![7;32],vec![8;32]]);
+                assert_eq!(
+                    request.expectation.and_then(|v| v.as_known()),
+                    Some(proto::RefExpectation::Match)
+                );
+                assert_eq!(request.expected_id, Some(vec![4; 32]));
+                assert_eq!(request.new_id, Some(vec![5; 32]));
+                assert_eq!(request.ticket_ids, [vec![7; 32], vec![8; 32]]);
                 assert_ne!(request.delete, Some(true));
                 Ok(self.refusal.map_or_else(success, error))
             }
         }
-        for refusal in [None, Some("permission_denied"), Some("failed_precondition"), Some("unavailable")] {
-            let channel = AttestServer { refusal, calls: Cell::new(0) };
+        for refusal in [
+            None,
+            Some("permission_denied"),
+            Some("failed_precondition"),
+            Some("unavailable"),
+        ] {
+            let channel = AttestServer {
+                refusal,
+                calls: Cell::new(0),
+            };
             let time = Time::default();
-            let client = Client::signed(&channel, Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(), &Key, &time);
+            let client = Client::signed(
+                &channel,
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap(),
+                &Key,
+                &time,
+            );
             let source = ClientSource::new(&client, &super::super::FuturesExecutor);
-            source.write_state().info.set(Ok(proto::GetServerInfoResponse { supports_attestations: Some(true), ..Default::default() })).unwrap();
-            let keys = [PackKey::new([1;32]), PackKey::new([2;32])];
-            for (key, id) in keys.iter().zip([7,8]) {
-                source.write_state().tickets.borrow_mut().insert((kit_core::refs::ATTESTMAP_REF.into(), *key), UploadTicket { id: Some(vec![id;32]), expires_unix_ms: Some(100_000), ..Default::default() });
+            source
+                .write_state()
+                .info
+                .set(Ok(proto::GetServerInfoResponse {
+                    supports_attestations: Some(true),
+                    ..Default::default()
+                }))
+                .unwrap();
+            let keys = [PackKey::new([1; 32]), PackKey::new([2; 32])];
+            for (key, id) in keys.iter().zip([7, 8]) {
+                source.write_state().tickets.borrow_mut().insert(
+                    (kit_core::refs::ATTESTMAP_REF.into(), *key),
+                    UploadTicket {
+                        id: Some(vec![id; 32]),
+                        expires_unix_ms: Some(100_000),
+                        ..Default::default()
+                    },
+                );
             }
-            let result = source.write_attestmap(RefWriteCondition::Match([4;32]), &[5;32], &keys);
+            let result = source.write_attestmap(RefWriteCondition::Match([4; 32]), &[5; 32], &keys);
             match refusal {
                 None => assert!(result.is_ok()),
-                Some("failed_precondition") => assert!(matches!(result, Err(SourceError::RefConflict))),
-                Some("permission_denied") => assert_eq!(result.unwrap_err().class(), crate::FailureClass::Refusal),
+                Some("failed_precondition") => {
+                    assert!(matches!(result, Err(SourceError::RefConflict)))
+                }
+                Some("permission_denied") => {
+                    assert_eq!(result.unwrap_err().class(), crate::FailureClass::Refusal)
+                }
                 _ => assert!(result.is_err()),
             }
-            assert_eq!(source.write_state().tickets.borrow().len(), if refusal.is_none() {0} else {2});
+            assert_eq!(
+                source.write_state().tickets.borrow().len(),
+                if refusal.is_none() { 0 } else { 2 }
+            );
             assert_eq!(channel.calls.get(), 1);
         }
     }

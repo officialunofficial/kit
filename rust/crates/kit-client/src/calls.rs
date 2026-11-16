@@ -177,11 +177,18 @@ pub(crate) async fn update_ref<
 
 /// A single-ref CAS with upload reservations.
 pub(crate) async fn update_ref_committing<
-    T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Sized,
+    T: HttpTransport,
+    S: Signer,
+    C: Clock,
+    O: Observer,
+    P: RequestPolicy + ?Sized,
 >(
     rpc: &Rpc<'_, T, S, C, O, P>,
-    name: &str, expected: RefWriteCondition, new_id: Option<Hash>,
-    tickets: &[Hash], identity: Option<&Identity>,
+    name: &str,
+    expected: RefWriteCondition,
+    new_id: Option<Hash>,
+    tickets: &[Hash],
+    identity: Option<&Identity>,
 ) -> Called<UpdateRefResponse> {
     let (expectation, expected_id) = condition(expected);
     let request = UpdateRefRequest {
@@ -198,8 +205,10 @@ pub(crate) async fn update_ref_committing<
         expected,
         new_id.map_or(RefTarget::Delete, RefTarget::Set),
     )];
-    let intent = WriteIntent::new(procedures::UPDATE_REF).with_ref_moves(&moves)
-        .with_ticketed(!tickets.is_empty()).with_tickets(tickets);
+    let intent = WriteIntent::new(procedures::UPDATE_REF)
+        .with_ref_moves(&moves)
+        .with_ticketed(!tickets.is_empty())
+        .with_tickets(tickets);
     let opts = Opts {
         identity,
         intent: Some(&intent),

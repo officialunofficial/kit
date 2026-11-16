@@ -1087,8 +1087,15 @@ fn quoted_md5(wire: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 impl Transport for S3Transport {
-    fn supports_attestations(&self) -> bool { true }
-    fn write_attestmap(&self, condition: RefWriteCondition, tip: &Hash, _keys: &[PackKey]) -> TransportResult<()> {
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
         self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
     }
 

@@ -345,9 +345,15 @@ impl<
 > RemoteSource for ClientSource<'_, T, S, C, E, O, P, R>
 {
     fn supports_attestations(&self) -> bool {
-        self.server_info().is_some_and(|info| info.supports_attestations == Some(true))
+        self.server_info()
+            .is_some_and(|info| info.supports_attestations == Some(true))
     }
-    fn write_attestmap(&self, condition: kit_core::refs::RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> Result<(), SourceError> {
         self.write_attestmap_committing(condition, tip, keys)
     }
     fn supports_push(&self) -> bool {

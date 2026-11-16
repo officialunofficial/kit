@@ -1053,7 +1053,12 @@ impl Transport for ConnectTransport {
     fn supports_attestations(&self) -> bool {
         matches!(self.server_info(), ServerInfoView::V2(info) if info.supports_attestations == Some(true))
     }
-    fn write_attestmap(&self, condition: RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> TransportResult<()> {
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> TransportResult<()> {
         self.with_client_source(|source| source.write_attestmap(condition, tip, keys))
     }
 
