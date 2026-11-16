@@ -469,11 +469,7 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
-    let root = dir
-        .ancestors()
-        .find(|p| p.join(".kit").exists())
-        .unwrap_or(dir);
-    load_from(root, dir)
+    load_from(dir, dir)
 }
 
 fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {

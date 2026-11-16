@@ -655,10 +655,12 @@ where
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
-    let scoped = ignore
-        .load_directory(target_dir)
-        .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
-    let ignore = &scoped;
+    let scoped;
+    let ignore = if options.clean {
+        scoped = ignore.load_directory(target_dir)
+            .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+        &scoped
+    } else { ignore };
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
