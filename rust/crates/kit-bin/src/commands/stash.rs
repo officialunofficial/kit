@@ -38,6 +38,8 @@ struct SaveOpts {
     /// Include untracked, non-ignored files (also included by default).
     #[arg(short = 'u', long)]
     include_untracked: bool,
+    /// Files or directory prefixes to save.
+    paths: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,7 +197,31 @@ fn dispatch(sub: StashCmd, store: &ObjectStore, layout: &RepoLayout, json: bool)
             } else {
                 format!("On {branch}: {}", save.message)
             };
-            match stash::save(store, layout, &effective) {
+            let cwd =
+                std::env::current_dir().unwrap_or_else(|_| layout.worktree_root().to_path_buf());
+            let mut paths = Vec::new();
+            for raw in &save.paths {
+                let absolute = cwd.join(raw);
+                let Ok(rel) = absolute.strip_prefix(layout.worktree_root()) else {
+                    return emit_err("path is outside the worktree", exit::USAGE);
+                };
+                let mut parts = Vec::new();
+                for c in rel.components() {
+                    match c {
+                        std::path::Component::Normal(p) => {
+                            parts.push(p.to_string_lossy().into_owned());
+                        }
+                        std::path::Component::CurDir => {}
+                        _ => return emit_err("invalid stash path", exit::USAGE),
+                    }
+                }
+                let path = parts.join("/");
+                if !path.is_empty() && !kit_core::index::validate_index_path(&path) {
+                    return emit_err("invalid stash path", exit::USAGE);
+                }
+                paths.push(path);
+            }
+            match stash::save_paths(store, layout, &effective, &paths) {
                 Ok(()) => {
                     let mut stderr = std::io::stderr().lock();
                     let _ = writeln!(
@@ -349,7 +375,11 @@ fn restore_entry(
         Ok(h) => h,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
-    if let Err(e) = super::ensure_restore_safe(layout, store, tree_hash) {
+    let options = match stash::entry_restore_options(store, layout, index) {
+        Ok(o) => o,
+        Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
+    };
+    if let Err(e) = super::ensure_restore_safe_with_options(layout, store, tree_hash, &options) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }
 
@@ -376,10 +406,40 @@ fn restore_entry(
     // the entry removal last means a failure in the index rewrite leaves the
     // stash in place for a normal retry, rather than dropping it with the
     // index half-restored.
-    let restored = match stash::entry_index(store, layout, index) {
+    let mut restored = match stash::entry_index(store, layout, index) {
         Ok(i) => i,
         Err(e) => return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR),
     };
+    // Merge staged differences relative to the stash base, preserving
+    // entries outside the stash's selection.
+    let base = entries
+        .get(index)
+        .and_then(|e| store.read_object(&e.parent_hash).ok())
+        .and_then(|o| match o {
+            kit_core::object::Object::Commit(c) => Some(c.tree_hash),
+            _ => None,
+        });
+    let base = match base {
+        Some(t) => match kit_core::index::from_tree(store, t) {
+            Ok(i) => i,
+            Err(e) => return emit_err(&e.to_string(), exit::GENERAL_ERROR),
+        },
+        None => kit_core::index::Index::new(),
+    };
+    let mut merged = match super::read_or_seed_index_from_head(layout, store) {
+        Ok(i) => i,
+        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+    };
+    for e in &restored.entries {
+        let same = base.find_entry(&e.path).is_some_and(|i| {
+            let b = &base.entries[i];
+            b.status == e.status && b.object_hash == e.object_hash
+        });
+        if !same {
+            merged.upsert_entry(e.clone());
+        }
+    }
+    restored = merged;
     if let Err(e) = stash::apply(store, layout, index) {
         return emit_err(&format!("stash {verb}: {e}"), exit::GENERAL_ERROR);
     }

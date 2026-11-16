@@ -255,6 +255,9 @@ pub fn config_parse_one_iteration(input: &[u8]) {
 pub fn stash_list_one_iteration(input: &[u8]) {
     use kit_core::ops::stash::{deserialize_list, serialize_list};
     let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(scoped) = kit_core::ops::stash::fuzz_scope_marker(input) {
+        assert_eq!(input, &[u8::from(scoped)]);
+    }
     if let Ok(list) = deserialize_list(input) {
         assert_eq!(
             serialize_list(&list).expect("accepted list must re-encode"),

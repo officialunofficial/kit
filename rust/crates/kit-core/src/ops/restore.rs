@@ -204,6 +204,8 @@ pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> b
         path_matches_pattern(&pat.pattern, dir_prefix)
             || pat
                 .pattern
+                .strip_prefix('/')
+                .unwrap_or(&pat.pattern)
                 .strip_prefix(dir_prefix)
                 .is_some_and(|rest| rest.starts_with('/'))
     })
@@ -248,6 +250,9 @@ pub fn write_sparse_checkout(layout: &RepoLayout, lines: &[&str]) -> RestoreResu
 }
 
 fn path_matches_pattern(pattern: &str, path: &str) -> bool {
+    if let Some(exact) = pattern.strip_prefix('/') {
+        return path == exact || path.strip_prefix(exact).is_some_and(|s| s.starts_with('/'));
+    }
     let pat = pattern.strip_suffix('/').unwrap_or(pattern);
     if pat == path {
         return true;
