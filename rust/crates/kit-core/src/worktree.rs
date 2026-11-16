@@ -275,7 +275,9 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     let ignores = if !rel_dir.is_empty() && !parent_ignored {
         local = ignore::load(dir).map_err(|e| WorktreeError::Io(io::Error::other(e)))?;
         &local
-    } else { ignores };
+    } else {
+        ignores
+    };
     let mut entries: Vec<TreeEntry> = Vec::new();
     // Cache-miss regular files collected during the walk below, hashed
     // together (sequentially or fanned out) once the walk finishes —

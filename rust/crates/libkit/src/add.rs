@@ -852,7 +852,9 @@ fn route_path(
     let ignores = if !force && !already_tracked {
         local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
         &local
-    } else { ignores };
+    } else {
+        ignores
+    };
     if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
         return Err(Error::Ignored(rel_str));
     }
@@ -985,7 +987,9 @@ fn add_tree(
     let ignores = if dir != root && !parent_ignored {
         local = ignore::load(dir).map_err(Error::IgnoreFile)?;
         &local
-    } else { ignores };
+    } else {
+        ignores
+    };
     let rd = std::fs::read_dir(dir).map_err(|source| Error::ReadDir {
         path: dir.to_path_buf(),
         source,
@@ -1140,7 +1144,9 @@ fn patch_one_file(
     let ignores = if !force && !already_tracked {
         local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
         &local
-    } else { ignores };
+    } else {
+        ignores
+    };
     if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, false) {
         return Err(Error::Ignored(rel_str));
     }

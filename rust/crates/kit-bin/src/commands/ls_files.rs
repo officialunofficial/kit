@@ -163,7 +163,9 @@ fn collect_others(
     let ignore = if !prefix.is_empty() && !parent_ignored {
         local = ignore::load(dir).map_err(std::io::Error::other)?;
         &local
-    } else { ignore };
+    } else {
+        ignore
+    };
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

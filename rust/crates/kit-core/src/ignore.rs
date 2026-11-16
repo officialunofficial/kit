@@ -413,23 +413,39 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
-    let root = dir.ancestors().find(|p| p.join(".kit").exists() || p.join(".git").exists())
+    let root = dir
+        .ancestors()
+        .find(|p| p.join(".kit").exists() || p.join(".git").exists())
         .unwrap_or(dir);
     let mut patterns = Vec::new();
-    let config = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty())
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
     if let Some(config) = config {
         append_file(&mut patterns, &config.join("git/ignore"), "")?;
     }
-    append_file(&mut patterns, &root.join(".kit/info/exclude"), "")?;
-    let mut dirs: Vec<_> = dir.ancestors().take_while(|p| p.starts_with(root)).collect();
+    if root.join(".kit").exists() {
+        let layout = crate::layout::discover(root)
+            .map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
+        append_file(&mut patterns, &layout.common_dir().join("info/exclude"), "")?;
+    }
+    let mut dirs: Vec<_> = dir
+        .ancestors()
+        .take_while(|p| p.starts_with(root))
+        .collect();
     dirs.reverse();
     for directory in dirs {
-        let prefix = directory.strip_prefix(root).unwrap_or(Path::new(""))
-            .to_string_lossy().replace('\\', "/");
-        if !prefix.is_empty() && IgnoreList::from_patterns(patterns.clone())
-            .is_ignored_with_ancestors(&prefix, true) { break; }
+        let prefix = directory
+            .strip_prefix(root)
+            .unwrap_or(Path::new(""))
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !prefix.is_empty()
+            && IgnoreList::from_patterns(patterns.clone()).is_ignored_with_ancestors(&prefix, true)
+        {
+            break;
+        }
         for name in [".gitignore", ".kitignore"] {
             append_file(&mut patterns, &directory.join(name), &prefix)?;
         }
@@ -444,9 +460,22 @@ fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result
         }
         for mut pattern in list.patterns {
             if !prefix.is_empty() {
-                let mut segments: Vec<_> = prefix.split('/').map(|s| Segment::Glob(s.chars().flat_map(|c| {
-                    if matches!(c, '*' | '?' | '[' | '\\') { vec!['\\', c] } else { vec![c] }
-                }).collect())).collect();
+                let mut segments: Vec<_> = prefix
+                    .split('/')
+                    .map(|s| {
+                        Segment::Glob(
+                            s.chars()
+                                .flat_map(|c| {
+                                    if matches!(c, '*' | '?' | '[' | '\\') {
+                                        vec!['\\', c]
+                                    } else {
+                                        vec![c]
+                                    }
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect();
                 segments.append(&mut pattern.segments);
                 pattern.segments = segments;
                 pattern.basename_kind = None;
@@ -465,7 +494,14 @@ fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result
 fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(None),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
         Err(e) => return Err(IgnoreError::Io(e)),
     };
     if !meta.file_type().is_file() {

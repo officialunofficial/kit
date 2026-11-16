@@ -348,7 +348,15 @@ fn add_explicit_ignored_path_refused_without_force() {
 fn nested_ignore_rules_match_git_and_clean_preserves_reincluded_files() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    assert!(std::process::Command::new("git").arg("init").arg(root).output().unwrap().status.success());
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     fs::create_dir_all(x.join("git")).unwrap();
     fs::write(x.join("git/ignore"), "*.global\n*.log\n").unwrap();
     fs::create_dir_all(root.join(".kit/info")).unwrap();
@@ -357,36 +365,103 @@ fn nested_ignore_rules_match_git_and_clean_preserves_reincluded_files() {
     fs::write(root.join(".gitignore"), "blocked/\n*.tmp\n!root.global\n").unwrap();
     fs::create_dir_all(root.join("sub/deep")).unwrap();
     fs::create_dir_all(root.join("blocked")).unwrap();
-    fs::write(root.join("sub/.gitignore"), "!keep.tmp\n/local\n!keep.log\n").unwrap();
+    fs::write(
+        root.join("sub/.gitignore"),
+        "!keep.tmp\n/local\n!keep.log\n",
+    )
+    .unwrap();
     fs::write(root.join("sub/deep/.gitignore"), "keep.tmp\n").unwrap();
     fs::write(root.join("blocked/.gitignore"), "!keep.tmp\n").unwrap();
     let cases = [
-        ("a.global", true), ("root.global", false), ("info.global", false),
-        ("a.tmp", true), ("sub/keep.tmp", false), ("sub/drop.tmp", true),
-        ("sub/local", true), ("sub/deep/local", false),
-        ("sub/deep/keep.tmp", true), ("blocked/keep.tmp", true),
+        ("a.global", true),
+        ("root.global", false),
+        ("info.global", false),
+        ("a.tmp", true),
+        ("sub/keep.tmp", false),
+        ("sub/drop.tmp", true),
+        ("sub/local", true),
+        ("sub/deep/local", false),
+        ("sub/deep/keep.tmp", true),
+        ("blocked/keep.tmp", true),
         ("sub/keep.log", false),
     ];
     for (path, ignored) in cases {
         fs::write(root.join(path), "data").unwrap();
-        let git = std::process::Command::new("git").args(["check-ignore", "-v", "--no-index", path])
-            .current_dir(root).env("XDG_CONFIG_HOME", x).env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+        let git = std::process::Command::new("git")
+            .args(["check-ignore", "-v", "--no-index", path])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", x)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
         let detail = String::from_utf8_lossy(&git.stdout);
-        let git_ignored = git.status.success() && !detail.split('\t').next().unwrap_or("").rsplit(':').next().unwrap_or("").starts_with('!');
+        let git_ignored = git.status.success()
+            && !detail
+                .split('\t')
+                .next()
+                .unwrap_or("")
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .starts_with('!');
         assert_eq!(git_ignored, ignored, "git {path}: {detail}");
     }
-    let others = out_str(&run_in(root, x, &["ls-files", "--others", "--exclude-standard"]));
-    let status = out_str(&run_in(root, x, &["status", "--porcelain", "--untracked-files=all"]));
+    let others = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
+    let status = out_str(&run_in(
+        root,
+        x,
+        &["status", "--porcelain", "--untracked-files=all"],
+    ));
     for (path, ignored) in cases {
-        assert_eq!(others.lines().any(|line| line == path), !ignored, "ls-files {path}");
-        assert_eq!(status.lines().any(|line| line.ends_with(path)), !ignored, "status {path}: {status}");
+        assert_eq!(
+            others.lines().any(|line| line == path),
+            !ignored,
+            "ls-files {path}"
+        );
+        assert_eq!(
+            status.lines().any(|line| line.ends_with(path)),
+            !ignored,
+            "status {path}: {status}"
+        );
     }
     assert!(run_in(root, x, &["clean", "-fdX"]).status.success());
-    for (path, ignored) in cases { assert_eq!(root.join(path).exists(), !ignored, "clean -X {path}"); }
+    for (path, ignored) in cases {
+        assert_eq!(root.join(path).exists(), !ignored, "clean -X {path}");
+    }
     assert!(run_in(root, x, &["add", "sub/keep.tmp"]).status.success());
     assert!(!run_in(root, x, &["add", "sub/local"]).status.success());
     assert!(run_in(root, x, &["add", "."]).status.success());
     let tracked = out_str(&run_in(root, x, &["ls-files"]));
     assert!(tracked.lines().any(|line| line == "sub/keep.log"));
+}
+
+#[test]
+fn nested_kitignore_wins_and_excluded_parent_rules_are_not_read() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join(".gitignore"), "*.tmp\nblocked/\n").unwrap();
+    fs::write(root.join("sub/.gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("sub/.kitignore"), "!keep.log\n!keep.tmp\n").unwrap();
+    fs::write(root.join("sub/keep.log"), "keep").unwrap();
+    fs::write(root.join("sub/keep.tmp"), "keep").unwrap();
+    fs::create_dir(root.join("blocked")).unwrap();
+    fs::write(root.join("blocked/.gitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+    fs::write(root.join("blocked/keep.tmp"), "keep").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.contains("sub/keep.tmp"));
+    assert!(tracked.contains("sub/keep.log"));
+    assert!(!tracked.contains("blocked/"));
+    assert!(!run_in(root, x, &["add", "blocked/keep.tmp"]).status.success());
+    // -x intentionally removes every untracked file, including re-inclusions.
+    fs::write(root.join("sub/new.log"), "remove").unwrap();
+    assert!(run_in(root, x, &["clean", "-fdx"]).status.success());
+    assert!(!root.join("sub/new.log").exists());
+    assert!(root.join("sub/keep.log").exists());
 }

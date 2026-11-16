@@ -1875,8 +1875,7 @@ fn check_unswept_dir(
     while let Some((path, full_path, is_dir)) = untracked.pop() {
         let parent = path.parent().unwrap_or(&unswept.dir);
         if !lists.contains_key(parent) {
-            let local = ignore::load(parent)
-                .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            let local = ignore::load(parent).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
             lists.insert(parent.to_path_buf(), local);
         }
         let local = &lists[parent];
@@ -2011,7 +2010,9 @@ fn clean_directory(
         is_dir: bool,
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
-    let local = ignore.map(|_| ignore::load(target_dir)).transpose()
+    let local = ignore
+        .map(|_| ignore::load(target_dir))
+        .transpose()
         .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
     let ignore = local.as_ref();
 
@@ -2120,7 +2121,9 @@ fn sweep_unlisted_dir(
     _ignore: &IgnoreList,
     sparse_patterns: Option<&[SparsePattern]>,
 ) {
-    let Ok(local) = ignore::load(dir) else { return; };
+    let Ok(local) = ignore::load(dir) else {
+        return;
+    };
     let ignore = &local;
     let Ok(read) = fs::read_dir(dir) else {
         return;

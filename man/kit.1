@@ -78,7 +78,15 @@ drops the success line and never an error.
 Stage files for the next commit. Respects
 .Pa .gitignore
 and
-.Pa .kitignore .
+.Pa .kitignore
+in each directory; deeper rules win. Patterns are relative to their file.
+Per-directory rules override
+.Pa .kit/info/exclude
+and the global
+.Pa $XDG_CONFIG_HOME/git/ignore
+(default
+.Pa ~/.config/git/ignore ) .
+An excluded directory cannot be re-included from below.
 Multiple pathspecs may be given;
 .Ql .
 stages every non-ignored file under the current directory.
