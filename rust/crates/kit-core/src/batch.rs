@@ -837,6 +837,7 @@ const SMALL_OBJECT_BYTES: u64 = crate::chunker::MIN_SIZE as u64;
 /// workers ran out of descriptors under the default soft limit of
 /// 1,024. 256 takes most of the gain and holds at most a quarter of that
 /// limit open.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // Linux-only cap; keep its documentation on every platform.
 const SMALL_OBJECT_SYNC_WORKERS: usize = 256;
 
 /// A checkpoint that took at least this many small objects renames

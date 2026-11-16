@@ -1897,3 +1897,20 @@ is authoritative for subcommand synopses.
 .El
 .Sh COPYRIGHT
 Licensed under MIT OR Apache-2.0.
+
+.Sh SHELL COMPLETION
+The shipped bash, zsh, and fish completions suggest local branch, remote,
+and tag names for commands that take them.
+Push suggests a remote, then a local branch.
+Fetch and pull suggest a remote; they accept no branch argument.
+Completion reads local metadata only and stays silent outside a repository.
+
+.Sh S3 CERTIFICATE TRUST
+Set
+.Ev KIT_SSL_CA_FILE
+to a PEM CA bundle to add trust roots for S3 metadata requests and pack uploads.
+Certificate-chain and hostname verification remain enabled.
+An unreadable, empty, or malformed bundle fails the connection.
+S3 does not read the Connect-only
+.Cm http.sslCAInfo
+configuration key.

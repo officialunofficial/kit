@@ -231,7 +231,7 @@ steps:
       - |
         set -euo pipefail
         cd rust
-        cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+        ../scripts/with-test-tmpdir.sh cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
           --profile ignored-lane --no-fail-fast --run-ignored ignored-only
 
   # nextest does not run doctests, so this step does.

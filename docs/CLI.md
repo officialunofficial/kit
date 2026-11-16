@@ -1992,11 +1992,12 @@ and hostname verification remain enabled. A missing, unreadable, empty,
 or malformed selected file is a hard error. Keep private keys out of the
 CA file; it contains certificates only.
 
-These settings apply only to native kit remotes over the Connect transport:
-HTTPS RPCs, pack uploads and downloads. The self-updater uses the OS trust
+For Connect remotes, these settings cover HTTPS RPCs, pack uploads, and
+downloads. The self-updater uses the OS trust
 store and the release checksum when present; it does not read
-`KIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes do not yet honor either
-setting; private-CA S3 endpoints are not supported. Wasm/browser
+`KIT_SSL_CA_FILE` / `http.sslCAInfo`. S3 remotes accept `KIT_SSL_CA_FILE`
+for both metadata requests and pack uploads. It adds roots to the system trust store and keeps certificate-chain
+and hostname verification enabled. S3 does not read `http.sslCAInfo`. Wasm/browser
 certificate trust is unchanged.
 The key shares its spelling with [Git's CA-file setting](https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpsslCAInfo);
 kit uses its own `KIT_SSL_CA_FILE` environment variable.
@@ -2148,9 +2149,10 @@ parsing stderr.
 - **`SSH_AUTH_SOCK`** &mdash; standard OpenSSH agent socket, used by
   `kit+ssh://` transports.
 - **`KIT_SSL_CA_FILE`** &mdash; PEM certificate file for additional native
-  Connect HTTPS remote trust only, overriding `http.sslCAInfo`. The
-  self-updater is excluded by design; S3 remotes are not yet covered.
-  Certificates are added to the Mozilla roots, with chain and hostname verification enabled.
+  Connect and S3 HTTPS remote trust. For Connect, it overrides `http.sslCAInfo`
+  and adds certificates to the Mozilla roots. For S3, it adds certificates to
+  system trust. Both keep chain and hostname verification enabled.
+  The self-updater is excluded.
   Missing, unreadable, empty, or malformed files are hard errors. See
   [HTTPS certificate trust](#https-certificate-trust).
 - **`XDG_CONFIG_HOME`**, **`XDG_DATA_HOME`**, **`XDG_CACHE_HOME`**,
@@ -2239,5 +2241,9 @@ cp completions/kit.zsh /usr/local/share/zsh/site-functions/_kit
 ```
 
 Then restart your shell (or run `compinit` on zsh). Completion covers
-the full subcommand list plus common flags; per-argument completion
-(branch names, remote URLs) is deferred to a future release.
+the full subcommand list, common flags, and local branch, remote, and tag names.
+Switch, checkout, merge, rebase, branch deletion and renaming, remote removal
+and renaming, and tag deletion suggest existing names. Push suggests a remote,
+then a local branch. Fetch and pull suggest a remote; those commands accept
+no branch argument.
+Completion reads local metadata only and stays silent outside a repository.

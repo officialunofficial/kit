@@ -6,13 +6,20 @@
 #   cp kit.bash /etc/bash_completion.d/              (most Linux)
 # or `source kit.bash` from your ~/.bashrc.
 #
-# Scope: subcommand completion + top-level flags. Completing sub-options
-# (branch names, remote URLs, etc.) is deferred so this file stays small
-# and easy to verify by eye.
+# Argument names come from the private, local-only kit __complete helper.
 
 _kit_complete() {
     local cur prev words cword
     _init_completion || return 0
+
+    if [[ $cword -gt 1 && $cur != -* ]]; then
+        local names
+        names=$(kit __complete "${words[@]:1:$((cword - 1))}" 2>/dev/null)
+        if [[ -n $names ]]; then
+            COMPREPLY=( $(compgen -W "$names" -- "$cur") )
+            return 0
+        fi
+    fi
 
     local subcommands="init add rm mv restore reset hash cat cat-file show tree ls-tree ls-files rev-parse rev-list merge-base show-ref for-each-ref symbolic-ref update-ref ref commit log reflog status diff branch checkout switch clean tag config merge push pull fetch stash clone remote key grant epoch visibility keygen cherry-pick revert rebase bisect gc worktree sparse-checkout serve mcp git blame prove verify verify-proof closure attest verify-attest self version help"
     # Top-level flags. --version/-V are aliases of the `version` subcommand.

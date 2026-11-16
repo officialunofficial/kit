@@ -56,6 +56,8 @@ use kit_core::refs::{
     Ref, RefWriteCondition, parse_lowercase_hash, validate_ref_name, validate_ref_prefix,
 };
 use md5::Md5;
+mod tls;
+
 use reqwest::Method;
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use sha2::{Digest as _, Sha256};
@@ -171,7 +173,10 @@ impl S3Transport {
         let secret_access_key = env::var(ENV_SECRET_KEY).unwrap_or_default();
         let region = env::var(ENV_REGION).unwrap_or_else(|_| DEFAULT_REGION.into());
 
+        let selected = env::var_os("KIT_SSL_CA_FILE");
+        let roots = tls::certificates(selected.as_deref().map(std::path::Path::new))?;
         let client = Client::builder()
+            .tls_certs_merge(roots.clone())
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -190,7 +195,7 @@ impl S3Transport {
             clock: default_clock,
             sleeper: default_sleeper,
             backoff: BackoffIterator::new,
-            put: PackPut::new()?,
+            put: PackPut::with_roots(roots)?,
             stall: REQUEST_TIMEOUT,
         })
     }
@@ -205,7 +210,10 @@ impl S3Transport {
         prefix: Option<String>,
         creds: Credentials,
     ) -> Result<Self, TransportError> {
+        let selected = env::var_os("KIT_SSL_CA_FILE");
+        let roots = tls::certificates(selected.as_deref().map(std::path::Path::new))?;
         let client = Client::builder()
+            .tls_certs_merge(roots.clone())
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -219,7 +227,7 @@ impl S3Transport {
             clock: default_clock,
             sleeper: default_sleeper,
             backoff: BackoffIterator::new,
-            put: PackPut::new()?,
+            put: PackPut::with_roots(roots)?,
             stall: REQUEST_TIMEOUT,
         })
     }
@@ -583,8 +591,9 @@ impl From<TransportError> for AttemptError {
 }
 
 impl PackPut {
-    fn new() -> Result<Self, TransportError> {
+    fn with_roots(roots: Vec<reqwest::Certificate>) -> Result<Self, TransportError> {
         let client = reqwest::Client::builder()
+            .tls_certs_merge(roots)
             .redirect(reqwest::redirect::Policy::none())
             .pool_max_idle_per_host(0)
             .build()
@@ -2141,6 +2150,8 @@ mod tests {
                             Err(error) => panic!("accept: {error}"),
                         }
                     };
+                    // Accepted sockets inherit nonblocking mode on macOS.
+                    stream.set_nonblocking(false).unwrap();
                     stream
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
