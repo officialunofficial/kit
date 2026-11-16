@@ -222,6 +222,7 @@ pub trait HunkChooser {
 #[non_exhaustive]
 pub enum Event {
     /// Input bytes hashed so far, excluding object headers and manifests.
+    /// Concurrent observers can receive samples out of order.
     HashProgress { bytes: u64 },
     /// A file is binary, so it has no hunks to choose from.
     BinarySkipped {

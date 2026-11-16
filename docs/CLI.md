@@ -1403,7 +1403,8 @@ Remote / sync:
   | `elapsed_ms` | unsigned integer | Milliseconds since this operation began |
 
   Packing and unpacking counts accumulate across packs; their clock starts
-  with the command. Other counts describe one operation. A new pack or a
+  with the command. Each split-push advance restarts those counts and their
+  clock. Other counts describe one operation. A new pack or a
   retry starts its byte count at zero. A changed `phase` starts its clock
   again, as does a retry or a new pack. Download lengths describe the current attempt. Skipped packs
   produce no download records. Progress is limited to ten updates per

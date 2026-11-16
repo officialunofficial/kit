@@ -157,6 +157,7 @@ impl Reporter {
                 self.packed = 0;
                 self.unpacked = 0;
                 self.command_started = std::time::Instant::now();
+                self.started = self.command_started;
                 self.bytes = 0;
                 self.last_emit_done = 0;
                 self.emitted = false;
@@ -535,6 +536,12 @@ impl Terminal {
         bytes: u64,
     ) {
         if let Some(reporter) = self.state().reporter.as_mut() {
+            // Parallel hashing callbacks may reach the terminal out of order.
+            let bytes = if phase == "add" && reporter.phase == phase {
+                bytes.max(reporter.bytes)
+            } else {
+                bytes
+            };
             reporter.update(phase, done, total, bytes, None);
         }
     }
@@ -776,6 +783,18 @@ mod tests {
     /// it never touches stderr. This is the path every push/pull/fetch
     /// integration test takes.
     #[test]
+    fn hashing_progress_keeps_the_highest_completed_byte_count() {
+        let guard = start("add", None, true, true);
+        guard.terminal().local_progress("add", 0, None, 20);
+        let started = guard.terminal().state().reporter.as_ref().unwrap().started;
+        guard.terminal().local_progress("add", 0, None, 10);
+        let state = guard.terminal().state();
+        let reporter = state.reporter.as_ref().unwrap();
+        assert_eq!(reporter.bytes, 20);
+        assert_eq!(reporter.started, started);
+    }
+
+    #[test]
     fn detached_terminal_ignores_progress_events() {
         let terminal = Terminal::detached();
         terminal.event(&SyncEvent::ObjectsPacked { count: 1 });
@@ -936,6 +955,7 @@ mod tests {
         let mut reporter = Reporter::new("Writing objects", None);
         assert_eq!(reporter.label(), "Writing objects");
         reporter.record(Event::Step { index: 2, total: 5 });
+        assert_eq!(reporter.started, reporter.command_started);
         assert_eq!(reporter.label(), "Writing objects (step 2/5)");
         assert_eq!((reporter.done, reporter.bytes), (0, 0));
 
