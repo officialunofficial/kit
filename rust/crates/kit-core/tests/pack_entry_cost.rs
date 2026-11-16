@@ -87,13 +87,10 @@ fn tiny_blob_pack(count: u32) -> Vec<u8> {
 /// The tests share the counting allocator, so they run one at a time.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A short fixed root for the store, so the staged paths stay short.
+/// Honour the caller's scratch volume. A short TMPDIR keeps staged paths
+/// short enough to measure the per-entry charge independently of path size.
 fn short_root() -> std::path::PathBuf {
-    if cfg!(unix) {
-        std::path::PathBuf::from("/tmp")
-    } else {
-        std::env::temp_dir()
-    }
+    std::env::temp_dir()
 }
 
 /// Reads a pack of `ENTRIES` tiny blobs into a store whose directory path is

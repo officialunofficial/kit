@@ -150,6 +150,20 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 filter = 'binary(large_file_ingest) or binary(large_file_worktree)'
 slow-timeout = { period = "120s", terminate-after = 3 }
 
+# APFS durable writes dominate these heap measurements. Keep the same
+# objects and memory assertions, but allow the filesystem barriers to finish.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'binary(pack_entry_cost)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'binary(pack_entry_cost)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "120s", terminate-after = 5 }
+
 # These heap measurements include queued file barriers. Run their disk-backed
 # fixtures without other tests competing for the same journal.
 
@@ -165,3 +179,4 @@ threads-required = "num-test-threads"
 [[profile.ignored-lane.overrides]]
 filter = 'test(/many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/)'
 slow-timeout = { period = "120s", terminate-after = 5 }
+

@@ -31,5 +31,5 @@ export KIT_TEST_STRICT=1
 export NEXTEST_TEST_THREADS=9
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../rust"
-cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
+../scripts/with-test-tmpdir.sh cargo nextest run --archive-file /workspace/nextest-archive.tar.zst --workspace-remap /workspace/rust \
   --partition "count:${partition}/${PARTITIONS}" --profile ci --no-fail-fast
