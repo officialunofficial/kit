@@ -79,7 +79,9 @@ pub(crate) fn run(
     if !options.attestations {
         return true;
     }
-    if matches!(snapshot, Snapshot::Unsupported) { return true; }
+    if matches!(snapshot, Snapshot::Unsupported) {
+        return true;
+    }
     let Snapshot::Read(head) = snapshot else {
         return false;
     };
@@ -266,7 +268,9 @@ fn process_pack(
         .map_err(|error| -> Failure {
             match error {
                 kit_core::pack::PackError::Io(error) => error.into(),
-                kit_core::pack::PackError::UnexpectedEof => std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into(),
+                kit_core::pack::PackError::UnexpectedEof => {
+                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()
+                }
                 other => kit_attest::pack::PackError::from(other).into(),
             }
         })?;
@@ -323,7 +327,10 @@ fn process_pack(
         // An envelope already made here keeps its local authorship when it
         // returns through a remote. Metadata errors never confer authorship.
         if kit_attest::store::envelope_path(layout, &subject, &id).try_exists()?
-            && !marker.try_exists()? { continue; }
+            && !marker.try_exists()?
+        {
+            continue;
+        }
         let parent = marker.parent().ok_or("missing provenance directory")?;
         std::fs::create_dir_all(parent)?;
         crate::applied_packs::write_atomic(&marker, b"")?;

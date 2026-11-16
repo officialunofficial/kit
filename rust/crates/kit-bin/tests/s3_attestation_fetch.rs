@@ -4,7 +4,9 @@
 include!("../../kit-sync/tests/support/attestation_fetch.rs");
 
 #[test]
+#[allow(clippy::too_many_lines)] // One transport round trip and its HTTP fixture.
 fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
+    use std::fmt::Write as _;
     use kit_core::{
         hash::{Hash, to_hex},
         protocol::{PackKey, Transport},
@@ -36,7 +38,7 @@ fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
     let mut pending = Vec::<Hash>::new();
     for reference in refs {
         let full = format!("refs/{}", reference.name);
-        xml.push_str(&format!("<Contents><Key>{full}</Key></Contents>"));
+        write!(xml, "<Contents><Key>{full}</Key></Contents>").unwrap();
         let value = reference.hash.unwrap();
         mocks.push(
             server

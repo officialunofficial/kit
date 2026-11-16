@@ -809,7 +809,9 @@ fn remote_unchanged(
     let Some(record) = crate::cursor::CursorRecord::load(path) else {
         return Ok(false);
     };
-    if options.refetch_attestations || record.attestations != (options.attestations && source.supports_attestations()) {
+    if options.refetch_attestations
+        || record.attestations != (options.attestations && source.supports_attestations())
+    {
         return Ok(false);
     }
     if options.attestations && source.supports_attestations() {
