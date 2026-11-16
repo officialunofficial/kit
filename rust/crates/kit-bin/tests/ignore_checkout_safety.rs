@@ -28,7 +28,7 @@ fn checkout_keeps_files_ignored_before_ancestor_rules_change() {
     assert!(run(root, xdg, &["add", "."]).status.success());
     assert!(run(root, xdg, &["commit", "-m", "protect local files"]).status.success());
     std::fs::write(root.join("config/secret.env"), "private data").unwrap();
-    let result = run(root, xdg, &["checkout", "--detach", target.trim()]);
+    let result = run(root, xdg, &["checkout", target.trim()]);
     assert!(result.status.success(), "{result:?}");
     assert_eq!(std::fs::read_to_string(root.join("config/secret.env")).unwrap(), "private data");
 }
