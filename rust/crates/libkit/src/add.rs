@@ -1015,18 +1015,25 @@ fn add_tree(
         let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
-        let rel_path = path_text(p.strip_prefix(root).unwrap_or(&p))?;
+        let native_relative = p.strip_prefix(root).unwrap_or(&p);
+        // Lossy text is only for ignore decisions. Unrepresentable names can
+        // never be tracked; route_path rejects them if a file is included.
+        let rel_path = native_relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
         // An ignore rule hides untracked content only. A tracked file stays
         // in view, and so does a directory that holds tracked content, so
         // `add .` and `add -A` refresh the tracked changes. The bit of an
         // ignored ancestor goes down, so the untracked and ignored children of
         // a tracked directory stay out.
         let entry_ignored = parent_ignored || ignores.is_ignored(&rel_path, is_dir);
-        if entry_ignored && !index_tracks_path_or_descendant(idx, &rel_path) {
+        if entry_ignored
+            && (native_relative.to_str().is_none()
+                || !index_tracks_path_or_descendant(idx, &rel_path))
+        {
             continue;
-        }
-        if !index::validate_index_path(&rel_path) {
-            return Err(Error::InvalidPath(rel_path));
         }
         if meta.file_type().is_dir() {
             add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;

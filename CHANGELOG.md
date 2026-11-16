@@ -14,7 +14,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Keep native path components in ignore checks and refuse filenames the index cannot represent.
-
 - Stop automated bisect when another command changes the session, preserving its state and worktree.
 - Refuse restore paths that alias another tree entry or an existing spelling on the destination filesystem before changing tracked files.
 - Report full disks during add and checkout with an actionable message and exit 74, distinct from a branch that already exists.
