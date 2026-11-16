@@ -594,3 +594,10 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "attestation_pack"
+path = "fuzz_targets/attestation_pack.rs"
+test = false
+doc = false
+required-features = ["libfuzzer"]

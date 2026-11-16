@@ -180,6 +180,9 @@ impl Default for SyncOptions {
     }
 }
 
+#[doc(hidden)]
+pub mod attestation_records;
+
 #[cfg(test)]
 mod tests {
     use super::*;

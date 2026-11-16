@@ -55,6 +55,7 @@ pub mod eth;
 #[cfg(feature = "grants")]
 pub mod grant;
 pub mod jcs;
+pub mod pack;
 pub mod pin_provider;
 pub mod signer;
 pub mod signer_external;

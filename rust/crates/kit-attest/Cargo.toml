@@ -43,8 +43,9 @@ grants = ["algo-ed25519", "algo-secp256k1", "algo-p256", "dep:sha3"]
 #
 # `default-features = false`: kit-core's default set includes
 # `pack-zstd` (SPEC-PACKFILE v2 compression), which pulls
-# `zstd-sys` — not wasm32-buildable. kit-attest doesn't touch
-# `pack.rs`, but a wasm32 consumer can depend on it, and
+# `zstd-sys` — not wasm32-buildable. The attestation pack codec
+# supports raw entries with this feature off. A wasm32 consumer can
+# depend on it, and
 # Cargo unifies a dependency's enabled features across every edge that
 # reaches it within one build — so leaving this edge on defaults would
 # silently drag `zstd-sys` back into that build even though the

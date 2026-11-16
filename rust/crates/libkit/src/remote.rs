@@ -186,6 +186,12 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
 }
 
 fn write(layout: &RepoLayout, repo: &Config) -> Result<(), Error> {
+    // A remote change retires disposable sync records, never provenance.
+    match std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::Write(ConfigError::Io(e))),
+    }
     config::write(layout, repo).map_err(Error::Write)
 }
 
