@@ -415,9 +415,7 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 /// is published, down to the tips earlier signed fetches recorded (see
 /// [`crate::anchor`]), and each tip it publishes is recorded in turn. So a
 /// fetch verifies only the commits between a new tip and what an earlier
-/// signed fetch verified. The returned set holds those recorded tips and every
-/// object whose history this call verified, so branches that share history
-/// walk it once, and a pull does not walk again a tip this call published.
+/// signed fetch verified. Branches that share history walk it once.
 pub(crate) fn fetch_objects(
     store: &ObjectStore,
     layout: &RepoLayout,
@@ -426,7 +424,7 @@ pub(crate) fn fetch_objects(
     remote: &str,
     options: &SyncOptions,
     lock_wait: &LockWait,
-) -> Result<(FetchReport, VerifiedHistory), SyncError> {
+) -> Result<FetchReport, SyncError> {
     let _prune_guard = store.prune_guard()?;
     kit_core::pack::sweep_spool_dir(&store.spool_dir());
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
@@ -450,7 +448,7 @@ pub(crate) fn fetch_objects(
         &mut verified,
     );
     persist_record(&mut applied, observer, remote);
-    result.map(|()| (report, verified))
+    result.map(|()| report)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

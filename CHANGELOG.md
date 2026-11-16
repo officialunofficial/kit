@@ -230,6 +230,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit pull --rebase` and `kit pull --no-ff` verify the history of the tracking
+  tip before changing the worktree, index or HEAD, including a tip left by an
+  opt-out fetch for a branch the remote no longer lists.
+
 - Pull and clean restore accept untracked files inside nested repositories they
   preserve, while still refusing paths they would overwrite or remove.
 

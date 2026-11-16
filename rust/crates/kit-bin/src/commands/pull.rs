@@ -207,8 +207,10 @@ fn pull_one(
                         super::fetched_tags::print_problems(&fetch, &mut stderr)
                     };
                     let code = match outcome {
-                        None if opts.no_ff => merge_fetched(layout, &resolved.name, json),
-                        None => rebase_onto_fetched(layout, &resolved.name, json),
+                        None if opts.no_ff => {
+                            merge_fetched(layout, &resolved.name, require_signed, json)
+                        }
+                        None => rebase_onto_fetched(layout, &resolved.name, require_signed, json),
                         Some(outcome) => report_fast_forward(
                             layout,
                             &resolved.name,
@@ -288,7 +290,7 @@ fn report_fast_forward(
 
 /// Rebase the current branch onto the branch that the fetch updated, unless
 /// the branch has that tip already.
-fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -325,6 +327,9 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
         }
     };
+    if let Err(code) = verify_fetched_tip(layout, &store, &upstream, require_signed, json) {
+        return code;
+    }
     // A branch that holds the fetched tip has nothing to replay. Replaying it
     // would rewrite its commits for no change.
     if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
@@ -345,7 +350,7 @@ fn rebase_onto_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
 /// Merge the branch that the fetch updated into the current branch, and write
 /// a merge commit even when a fast-forward is possible. A branch that holds
 /// the fetched tip is up to date and gets no commit.
-fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
+fn merge_fetched(layout: &RepoLayout, remote: &str, require_signed: bool, json: bool) -> u8 {
     let _lock = match super::acquire_worktree_lock(layout) {
         Ok(lock) => lock,
         Err(code) => return code,
@@ -382,6 +387,9 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             return emit_err_json(&format!("pull: open store: {e}"), exit::GENERAL_ERROR, json);
         }
     };
+    if let Err(code) = verify_fetched_tip(layout, &store, &upstream, require_signed, json) {
+        return code;
+    }
     // The merge treats a fetched tip that `HEAD` already holds as a base, and
     // would write an empty merge commit for it.
     if let Ok(Some(head)) = kit_core::refs::resolve_head(layout) {
@@ -396,9 +404,10 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             }
         }
     }
-    // The tracking ref names the target, so the message reads `Merge
-    // remote-tracking branch '<remote>/<branch>'`.
-    let target = format!("refs/remotes/{remote}/{branch}");
+    // Use the verified tip even if a fetch in another worktree moves the
+    // shared tracking ref. Keep the message that names the tracking branch.
+    let target = kit_core::hash::to_hex(&upstream);
+    let message = format!("Merge remote-tracking branch '{remote}/{branch}'");
     super::merge::start(
         layout,
         &store,
@@ -406,9 +415,55 @@ fn merge_fetched(layout: &RepoLayout, remote: &str, json: bool) -> u8 {
             target: &target,
             no_commit: false,
             no_ff: true,
-            message: None,
+            message: Some(&message),
         },
         json,
+    )
+}
+
+/// Verify the selected tip while the caller holds the worktree lock, before
+/// merge or rebase can write operation state, files, the index or HEAD.
+fn verify_fetched_tip(
+    layout: &RepoLayout,
+    store: &kit_core::store::ObjectStore,
+    tip: &Hash,
+    require_signed: bool,
+    json: bool,
+) -> Result<(), u8> {
+    // Merge and rebase resolve revision strings with local refs taking
+    // precedence over hashes. Refuse a shadowing ref so they use this tip.
+    let revision = kit_core::hash::to_hex(tip);
+    match libkit::revspec::resolve_revision(store, layout, &revision) {
+        Ok(resolved) if resolved == *tip => {}
+        Ok(_) => {
+            return Err(emit_err_json(
+                &format!(
+                    "pull: a local ref shadows fetched tip {revision}; rename the ref before pulling"
+                ),
+                exit::GENERAL_ERROR,
+                json,
+            ));
+        }
+        Err(e) => {
+            return Err(emit_err_json(
+                &format!("pull: {e}"),
+                exit::GENERAL_ERROR,
+                json,
+            ));
+        }
+    }
+    if !require_signed {
+        return Ok(());
+    }
+    kit_sync::verify_pull_tip(layout, store, tip, &crate::progress::Terminal::detached()).map_err(
+        |e| {
+            let code = match e {
+                kit_sync::SyncError::UnsignedOrInvalidObject { .. } => exit::DATAERR,
+                kit_sync::SyncError::Interrupted => exit::TEMPFAIL,
+                _ => exit::GENERAL_ERROR,
+            };
+            emit_err_json(&format!("pull: {e}"), code, json)
+        },
     )
 }
 
