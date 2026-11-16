@@ -156,7 +156,7 @@ orders itself against; see SPEC-OBJECTS §10.1.)
 Readers MUST enforce:
 
 - File absent → empty index. A present zero-length file is corruption.
-- File > 64 MiB (`MAX_INDEX_BYTES`) → `IndexError::TooLarge`.
+- File > 256 MiB (`MAX_INDEX_BYTES`) → `IndexError::TooLarge`.
   Bounded reads MUST enforce this even if the file grows during reading.
 - Version 3 checksum mismatch or missing checksum → `IndexError::Corrupt`,
   before interpreting entries. The checksum detects corruption, not malicious
@@ -222,7 +222,7 @@ re-emits current filenames byte-identically and records every fixture BLAKE3 in
 | Invariant | Enforced by |
 |---|---|
 | A file is parsed only under a known layout | `"KIDX"` magic → `IndexError::BadMagic`; explicit supported version matrix → `IndexError::UnsupportedVersion` (§2, §5) |
-| A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 64 MiB cap → `IndexError::TooLarge` (§5) |
+| A header cannot force pathological allocation | `entry_count` checked against the minimum entry size and remaining buffer → `IndexError::Corrupt`; 256 MiB cap → `IndexError::TooLarge` (§5) |
 | The file encodes exactly its declared entries | trailing bytes rejected (§5) |
 | Each path has exactly one live interpretation | duplicate exact paths → `IndexError::DuplicatePath` (§5) |
 | No staged path escapes the worktree or names repo metadata | path grammar: non-empty, no leading `/`, no `.`/`..`/empty segments, every segment valid per SPEC-OBJECTS §4.1 → `IndexError::InvalidPath` / `Corrupt` (§2) |
