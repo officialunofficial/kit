@@ -148,7 +148,7 @@ pub struct Pattern {
     pub negated: bool,
     /// `true` if the pattern ended with `/` (directory-only).
     pub dir_only: bool,
-    /// `true` if the pattern is anchored to the repo root (contained a
+    /// `true` if the pattern is anchored to its ignore file's directory (contained a
     /// non-trailing `/`); otherwise it matches at any depth.
     pub anchored: bool,
     /// Effective match segments. Non-anchored patterns carry a leading
@@ -455,7 +455,8 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 
 /// Load ignore rules for `dir`, relative to its repository root.
 /// Global rules and `.kit/info/exclude` precede ancestor and local files.
-/// Call this when entering a directory, before testing its children.
+/// Start with the repository root; use [`IgnoreList::load_directory`] to
+/// extend that snapshot when entering child directories.
 /// An excluded ancestor stops loading deeper files.
 ///
 /// `.gitignore` patterns come first so a repo's own `.kitignore` wins under
