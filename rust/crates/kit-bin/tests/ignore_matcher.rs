@@ -415,7 +415,7 @@ fn nested_ignore_rules_match_git_and_clean_preserves_reincluded_files() {
     let status = out_str(&run_in(
         root,
         x,
-        &["status", "--porcelain", "--untracked-files=all"],
+        &["status", "--porcelain"],
     ));
     for (path, ignored) in cases {
         assert_eq!(
@@ -458,7 +458,11 @@ fn nested_kitignore_wins_and_excluded_parent_rules_are_not_read() {
     assert!(tracked.contains("sub/keep.tmp"));
     assert!(tracked.contains("sub/keep.log"));
     assert!(!tracked.contains("blocked/"));
-    assert!(!run_in(root, x, &["add", "blocked/keep.tmp"]).status.success());
+    assert!(
+        !run_in(root, x, &["add", "blocked/keep.tmp"])
+            .status
+            .success()
+    );
     // -x intentionally removes every untracked file, including re-inclusions.
     fs::write(root.join("sub/new.log"), "remove").unwrap();
     assert!(run_in(root, x, &["clean", "-fdx"]).status.success());

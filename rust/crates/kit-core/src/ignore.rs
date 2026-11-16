@@ -426,8 +426,8 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
         append_file(&mut patterns, &config.join("git/ignore"), "")?;
     }
     if root.join(".kit").exists() {
-        let layout = crate::layout::discover(root)
-            .map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
+        let layout =
+            crate::layout::discover(root).map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
         append_file(&mut patterns, &layout.common_dir().join("info/exclude"), "")?;
     }
     let mut dirs: Vec<_> = dir
