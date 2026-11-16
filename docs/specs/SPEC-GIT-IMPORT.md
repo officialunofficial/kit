@@ -405,13 +405,13 @@ The attestation `remoteUrl` field derives from it (see below):
 
 **Attested remote.** An attestation travels with the repository, so it
 MUST NOT name a path of the importer's machine. The `remoteUrl` field
-holds the canonical identity when it contains `://`. For a local path
+holds the canonical network locator without userinfo, query, or fragment.
+File URLs and local paths never appear in an attestation. For a local path
 or a `file://` URL, the field holds the fixed string `local`. The
-identity never holds userinfo, query or fragment, so no credential
-reaches the field. A
-verifier MUST accept a claim whose `remoteUrl` equals the recorded
-identity or the attested remote of that identity. This accepts an
-attestation of an earlier import, which names the local path itself.
+attested remote also uses `local` for helper addresses and ambiguous
+URL authorities. A verifier MUST require `remoteUrl` to equal the
+attested remote of the recorded identity. It MUST NOT accept a raw local
+path.
 
 Equivalence examples (all one identity):
 `git@github.com:org/repo.git` ≡ `ssh://github.com/org/repo` ≡

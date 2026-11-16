@@ -420,7 +420,7 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
 ```json
 {
   "gitCommit": "<40hex sha1 of the translated head>",
-  "mirror": "<git remote URL as configured>",
+  "mirror": "<redacted remote locator, or local>",
   "refName": "<full kit ref name>",
   "schemaVersion": 1,
   "specVersion": 1
@@ -430,9 +430,14 @@ ref head (SPEC-ATTESTATIONS encoding rules apply):
   Field semantics: `gitCommit` locates the translated head on the
   mirror (locator, never a proof &mdash; §2; for annotated-tag refs it is
   the SHA-1 of the translated git *tag object* &mdash; the field name stays
-  for predicate stability); `mirror` is the git remote
-  the head was exported to, as configured (a locator, not an identity
-  claim); `refName` is the full kit ref whose head is attested;
+  for predicate stability); `mirror` is the canonical remote locator
+  from SPEC-GIT-IMPORT §8, with userinfo, query, and fragment removed.
+  SCP-style remotes use the corresponding `ssh://` locator. Local paths
+  and file URLs record only `local`; credentials and local paths MUST
+  NOT appear in this field. Helper addresses and ambiguous URL authorities
+  also record `local`. This locator is not an identity claim; verifiers
+  MUST use only the redacted locator.
+  `refName` is the full kit ref whose head is attested;
   `schemaVersion` is the kit object `schema_version` the translated
   history carries (§1.2); `specVersion` is the version of this
   predicate's own shape, that is, the `git-bridge/v1` definition.
