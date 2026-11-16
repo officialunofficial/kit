@@ -156,6 +156,10 @@ struct Recorded<'a> {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    not(feature = "s3"),
+    expect(dead_code, reason = "only the s3 tests change a later read")
+)]
 enum AfterFirst {
     Same,
     /// Later reads flip one byte at this offset.
@@ -179,6 +183,10 @@ impl<'a> Recorded<'a> {
         self
     }
 
+    #[cfg_attr(
+        not(feature = "s3"),
+        expect(dead_code, reason = "only the s3 tests change a later read")
+    )]
     fn after_first(mut self, change: AfterFirst) -> Self {
         self.after_first = change;
         self
