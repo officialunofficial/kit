@@ -682,7 +682,15 @@ fn live_objects_observed(
     if soft.is_empty() {
         return Ok((mark_live_observed(store, &hard, limits, progress)?, vec![]));
     }
-    soft::mark(store, hard, soft, limits, progress)
+    let mut all = hard.clone();
+    all.extend(soft.iter().map(|root| root.hash));
+    match mark_live_observed(store, &all, limits, progress) {
+        Ok(live) => Ok((live, vec![])),
+        Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
+            soft::mark(store, hard, soft, limits, progress)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Outcome of a [`run_gc`] sweep.
@@ -1188,6 +1196,28 @@ mod tests {
         let (prev, _) = commit_one(&s, b"prev", b"prev", vec![]);
         refs::write_previous_head(&md, &refs::Head::Detached(prev)).unwrap();
         assert!(collect_roots(&md).unwrap().contains(&prev));
+    }
+
+    #[test]
+    fn complete_soft_roots_do_not_restart_the_mark() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (base, _) = commit_one(&store, b"base", b"base", vec![]);
+        let (hard, _) = commit_one(&store, b"hard", b"hard", vec![base]);
+        let (soft, _) = commit_one(&store, b"soft", b"soft", vec![base]);
+        write_ref(&md, "refs/heads/main", &hard);
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&soft))).unwrap();
+        let mut starts = 0;
+        let (live, skipped) =
+            live_objects_observed(&store, &md, MarkLimits::DEFAULT, &mut |phase, count, _| {
+                if phase == "gc_mark" && count == 0 {
+                    starts += 1;
+                }
+            })
+            .unwrap();
+        assert!(live.contains(&hard) && live.contains(&soft) && live.contains(&base));
+        assert!(skipped.is_empty());
+        assert_eq!(starts, 1, "complete roots need one shared mark");
     }
 
     #[test]

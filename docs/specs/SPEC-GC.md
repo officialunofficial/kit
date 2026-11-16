@@ -137,7 +137,10 @@ set. In particular:
   the id of every loose object. The dry run and the real run visit the same
   candidates.
 
-Soft-root completeness is memoized across all hard and soft roots. During
+Gc first runs one ordinary union mark across all hard and soft roots. When
+all closures are present, that mark is the entire walk. Only an
+`ObjectNotFound` error starts the shared completeness fallback; other errors
+abort. Soft-root completeness is then memoized across all hard and soft roots. During
 classification, gc reads each distinct metadata object and checks each
 distinct chunk once, propagating missing-closure results to dependent roots.
 It discards edge lists after each postorder verdict and retains only the

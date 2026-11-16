@@ -146,3 +146,44 @@ fn non_blobs_and_invalid_envelopes_are_rejected() {
     );
     assert!(pack::build(&[b"{}"], 4096).is_err());
 }
+
+#[test]
+fn a_pack_above_the_starting_fetch_allowance_is_rejected_not_deferred() {
+    let bytes = pack::build(&[ENVELOPE], 4096).unwrap();
+    for _ in 0..2 {
+        let mut budget = pack::DecodeBudget::new(ENVELOPE.len() as u64 + 9);
+        let mut seen = 0;
+        let result = pack::read(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            4096,
+            hash(&bytes),
+            &mut budget,
+            |_, _, _| seen += 1,
+        );
+        assert!(matches!(result, Err(pack::PackError::Invalid(_))));
+        assert_eq!(seen, 0);
+    }
+    let size = ENVELOPE.len() as u64 + 10;
+    let mut budget = pack::DecodeBudget::new(size * 2 - 1);
+    pack::read(
+        &mut bytes.as_slice(),
+        bytes.len() as u64,
+        4096,
+        hash(&bytes),
+        &mut budget,
+        |_, _, _| {},
+    )
+    .unwrap();
+    assert!(matches!(
+        pack::read(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            4096,
+            hash(&bytes),
+            &mut budget,
+            |_, _, _| {}
+        ),
+        Err(pack::PackError::FetchBudget)
+    ));
+}

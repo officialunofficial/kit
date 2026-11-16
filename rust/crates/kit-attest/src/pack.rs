@@ -23,19 +23,28 @@ pub const MAX_FETCH_DECODED_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Debug)]
 pub struct DecodeBudget {
     remaining: u64,
+    pack_limit: u64,
 }
 impl Default for DecodeBudget {
     fn default() -> Self {
         Self {
             remaining: MAX_FETCH_DECODED_BYTES,
+            pack_limit: MAX_PACK_DECODED_BYTES,
         }
     }
 }
 impl DecodeBudget {
     /// A stricter fetch allowance; values above the default cannot raise it.
+    /// The starting allowance also caps a pack, so a larger pack is rejected
+    /// rather than deferred on every fresh fetch.
     #[must_use]
     pub const fn new(bytes: u64) -> Self {
         Self {
+            pack_limit: if bytes < MAX_PACK_DECODED_BYTES {
+                bytes
+            } else {
+                MAX_PACK_DECODED_BYTES
+            },
             remaining: if bytes < MAX_FETCH_DECODED_BYTES {
                 bytes
             } else {
@@ -137,13 +146,14 @@ pub fn read(
     budget: &mut DecodeBudget,
     mut sink: impl FnMut(Hash, Hash, &[u8]),
 ) -> Result<(), PackError> {
+    let pack_limit = budget.pack_limit;
     read_capped(
         input,
         declared_len,
         max_bytes,
         expected_key,
         budget,
-        MAX_PACK_DECODED_BYTES,
+        pack_limit,
         &mut sink,
     )
 }
@@ -278,7 +288,10 @@ mod tests {
         let envelope = include_bytes!("../../../tests/golden/attest/envelope_basic.json");
         let pack = build(&[envelope, envelope], 4096).unwrap();
         let size = envelope.len() as u64 + 10;
-        let mut budget = DecodeBudget { remaining: size };
+        let mut budget = DecodeBudget {
+            remaining: size,
+            ..DecodeBudget::default()
+        };
         let mut seen = 0;
         assert!(
             read(
@@ -317,6 +330,7 @@ mod tests {
         let size = envelope.len() as u64 + 10;
         let mut budget = DecodeBudget {
             remaining: size * 2 - 1,
+            ..DecodeBudget::default()
         };
         assert!(
             read(
@@ -342,7 +356,10 @@ mod tests {
         ));
         let last = pack.len() - 1;
         pack[last] ^= 1;
-        let mut budget = DecodeBudget { remaining: size };
+        let mut budget = DecodeBudget {
+            remaining: size,
+            ..DecodeBudget::default()
+        };
         assert!(
             read(
                 &mut pack.as_slice(),
@@ -365,7 +382,10 @@ mod tests {
         bytes.push(3);
         bytes.extend(4u32.to_le_bytes());
         bytes.extend(100u32.to_le_bytes());
-        let mut budget = DecodeBudget { remaining: 99 };
+        let mut budget = DecodeBudget {
+            remaining: 99,
+            ..DecodeBudget::default()
+        };
         let err = read(
             &mut bytes.as_slice(),
             100,

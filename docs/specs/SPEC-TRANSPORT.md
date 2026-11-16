@@ -287,6 +287,9 @@ decoded envelopes in memory.
 
 Readers MUST enforce a 64 MiB total decoded-byte budget per pack and a
 512 MiB total per attestation fetch. Applications MAY lower these budgets.
+The effective per-pack decoded cap MUST NOT exceed the fetch's starting
+allowance. A pack above that cap is rejected and recorded as processed,
+rather than repeatedly deferred by a fresh but insufficient fetch budget.
 Count canonical blob bytes, including the ten-byte header, for raw entries and the declared uncompressed length
 for zstd-raw entries. Check both totals before allocating or decoding the
 entry. Never refund charges from a rejected pack. The limits allow roughly
