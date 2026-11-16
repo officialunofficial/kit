@@ -13,6 +13,9 @@ _kit() {
         local -a names
         names=("${(@f)$(kit __complete "${words[@]:1:$((CURRENT - 2))}" 2>/dev/null)}")
         if (( ${#names} )) && [[ -n $names[1] ]]; then
+            if (( CURRENT == 3 )) && [[ $words[2] == switch || $words[2] == checkout ]]; then
+                names+=('-' '@{-1}')
+            fi
             compadd -a names
             return
         fi
@@ -180,14 +183,16 @@ _kit() {
                     _arguments \
                         '(-c -C)-c[create a new branch and switch to it]:new:' \
                         '(-c -C)-C[create-or-reset a branch and switch to it]:new:' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '1:target:(- @{-1})'
                     ;;
                 checkout)
                     _arguments \
                         '(-b -B)-b[create a branch and switch to it]:new:' \
                         '(-b -B)-B[create-or-reset a branch and switch to it]:new:' \
                         '(-f --force)'{-f,--force}'[discard local changes that block the switch]' \
-                        '--help[show help]'
+                        '--help[show help]' \
+                        '1:target:(- @{-1})'
                     ;;
                 merge-base)
                     _arguments \
@@ -517,7 +522,9 @@ _kit() {
                         'apply[apply stash entry without removing it]' \
                         'drop[remove stash entry]' \
                         'clear[remove all stash entries]' \
-                        'show[show diff of stash entry]'
+                        'show[show diff of stash entry]' \
+                        '-u[include non-ignored untracked files]' \
+                        '--include-untracked[include non-ignored untracked files]'
                     ;;
                 remote)
                     _values 'remote subcommand' \

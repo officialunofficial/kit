@@ -230,7 +230,15 @@ Working-tree commands:
   before it removes anything and names the linked tree.
 - `kit stash [save|push|list|pop|apply|drop|clear|show] [--format=json]` &mdash;
   save/restore WIP
-  changes. `push` is another name for `save`. `apply` restores an entry without removing it; `clear` drops
+  changes. `push` is another name for `save`. `push -u` and
+  `push --include-untracked` explicitly include non-ignored untracked files
+  (kit also includes them by default). `-a`/`--all` is not supported.
+  `push [--] <path>...` saves only the named files or directory prefixes,
+  relative to the current directory, and leaves other worktree and index
+  entries alone. Globs, pathspec magic, and paths containing `..` are not supported. Pop and apply
+  restore only saved changes and refuse an existing untracked destination
+  before writing anything, even when its bytes match the saved file.
+  `apply` restores an entry without removing it; `clear` drops
   every entry. `pop`/`apply`/`drop`/`show` select an entry by index
   (default `0`), accepting either a bare `N` or the `stash@{N}` form
   printed by `stash list`. `pop`/`apply` accept `--index`, which also
@@ -240,10 +248,13 @@ Working-tree commands:
   `[HEAD, index]`) &mdash; no on-disk manifest change, and it stays gc-reachable
   through the stash commit. The snapshot is the **serialized index** (a blob
   in the index commit's wrapper tree, paired with a content subtree that
-  keeps staged blobs gc-reachable), so `--index` restores the index exactly,
+  keeps staged blobs gc-reachable). A `p` blob in that local wrapper holds
+  one byte: `0` for a full stash or `1` for selected paths. Pop and apply
+  require this marker; there is no compatibility reader for earlier entries.
+  Full stashes keep the whole-worktree dirty guard; selected stashes check
+  only saved paths. `--index` restores staged differences,
   **including staged deletions** (`kit rm`-staged) &mdash; which a tree could not
-  encode. Stashes created before this feature carry no index snapshot, so
-  `--index` is a no-op for them (with a note).
+  encode.
   `--format=json` (a global flag, valid after any subcommand) emits a
   machine-readable result to stdout: on `list`, JSONL with keys `index`,
   `hash`, `message` (mirroring `branch --format=json`); on
@@ -883,8 +894,11 @@ Branches / refs:
 - `kit switch <branch>` / `kit switch -c|-C <new> [<start>]` &mdash; git's
   modern branch-switch UX; a thin front-end over `checkout` with the same
   clobber guard and output. `-c` creates (refuses to clobber), `-C`
-  create-or-resets, then switches. (`switch -`/`@{-1}` is a follow-up:
-  kit does not yet track a previous branch.)
+  create-or-resets, then switches. `switch -`, `switch @{-1}`, and
+  `checkout -` return to the previous HEAD, detached when it was detached.
+  A successful HEAD change atomically saves one previous HEAD in the local
+  per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
+  `no previous branch`. `@{-N}` for N greater than 1 is not supported.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`

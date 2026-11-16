@@ -16,6 +16,9 @@ _kit_complete() {
         local names
         names=$(kit __complete "${words[@]:1:$((cword - 1))}" 2>/dev/null)
         if [[ -n $names ]]; then
+            if [[ $cword -eq 2 && ( ${words[1]} == switch || ${words[1]} == checkout ) ]]; then
+                names+=$'\n-\n@{-1}'
+            fi
             COMPREPLY=( $(compgen -W "$names" -- "$cur") )
             return 0
         fi
@@ -175,7 +178,7 @@ _kit_complete() {
             fi
             ;;
         stash)
-            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show" -- "$cur") )
+            COMPREPLY=( $(compgen -W "save push list pop apply drop clear show -u --include-untracked -m --message" -- "$cur") )
             ;;
         remote)
             COMPREPLY=( $(compgen -W "add set remove rename get-url set-url -v --verbose --help" -- "$cur") )
@@ -228,10 +231,10 @@ _kit_complete() {
             COMPREPLY=( $(compgen -W "--commit --trust-roots --algorithm --help" -- "$cur") )
             ;;
         switch)
-            COMPREPLY=( $(compgen -W "-c -C --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-c -C - @{-1} --help" -- "$cur") )
             ;;
         checkout)
-            COMPREPLY=( $(compgen -W "-b -B -f --force --help" -- "$cur") )
+            COMPREPLY=( $(compgen -W "-b -B -f --force - @{-1} --help" -- "$cur") )
             ;;
         merge-base)
             COMPREPLY=( $(compgen -W "--is-ancestor --help" -- "$cur") )

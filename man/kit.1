@@ -879,12 +879,20 @@ a branch at
 .Ar start
 .Pq default HEAD
 and switch to it.
-.It Cm switch Ar branch
+.It Cm switch Ar branch | - | @{-1}
 Switch branches (git
 .Cm switch ) .
 A thin front-end over
 .Cm checkout
 with the same clobber guard and output.
+Use
+.Cm switch - , checkout - ,
+or
+.Cm switch @{-1}
+to return to the previous HEAD, detached if it was detached.
+Only one previous HEAD is stored, atomically, in the per-worktree
+.Pa PREVIOUS_HEAD
+file. Older selections are not supported.
 .It Cm switch Oo Fl c | Fl C Oc Ar new Op Ar start
 Create
 .Pq Fl c , or create-or-reset Fl C
@@ -1193,6 +1201,19 @@ renames a tree to a path that does not exist and updates its links.
 fixes the links of a tree that was moved by hand. On-disk format:
 .Pa docs/specs/SPEC-WORKTREE.md .
 .It Cm stash Oo Cm save | Cm push Fl m Ar msg | Cm list | Cm pop Oo Fl Fl index Oc Op Ar ref | Cm apply Oo Fl Fl index Oc Op Ar ref | Cm drop Op Ar ref | Cm clear | Cm show Op Ar ref Oc
+.Cm stash push Fl u
+or
+.Fl Fl include-untracked
+includes non-ignored untracked files (also included by default).
+.Fl a
+and
+.Fl Fl all
+are not supported.
+.Cm stash push Op Fl Fl Ar path ...
+saves only matching files or directory prefixes relative to the current directory.
+Other worktree files and staged entries stay unchanged.
+Pop and apply refuse existing untracked destinations before writing files.
+
 Save or restore a snapshot of working-tree changes.
 .Cm pop
 applies an entry and removes it;
@@ -1208,11 +1229,11 @@ also restores the staged state recorded when the stash was created (like
 .Cm stash pop Fl Fl index ) ,
 not just the worktree changes.
 .Cm save
-records that staged snapshot as the stash commit's second parent, so it
-needs no on-disk format change; stashes created before this feature carry
-no index snapshot and
-.Fl Fl index
-is a no-op for them.
+records that staged snapshot as the stash commit's second parent.
+Its local wrapper also records scope: one byte, 0 for a full stash or 1
+for selected paths. Full stashes retain the whole-worktree dirty guard;
+selected stashes check only saved paths.
+Entries without this marker cannot be applied; there is no compatibility reader.
 .Cm clear
 removes every stash entry.
 .Cm pop , Cm apply , Cm drop ,

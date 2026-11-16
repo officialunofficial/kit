@@ -103,7 +103,7 @@ fn bash_and_zsh_request_the_same_local_names() {
         ),
         (
             "zsh",
-            "compdef() { :; }; compadd() { print -rl -- $names; }; source \"$1/kit.zsh\"; words=(kit switch to); CURRENT=3; PREFIX=to; _kit",
+            "compdef() { :; }; compadd() { for name in $names; do [[ $name == ${PREFIX}* ]] && print -r -- $name; done; return 0; }; source \"$1/kit.zsh\"; words=(kit switch to); CURRENT=3; PREFIX=to; _kit",
         ),
     ] {
         let result = Command::new(shell)
@@ -122,5 +122,51 @@ fn bash_and_zsh_request_the_same_local_names() {
         };
         assert!(output.status.success(), "{shell}: {output:?}");
         assert_eq!(output.stdout, b"topic\n", "{shell}: {output:?}");
+    }
+}
+
+#[test]
+fn switch_completion_keeps_branch_names_and_previous_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let refs = dir.path().join(".kit/refs/heads");
+    std::fs::create_dir_all(&refs).unwrap();
+    std::fs::write(refs.join("topic"), format!("{}\n", "ab".repeat(32))).unwrap();
+    let completions = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../completions");
+    let path = format!(
+        "{}:{}",
+        std::path::Path::new(env!("CARGO_BIN_EXE_kit"))
+            .parent()
+            .unwrap()
+            .display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    for command in ["switch", "checkout"] {
+        for (shell, script) in [
+            (
+                "bash",
+                "source \"$1/kit.bash\"; command_name=$2; _init_completion() { words=(kit \"$command_name\" ''); cword=2; cur=''; }; _kit_complete; printf '%s\\n' \"${COMPREPLY[@]}\"",
+            ),
+            (
+                "zsh",
+                "compdef() { :; }; compadd() { print -rl -- $names; }; source \"$1/kit.zsh\"; words=(kit \"$2\" ''); CURRENT=3; PREFIX=''; _kit",
+            ),
+        ] {
+            let output = Command::new(shell)
+                .args(["-c", script, "test"])
+                .arg(&completions)
+                .arg(command)
+                .current_dir(dir.path())
+                .env("PATH", &path)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{shell} {command}: {output:?}");
+            let names = String::from_utf8(output.stdout).unwrap();
+            for expected in ["topic", "-", "@{-1}"] {
+                assert!(
+                    names.lines().any(|name| name == expected),
+                    "{shell} {command}: {names:?}"
+                );
+            }
+        }
     }
 }
