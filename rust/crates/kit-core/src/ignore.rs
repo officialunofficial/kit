@@ -332,17 +332,27 @@ impl IgnoreList {
         let (Some(root), Some(directory)) = (&self.root, &self.directory) else {
             return Ok(self.clone());
         };
-        let suffix = dir.strip_prefix(directory).map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+        let suffix = dir
+            .strip_prefix(directory)
+            .map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
         let mut list = self.clone();
         let mut current = directory.clone();
         for component in suffix.components() {
             if !matches!(component, std::path::Component::Normal(_)) {
-                return Err(IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, "ignore directory is not a descendant")));
+                return Err(IgnoreError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "ignore directory is not a descendant",
+                )));
             }
             current.push(component);
-            let prefix = current.strip_prefix(root).map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?
-                .to_string_lossy().replace('\\', "/");
-            if list.is_ignored_with_ancestors(&prefix, true) { break; }
+            let prefix = current
+                .strip_prefix(root)
+                .map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if list.is_ignored_with_ancestors(&prefix, true) {
+                break;
+            }
             let mut patterns = list.patterns;
             for name in [".gitignore", ".kitignore"] {
                 append_file(&mut patterns, &current.join(name), &prefix)?;
@@ -1271,6 +1281,23 @@ mod tests {
         assert!(!nested.is_ignored("sub/keep.log", false));
         assert!(nested.is_ignored("sub/local", false));
         assert!(!nested.is_ignored("other/local", false));
+    }
+
+    #[test]
+    fn directory_snapshots_keep_inherited_rules_after_files_change() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("sub/deep")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.env\n").unwrap();
+        fs::write(dir.path().join("sub/.gitignore"), "*.local\n").unwrap();
+        let root = load(dir.path()).unwrap();
+        let sub = root.load_directory(&dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "").unwrap();
+        fs::write(dir.path().join("sub/.gitignore"), "").unwrap();
+        let deep = sub.load_directory(&dir.path().join("sub/deep")).unwrap();
+        assert!(deep.is_ignored("sub/deep/private.env", false));
+        assert!(deep.is_ignored("sub/deep/private.local", false));
+        assert!(sub.load_directory(dir.path()).is_err());
+        assert!(sub.load_directory(&dir.path().join("sub/../other")).is_err());
     }
 
     // --- glob_match public helper --------------------------------------

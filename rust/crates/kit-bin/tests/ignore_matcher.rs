@@ -541,3 +541,21 @@ fn global_ignore_symlinks_are_followed_and_nested_ones_are_skipped() {
     assert!(out_str(&status).contains("sub/public"));
     assert!(out_str(&status).contains("sub/visible.skip"));
 }
+
+#[test]
+fn nested_kit_metadata_does_not_change_the_outer_ignore_scope() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("nested")).unwrap();
+    assert!(run_in(&root.join("nested"), x, &["init"]).status.success());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("nested/.kitignore"), "!keep.log\n").unwrap();
+    fs::write(root.join("nested/keep.log"), "keep").unwrap();
+    fs::write(root.join("nested/drop.log"), "ignore").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.lines().any(|p| p == "nested/keep.log"));
+    assert!(!tracked.lines().any(|p| p == "nested/drop.log"));
+    let others = out_str(&run_in(root, x, &["ls-files", "--others", "--exclude-standard"]));
+    assert!(!others.contains("nested/drop.log"));
+}

@@ -6,7 +6,11 @@ use std::process::Output;
 
 fn run(root: &Path, xdg: &Path, args: &[&str]) -> Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_kit"))
-        .args(args).current_dir(root).env("XDG_CONFIG_HOME", xdg).output().unwrap()
+        .args(args)
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", xdg)
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -26,9 +30,16 @@ fn checkout_keeps_files_ignored_before_ancestor_rules_change() {
     std::fs::write(root.join(".gitignore"), "*.env\n").unwrap();
     std::fs::write(root.join("config/tracked"), "current").unwrap();
     assert!(run(root, xdg, &["add", "."]).status.success());
-    assert!(run(root, xdg, &["commit", "-m", "protect local files"]).status.success());
+    assert!(
+        run(root, xdg, &["commit", "-m", "protect local files"])
+            .status
+            .success()
+    );
     std::fs::write(root.join("config/secret.env"), "private data").unwrap();
     let result = run(root, xdg, &["checkout", target.trim()]);
     assert!(result.status.success(), "{result:?}");
-    assert_eq!(std::fs::read_to_string(root.join("config/secret.env")).unwrap(), "private data");
+    assert_eq!(
+        std::fs::read_to_string(root.join("config/secret.env")).unwrap(),
+        "private data"
+    );
 }

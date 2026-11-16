@@ -655,7 +655,8 @@ where
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
-    let scoped = ignore.load_directory(target_dir)
+    let scoped = ignore
+        .load_directory(target_dir)
         .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
     let ignore = &scoped;
     let obj = store.read_object(&tree_hash)?;
@@ -4124,17 +4125,34 @@ mod tests {
         fs::write(target.path().join(".gitignore"), "*.env\n").unwrap();
         fs::create_dir(target.path().join("config")).unwrap();
         fs::write(target.path().join("config/secret.env"), "private data").unwrap();
-        let config = put_tree_with(&store, vec![TreeEntry {
-            name: b"tracked".to_vec(), mode: EntryMode::Blob,
-            object_hash: put_blob(&store, b"target"),
-        }]);
-        let tree = put_tree_with(&store, vec![
-            TreeEntry { name: b".gitignore".to_vec(), mode: EntryMode::Blob,
-                object_hash: put_blob(&store, b"") },
-            TreeEntry { name: b"config".to_vec(), mode: EntryMode::Tree, object_hash: config },
-        ]);
+        let config = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b".gitignore".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b""),
+                },
+                TreeEntry {
+                    name: b"config".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: config,
+                },
+            ],
+        );
         restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default()).unwrap();
-        assert_eq!(fs::read_to_string(target.path().join("config/secret.env")).unwrap(), "private data");
+        assert_eq!(
+            fs::read_to_string(target.path().join("config/secret.env")).unwrap(),
+            "private data"
+        );
     }
 
     #[test]
@@ -4563,6 +4581,4 @@ mod random_input_tests {
             assert_eq!(got, want, "round {round}");
         }
     }
-
-
 }

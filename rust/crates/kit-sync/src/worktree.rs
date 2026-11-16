@@ -483,7 +483,8 @@ pub(crate) fn check_restore_safe(
             let full_path = root.join(path);
             let parent = full_path.parent().unwrap_or(root);
             if !ignores.contains_key(parent) {
-                let local = ignore.load_directory(parent)
+                let local = ignore
+                    .load_directory(parent)
                     .map_err(|e| format!("read ignore file: {e}"))?;
                 ignores.insert(parent.to_path_buf(), local);
             }
