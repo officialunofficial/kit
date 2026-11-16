@@ -2522,6 +2522,16 @@ pub struct UpdateRefRequest {
     /// Field 5: `delete`
     #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
     pub delete: ::core::option::Option<bool>,
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.1).
+    ///
+    /// Field 6: `ticket_ids`
+    #[serde(
+        rename = "ticketIds",
+        alias = "ticket_ids",
+        with = "::buffa::json_helpers::proto_seq",
+        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    )]
+    pub ticket_ids: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -2534,6 +2544,7 @@ impl ::core::fmt::Debug for UpdateRefRequest {
             .field("expected_id", &self.expected_id)
             .field("new_id", &self.new_id)
             .field("delete", &self.delete)
+            .field("ticket_ids", &self.ticket_ids)
             .finish()
     }
 }
@@ -2628,6 +2639,9 @@ impl ::buffa::Message for UpdateRefRequest {
         if self.delete.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        for v in &self.ticket_ids {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -2652,6 +2666,9 @@ impl ::buffa::Message for UpdateRefRequest {
         }
         if let Some(v) = self.delete {
             ::buffa::types::put_bool_field(5u32, v, buf);
+        }
+        for v in &self.ticket_ids {
+            ::buffa::types::put_shared_bytes_field(6u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -2714,6 +2731,17 @@ impl ::buffa::Message for UpdateRefRequest {
                     ::buffa::types::decode_bool(buf)?,
                 );
             }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::decode_bytes(buf)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                self.ticket_ids.push(__elem);
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -2727,6 +2755,7 @@ impl ::buffa::Message for UpdateRefRequest {
         self.expected_id = ::core::option::Option::None;
         self.new_id = ::core::option::Option::None;
         self.delete = ::core::option::Option::None;
+        self.ticket_ids.clear();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -6465,6 +6494,15 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_tickets_per_advance: ::core::option::Option<u32>,
+    /// Ticketed attestmap writes and reads (STC §4.1); absent means unsupported.
+    ///
+    /// Field 23: `supports_attestations`
+    #[serde(
+        rename = "supportsAttestations",
+        alias = "supports_attestations",
+        skip_serializing_if = "::core::option::Option::is_none"
+    )]
+    pub supports_attestations: ::core::option::Option<bool>,
     #[serde(skip)]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
@@ -6494,6 +6532,7 @@ impl ::core::fmt::Debug for GetServerInfoResponse {
             .field("supports_pack_locations", &self.supports_pack_locations)
             .field("max_pack_location_lifetime_ms", &self.max_pack_location_lifetime_ms)
             .field("max_tickets_per_advance", &self.max_tickets_per_advance)
+            .field("supports_attestations", &self.supports_attestations)
             .finish()
     }
 }
@@ -6664,6 +6703,13 @@ impl GetServerInfoResponse {
         self.max_tickets_per_advance = Some(value);
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::supports_attestations`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_supports_attestations(mut self, value: bool) -> Self {
+        self.supports_attestations = Some(value);
+        self
+    }
 }
 ::buffa::impl_default_instance!(GetServerInfoResponse);
 impl ::buffa::MessageName for GetServerInfoResponse {
@@ -6751,6 +6797,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         if let Some(v) = self.max_tickets_per_advance {
             size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
         }
+        if self.supports_attestations.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -6826,6 +6875,9 @@ impl ::buffa::Message for GetServerInfoResponse {
         }
         if let Some(v) = self.max_tickets_per_advance {
             ::buffa::types::put_uint32_field(22u32, v, buf);
+        }
+        if let Some(v) = self.supports_attestations {
+            ::buffa::types::put_bool_field(23u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -7052,6 +7104,15 @@ impl ::buffa::Message for GetServerInfoResponse {
                     ::buffa::types::decode_uint32(buf)?,
                 );
             }
+            23u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.supports_attestations = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -7082,6 +7143,7 @@ impl ::buffa::Message for GetServerInfoResponse {
         self.supports_pack_locations = ::core::option::Option::None;
         self.max_pack_location_lifetime_ms = ::core::option::Option::None;
         self.max_tickets_per_advance = ::core::option::Option::None;
+        self.supports_attestations = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
