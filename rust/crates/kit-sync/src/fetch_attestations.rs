@@ -17,27 +17,38 @@ use std::{
     path::Path,
 };
 
+#[derive(Clone, Copy)]
+pub(crate) enum Snapshot {
+    Unavailable,
+    Read(Option<Hash>),
+}
+impl Snapshot {
+    pub(crate) fn head(self) -> Option<Hash> {
+        match self { Self::Read(head) => head, Self::Unavailable => None }
+    }
+}
+
 pub(crate) fn snapshot(
     source: &dyn RemoteSource,
     options: &SyncOptions,
     report: &mut FetchReport,
-) -> Option<Option<Hash>> {
+) -> Snapshot {
     if !options.attestations {
-        return Some(None);
+        return Snapshot::Read(None);
     }
     if !source.supports_attestations() {
         report
             .attestation_warnings
             .push("remote does not support attestations; skipped".into());
-        return None;
+        return Snapshot::Unavailable;
     }
     match source.read_ref(ATTESTMAP_REF) {
-        Ok(head) => Some(head),
+        Ok(head) => Snapshot::Read(head),
         Err(error) => {
             report
                 .attestation_warnings
                 .push(format!("cannot read attestation log: {error}"));
-            None
+            Snapshot::Unavailable
         }
     }
 }
@@ -58,13 +69,13 @@ pub(crate) fn run(
     remote: &str,
     options: &SyncOptions,
     lock_wait: &LockWait,
-    snapshot: Option<Option<Hash>>,
+    snapshot: Snapshot,
     report: &mut FetchReport,
 ) -> bool {
     if !options.attestations {
         return true;
     }
-    let Some(head) = snapshot else {
+    let Snapshot::Read(head) = snapshot else {
         return false;
     };
     let result = process(
@@ -208,7 +219,7 @@ struct Reader<'a> {
 }
 impl Read for Reader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let len = (self.pack.len() - self.offset).min(buf.len() as u64) as usize;
+        let len = usize::try_from(self.pack.len() - self.offset).unwrap_or(usize::MAX).min(buf.len());
         self.pack.read_at(self.offset, &mut buf[..len])?;
         self.offset += len as u64;
         Ok(len)
@@ -228,7 +239,14 @@ fn process_pack(
     report: &mut FetchReport,
 ) -> Result<(), Failure> {
     let mut spool = kit_core::pack::PackSpool::create(&store.spool_dir(), max)?;
-    source.download_pack(&PackKey::from_hash(key), ATTESTMAP_REF, &mut spool)?;
+    let downloaded = source.download_pack(&PackKey::from_hash(key), ATTESTMAP_REF, &mut spool);
+    if let Some(kind) = spool.failed() { return Err(std::io::Error::from(kind).into()); }
+    downloaded.map_err(|error| -> Failure {
+        match error {
+            crate::SourceError::PayloadTooLarge(_) => kit_attest::pack::PackError::Invalid("wire size limit").into(),
+            other => other.into(),
+        }
+    })?;
     if let Some(kind) = spool.failed() {
         return Err(std::io::Error::from(kind).into());
     }
@@ -274,7 +292,9 @@ fn process_pack(
         staged.read_exact(&mut subject)?;
         staged.read_exact(&mut id)?;
         staged.read_exact(&mut len)?;
-        let mut bytes = vec![0; u64::from_le_bytes(len) as usize];
+        let len = usize::try_from(u64::from_le_bytes(len))?;
+        if len > kit_attest::store::MAX_ENVELOPE_SIZE { return Err("staged envelope size limit".into()); }
+        let mut bytes = vec![0; len];
         staged.read_exact(&mut bytes)?;
         if !store.contains(&subject) {
             report.attestations_dropped += 1;

@@ -89,6 +89,7 @@ use kit_core::store::SyncPolicy;
 /// [`SyncOptions::default`] and set the fields you need.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // Independent fetch policy switches.
 pub struct SyncOptions {
     /// Verify the Ed25519 signature of every commit, remix and tag the call
     /// introduces. `true` by default; failing closed on an unsigned or invalid

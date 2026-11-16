@@ -719,7 +719,7 @@ fn fetch_objects_inner(
                 tags: options.tags,
                 tag_digest,
                 attestations: options.attestations,
-                attestmap_head: snapshot.flatten(),
+                attestmap_head: snapshot.head(),
             };
             let _ = record.persist(&cursor_path);
         }
