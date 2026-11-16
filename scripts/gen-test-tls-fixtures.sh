@@ -18,6 +18,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 targets=(
   "${repo_root}/rust/crates/kit-bin/tests/support/fixtures/ca"
   "${repo_root}/rust/crates/kit-transport-connect/tests/fixtures/ca"
+  "${repo_root}/rust/crates/kit-transport-s3/tests/fixtures/ca"
 )
 days=3650
 
@@ -39,7 +40,7 @@ printf '%s\n' \
   "extendedKeyUsage=serverAuth" \
   "subjectAltName=DNS:localhost" >"${work}/server.ext"
 openssl x509 -req -in "${work}/server.csr" -CA "${work}/ca.crt" -CAkey "${work}/ca.key" \
-  -CAcreateserial -sha256 -days "$days" -extfile "${work}/server.ext" \
+  -CAcreateserial -sha256 -days 825 -extfile "${work}/server.ext" \
   -out "${work}/server.crt" 2>/dev/null
 openssl pkcs8 -topk8 -nocrypt -inform PEM -outform DER \
   -in "${work}/server.key" -out "${work}/server-pk8.der"

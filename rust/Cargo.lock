@@ -2615,6 +2615,7 @@ dependencies = [
  "md-5",
  "mockito",
  "reqwest",
+ "rustls",
  "serde_json",
  "sha2",
  "tokio",
