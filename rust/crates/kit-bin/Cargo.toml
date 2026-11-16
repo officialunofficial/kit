@@ -194,6 +194,7 @@ kit-keystore = { version = "=0.8.1", path = "../kit-keystore", features = ["back
 # reading src/cli.rs. No external deps — plain file I/O + string match.
 
 [dev-dependencies]
+kit-core = { version = "=0.8.1", path = "../kit-core", features = ["fault-injection"] }
 tempfile = "3.27.0"
 kit-test-util = { path = "../kit-test-util" }
 # `reader_budget_fit` reads the packs of a push back through the client reader.

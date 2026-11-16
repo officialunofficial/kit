@@ -108,7 +108,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # KIT_RUN_NATIVE_KEYSTORE_TESTS), the Docker-based S3 test and the
 # recorders and profiling tools that run by hand. Some of these panic when
 # their gate is unset, so a plain run would fail.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_kit_ssh_url|second_mutating_command_blocks_on_worktree_lock|gc_blocks_on_a_sibling_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|chunked_id_at_the_chunk_cap_is_pinned/) or binary(pack_entry_cost) or binary(pack_file_memory) or binary(pack_file_no_regression) or binary(large_file_clone) or binary(ssh_s3_streaming) or binary(connect_streaming_memory)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_kit_ssh_url|second_mutating_command_blocks_on_worktree_lock|gc_blocks_on_a_sibling_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|chunked_id_at_the_chunk_cap_is_pinned|many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/) or binary(pack_entry_cost) or binary(pack_file_memory) or binary(pack_file_no_regression) or binary(large_file_clone) or binary(ssh_s3_streaming) or binary(connect_streaming_memory)'
 # Run the tests one at a time, so their real timers and sockets do not
 # contend. Only localhost networking is needed.
 test-threads = 1
@@ -160,3 +160,8 @@ threads-required = "num-test-threads"
 [[profile.ci.overrides]]
 filter = 'binary(pack_entry_cost)'
 threads-required = "num-test-threads"
+
+# Proof-boundary assertions build large valid inputs before refusing one byte.
+[[profile.ignored-lane.overrides]]
+filter = 'test(/many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/)'
+slow-timeout = { period = "120s", terminate-after = 5 }

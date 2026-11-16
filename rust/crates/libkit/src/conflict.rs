@@ -685,6 +685,17 @@ pub fn reset_paths(
     op_result_tree: Option<Hash>,
 ) -> Result<(), Error> {
     let root = layout.worktree_root();
+    kit_core::ops::restore::check_nested_repositories(
+        store,
+        target_tree,
+        root,
+        &kit_core::ops::restore::RestoreOptions {
+            clean: false,
+            ..Default::default()
+        },
+        None,
+    )
+    .map_err(|error| Error::Worktree(format!("restore: {error}")))?;
 
     let target_idx = index::from_tree(store, target_tree).map_err(Error::ReadTargetTree)?;
     let target_map: HashMap<&str, &IndexEntry> = target_idx

@@ -125,10 +125,10 @@ pub enum Error {
     Serialize(KitError),
     /// An object cannot be stored.
     #[error("store: {0}")]
-    Store(StoreError),
+    Store(#[source] StoreError),
     /// A file cannot be stored.
     #[error("store: {0}")]
-    StoreFile(WorktreeError),
+    StoreFile(#[source] WorktreeError),
     /// A path is not a regular file or a symlink.
     #[error("not a regular file: {}", .0.display())]
     NotRegular(PathBuf),
@@ -158,7 +158,7 @@ pub enum Error {
     },
     /// The index cannot be written.
     #[error("write index: {0}")]
-    WriteIndex(IndexError),
+    WriteIndex(#[source] IndexError),
     /// `patch` names a path that is not a regular file.
     #[error("-p/--patch supports regular files only: {0}")]
     PatchRegularOnly(String),

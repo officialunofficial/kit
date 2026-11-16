@@ -15,12 +15,65 @@ use libkit::{
 
 use crate::exit;
 
+/// Find a full-disk I/O error through the typed operation wrappers.
+pub(crate) fn is_full_disk(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::StorageFull)
+        {
+            return true;
+        }
+        let io = if let Some(StoreError::Io(io)) = error.downcast_ref::<StoreError>() {
+            Some(io)
+        } else if let Some(WorktreeError::Io(io)) = error.downcast_ref::<WorktreeError>() {
+            Some(io)
+        } else if let Some(kit_core::index::IndexError::Io(io)) =
+            error.downcast_ref::<kit_core::index::IndexError>()
+        {
+            Some(io)
+        } else if let Some(kit_core::ops::restore::RestoreError::Io(io)) =
+            error.downcast_ref::<kit_core::ops::restore::RestoreError>()
+        {
+            Some(io)
+        } else {
+            None
+        };
+        if io.is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull) {
+            return true;
+        }
+        if let Some(WorktreeError::Store(inner)) = error.downcast_ref::<WorktreeError>() {
+            return is_full_disk(inner);
+        }
+        if let Some(kit_core::ops::restore::RestoreError::Store(inner)) =
+            error.downcast_ref::<kit_core::ops::restore::RestoreError>()
+        {
+            return is_full_disk(inner);
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
+    }
+}
+
+// Metadata helpers and tracked-file refresh return text. Compare the platform
+// I/O rendering at those boundaries.
+pub(crate) fn full_disk_text(message: &str) -> bool {
+    let errno = if cfg!(windows) { 112 } else { 28 };
+    message.contains(&std::io::Error::from_raw_os_error(errno).to_string())
+        || message.contains(&std::io::Error::from(std::io::ErrorKind::StorageFull).to_string())
+}
+
 /// The exit code for `error`.
 ///
 /// An error variant that this table does not list yet fails closed with
 /// [`exit::GENERAL_ERROR`].
 #[must_use]
 pub fn exit_code(error: &libkit::Error) -> u8 {
+    if is_full_disk(error) || full_disk_text(&error.to_string()) {
+        return exit::IOERR;
+    }
     match error {
         libkit::Error::Repo(inner) => repo_exit_code(inner),
         libkit::Error::Revspec(inner) => revspec_exit_code(inner),
@@ -657,6 +710,9 @@ fn repo_exit_code(error: &repo::Error) -> u8 {
 /// The text that follows `error: ` on stderr for `error`.
 #[must_use]
 pub fn message(error: &libkit::Error) -> String {
+    if is_full_disk(error) || full_disk_text(&error.to_string()) {
+        return format!("out of space: free disk space and retry: {error}");
+    }
     match error {
         libkit::Error::Repo(repo::Error::Discover(inner)) => {
             format!("worktree discovery: {inner}")
@@ -1097,6 +1153,17 @@ mod tests {
             (keys::Error::SecretHexLength.into(), exit::DATAERR),
             (keys::Error::SecretHexDigit.into(), exit::DATAERR),
         ]
+    }
+
+    #[test]
+    fn full_disk_has_an_io_exit_and_an_actionable_message() {
+        let error = libkit::Error::from(libkit::add::Error::StoreFile(
+            kit_core::worktree::WorktreeError::Io(std::io::Error::from(
+                std::io::ErrorKind::StorageFull,
+            )),
+        ));
+        assert_eq!(super::exit_code(&error), 74);
+        assert!(super::message(&error).contains("out of space"));
     }
 
     #[cfg(feature = "git-bridge")]

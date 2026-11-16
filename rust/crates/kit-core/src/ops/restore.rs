@@ -820,8 +820,7 @@ pub fn restore_tree(
 ///
 /// # Errors
 /// Returns a restore error when a target tree cannot be read or a directory
-/// that would be replaced contains repository metadata. A clean sparse restore
-/// also refuses directory spellings that differ between the tree and disk.
+/// that would be replaced contains repository metadata. A restore also refuses path aliases on the destination filesystem.
 pub fn check_nested_repositories(
     store: &ObjectStore,
     tree: Hash,
@@ -849,23 +848,28 @@ fn check_nested_repositories_inner(
     let Object::Tree(tree) = store.read_object(&tree)? else {
         return Err(RestoreError::NotATree);
     };
+    check_name_collisions(&tree.entries, dir, prefix)?;
     let base = base.and_then(|hash| store.read_object(&hash).ok());
-    let disk_names = if options.clean && options.sparse_patterns.is_some() {
-        match fs::read_dir(dir) {
-            Ok(entries) => Some(
-                entries
-                    .map(|entry| entry.map(|entry| entry.file_name()))
-                    .collect::<io::Result<std::collections::HashSet<_>>>()?,
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        None
-    };
+    let disk_names = directory_names(dir)?;
     for entry in &tree.entries {
         if !TreeEntry::validate_name(&entry.name) {
             continue;
+        }
+        let target =
+            dir.join(std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?);
+        if disk_names
+            .as_ref()
+            .is_some_and(|names| !names.contains(target.file_name().unwrap_or_default()))
+            && fs::symlink_metadata(&target).is_ok()
+        {
+            if entry.mode == EntryMode::Tree && options.clean && options.sparse_patterns.is_some() {
+                return Err(RestoreError::SparseDirectoryAlias(name_path(
+                    prefix,
+                    std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?,
+                )));
+            }
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                format!("restore path '{}' has a different spelling on disk; rename it to match the tree", name_path(prefix, std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?))).into());
         }
         let base_entry = match &base {
             Some(Object::Tree(tree)) => tree_entry(tree, &entry.name),
@@ -893,6 +897,9 @@ fn check_nested_repositories_inner(
         // A non-directory ancestor is replaced by the restore. Its descendants
         // do not exist yet; following a symlink here would inspect another tree.
         if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+            if is_tree {
+                check_new_tree_names(store, entry.object_hash, dir, &path, depth + 1)?;
+            }
             if is_tree && let Some(count) = count.as_deref_mut() {
                 *count += count_restore_files(
                     store,
@@ -908,16 +915,6 @@ fn check_nested_repositories_inner(
             continue;
         }
         if is_tree {
-            // The gate sees names on disk; the sweep uses tree prefixes. On a
-            // case-insensitive or normalization-insensitive filesystem those
-            // spellings can select different sparse paths. Refuse before any
-            // writes instead of letting the sweep delete an unchecked path.
-            if disk_names
-                .as_ref()
-                .is_some_and(|names| !names.contains(std::ffi::OsStr::new(name)))
-            {
-                return Err(RestoreError::SparseDirectoryAlias(path));
-            }
             check_nested_repositories_inner(
                 store,
                 entry.object_hash,
@@ -932,6 +929,93 @@ fn check_nested_repositories_inner(
             )?;
         } else if let Some(entry) = nested_repository(&target)? {
             return Err(RestoreError::NestedRepository(name_path(&path, &entry)));
+        }
+    }
+    Ok(())
+}
+
+fn directory_names(
+    dir: &Path,
+) -> io::Result<Option<std::collections::HashSet<std::ffi::OsString>>> {
+    if !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(None);
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<_>>()
+            .map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+// A missing directory, or a non-directory to replace, has no disk names to
+// inspect. Check all its descendant names against the nearest real directory's
+// filesystem without following the path that the restore will replace.
+fn check_new_tree_names(
+    store: &ObjectStore,
+    tree: Hash,
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    check_name_collisions(&tree.entries, dir, prefix)?;
+    for entry in tree.entries {
+        if entry.mode == EntryMode::Tree && TreeEntry::validate_name(&entry.name) {
+            let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+            check_new_tree_names(
+                store,
+                entry.object_hash,
+                dir,
+                &name_path(prefix, name),
+                depth + 1,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// Probe only potentially colliding names, on the destination filesystem. The
+// private directory is removed before any worktree path is changed. This also
+// catches normalization aliases on filesystems that equate Unicode spellings.
+fn check_name_collisions(entries: &[TreeEntry], dir: &Path, prefix: &str) -> RestoreResult<()> {
+    let mut folded = std::collections::HashSet::new();
+    let ambiguous = entries
+        .iter()
+        .any(|entry| !entry.name.is_ascii() || !folded.insert(entry.name.to_ascii_lowercase()));
+    if !ambiguous {
+        return Ok(());
+    }
+    let parent = dir
+        .ancestors()
+        .find(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "restore parent does not exist"))?;
+    let probe = tempfile::tempdir_in(parent)?;
+    for entry in entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        match fs::create_dir(probe.path().join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "restore path '{}' aliases another tree entry on this filesystem",
+                        name_path(prefix, name)
+                    ),
+                )
+                .into());
+            }
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -2090,6 +2174,71 @@ mod tests {
     fn put_tree_with(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn restore_refuses_case_aliases_before_writing_any_tracked_file() {
+        let (_repo, store) = fresh_store();
+        for (existing, nested) in [(false, false), (true, false), (false, true), (true, true)] {
+            let dir = TempDir::new().unwrap();
+            fs::write(dir.path().join("probe"), b"probe").unwrap();
+            if !dir.path().join("PROBE").exists() {
+                return;
+            }
+            fs::remove_file(dir.path().join("probe")).unwrap();
+            fs::write(dir.path().join("aaa"), b"keep").unwrap();
+            let target = if nested {
+                dir.path().join("new")
+            } else {
+                dir.path().to_path_buf()
+            };
+            if existing {
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("readme"), b"keep readme").unwrap();
+            }
+            let blob = put_blob(&store, b"new");
+            let mut entries = vec![TreeEntry {
+                name: b"README".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }];
+            if !existing {
+                entries.push(TreeEntry {
+                    name: b"readme".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: blob,
+                });
+            }
+            let mut tree = put_tree_with(&store, entries);
+            let mut root_entries = if nested {
+                vec![TreeEntry {
+                    name: b"new".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: tree,
+                }]
+            } else {
+                let Object::Tree(tree) = store.read_object(&tree).unwrap() else {
+                    panic!("tree");
+                };
+                tree.entries
+            };
+            root_entries.push(TreeEntry {
+                name: b"aaa".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            });
+            root_entries.sort_by(|a, b| a.name.cmp(&b.name));
+            tree = put_tree_with(&store, root_entries);
+            let result =
+                restore_tree_to_worktree(&store, &tree, dir.path(), &RestoreOptions::default());
+            assert!(result.is_err(), "case alias was accepted");
+            assert_eq!(fs::read(dir.path().join("aaa")).unwrap(), b"keep");
+            if existing {
+                assert_eq!(fs::read(target.join("readme")).unwrap(), b"keep readme");
+            } else {
+                assert!(!target.join("README").exists());
+            }
+        }
     }
 
     #[test]
