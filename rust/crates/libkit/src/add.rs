@@ -848,16 +848,7 @@ fn route_path(
     // A path that is named and ignored needs `force`. A path that is tracked
     // is never ignored.
     let already_tracked = previous_status != EntryStatus::Removed && existing_pos.is_some();
-    let local;
-    let ignores = if !force && !already_tracked {
-        local = ignores
-            .load_directory(abs.parent().unwrap_or(root))
-            .map_err(Error::IgnoreFile)?;
-        &local
-    } else {
-        ignores
-    };
-    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
+    if !force && !already_tracked && is_ignored_untracked(ignores, &abs, &rel_str, meta.is_dir())? {
         return Err(Error::Ignored(rel_str));
     }
     // A tracked file whose time, size and mode class match is staged to the
@@ -971,6 +962,17 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
     };
     idx.remove_directory_conflicts(&entry.path);
     idx.upsert_entry(entry);
+}
+
+fn is_ignored_untracked(
+    ignores: &IgnoreList,
+    path: &Path,
+    relative: &str,
+    is_dir: bool,
+) -> Result<bool, Error> {
+    let scoped = ignores.load_directory(path.parent().unwrap_or(path))
+        .map_err(Error::IgnoreFile)?;
+    Ok(scoped.is_ignored_with_ancestors(relative, is_dir))
 }
 
 /// Walk `dir` using metadata and link targets. Record a placeholder for each
@@ -1142,16 +1144,7 @@ fn patch_one_file(
     let already_tracked = idx
         .find_entry(&rel_str)
         .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed);
-    let local;
-    let ignores = if !force && !already_tracked {
-        local = ignores
-            .load_directory(abs.parent().unwrap_or(root))
-            .map_err(Error::IgnoreFile)?;
-        &local
-    } else {
-        ignores
-    };
-    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, false) {
+    if !force && !already_tracked && is_ignored_untracked(ignores, &abs, &rel_str, false)? {
         return Err(Error::Ignored(rel_str));
     }
 
