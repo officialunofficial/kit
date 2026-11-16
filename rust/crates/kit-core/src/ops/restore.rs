@@ -103,8 +103,16 @@ pub enum RestoreError {
     /// the repository's `.kit` or `.git` entry, relative to the restore
     /// root. The restore refuses rather than remove the repository; a
     /// caller's safety gate refuses the same case before the restore starts.
-    #[error("restore would remove untracked path '{0}'; move or remove it first")]
+    #[error(
+        "restore would remove untracked path '{0}'; move or delete '{dir}', which holds a repository, and run the command again",
+        dir = .0.rsplit_once('/').map_or(".", |(dir, _)| dir)
+    )]
     NestedRepository(String),
+    /// A sparse sweep would use a different directory spelling than its gate.
+    #[error(
+        "sparse restore directory '{0}' has a different spelling on disk; rename it to match the tree and run the command again"
+    )]
+    SparseDirectoryAlias(String),
 }
 
 /// Result alias.
@@ -192,26 +200,13 @@ pub fn matches_sparse(patterns: &[SparsePattern], path: &str, is_dir: bool) -> b
 /// descendants. Used to short-circuit recursion under sparse mode.
 #[must_use]
 pub fn could_match_descendant(patterns: &[SparsePattern], dir_prefix: &str) -> bool {
-    for pat in patterns {
-        if pat.negated {
-            continue;
-        }
-        if pat.pattern.starts_with(dir_prefix) {
-            return true;
-        }
-        if dir_prefix.starts_with(&pat.pattern) {
-            return true;
-        }
-        if !dir_prefix.is_empty()
-            && !dir_prefix.ends_with('/')
-            && pat.pattern.len() > dir_prefix.len()
-            && pat.pattern.starts_with(dir_prefix)
-            && pat.pattern.as_bytes()[dir_prefix.len()] == b'/'
-        {
-            return true;
-        }
-    }
-    false
+    patterns.iter().filter(|pat| !pat.negated).any(|pat| {
+        path_matches_pattern(&pat.pattern, dir_prefix)
+            || pat
+                .pattern
+                .strip_prefix(dir_prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// Load patterns from `<repo_root>/.kit/sparse-checkout`. Returns
@@ -492,6 +487,7 @@ where
         skipped_subtrees(store, *tree, base, root, "", 0, &mut skipped)?;
         check_unswept(store, skipped, &ignore_list)?;
     }
+    check_nested_repositories(store, *tree, root, opts, base_tree)?;
     fs::create_dir_all(root)?;
     let mut report = RestoreReport::default();
     restore_tree_to_worktree_inner(
@@ -669,8 +665,114 @@ pub fn restore_tree(
     target_dir: &Path,
     options: &RestoreOptions,
 ) -> RestoreResult<()> {
+    check_nested_repositories(store, tree_hash, target_dir, options, None)?;
     fs::create_dir_all(target_dir)?;
     restore_tree_inner(store, tree_hash, target_dir, options, "")
+}
+
+/// Refuse a file or symlink write over a directory holding a repository before
+/// changing the worktree. Callers that change HEAD or the index first must call
+/// this before those changes too. Symlink directories are never followed.
+///
+/// # Errors
+/// Returns a restore error when a target tree cannot be read or a directory
+/// that would be replaced contains repository metadata. A clean sparse restore
+/// also refuses directory spellings that differ between the tree and disk.
+pub fn check_nested_repositories(
+    store: &ObjectStore,
+    tree: Hash,
+    root: &Path,
+    options: &RestoreOptions,
+    base: Option<Hash>,
+) -> RestoreResult<()> {
+    check_nested_repositories_inner(store, tree, root, options, base, "", 0)
+}
+
+fn check_nested_repositories_inner(
+    store: &ObjectStore,
+    tree: Hash,
+    dir: &Path,
+    options: &RestoreOptions,
+    base: Option<Hash>,
+    prefix: &str,
+    depth: usize,
+) -> RestoreResult<()> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    let base = base.and_then(|hash| store.read_object(&hash).ok());
+    let disk_names = if options.clean && options.sparse_patterns.is_some() {
+        match fs::read_dir(dir) {
+            Ok(entries) => Some(
+                entries
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<io::Result<std::collections::HashSet<_>>>()?,
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    for entry in &tree.entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let base_entry = match &base {
+            Some(Object::Tree(tree)) => tree_entry(tree, &entry.name),
+            _ => None,
+        };
+        if base_entry.is_some_and(|e| e.mode == entry.mode && e.object_hash == entry.object_hash) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let path = name_path(prefix, name);
+        let is_tree = entry.mode == EntryMode::Tree;
+        if options.sparse_patterns.as_deref().is_some_and(|patterns| {
+            if is_tree {
+                !could_match_descendant(patterns, &path)
+            } else {
+                !matches_sparse(patterns, &path, false)
+            }
+        }) {
+            continue;
+        }
+        let target = dir.join(name);
+        // A non-directory ancestor is replaced by the restore. Its descendants
+        // do not exist yet; following a symlink here would inspect another tree.
+        if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
+        if is_tree {
+            // The gate sees names on disk; the sweep uses tree prefixes. On a
+            // case-insensitive or normalization-insensitive filesystem those
+            // spellings can select different sparse paths. Refuse before any
+            // writes instead of letting the sweep delete an unchecked path.
+            if disk_names
+                .as_ref()
+                .is_some_and(|names| !names.contains(std::ffi::OsStr::new(name)))
+            {
+                return Err(RestoreError::SparseDirectoryAlias(path));
+            }
+            check_nested_repositories_inner(
+                store,
+                entry.object_hash,
+                &target,
+                options,
+                base_entry
+                    .filter(|e| e.mode == EntryMode::Tree)
+                    .map(|e| e.object_hash),
+                &path,
+                depth + 1,
+            )?;
+        } else if let Some(entry) = nested_repository(&target)? {
+            return Err(RestoreError::NestedRepository(name_path(&path, &entry)));
+        }
+    }
+    Ok(())
 }
 
 fn restore_tree_inner(
@@ -1706,7 +1808,12 @@ fn clean_directory(
             } else {
                 format!("{path_prefix}/{}", item.name)
             };
-            sweep_unlisted_dir(&path, &prefix, ignore.unwrap_or(&no_ignore_rules));
+            sweep_unlisted_dir(
+                &path,
+                &prefix,
+                ignore.unwrap_or(&no_ignore_rules),
+                sparse_patterns,
+            );
         } else {
             let _ = fs::remove_file(&path);
         }
@@ -1728,7 +1835,12 @@ fn is_repository_name(name: &str) -> bool {
 /// A directory that holds a `.kit` or `.git` entry of any type is a nested
 /// repository, and the sweep leaves it and everything in it, as `git clean
 /// -d` does without a second `-f`.
-fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
+fn sweep_unlisted_dir(
+    dir: &Path,
+    prefix: &str,
+    ignore: &IgnoreList,
+    sparse_patterns: Option<&[SparsePattern]>,
+) {
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
@@ -1752,8 +1864,14 @@ fn sweep_unlisted_dir(dir: &Path, prefix: &str, ignore: &IgnoreList) {
         if ignore.is_ignored_with_ancestors(&rel, meta.is_dir()) {
             continue;
         }
+        if sparse_patterns.is_some_and(|patterns| {
+            !(matches_sparse(patterns, &rel, meta.is_dir())
+                || (meta.is_dir() && could_match_descendant(patterns, &rel)))
+        }) {
+            continue;
+        }
         if meta.is_dir() {
-            sweep_unlisted_dir(&entry.path(), &rel, ignore);
+            sweep_unlisted_dir(&entry.path(), &rel, ignore, sparse_patterns);
         } else {
             let _ = fs::remove_file(entry.path());
         }
@@ -2325,6 +2443,8 @@ mod tests {
         assert!(could_match_descendant(&p, "src"));
         assert!(could_match_descendant(&p, "src/lib"));
         assert!(!could_match_descendant(&p, "tests"));
+        assert!(!could_match_descendant(&p, "src/library"));
+        assert!(!could_match_descendant(&p, "src3"));
     }
 
     #[test]

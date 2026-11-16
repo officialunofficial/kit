@@ -396,23 +396,114 @@ pub(crate) fn check_restore_safe(
         }
     }
 
-    if options.clean
-        && let Some(path) = worktree_paths.iter().find(|path| {
-            !index_tracks_path_or_descendant(&tracked, path)
+    if options.clean {
+        let mut kept = std::collections::HashMap::new();
+        for path in &worktree_paths {
+            if !index_tracks_path_or_descendant(&tracked, path)
                 && restore_affects_path(options, path)
-                && *path != ".kitignore"
-                && *path != ".gitignore"
-                // A directory is judged by its descendants, which this list
-                // also holds; the sweep keeps one that holds ignored files.
+                && path != ".kitignore"
+                && path != ".gitignore"
                 && (expected.refuse_untracked_dirs || !is_real_dir(path))
                 && !is_ignored_worktree_path(root, &ignore, path)
                 && (!expected.restore_temp_files || !is_restore_temp(root, &tracked, path))
-        })
-    {
-        return Err((expected.refusals.remove_untracked)(path));
+                && !sweep_keeps_path(store, target_tree, root, path, &mut kept)
+                    .map_err(|e| format!("check untracked repository at '{path}': {e}"))?
+            {
+                return Err((expected.refusals.remove_untracked)(path));
+            }
+        }
     }
 
     Ok(())
+}
+
+/// Only an unlisted directory with its own metadata marker is kept whole.
+/// A listed directory is swept, even when it has a metadata marker; an
+/// ancestor of a nested repository may also have files the sweep removes.
+fn sweep_keeps_path(
+    store: &ObjectStore,
+    target: Hash,
+    root: &Path,
+    path: &str,
+    cache: &mut std::collections::HashMap<String, bool>,
+) -> Result<bool, String> {
+    let mut path = Some(path);
+    while let Some(candidate) = path {
+        let kept = if let Some(kept) = cache.get(candidate) {
+            *kept
+        } else {
+            let dir = root.join(candidate);
+            let mut holds_repository = false;
+            if fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
+                for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                    let name = entry.map_err(|e| e.to_string())?.file_name();
+                    if name.to_str().is_some_and(|name| {
+                        name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git")
+                    }) {
+                        holds_repository = true;
+                        break;
+                    }
+                }
+            }
+            let kept = holds_repository && !target_lists_directory(store, target, root, candidate)?;
+            cache.insert(candidate.to_string(), kept);
+            kept
+        };
+        if kept {
+            return Ok(true);
+        }
+        path = candidate.rsplit_once('/').map(|(parent, _)| parent);
+    }
+    Ok(false)
+}
+
+fn target_lists_directory(
+    store: &ObjectStore,
+    mut tree: Hash,
+    root: &Path,
+    path: &str,
+) -> Result<bool, String> {
+    let mut dir = root.to_path_buf();
+    for (depth, name) in path.split('/').enumerate() {
+        if depth > kit_core::store::MAX_TREE_DEPTH {
+            return Err("tree nesting exceeds the depth limit".into());
+        }
+        let Object::Tree(entries) = store.read_object(&tree).map_err(|e| e.to_string())? else {
+            return Err("restore target is not a tree".into());
+        };
+        let entry = entries.entries.iter().find(|entry| {
+            entry.mode == EntryMode::Tree
+                && (entry.name.eq_ignore_ascii_case(name.as_bytes())
+                    || std::str::from_utf8(&entry.name).is_ok_and(|target_name| {
+                        directory_alias(&dir.join(target_name), &dir.join(name))
+                    }))
+        });
+        let Some(entry) = entry else { return Ok(false) };
+        tree = entry.object_hash;
+        dir.push(name);
+    }
+    Ok(true)
+}
+
+// Unix file identity handles casefold directories even when realpath preserves
+// the spelling supplied by the caller. Other targets also compare names without
+// ASCII case above, conservatively refusing more on case-sensitive filesystems.
+fn directory_alias(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::symlink_metadata(left), fs::symlink_metadata(right)) {
+            (Ok(a), Ok(b)) => a.is_dir() && b.is_dir() && a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (fs::canonicalize(left), fs::canonicalize(right)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// How a tree differs from the expected trees.

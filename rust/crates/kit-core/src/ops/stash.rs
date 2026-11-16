@@ -210,13 +210,7 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
         None => None,
     };
     let root = layout.worktree_root();
-    if head_tree.is_some() {
-        for e in &diff_trees(store, Some(tree_hash), head_tree)?.entries {
-            if e.kind == DiffKind::Added && path_blocked(root, &e.path) {
-                return Err(StashError::IgnoredPathInTheWay(e.path.clone()));
-            }
-        }
-    }
+    check_reset_paths(store, head_tree, tree_hash, root)?;
 
     // Prepend the new entry.
     let mut list = read_list(layout)?;
@@ -252,6 +246,36 @@ pub fn save(store: &ObjectStore, layout: &RepoLayout, message: &str) -> StashRes
 
     // Clear the index.
     let _ = index::write_index(layout, &Index::new());
+    Ok(())
+}
+
+fn check_reset_paths(
+    store: &ObjectStore,
+    head_tree: Option<Hash>,
+    tree_hash: Hash,
+    root: &std::path::Path,
+) -> StashResult<()> {
+    if let Some(tree) = head_tree {
+        restore::check_nested_repositories(
+            store,
+            tree,
+            root,
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            None,
+        )?;
+    }
+
+    if head_tree.is_some() {
+        for e in &diff_trees(store, Some(tree_hash), head_tree)?.entries {
+            if e.kind == DiffKind::Added && path_blocked(root, &e.path) {
+                return Err(StashError::IgnoredPathInTheWay(e.path.clone()));
+            }
+        }
+    }
+
     Ok(())
 }
 

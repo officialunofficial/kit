@@ -185,6 +185,18 @@ pub fn run(args: &[String]) -> u8 {
         }
     }
 
+    if opts.hard
+        && let Err(e) = kit_core::ops::restore::check_nested_repositories(
+            &store,
+            tree_hash,
+            &cwd,
+            &restore_opts,
+            None,
+        )
+    {
+        return emit_err(&format!("reset worktree: {e}"), exit::CANTCREAT);
+    }
+
     // If reset moves the branch off its current tip, that old tip may
     // become unreachable — record it BEFORE the move (under the worktree
     // lock) so it stays recoverable, and abort if the log can't be

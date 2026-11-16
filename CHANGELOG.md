@@ -179,6 +179,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Pull and clean restore accept untracked files inside nested repositories they
+  preserve, while still refusing paths they would overwrite or remove.
+
+- Forced checkout, hard reset and stash save refuse repository conflicts before
+  changing files, the index or HEAD, and explain how to resolve the conflict.
+
+- Sparse checkout preserves untracked files outside its selected paths, including
+  files beneath directories that contain selected descendants.
+
 - A restore no longer removes a nested repository, which is a `.kit` or
   `.git` entry of any type (a `.git` file included) and the directory that
   holds it. The clean sweep leaves an untracked directory that holds one

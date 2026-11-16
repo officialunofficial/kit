@@ -2023,10 +2023,90 @@ fn sparse_checkout_roundtrips_patterns() {
     );
 }
 
-/// The sparse sweep enters an untracked directory that a pattern could match
-/// under, here `vendor3` for the pattern `vendor`, whose plain prefix test
-/// in `could_match_descendant` matches it. It leaves a nested repository
-/// there whole, its files beside `.git` included.
+#[test]
+fn sparse_checkout_preserves_notes_under_a_case_alias() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    fs::create_dir(root.join("vendor")).unwrap();
+    if !root.join("Vendor").exists() {
+        // This case needs a filesystem that resolves both spellings.
+        return;
+    }
+    init_repo(root);
+    make_commit(root, "vendor/a", b"a\n", "base");
+    fs::rename(root.join("vendor"), root.join("renaming")).unwrap();
+    fs::rename(root.join("renaming"), root.join("Vendor")).unwrap();
+    fs::write(root.join("Vendor/notes.txt"), b"mine\n").unwrap();
+    let out = run_in(root, &["sparse-checkout", "set", "vendor/notes.txt"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("different spelling on disk"),
+        "{out:?}"
+    );
+    assert!(!root.join(".kit/sparse-checkout").exists());
+    assert_eq!(
+        fs::read(root.join("Vendor/notes.txt")).unwrap(),
+        b"mine\n",
+        "{out:?}"
+    );
+}
+
+#[test]
+fn sparse_checkout_vendor_preserves_vendor3_notes() {
+    let td = tempfile::tempdir().unwrap();
+    init_repo(td.path());
+    fs::create_dir(td.path().join("vendor")).unwrap();
+    make_commit(td.path(), "vendor/a", b"a\n", "base");
+    fs::create_dir(td.path().join("vendor3")).unwrap();
+    fs::write(td.path().join("vendor3/notes.txt"), b"mine\n").unwrap();
+    let out = run_in(td.path(), &["sparse-checkout", "set", "vendor"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        fs::read(td.path().join("vendor3/notes.txt")).unwrap(),
+        b"mine\n"
+    );
+}
+
+#[test]
+fn sparse_checkout_keeps_unselected_untracked_files() {
+    for pattern in ["vendor", "vendor/", "vendor/deep", "Vendor"] {
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        fs::create_dir_all(td.path().join("vendor/deep")).unwrap();
+        make_commit(td.path(), "vendor/deep/a", b"a\n", "c1");
+        for path in [
+            "vendor3/notes.txt",
+            "vendor/other/notes.txt",
+            "vendor/deep3/notes.txt",
+        ] {
+            let path = td.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"mine\n").unwrap();
+        }
+        let out = run_in(td.path(), &["sparse-checkout", "set", pattern]);
+        // Patterns selecting an untracked file must refuse; others preserve it.
+        if !out.status.success() {
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("untracked"),
+                "{out:?}"
+            );
+        }
+        for path in [
+            "vendor3/notes.txt",
+            "vendor/other/notes.txt",
+            "vendor/deep3/notes.txt",
+        ] {
+            assert_eq!(
+                fs::read(td.path().join(path)).unwrap(),
+                b"mine\n",
+                "{pattern}: {path}"
+            );
+        }
+    }
+}
+
+/// The sweep enters an untracked directory to reach a selected descendant,
+/// and preserves the nested repository and its unselected files.
 #[test]
 fn sparse_checkout_set_leaves_a_nested_repository() {
     let td = tempfile::tempdir().unwrap();
@@ -2039,7 +2119,7 @@ fn sparse_checkout_set_leaves_a_nested_repository() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"mine\n").unwrap();
     }
-    let out = run_in(td.path(), &["sparse-checkout", "set", "vendor"]);
+    let out = run_in(td.path(), &["sparse-checkout", "set", "vendor3/selected"]);
     assert!(out.status.success(), "sparse set failed: {out:?}");
     for path in nested {
         assert_eq!(fs::read(td.path().join(path)).unwrap(), b"mine\n", "{path}");
@@ -2227,4 +2307,48 @@ fn tag_create_collision_is_rejected() {
         stderr.contains("already exists"),
         "expected collision diagnostic, got: {stderr}"
     );
+}
+
+#[test]
+fn repository_conflict_refuses_before_files_index_or_head_change() {
+    for args in [
+        vec!["checkout", "-f", "HEAD~1"],
+        vec!["reset", "--hard", "-f", "HEAD~1"],
+        vec!["stash", "push"],
+    ] {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        init_repo(root);
+        make_commit(root, "vendor", b"file\n", "base");
+        make_commit(root, "a", b"before\n", "next");
+        fs::write(root.join("a"), b"local\n").unwrap();
+        fs::remove_file(root.join("vendor")).unwrap();
+        fs::create_dir_all(root.join("vendor/deep/.git")).unwrap();
+        fs::write(root.join("vendor/deep/.git/HEAD"), b"ref\n").unwrap();
+        fs::write(root.join("vendor/README"), b"mine\n").unwrap();
+        let head = fs::read(root.join(".kit/HEAD")).unwrap();
+        let branch = head_hash(root);
+        let index = fs::read(root.join(".kit/index")).unwrap();
+        let out = run_in(root, &args);
+        assert!(!out.status.success(), "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("vendor/deep/.git"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("move or delete 'vendor/deep'"),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            stderr.contains("run the command again"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(fs::read(root.join("a")).unwrap(), b"local\n");
+        assert_eq!(fs::read(root.join("vendor/README")).unwrap(), b"mine\n");
+        assert_eq!(
+            fs::read(root.join("vendor/deep/.git/HEAD")).unwrap(),
+            b"ref\n"
+        );
+        assert_eq!(fs::read(root.join(".kit/HEAD")).unwrap(), head);
+        assert_eq!(head_hash(root), branch);
+        assert_eq!(fs::read(root.join(".kit/index")).unwrap(), index);
+    }
 }
