@@ -254,7 +254,9 @@ fn process_pack(
     }
     downloaded.map_err(|error| -> Failure {
         match error {
-            error if error.is_not_found() => kit_attest::pack::PackError::Invalid("listed pack is missing").into(),
+            error if error.is_not_found() => {
+                kit_attest::pack::PackError::Invalid("listed pack is missing").into()
+            }
             crate::SourceError::PayloadTooLarge(_) => {
                 kit_attest::pack::PackError::Invalid("wire size limit").into()
             }
@@ -304,41 +306,77 @@ fn process_pack(
     save_staged(&mut staged, store, layout, observer, lock_wait, report)
 }
 
-struct StagedEnvelope { subject: Hash, id: Hash, bytes: Vec<u8> }
+struct StagedEnvelope {
+    subject: Hash,
+    id: Hash,
+    bytes: Vec<u8>,
+}
 
 fn read_staged(staged: &mut std::fs::File, total: u64) -> Result<Option<StagedEnvelope>, Failure> {
-    if staged.stream_position()? == total { return Ok(None); }
-    let mut subject = [0; 32]; let mut id = [0; 32]; let mut len = [0; 8];
-    staged.read_exact(&mut subject)?; staged.read_exact(&mut id)?; staged.read_exact(&mut len)?;
+    if staged.stream_position()? == total {
+        return Ok(None);
+    }
+    let mut subject = [0; 32];
+    let mut id = [0; 32];
+    let mut len = [0; 8];
+    staged.read_exact(&mut subject)?;
+    staged.read_exact(&mut id)?;
+    staged.read_exact(&mut len)?;
     let len = usize::try_from(u64::from_le_bytes(len))?;
-    if len > kit_attest::store::MAX_ENVELOPE_SIZE { return Err("staged envelope size limit".into()); }
-    let mut bytes = vec![0; len]; staged.read_exact(&mut bytes)?;
+    if len > kit_attest::store::MAX_ENVELOPE_SIZE {
+        return Err("staged envelope size limit".into());
+    }
+    let mut bytes = vec![0; len];
+    staged.read_exact(&mut bytes)?;
     Ok(Some(StagedEnvelope { subject, id, bytes }))
 }
 
-fn save_staged(staged: &mut std::fs::File, store: &ObjectStore, layout: &RepoLayout,
-    observer: &dyn Observer<SyncEvent>, lock_wait: &LockWait, report: &mut FetchReport) -> Result<(), Failure> {
+fn save_staged(
+    staged: &mut std::fs::File,
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    observer: &dyn Observer<SyncEvent>,
+    lock_wait: &LockWait,
+    report: &mut FetchReport,
+) -> Result<(), Failure> {
     staged.seek(SeekFrom::Start(0))?;
     let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
     let total = staged.metadata()?.len();
     let mut prepared = BTreeSet::new();
     while let Some(entry) = read_staged(staged, total)? {
-        if observer.cancelled() { return Err("interrupted".into()); }
-        if !store.contains(&entry.subject) { report.attestations_dropped += 1; continue; }
+        if observer.cancelled() {
+            return Err("interrupted".into());
+        }
+        if !store.contains(&entry.subject) {
+            report.attestations_dropped += 1;
+            continue;
+        }
         // Existing envelopes retain their provenance and require no writes.
-        if kit_attest::store::envelope_path(layout, &entry.subject, &entry.id).try_exists()? { continue; }
-        if !prepared.insert(entry.id) { continue; }
+        if kit_attest::store::envelope_path(layout, &entry.subject, &entry.id).try_exists()? {
+            continue;
+        }
+        if !prepared.insert(entry.id) {
+            continue;
+        }
         let marker = attestation_records::fetched_path(layout, &entry.id);
         let parent = marker.parent().ok_or("missing provenance directory")?;
         std::fs::create_dir_all(parent)?;
-        let file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&marker) {
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => std::fs::File::open(&marker)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::File::open(&marker)?
+            }
             Err(error) => return Err(error.into()),
         };
         file.sync_all()?;
     }
-    if prepared.is_empty() { return Ok(()); }
+    if prepared.is_empty() {
+        return Ok(());
+    }
     // Every marker and its ancestor directory is durable before any envelope
     // becomes visible. Directory syncs are shared by this pack's markers.
     crate::applied_packs::sync_parent_dir(&layout.attestations_dir().join(".fetched"))?;
@@ -346,7 +384,9 @@ fn save_staged(staged: &mut std::fs::File, store: &ObjectStore, layout: &RepoLay
     crate::applied_packs::sync_parent_dir(layout.common_dir())?;
     staged.seek(SeekFrom::Start(0))?;
     while let Some(entry) = read_staged(staged, total)? {
-        if observer.cancelled() { return Err("interrupted".into()); }
+        if observer.cancelled() {
+            return Err("interrupted".into());
+        }
         if prepared.remove(&entry.id) {
             kit_attest::store::save(layout, &entry.subject, &entry.bytes)?;
             report.attestations_stored += 1;

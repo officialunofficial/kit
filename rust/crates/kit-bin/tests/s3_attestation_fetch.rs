@@ -6,12 +6,12 @@ include!("../../kit-sync/tests/support/attestation_fetch.rs");
 #[test]
 #[allow(clippy::too_many_lines)] // One transport round trip and its HTTP fixture.
 fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
-    use std::fmt::Write as _;
     use kit_core::{
         hash::{Hash, to_hex},
         protocol::{PackKey, Transport},
         refs::ATTESTMAP_REF,
     };
+    use std::fmt::Write as _;
     let memory = kit_transport_memory::MemoryTransport::new();
     let (tip, _) = attestation_fetch::code(&memory);
     let env = attestation_fetch::envelope(tip);

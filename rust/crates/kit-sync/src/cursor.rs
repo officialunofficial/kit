@@ -34,7 +34,7 @@ pub struct CursorRecord {
     pub tags: bool,
     /// [`tag_digest`] after the fetch.
     pub tag_digest: Hash,
-    /// Whether attestations were requested.
+    /// Whether attestations were requested and supported by the source.
     pub attestations: bool,
     /// Snapshot of the completely processed attestation log.
     pub attestmap_head: Option<Hash>,

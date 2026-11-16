@@ -412,30 +412,77 @@ fn oversized_node_warns_without_replacing_a_completed_checkpoint() {
 #[test]
 fn clone_resumes_after_fetch_stores_envelopes_before_checkout() {
     let tx = kit_transport_memory::MemoryTransport::new();
-    let (tip, _) = attestation_fetch::code(&tx); let env = attestation_fetch::envelope(tip);
+    let (tip, _) = attestation_fetch::code(&tx);
+    let env = attestation_fetch::envelope(tip);
     attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
     let temp = tempfile::tempdir().unwrap();
-    let remote = descriptor(); kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
+    let remote = descriptor();
+    kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
     let source = kit_sync::TransportSource::new(&tx);
-    let mut options = kit_sync::SyncOptions::default(); options.remote_url.clone_from(&remote.url);
-    kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
-    let report = kit_sync::clone(temp.path(), &source, &remote, &options, &kit_sync::NoopObserver).unwrap();
-    assert_eq!(kit_core::refs::resolve_head(&kit_core::layout::RepoLayout::single(temp.path())).unwrap(), Some(tip));
+    let mut options = kit_sync::SyncOptions::default();
+    options.remote_url.clone_from(&remote.url);
+    kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    let report = kit_sync::clone(
+        temp.path(),
+        &source,
+        &remote,
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        kit_core::refs::resolve_head(&kit_core::layout::RepoLayout::single(temp.path())).unwrap(),
+        Some(tip)
+    );
     assert!(report.pull.fetch.attestation_warnings.is_empty());
 }
 
 #[test]
 fn missing_pack_is_rejected_without_blocking_newer_envelopes_or_cursor() {
-    use kit_core::{protocol::{Transport, PackKey}, refs::{ATTESTMAP_REF, RefWriteCondition}};
+    use kit_core::{
+        protocol::{PackKey, Transport},
+        refs::{ATTESTMAP_REF, RefWriteCondition},
+    };
     let tx = kit_transport_memory::MemoryTransport::new();
-    let (tip, _) = attestation_fetch::code(&tx); let env = attestation_fetch::envelope(tip);
-    let node = kit_core::transfer::encode_packlist(None, &[[123;32]]).unwrap();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let env = attestation_fetch::envelope(tip);
+    let node = kit_core::transfer::encode_packlist(None, &[[123; 32]]).unwrap();
     let key = kit_core::hash::hash(&node);
-    tx.upload_blob(&node, &PackKey::from_hash(key), None).unwrap(); tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &key).unwrap();
+    tx.upload_blob(&node, &PackKey::from_hash(key), None)
+        .unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &key)
+        .unwrap();
     attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
-    let temp = tempfile::tempdir().unwrap(); kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
-    let source = kit_sync::TransportSource::new(&tx); let options = kit_sync::SyncOptions::default();
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
-    assert_eq!(report.attestations_stored, 1); assert_eq!(report.attestations_rejected, 1);
-    assert!(kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap().remote_unchanged);
+    let temp = tempfile::tempdir().unwrap();
+    kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let source = kit_sync::TransportSource::new(&tx);
+    let options = kit_sync::SyncOptions::default();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.attestations_stored, 1);
+    assert_eq!(report.attestations_rejected, 1);
+    assert!(
+        kit_sync::fetch(
+            temp.path(),
+            &source,
+            "origin",
+            &options,
+            &kit_sync::NoopObserver
+        )
+        .unwrap()
+        .remote_unchanged
+    );
 }
