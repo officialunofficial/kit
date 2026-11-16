@@ -273,7 +273,10 @@ impl<'a> HostPolicy<'a> {
     }
     fn observe_intent(&self, intent: Option<kit_client::WriteIntent<'_>>) {
         if let Some(intent) = intent
-            && matches!(intent.procedure, kit_client::procedures::ADVANCE_REFS | kit_client::procedures::UPDATE_REF)
+            && matches!(
+                intent.procedure,
+                kit_client::procedures::ADVANCE_REFS | kit_client::procedures::UPDATE_REF
+            )
         {
             self.advance_ticketed.set(intent.ticketed);
         }
@@ -473,7 +476,8 @@ impl WriteRecovery for HostPolicy<'_> {
         if (matches!(
             error,
             SourceError::PendingVerification { .. } | SourceError::MembershipNotVisible
-        ) && !(procedure.ends_with("/AdvanceRefs") || (procedure.ends_with("/UpdateRef") && self.advance_ticketed.get())))
+        ) && !(procedure.ends_with("/AdvanceRefs")
+            || (procedure.ends_with("/UpdateRef") && self.advance_ticketed.get())))
             || (matches!(error, SourceError::MembershipNotVisible) && !self.advance_ticketed.get())
             || matches!(error, SourceError::RetryAfter { .. })
         {
@@ -765,8 +769,15 @@ impl HostSource<'_> {
     }
 }
 impl RemoteSource for HostSource<'_> {
-    fn supports_attestations(&self) -> bool { self.0.supports_attestations() }
-    fn write_attestmap(&self, condition: kit_core::refs::RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+    fn supports_attestations(&self) -> bool {
+        self.0.supports_attestations()
+    }
+    fn write_attestmap(
+        &self,
+        condition: kit_core::refs::RefWriteCondition,
+        tip: &Hash,
+        keys: &[kit_core::protocol::PackKey],
+    ) -> Result<(), SourceError> {
         self.0.write_attestmap(condition, tip, keys)
     }
 

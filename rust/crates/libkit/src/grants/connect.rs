@@ -709,14 +709,37 @@ mod tests {
 
     #[test]
     fn attestmap_uses_exact_update_grants_and_prefers_force_for_compaction() {
-        let grant = |scope: &str| header(&format!("{NS}/photos"), "write", scope, NOW, NOW + 100_000, "https://git.example.com", KEY);
-        let refs = [GrantRef::new(kit_core::refs::ATTESTMAP_REF, GrantCondition::Match)];
+        let grant = |scope: &str| {
+            header(
+                &format!("{NS}/photos"),
+                "write",
+                scope,
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            )
+        };
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
         let request = request(GrantOperation::Write { refs: &refs });
         let update = grant("refs/kit/attestmap=u");
         let force = grant("refs/kit/attestmap=f");
-        assert_eq!(LocalGrants::from_headers(vec![update.clone()]).select_at(&request, NOW), Some(update.clone()));
-        assert_eq!(LocalGrants::from_headers(vec![update, force.clone()]).select_at(&request, NOW), Some(force));
-        assert!(LocalGrants::from_headers(vec![grant("refs/kit/*=f")]).select_at(&request, NOW).is_none());
+        assert_eq!(
+            LocalGrants::from_headers(vec![update.clone()]).select_at(&request, NOW),
+            Some(update.clone())
+        );
+        assert_eq!(
+            LocalGrants::from_headers(vec![update, force.clone()]).select_at(&request, NOW),
+            Some(force)
+        );
+        assert!(
+            LocalGrants::from_headers(vec![grant("refs/kit/*=f")])
+                .select_at(&request, NOW)
+                .is_none()
+        );
     }
 
     #[test]
