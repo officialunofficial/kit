@@ -60,7 +60,7 @@ pub enum IgnoreError {
     #[error("ignore file too large (>{MAX_IGNORE_FILE_BYTES} bytes)")]
     FileTooLarge,
     /// The ignore files hold more than [`MAX_IGNORE_PATTERNS`] patterns.
-    #[error("ignore file has more than {MAX_IGNORE_PATTERNS} patterns")]
+    #[error("ignore rules have more than {MAX_IGNORE_PATTERNS} patterns")]
     TooManyPatterns,
     /// A pattern line is longer than [`MAX_IGNORE_PATTERN_BYTES`].
     #[error("ignore pattern is longer than {MAX_IGNORE_PATTERN_BYTES} bytes")]
@@ -437,12 +437,12 @@ fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
     if let Some(config) = config {
-        append_file(&mut patterns, &config.join("git/ignore"), "")?;
+        append_external(&mut patterns, &config.join("git/ignore"))?;
     }
     if root.join(".kit").exists() {
         let layout =
             crate::layout::discover(root).map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
-        append_file(&mut patterns, &layout.common_dir().join("info/exclude"), "")?;
+        append_external(&mut patterns, &layout.common_dir().join("info/exclude"))?;
     }
     let mut dirs: Vec<_> = dir
         .ancestors()
@@ -469,8 +469,21 @@ fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
     Ok(list)
 }
 
+fn append_external(patterns: &mut Vec<Pattern>, path: &Path) -> Result<(), IgnoreError> {
+    append_patterns(patterns, load_one(path, true)?, "")
+}
+
 fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result<(), IgnoreError> {
-    if let Some(list) = load_one(path)? {
+    // Git does not follow worktree ignore symlinks. Keep the root file's
+    // strict rejection, but skip a nested symlink rather than following it.
+    if !prefix.is_empty() && fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(());
+    }
+    append_patterns(patterns, load_one(path, false)?, prefix)
+}
+
+fn append_patterns(patterns: &mut Vec<Pattern>, list: Option<IgnoreList>, prefix: &str) -> Result<(), IgnoreError> {
+    if let Some(list) = list {
         if patterns.len() + list.patterns.len() > MAX_IGNORE_PATTERNS {
             return Err(IgnoreError::TooManyPatterns);
         }
@@ -507,8 +520,8 @@ fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result
 /// The file must be a regular file. A symlink, device or FIFO is an
 /// error: `/dev/zero` reports length 0 and would never end. The read
 /// itself is capped, so a file that grows after the check stays bounded.
-fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
-    let meta = match fs::symlink_metadata(path) {
+fn load_one(path: &Path, follow: bool) -> Result<Option<IgnoreList>, IgnoreError> {
+    let meta = match if follow { fs::metadata(path) } else { fs::symlink_metadata(path) } {
         Ok(m) => m,
         Err(e)
             if matches!(

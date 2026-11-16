@@ -26,7 +26,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
-
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
 

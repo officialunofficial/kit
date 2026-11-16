@@ -520,3 +520,21 @@ fn malformed_nested_ignore_aborts_clean_before_deleting_any_file() {
     assert!(!cleaned.status.success(), "{cleaned:?}");
     assert!(root.join("victim").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn global_ignore_symlinks_are_followed_and_nested_ones_are_skipped() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(x.join("git")).unwrap();
+    fs::write(x.join("rules"), "*.local\n").unwrap();
+    std::os::unix::fs::symlink(x.join("rules"), x.join("git/ignore")).unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    std::os::unix::fs::symlink(x.join("rules"), root.join("sub/.gitignore")).unwrap();
+    fs::write(root.join("sub/private.local"), "ignore").unwrap();
+    fs::write(root.join("sub/public"), "keep").unwrap();
+    let status = run_in(root, x, &["status", "--porcelain"]);
+    assert!(status.status.success(), "{status:?}");
+    assert!(!out_str(&status).contains("private.local"));
+    assert!(out_str(&status).contains("sub/public"));
+}
