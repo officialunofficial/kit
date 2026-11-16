@@ -410,8 +410,12 @@ fn write_pull_head(
 ) -> Result<(), SyncError> {
     let index = crate::worktree::read_or_seed_index_from_head(layout, store)
         .map_err(SyncError::RestoreSafety)?;
-    let before_tree = kit_core::worktree::build_tree_from_index_with(store, store, &index, false)
-        .map_err(|e| SyncError::RestoreSafety(e.to_string()))?;
+    // The restore-safety check already opened every indexed object. Reuse
+    // HEAD here to avoid opening unchanged objects again for the recovery tree.
+    let base = current_head_tree(layout, store).map_err(SyncError::RestoreSafety)?;
+    let before_tree =
+        kit_core::worktree::build_tree_from_index_against(store, store, &index, false, base)
+            .map_err(|e| SyncError::RestoreSafety(e.to_string()))?;
     crate::applied_packs::write_atomic(
         &layout.pull_head_file(),
         &PullState {
@@ -436,6 +440,63 @@ mod recovery_message_tests {
         assert_eq!(
             super::pull_recovery_changes_message("a b"),
             "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tree_write_tests {
+    #[test]
+    fn pull_tree_write_reuses_head_but_checks_a_mode_change() {
+        use kit_core::{index, layout::RepoLayout, object::*, refs, serialize, store::ObjectStore};
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        refs::init(&layout).unwrap();
+        let put = |object| {
+            store
+                .write(&serialize::serialize(&object).unwrap())
+                .unwrap()
+        };
+        let blob = put(Object::Blob(Blob {
+            data: b"keep".to_vec(),
+        }));
+        let tree = put(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        }));
+        let commit = put(Object::Commit(Commit::new_unannotated(
+            tree,
+            vec![],
+            Identity::ed25519([1; 32]),
+            [1; 32],
+            b"base".to_vec(),
+            1,
+            [0; 64],
+        )));
+        refs::write_ref(&layout, "main", &commit).unwrap();
+        refs::write_head_branch(&layout, "main").unwrap();
+        let mut idx = index::read_or_seed_from_head(&layout, &store).unwrap();
+        std::fs::remove_file({
+            let hex = kit_core::hash::to_hex(&blob);
+            layout.objects_dir().join(&hex[..2]).join(&hex[2..])
+        })
+        .unwrap();
+        super::write_pull_head(&layout, &store, commit).unwrap();
+        let state = kit_core::ops::pull_state::PullState::decode(
+            &std::fs::read(layout.pull_head_file()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(state.before_tree, tree);
+        idx.entries[0].status = index::EntryStatus::Executable;
+        index::write_index(&layout, &idx).unwrap();
+        let error = super::write_pull_head(&layout, &store, commit).unwrap_err();
+        assert!(
+            matches!(error, crate::error::SyncError::RestoreSafety(ref message) if message.contains("not found")),
+            "{error}"
         );
     }
 }

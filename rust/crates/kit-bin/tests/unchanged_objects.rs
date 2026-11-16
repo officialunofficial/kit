@@ -48,11 +48,12 @@ fn repo(change: &dyn Fn(&Path)) -> tempfile::TempDir {
 type Change<'a> = (&'a str, &'a dyn Fn(&Path));
 
 /// Remove the object `HEAD` names at `path` from the store.
-fn lose_object(dir: &Path, path: &str) {
+fn lose_object(dir: &Path, path: &str) -> String {
     let out = ok(dir, &["ls-tree", "-r", "HEAD", path]);
     let line = String::from_utf8(out.stdout).unwrap();
     let hash = line.split_whitespace().nth(2).unwrap().to_string();
     fs::remove_file(dir.join(".kit/objects").join(&hash[..2]).join(&hash[2..])).unwrap();
+    hash
 }
 
 #[test]
@@ -192,4 +193,53 @@ fn a_sparse_checkout_refuses_a_lost_object_before_writing() {
     assert!(String::from_utf8(out.stderr).unwrap().contains("not found"));
     assert_eq!(fs::read(dir.join(".kit/HEAD")).unwrap(), head);
     assert_eq!(fs::read(dir.join("a.txt")).unwrap(), b"alpha\n");
+}
+
+#[test]
+fn cached_diff_skips_unchanged_objects_but_reads_changed_content() {
+    let td = repo(&|dir| {
+        fs::write(dir.join("b.txt"), b"other\n").unwrap();
+        ok(dir, &["add", "b.txt"]);
+    });
+    let dir = td.path();
+    let lost = lose_object(dir, "a.txt");
+    ok(dir, &["diff", "--cached"]);
+    fs::write(dir.join("b.txt"), b"staged\n").unwrap();
+    ok(dir, &["add", "b.txt"]);
+    let out = ok(dir, &["diff", "--cached"]);
+    assert!(String::from_utf8(out.stdout).unwrap().contains("+staged"));
+    // A read of the lost object still refuses it.
+    assert!(!run_in(dir, &["cat", &lost]).status.success());
+    assert!(!run_in(dir, &["closure", "verify", "HEAD"]).status.success());
+}
+
+#[test]
+fn cached_diff_leaves_unchanged_corruption_to_verifying_reads() {
+    let td = repo(&|dir| {
+        fs::write(dir.join("b.txt"), b"other\n").unwrap();
+        ok(dir, &["add", "b.txt"]);
+    });
+    let dir = td.path();
+    let out = ok(dir, &["ls-tree", "-r", "HEAD", "a.txt"]);
+    let line = String::from_utf8(out.stdout).unwrap();
+    let hash = line.split_whitespace().nth(2).unwrap();
+    let path = dir.join(".kit/objects").join(&hash[..2]).join(&hash[2..]);
+    let mut bytes = fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    fs::write(path, bytes).unwrap();
+    ok(dir, &["diff", "--cached"]);
+    for args in [vec!["cat", hash], vec!["closure", "verify", "HEAD"]] {
+        let out = run_in(dir, &args);
+        assert!(!out.status.success());
+        let message = format!(
+            "{}{}",
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap()
+        );
+        assert!(
+            message.contains("bytes hash to") && message.contains(hash),
+            "{args:?}: {message}"
+        );
+    }
 }

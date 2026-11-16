@@ -396,7 +396,7 @@ fn resolve_endpoints(
             return Err(Error::UnknownRevision(first.clone()));
         }
         let head = head_tree(repo)?;
-        let staged = staged_tree(repo, snapshot)?;
+        let staged = staged_tree(repo, snapshot, head)?;
         return Ok((head, staged, args.to_vec()));
     }
 
@@ -580,11 +580,16 @@ fn head_tree(repo: &Repo) -> Result<Option<Hash>, Error> {
     }
 }
 
-/// The staged tree. The diff only shows it, so the tree is not hashed again.
-/// A read verifies each object that it touches.
-fn staged_tree(repo: &Repo, snapshot: &EphemeralSink<'_>) -> Result<Option<Hash>, Error> {
+/// The staged tree opens only entries that differ from HEAD by path, mode
+/// or object id. The diff publishes nothing; a read verifies each object
+/// that it touches.
+fn staged_tree(
+    repo: &Repo,
+    snapshot: &EphemeralSink<'_>,
+    base: Option<Hash>,
+) -> Result<Option<Hash>, Error> {
     let index = index::read_or_seed_from_head(repo.layout(), repo.store()).map_err(Error::Index)?;
-    worktree::build_tree_from_index_with(repo.store(), snapshot, &index, false)
+    worktree::build_tree_from_index_against(repo.store(), snapshot, &index, false, base)
         .map(Some)
         .map_err(Error::BuildIndexTree)
 }

@@ -419,3 +419,33 @@ mod marker_scan {
         );
     }
 }
+
+#[test]
+fn abort_refuses_a_missing_unchanged_object_before_resetting_a_resolution() {
+    let p = pause(
+        &[("a.txt", "base\n"), ("b.txt", "keep\n")],
+        &[("a.txt", "ours\n"), ("b.txt", "keep\n")],
+        &[("a.txt", "theirs\n"), ("b.txt", "keep\n")],
+    );
+    let records = materialize(&p, &NoopObserver);
+    p.f.write("a.txt", "my resolution\n");
+    let idx = index::read_index(&p.f.layout).unwrap();
+    let h = idx
+        .entries
+        .iter()
+        .find(|e| e.path == "b.txt")
+        .unwrap()
+        .object_hash;
+    let hex = kit_core::hash::to_hex(&h);
+    std::fs::remove_file(p.f.layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let error = conflict::ensure_abort_safe(
+        &p.f.layout,
+        &p.f.store,
+        &records,
+        p.ours_tree,
+        Some(p.result.tree_hash),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("not found"), "{error}");
+    assert_eq!(p.f.read("a.txt"), "my resolution\n");
+}

@@ -72,6 +72,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `kit diff --cached` and the pull recovery-tree write open only
+  staged objects that differ from `HEAD`. Reads and full restores still check
+  the objects they need.
+
 - The local index limit is 256 MiB, enough for 2 million files with 64-byte
   average paths. Older kits refuse indexes above 64 MiB with
   `index file too large (>67108864 bytes)`; the on-disk format is unchanged.
