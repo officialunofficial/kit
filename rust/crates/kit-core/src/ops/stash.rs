@@ -439,6 +439,7 @@ pub fn pop(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResult<
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
+    check_untracked_restore(store, layout, &entry)?;
     // Record the popped commit in the recovery log BEFORE removing the
     // manifest entry: restored worktree files are not crash-durable
     // (ops/restore writes them unflushed), and the manifest entry is
@@ -527,12 +528,33 @@ pub fn apply(store: &ObjectStore, layout: &RepoLayout, idx: usize) -> StashResul
     let Object::Commit(commit) = obj else {
         return Err(StashError::NotACommit);
     };
+    check_untracked_restore(store, layout, &entry)?;
     restore::restore_tree_to_worktree(
         store,
         &commit.tree_hash,
         layout.worktree_root(),
         &RestoreOptions::default(),
     )?;
+    Ok(())
+}
+
+// Untracked additions must never overwrite an existing file, even one with
+// identical bytes. Check every destination before restoring any path.
+fn check_untracked_restore(store: &ObjectStore, layout: &RepoLayout, entry: &StashEntry) -> StashResult<()> {
+    let base = if entry.parent_hash == ZERO { None } else {
+        match store.read_object(&entry.parent_hash)? {
+            Object::Commit(c) => Some(c.tree_hash),
+            _ => return Err(StashError::NotACommit),
+        }
+    };
+    let Object::Commit(c) = store.read_object(&entry.commit_hash)? else {
+        return Err(StashError::NotACommit);
+    };
+    for e in diff_trees(store, base, Some(c.tree_hash))?.entries {
+        if e.kind == DiffKind::Added && path_blocked(layout.worktree_root(), &e.path) {
+            return Err(StashError::Io(io::Error::other(format!("untracked path '{}' would be overwritten", e.path))));
+        }
+    }
     Ok(())
 }
 

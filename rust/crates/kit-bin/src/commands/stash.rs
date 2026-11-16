@@ -35,6 +35,9 @@ struct SaveOpts {
     /// Stash message.
     #[arg(short, long, default_value = "")]
     message: String,
+    /// Include untracked, non-ignored files (also included by default).
+    #[arg(short = 'u', long)]
+    include_untracked: bool,
 }
 
 #[derive(Debug, Subcommand)]

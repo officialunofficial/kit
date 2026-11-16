@@ -68,16 +68,59 @@ fn push_and_save_record_the_same_message() {
 }
 
 #[test]
-fn push_rejects_an_unknown_flag_a_pathspec_and_include_untracked() {
+fn push_rejects_an_unknown_flag_and_a_pathspec() {
     let repo = repo();
     fs::write(repo.path().join("a.txt"), b"two\n").unwrap();
     for args in [
         &["stash", "push", "--bogus"][..],
         &["stash", "push", "a.txt"][..],
-        &["stash", "push", "-u"][..],
     ] {
         assert!(!run_in(repo.path(), args).status.success(), "{args:?}");
     }
     assert_eq!(fs::read(repo.path().join("a.txt")).unwrap(), b"two\n");
     assert!(stdout(&ok(repo.path(), &["stash", "list"])).is_empty());
 }
+
+#[test]
+fn include_untracked_refuses_collisions_before_restoring_tracked_changes() {
+    for flag in ["-u", "--include-untracked"] {
+        let r = repo(); let p = r.path();
+        fs::write(p.join("a.txt"), b"edited").unwrap();
+        fs::write(p.join("new.txt"), b"saved").unwrap();
+        ok(p, &["stash", "push", flag]);
+        assert!(!p.join("new.txt").exists());
+        fs::write(p.join("new.txt"), b"saved").unwrap();
+        for verb in ["apply", "pop"] {
+            assert!(!run_in(p, &["stash", verb]).status.success());
+            assert_eq!(fs::read(p.join("a.txt")).unwrap(), b"one\n");
+            assert_eq!(fs::read(p.join("new.txt")).unwrap(), b"saved");
+        }
+        fs::remove_file(p.join("new.txt")).unwrap();
+        ok(p, &["stash", "pop"]);
+        assert_eq!(fs::read(p.join("new.txt")).unwrap(), b"saved");
+        assert_eq!(fs::read(p.join("a.txt")).unwrap(), b"edited");
+    }
+}
+
+#[test]
+fn include_untracked_uses_nested_ignore_reincludes_and_keeps_ignored_files() {
+    for flag in ["-u", "--include-untracked"] {
+        let r = repo();
+        let p = r.path();
+        fs::create_dir(p.join("nested")).unwrap();
+        fs::write(p.join(".gitignore"), b"*.log\n").unwrap();
+        fs::write(p.join("nested/.gitignore"), b"!keep.log\n").unwrap();
+        ok(p, &["add", ".gitignore", "nested/.gitignore"]);
+        ok(p, &["commit", "-m", "ignore rules"]);
+        fs::write(p.join("nested/keep.log"), b"saved").unwrap();
+        fs::write(p.join("nested/skip.log"), b"ignored").unwrap();
+        ok(p, &["stash", "push", flag]);
+        assert!(!p.join("nested/keep.log").exists());
+        assert_eq!(fs::read(p.join("nested/skip.log")).unwrap(), b"ignored");
+        fs::write(p.join("nested/skip.log"), b"still local").unwrap();
+        ok(p, &["stash", "pop"]);
+        assert_eq!(fs::read(p.join("nested/keep.log")).unwrap(), b"saved");
+        assert_eq!(fs::read(p.join("nested/skip.log")).unwrap(), b"still local");
+    }
+}
+
