@@ -96,7 +96,8 @@ pub enum PushLease {
     Force,
     /// Require the last locally tracked remote tip, allowing divergence.
     WithLease,
-    /// Require both ancestry from the tracked tip and its live CAS lease.
+    /// Require both ancestry from the tracked tip and its live CAS lease. A
+    /// branch the remote no longer holds is created.
     FastForward,
 }
 /// Repository refs to publish.
@@ -179,7 +180,8 @@ impl Default for PushOptions<'_> {
 pub struct PushReport {
     /// Completed branches.
     pub refs: usize,
-    /// Published advances across completed branches.
+    /// Published advances across completed branches. A branch push whose
+    /// remote already held the tip publishes none.
     pub steps: usize,
     /// Tip of a selected single branch; absent for a mirror push.
     pub tip: Option<Hash>,
@@ -232,6 +234,18 @@ fn push_refs(
                 tags: Vec::new(),
                 deleted: None,
             };
+            // The branches the remote holds, read once: a branch it lost is
+            // created, as the push of one branch creates it. A listing gone
+            // stale can only refuse a push: the remote checks the condition.
+            let held: std::collections::HashSet<String> = if *force {
+                std::collections::HashSet::new()
+            } else {
+                tx.list_branches()?
+                    .into_iter()
+                    .filter(|b| b.hash.is_some())
+                    .map(|b| b.name)
+                    .collect()
+            };
             let result: Result<(), PushError> = (|| {
                 for r in refs_list {
                     if tx.observer.cancelled() {
@@ -241,7 +255,12 @@ fn push_refs(
                     let condition = if *force {
                         refs::RefWriteCondition::Any
                     } else {
-                        lease(layout, options.remote_name, &r.name)?
+                        match lease(layout, options.remote_name, &r.name)? {
+                            refs::RefWriteCondition::Match(_) if !held.contains(&r.name) => {
+                                refs::RefWriteCondition::Missing
+                            }
+                            condition => condition,
+                        }
                     };
                     tx.observer.event(&SyncEvent::PushBranchStarted {
                         branch: r.name.clone(),
@@ -272,7 +291,22 @@ fn push_refs(
         } => {
             let tip = refs::read_ref(layout, local)?
                 .ok_or_else(|| SyncError::RemoteBranchMissing(local.clone()))?;
+            refs::check_pushable_branch(remote)?;
+            // The remote's head decides, not the tracking ref: the remote
+            // may have lost the branch since this repository last saw it.
+            let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
+            if head == Some(tip) {
+                refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
+                return Ok(PushReport {
+                    refs: 1,
+                    steps: 0,
+                    tip: Some(tip),
+                    tags: Vec::new(),
+                    deleted: None,
+                });
+            }
             if matches!(policy, PushLease::FastForward)
+                && head.is_some()
                 && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
             {
@@ -280,10 +314,14 @@ fn push_refs(
                     branch: remote.clone(),
                 });
             }
-            let condition = if matches!(policy, PushLease::Force) {
-                refs::RefWriteCondition::Any
-            } else {
-                lease(layout, options.remote_name, remote)?
+            let condition = match (policy, lease(layout, options.remote_name, remote)?) {
+                (PushLease::Force, _) => refs::RefWriteCondition::Any,
+                // A fast-forward push of a branch the remote does not hold
+                // creates it: there is nothing on the remote to overwrite.
+                (PushLease::FastForward, refs::RefWriteCondition::Match(_)) if head.is_none() => {
+                    refs::RefWriteCondition::Missing
+                }
+                (_, condition) => condition,
             };
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
@@ -1048,8 +1086,9 @@ fn build_packs<W: std::io::Write>(
     let mut start = 0;
     for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk = &raw[start..start + len];
+        let parallel = batch_fans_out(len, raw_sizes[start..start + len].iter().sum());
         start += len;
-        for entry in prepare_raw_batch(store, chunk)? {
+        for entry in prepare_raw_batch(store, chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(),
@@ -1075,9 +1114,12 @@ fn build_packs<W: std::io::Write>(
         .iter()
         .map(|d| (HASH_LEN + d.stream.len()) as u64)
         .collect();
+    let mut start = 0;
     for len in size_capped_batch_lens(&delta_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
-        for entry in prepare_delta_batch(chunk)? {
+        let parallel = batch_fans_out(len, delta_sizes[start..start + len].iter().sum());
+        start += len;
+        for entry in prepare_delta_batch(chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -1149,9 +1191,8 @@ fn size_capped_batch_lens(sizes: &[u64], byte_cap: u64, max_entries: usize) -> V
 /// Also doubles as one of [`size_capped_batch_lens`]'s two caps: a
 /// batch that isn't cut short by [`PUSH_BATCH_BYTES`] first comes out exactly
 /// this many entries long (until the final, possibly-shorter
-/// remainder) — the same length `prepare_raw_batch`/
-/// `prepare_delta_batch` compare against to decide sequential vs.
-/// parallel, so a full-length batch always takes the parallel path.
+/// remainder), so such a batch always takes the parallel path. A batch the
+/// byte cap cuts short fans out by [`PACK_FANOUT_MIN_BYTES`] instead.
 const PACK_FANOUT_ENTRIES_PER_THREAD: usize = 8;
 
 /// The per-batch entry count [`build_and_upload_packs`] fans out across
@@ -1160,17 +1201,40 @@ fn pack_fanout_threshold() -> usize {
     crate::fanout::threshold(PACK_FANOUT_ENTRIES_PER_THREAD)
 }
 
-/// Read + compression-prepare one chunk of raw object hashes —
-/// sequentially below [`pack_fanout_threshold`], via rayon's global
-/// thread pool at or above it. Output mirrors `chunk`'s order 1:1
+/// Bytes from which a batch of two or more entries fans out whatever its
+/// entry count, 4 MiB. Reading and compressing that much takes milliseconds,
+/// far more than handing the entries to the pool costs.
+const PACK_FANOUT_MIN_BYTES: u64 = 4 << 20;
+
+/// Whether a batch of `len` entries and `bytes` uncompressed bytes is read and
+/// compressed on rayon's pool: when it reaches [`pack_fanout_threshold`], or
+/// when it holds two or more entries and [`PACK_FANOUT_MIN_BYTES`]. A batch
+/// of large objects is cut by [`PUSH_BATCH_BYTES`] long before it reaches
+/// the entry threshold, and it is the batch that gains most from the pool.
+/// The batch's bytes are bounded either way, so fanning out does not change
+/// what the push holds in memory.
+fn batch_fans_out(len: usize, bytes: u64) -> bool {
+    len >= pack_fanout_threshold() || (len >= 2 && bytes >= PACK_FANOUT_MIN_BYTES)
+}
+
+/// Read + compression-prepare one chunk of raw object hashes — on rayon's
+/// global thread pool when `parallel` (see [`batch_fans_out`]), sequentially
+/// otherwise. Output mirrors `chunk`'s order 1:1
 /// either way: `plan.raw` is already ordered (non-blobs before blobs,
 /// each group in BLAKE3 order — see [`transfer::PackPlan`]'s doc
 /// comment), and that order is the wire order the pack is built in, so
 /// a parallel fan-out must not reshuffle it.
-fn prepare_raw_batch(store: &ObjectStore, chunk: &[Hash]) -> Result<Vec<PreparedRaw>, PushError> {
-    crate::fanout::try_map_seq_or_par(chunk, pack_fanout_threshold(), |h| {
-        Ok(PackWriter::prepare_raw(*h, store.read(h)?))
-    })
+fn prepare_raw_batch(
+    store: &ObjectStore,
+    chunk: &[Hash],
+    parallel: bool,
+) -> Result<Vec<PreparedRaw>, PushError> {
+    let prepare = |h: &Hash| Ok(PackWriter::prepare_raw(*h, store.read(h)?));
+    if parallel {
+        chunk.par_iter().map(prepare).collect()
+    } else {
+        chunk.iter().map(prepare).collect()
+    }
 }
 
 /// The delta-entry counterpart of [`prepare_raw_batch`]: reads each
@@ -1179,6 +1243,7 @@ fn prepare_raw_batch(store: &ObjectStore, chunk: &[Hash]) -> Result<Vec<Prepared
 /// it straight out of `plan.deltas`.
 fn prepare_delta_batch(
     chunk: Vec<transfer::PlannedDelta>,
+    parallel: bool,
 ) -> Result<Vec<PreparedDelta>, PushError> {
     let prepare = |d: transfer::PlannedDelta| {
         Ok(PackWriter::prepare_delta(
@@ -1186,10 +1251,11 @@ fn prepare_delta_batch(
             d.stream.into_vec().map_err(StoreError::Io)?,
         ))
     };
-    if chunk.len() < pack_fanout_threshold() {
-        return chunk.into_iter().map(prepare).collect();
+    if parallel {
+        chunk.into_par_iter().map(prepare).collect()
+    } else {
+        chunk.into_iter().map(prepare).collect()
     }
-    chunk.into_par_iter().map(prepare).collect()
 }
 
 /// [`PackFill::seals_before`] for the pack `w` is building.
@@ -1813,13 +1879,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_batch_fans_out_by_entries_or_by_bytes() {
+        let threshold = super::pack_fanout_threshold();
+        let min = super::PACK_FANOUT_MIN_BYTES;
+        assert!(super::batch_fans_out(threshold, 0));
+        assert!(!super::batch_fans_out(threshold - 1, min - 1));
+        // A batch the byte cap cut short: 255 objects of 256 KiB on 32
+        // threads stay one entry under the entry threshold.
+        assert!(super::batch_fans_out(
+            threshold - 1,
+            super::PUSH_BATCH_BYTES
+        ));
+        assert!(super::batch_fans_out(2, min));
+        // One entry has nothing to share with another thread.
+        assert!(!super::batch_fans_out(1, super::PUSH_BATCH_BYTES));
+    }
+
     // =================================================================
     // `prepare_raw_batch` / `prepare_delta_batch` — order preservation
     // and error propagation across BOTH the sequential and the rayon
-    // branch. `pack_fanout_threshold()` is read directly (rather than
-    // hardcoding a count) so a chunk built at exactly that length
-    // reliably lands in the parallel branch regardless of how many
-    // cores the test happens to run on.
+    // branch, for one entry and for several.
     // =================================================================
 
     fn store() -> (tempfile::TempDir, ObjectStore) {
@@ -1832,11 +1912,12 @@ mod tests {
     #[test]
     fn prepare_raw_batch_preserves_order_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let hashes: Vec<kit_core::hash::Hash> = (0..n)
                 .map(|i| store.write(format!("raw entry #{i}").as_bytes()).unwrap())
                 .collect();
-            let prepared = super::prepare_raw_batch(&store, &hashes).expect("prepare raw batch");
+            let prepared =
+                super::prepare_raw_batch(&store, &hashes, parallel).expect("prepare raw batch");
             assert_eq!(
                 prepared.iter().map(PreparedRaw::hash).collect::<Vec<_>>(),
                 hashes,
@@ -1848,7 +1929,7 @@ mod tests {
     #[test]
     fn prepare_raw_batch_propagates_a_missing_object_error_sequential_and_parallel() {
         let (_dir, store) = store();
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let mut hashes: Vec<kit_core::hash::Hash> = (0..n.saturating_sub(1))
                 .map(|i| store.write(format!("raw entry #{i}").as_bytes()).unwrap())
                 .collect();
@@ -1857,7 +1938,7 @@ mod tests {
             // surface through `prepare_raw_batch` rather than being
             // silently dropped or panicking on either branch.
             hashes.push(kit_core::hash::hash(b"never written"));
-            let err = super::prepare_raw_batch(&store, &hashes).expect_err(
+            let err = super::prepare_raw_batch(&store, &hashes, parallel).expect_err(
                 "a missing object must fail prepare_raw_batch instead of being dropped",
             );
             assert!(matches!(
@@ -1872,7 +1953,7 @@ mod tests {
     #[test]
     fn prepare_delta_batch_preserves_order_sequential_and_parallel() {
         use kit_core::transfer::PlannedDelta;
-        for &n in &[1usize, super::pack_fanout_threshold()] {
+        for (n, parallel) in [(1usize, false), (1, true), (5, false), (5, true)] {
             let deltas: Vec<PlannedDelta> = (0..n)
                 .map(|i| PlannedDelta {
                     target: kit_core::hash::hash(format!("target #{i}").as_bytes()),
@@ -1881,7 +1962,7 @@ mod tests {
                 })
                 .collect();
             let expected_bases: Vec<_> = deltas.iter().map(|d| d.base).collect();
-            let prepared = super::prepare_delta_batch(deltas).unwrap();
+            let prepared = super::prepare_delta_batch(deltas, parallel).unwrap();
             assert_eq!(
                 prepared.iter().map(PreparedDelta::base).collect::<Vec<_>>(),
                 expected_bases,

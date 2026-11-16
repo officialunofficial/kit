@@ -10,7 +10,9 @@ use std::process::ExitCode;
 use kit_bin::{dispatch, signal};
 
 fn main() -> ExitCode {
-    signal::install();
+    // Only the binary handles signals; a library caller of `dispatch` keeps
+    // its own.
+    signal::enable();
     let argv: Vec<String> = std::env::args().collect();
     let code = dispatch(&argv);
     ExitCode::from(code)

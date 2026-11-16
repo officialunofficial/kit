@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
-use super::{LenCache, Tuning, chunk_blob_len, walk_chunks};
+use super::{LenCache, Tuning, chunk_blob_len, try_each_in_order, walk_chunks};
 use crate::hash::{self, Hash};
 use crate::object::{Blob, ChunkedBlob, KitError, Object, Tree};
 use crate::serialize;
@@ -311,5 +311,40 @@ fn a_round_reads_each_distinct_chunk_once() {
     assert_eq!(
         crate::ops::graph::CHUNK_TYPE_READS.with(std::cell::Cell::get),
         300
+    );
+}
+
+/// The checks of `try_each_in_order` run once per item, across windows and on
+/// the parallel path, and the error returned is the first in item order.
+#[test]
+fn try_each_in_order_reports_the_first_error_in_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let n = 2 * Tuning::DEFAULT.window + 100;
+    let items: Vec<usize> = (0..n).collect();
+    let ran = AtomicUsize::new(0);
+    try_each_in_order(&items, |_| {
+        ran.fetch_add(1, Ordering::Relaxed);
+        Ok::<(), usize>(())
+    })
+    .unwrap();
+    assert_eq!(ran.load(Ordering::Relaxed), n);
+
+    let window = Tuning::DEFAULT.window;
+    for bad in [0, 1, 63, 64, window - 1, window, n - 1] {
+        let error = try_each_in_order(&items, |&i| {
+            if i == bad || i == bad + 3 || i == n - 1 {
+                Err(i)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error, bad);
+    }
+    // A short list runs on the calling thread.
+    assert_eq!(
+        try_each_in_order(&items[..3], |&i| if i > 0 { Err(i) } else { Ok(()) }),
+        Err(1)
     );
 }

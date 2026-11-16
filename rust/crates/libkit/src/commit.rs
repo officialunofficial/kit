@@ -383,11 +383,13 @@ pub fn create(
         first_parent
     };
     advance_head(layout, &commit, expected_tip)?;
-    sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
-    // The merge is recorded, so the repository is no longer merging.
+    // The merge is recorded, so the repository is no longer merging. This
+    // goes right after the head moves: a command stopped before the index
+    // sync below leaves the index holding the committed tree already.
     if pending.merge.is_some() {
         conflict_state::clear_merge_state(layout).map_err(Error::ClearMergeState)?;
     }
+    sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
 
     let branch = match refs::read_head(layout) {
         Ok(Head::Branch(b)) => Some(b),

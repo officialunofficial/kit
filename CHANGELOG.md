@@ -167,6 +167,21 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unchanged before it sweeps or writes anything, and refuses with the new
   `RestoreError::UnsweptPath` when one holds an untracked path the sweep
   would remove, where it trusted its caller's check.
+- A push reads and compresses a batch of large objects on all cores, as it
+  does a batch of many small ones. A batch is still at most 64 MiB.
+- Ctrl-C and SIGTERM stop a local command such as `add`, `checkout` or
+  `gc` at once; they ran to the end. A second Ctrl-C stops `push`, `pull`,
+  `fetch`, `clone`, `log`, `merge`, `rebase` and the other commands that
+  stop at a checkpoint or finish a multi-step operation. `checkout` and
+  `reset --hard` now write the files before HEAD and the index, as git
+  does, so a stopped one leaves them where they were; the next restore
+  that writes into a directory removes the temp files it left there.
+- `kit gc` checks the chunks of large files 32 at a time, so its mark no
+  longer waits on a cold disk for one chunk after another.
+- `kit commit` without `-m`, `kit tag -a` without `-m` and `kit rebase -i`
+  fail at once when no editor is set and stdin is not a terminal, where
+  they started `vi`, which waited for a terminal. An editor set in
+  `GIT_EDITOR`, `EDITOR` or `VISUAL` still runs, terminal or not.
 
 ### Removed
 
@@ -209,6 +224,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `404` from a store that names the key, request and host in its error
   document (MinIO does, in about 350 bytes) failed `read_ref` with
   `PayloadTooLarge`, so a push to a new S3 remote failed.
+- `kit push` reads the remote's head before it says "Everything up-to-date",
+  so a push with nothing to send now contacts the remote. A remote that
+  lost the branch, for example one deleted and made again under the same
+  name, got nothing while its tracking ref matched the local tip; `kit push`
+  and `kit push --all` now send it the branch.
 
 ## [0.8.1] - 2026-11-15
 

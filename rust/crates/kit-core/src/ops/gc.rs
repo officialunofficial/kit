@@ -559,13 +559,22 @@ fn mark_live(
     ids.compact()?;
     let mut chunks = ids.ids;
     chunks.retain(|c| !objects.contains(c));
-    for chunk in &chunks {
-        if store.object_type(chunk)? != ObjectType::Blob {
-            return Err(GcRootsError::ChunkNotBlob {
-                manifest: manifest_listing(store, &objects, chunk)?,
-                chunk: *chunk,
-            });
-        }
+    // Each check opens a chunk and reads its type, so on a cold disk the
+    // checks wait on the disk, and run many at a time.
+    let checked =
+        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.object_type(chunk) {
+            Ok(ObjectType::Blob) => Ok(()),
+            Ok(_) => Err((*chunk, None)),
+            Err(error) => Err((*chunk, Some(error))),
+        });
+    if let Err((chunk, error)) = checked {
+        return Err(match error {
+            Some(error) => error.into(),
+            None => GcRootsError::ChunkNotBlob {
+                manifest: manifest_listing(store, &objects, &chunk)?,
+                chunk,
+            },
+        });
     }
     Ok(LiveSet { objects, chunks })
 }

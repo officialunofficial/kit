@@ -1,15 +1,20 @@
-//! `$EDITOR` / `$VISUAL` spawn helper for `kit commit`.
+//! `$EDITOR` / `$VISUAL` spawn helper for `kit commit`, `kit tag -a` and
+//! `kit rebase -i`.
 //!
 //! Behaviour:
 //! * Honour `$GIT_EDITOR` first, then `$EDITOR`, then `$VISUAL`.
 //! * Fall back to `vi` when no env var is set, so `kit commit` works
 //!   out-of-the-box.
+//! * An editor the user set is always started, terminal or not, as git
+//!   does: `EDITOR="code --wait"` works from a script.
+//! * Start no editor when none is set and stdin is not a terminal: the
+//!   default `vi` would wait for a terminal that never comes.
 //! * Write `template` to a tempfile, spawn the editor, wait, read the
 //!   file back, strip any line whose first non-whitespace byte is `#`,
 //!   and return the trimmed message.
 
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -33,10 +38,13 @@ pub const MAX_COMMIT_MSG_BYTES: u64 = 1024 * 1024;
 /// parsed (e.g. `EDITOR="vim -c 'set nowrap'"`).
 ///
 /// # Errors
+/// - [`check_usable`]'s error when no editor is set and stdin is not a
+///   terminal.
 /// - [`io::ErrorKind::NotFound`] if the editor binary cannot be spawned.
 /// - [`io::ErrorKind::Other`] with a descriptive message if the editor
 ///   exits non-zero or the file exceeds [`MAX_COMMIT_MSG_BYTES`].
 pub fn spawn_editor(template: &str) -> io::Result<String> {
+    check_usable()?;
     let editor = pick_editor();
     if editor.is_empty() {
         return Err(io::Error::other(
@@ -64,10 +72,12 @@ pub fn spawn_editor(template: &str) -> io::Result<String> {
     let extra_args: Vec<&str> = parts.collect();
     let path_arg: PathBuf = tmp.path().to_path_buf();
 
-    let status = Command::new(program)
-        .args(&extra_args)
-        .arg(&path_arg)
-        .status()?;
+    let status = crate::signal::while_editor_runs(|| {
+        Command::new(program)
+            .args(&extra_args)
+            .arg(&path_arg)
+            .status()
+    })?;
     if !status.success() {
         return Err(io::Error::other(format!(
             "editor exited with status {status:?}"
@@ -87,25 +97,69 @@ pub fn spawn_editor(template: &str) -> io::Result<String> {
     Ok(strip_comments_and_trim(&raw))
 }
 
+/// The error of [`check_usable`] when it refuses.
+#[derive(Debug)]
+struct NoTerminal;
+
+impl std::fmt::Display for NoTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "no editor is set and stdin is not a terminal, so none was started; \
+             set GIT_EDITOR, EDITOR or VISUAL",
+        )
+    }
+}
+
+impl std::error::Error for NoTerminal {}
+
+/// Whether `error` is [`check_usable`]'s refusal, a usage error.
+#[must_use]
+pub fn is_no_terminal(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(<dyn std::error::Error + Send + Sync>::is::<NoTerminal>)
+}
+
+/// Refuse to start the default editor when stdin is not a terminal. An
+/// editor the user set is never refused. Call it before any work that a
+/// refused editor would waste.
+///
+/// # Errors
+/// An [`io::ErrorKind::Other`] error that says why and what to do instead.
+pub fn check_usable() -> io::Result<()> {
+    check_usable_with(io::stdin().is_terminal(), |name| std::env::var(name).ok())
+}
+
+/// [`check_usable`] with the terminal test and the environment passed in.
+fn check_usable_with(
+    stdin_is_terminal: bool,
+    resolver: impl Fn(&str) -> Option<String>,
+) -> io::Result<()> {
+    if stdin_is_terminal || set_editor_with(resolver).is_some() {
+        Ok(())
+    } else {
+        Err(io::Error::other(NoTerminal))
+    }
+}
+
 /// Pick an editor from the environment. Returns an empty string if
 /// nothing usable is set AND no platform default applies.
 fn pick_editor() -> String {
     pick_editor_with(|name| std::env::var(name).ok())
 }
 
-/// Test-friendly variant of [`pick_editor`] — `resolver` is called
-/// once per candidate env var, and the first non-empty trimmed value
-/// wins. On a fully-empty environment, falls back to the platform
-/// default (`vi`).
+/// Test-friendly variant of [`pick_editor`]: the editor the user set, or
+/// the platform default (`vi`) when none is set.
 fn pick_editor_with(resolver: impl Fn(&str) -> Option<String>) -> String {
-    for var in ["GIT_EDITOR", "EDITOR", "VISUAL"] {
-        if let Some(v) = resolver(var)
-            && !v.trim().is_empty()
-        {
-            return v;
-        }
-    }
-    "vi".to_string()
+    set_editor_with(resolver).unwrap_or_else(|| "vi".to_string())
+}
+
+/// The editor the user set: `resolver` is called once per candidate env
+/// var, and the first value that is not blank wins.
+fn set_editor_with(resolver: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["GIT_EDITOR", "EDITOR", "VISUAL"]
+        .into_iter()
+        .find_map(|var| resolver(var).filter(|v| !v.trim().is_empty()))
 }
 
 /// Strip all lines whose first non-whitespace byte is `#`, then trim
@@ -182,6 +236,19 @@ mod tests {
             _ => None,
         });
         assert_eq!(got, "nano");
+    }
+
+    #[test]
+    fn no_terminal_refuses_only_the_default_editor() {
+        assert!(check_usable_with(true, |_| None).is_ok());
+        assert!(check_usable_with(false, |_| None).is_err_and(|e| is_no_terminal(&e)));
+        assert!(!is_no_terminal(&io::Error::other("other")));
+        let only =
+            |var: &'static str| move |name: &str| (name == var).then(|| "my-editor".to_string());
+        for var in ["GIT_EDITOR", "EDITOR", "VISUAL"] {
+            assert!(check_usable_with(false, only(var)).is_ok(), "{var}");
+        }
+        assert!(check_usable_with(false, |_| Some("  ".to_string())).is_err());
     }
 
     #[test]

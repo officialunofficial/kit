@@ -198,39 +198,27 @@ pub fn run(args: &[String]) -> u8 {
     }
 
     // If reset moves the branch off its current tip, that old tip may
-    // become unreachable — record it BEFORE the move (under the worktree
-    // lock) so it stays recoverable, and abort if the log can't be
+    // become unreachable — record it right before the move (under the
+    // worktree lock) so it stays recoverable, and abort if the log can't be
     // written. Fail closed: an unreadable/corrupt current ref
-    // (`resolve_head` Err) aborts rather than letting `move_head` clobber
-    // it unlogged. `Ok(None)` is an unborn branch (nothing to supersede);
-    // a no-op move (old == target) records nothing.
-    match refs::resolve_head(&layout) {
+    // (`resolve_head` Err) aborts before anything is written rather than
+    // letting `move_head` clobber it unlogged. `Ok(None)` is an unborn
+    // branch (nothing to supersede); a no-op move (old == target) records
+    // nothing.
+    let superseded = match refs::resolve_head(&layout) {
         Ok(Some(old_head)) if old_head != target => {
-            let branch = super::head_branch_name(&layout);
-            if let Err((msg, code)) = super::record_superseded(&layout, "reset", &branch, old_head)
-            {
-                return emit_err(&msg, code);
-            }
+            Some((super::head_branch_name(&layout), old_head))
         }
-        Ok(_) => {}
+        Ok(_) => None,
         Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::DATAERR),
-    }
-
-    // Move HEAD / the current branch FIRST. As in `checkout`, advancing
-    // the ref before the index keeps the failure modes benign: a later
-    // index-write failure leaves HEAD on the target with a stale index,
-    // which `kit status` surfaces and a re-run repairs.
-    if let Err((msg, code)) = move_head(&layout, &target) {
-        return emit_err(&msg, code);
-    }
-
-    if reset_index && let Err(e) = super::sync_index_to_tree(&layout, &store, tree_hash) {
-        return emit_err(&e, exit::CANTCREAT);
-    }
+    };
 
     // --hard: materialize the target tree into the worktree (overwriting
     // tracked files, keeping untracked ones), then delete the tracked
-    // files the target dropped.
+    // files the target dropped. The files go first and HEAD and the index
+    // after, as git does: a reset stopped or failed partway leaves HEAD and
+    // the index where they were, so the same reset run again with `-f`
+    // finishes it, and the files it wrote show as local changes.
     if opts.hard {
         if let Err(e) = restore_tree_to_worktree_with(
             &store,
@@ -250,6 +238,23 @@ pub fn run(args: &[String]) -> u8 {
                 );
             }
         }
+    }
+
+    // Signals are held across the log, HEAD and index writes, so a stopped
+    // reset never leaves HEAD moved over the old index.
+    let published = crate::signal::defer(|| {
+        if let Some((branch, old_head)) = &superseded {
+            super::record_superseded(&layout, "reset", branch, *old_head)?;
+        }
+        move_head(&layout, &target)?;
+        if reset_index {
+            super::sync_index_to_tree(&layout, &store, tree_hash)
+                .map_err(|e| (e, exit::CANTCREAT))?;
+        }
+        Ok(())
+    });
+    if let Err((msg, code)) = published {
+        return emit_err(&msg, code);
     }
 
     // git-shaped report: `--hard` prints `HEAD is now at <hash> <subject>`;

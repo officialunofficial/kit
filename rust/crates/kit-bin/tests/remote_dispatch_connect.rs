@@ -1616,11 +1616,12 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         assert!(rejected.stdout.is_empty());
         transcript.push(endpoint_transcript(&rejected, &endpoint));
         if let Some(proxy) = &proxy {
-            // The up-to-date and rejected pushes resolve from local tracking
-            // state. The other five commands each make several remote RPCs.
+            // Each of the seven commands makes its remote RPCs over one
+            // connection. The up-to-date and rejected pushes read the
+            // remote's head too.
             assert_eq!(
                 proxy.connections(),
-                5,
+                7,
                 "each CLI operation must reuse its TLS connection across RPCs"
             );
         }

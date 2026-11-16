@@ -744,6 +744,43 @@ fn a_tree_used_as_a_chunk_aborts_gc_and_names_its_manifest() {
     assert!(text.contains("is not a blob (fail closed)"), "{text}");
 }
 
+/// Enough chunks that their checks run in parallel: gc still reports the
+/// first bad chunk in hash order, as a serial loop does.
+#[test]
+fn the_first_bad_chunk_of_many_aborts_gc() {
+    let fx = Fx::new();
+    let mut chunks = fx.blobs("c", 300);
+    let bad: Vec<Hash> = (0..3)
+        .map(|i| fx.tree(&[fx.blob(&format!("in-{i}"))], &[]))
+        .collect();
+    chunks.extend(&bad);
+    fx.chunked_file_on_main(&chunks);
+    let orphan = fx.blob("orphan");
+    let first = *bad.iter().min().unwrap();
+
+    assert_gc_refuses(
+        &fx,
+        &orphan,
+        |e| matches!(e, GcRootsError::ChunkNotBlob { chunk, .. } if *chunk == first),
+    );
+
+    let fx = Fx::new();
+    let chunks = fx.blobs("c", 300);
+    fx.chunked_file_on_main(&chunks);
+    let orphan = fx.blob("orphan");
+    let mut sorted = chunks.clone();
+    sorted.sort_unstable();
+    for gone in [sorted[250], sorted[100]] {
+        fs::remove_file(fx.store.path_for(&gone)).unwrap();
+    }
+    let first = hash::to_hex(&sorted[100]);
+    assert_gc_refuses(
+        &fx,
+        &orphan,
+        |e| matches!(e, GcRootsError::Store(StoreError::ObjectNotFound(id)) if *id == first),
+    );
+}
+
 #[test]
 fn a_commit_or_a_manifest_used_as_a_chunk_aborts_gc() {
     for kind in ["commit", "manifest"] {

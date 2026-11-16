@@ -549,6 +549,8 @@ where
             path_prefix,
             Some(ignore),
         )?;
+    } else {
+        remove_stale_temps(target_dir, &tree.entries);
     }
 
     for entry in &tree.entries {
@@ -1388,6 +1390,31 @@ pub fn nested_repository(dir: &Path) -> io::Result<Option<String>> {
 /// Prefix of every restore temporary name, `<prefix>.<pid>.<counter>`.
 const TMP_PREFIX: &str = ".kit-restore-tmp";
 
+/// Remove from the worktree directory `dir` the regular files with a restore
+/// temporary name of another process, except a name the tree at `dir` holds.
+/// A worktree restore holds the worktree, so such a file is one a restore
+/// stopped by a signal left. A file that cannot be removed only stays, and a
+/// symlink a stopped symlink restore left is not touched.
+fn remove_stale_temps(dir: &Path, entries: &[TreeEntry]) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    let own = format!("{TMP_PREFIX}.{}.", process::id());
+    for entry in read.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_restore_temp_name(name)
+            && !name.starts_with(&own)
+            && !entries.iter().any(|e| e.name == name.as_bytes())
+            && entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// A short temporary name for a restore write. It does not contain the
 /// file name, so it stays within the file system's name limit for any
 /// name the file system accepts. The process id and a process-wide
@@ -2038,6 +2065,53 @@ mod tests {
                 for path in planted {
                     assert_eq!(fs::read(&path).unwrap(), b"keep", "{}", path.display());
                 }
+            }
+        }
+    }
+
+    /// A worktree restore removes the temporary files a stopped restore of
+    /// another process left in a directory it writes, and keeps a tracked
+    /// file with such a name, a symlink, and its own process's names.
+    #[test]
+    fn a_worktree_restore_removes_stale_temporary_files() {
+        let (_d, store) = fresh_store();
+        let keep_untracked = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let tracked = format!("{TMP_PREFIX}.4294967295.1");
+        let stale = format!("{TMP_PREFIX}.4294967295.2");
+        let tree = put_tree_with(
+            &store,
+            // Sorted by name: "." sorts before "a".
+            vec![
+                TreeEntry {
+                    name: tracked.as_bytes().to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b"tracked"),
+                },
+                TreeEntry {
+                    name: b"a".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b"restored"),
+                },
+            ],
+        );
+        for worktree in [false, true] {
+            let target = TempDir::new().unwrap();
+            fs::write(target.path().join(&stale), b"partial").unwrap();
+            let own = plant_temp_names(target.path(), |path| {
+                fs::write(path, b"keep").unwrap();
+            });
+            if worktree {
+                restore_tree_to_worktree(&store, &tree, target.path(), &keep_untracked).unwrap();
+            } else {
+                restore_tree(&store, tree, target.path(), &keep_untracked).unwrap();
+            }
+            assert_eq!(fs::read(target.path().join(&tracked)).unwrap(), b"tracked");
+            assert_eq!(target.path().join(&stale).exists(), !worktree);
+            for path in own {
+                assert_eq!(fs::read(&path).unwrap(), b"keep", "{}", path.display());
             }
         }
     }

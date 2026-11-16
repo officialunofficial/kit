@@ -41,6 +41,12 @@ use std::io::Write;
 /// spawn the binary (full end-to-end) or drive this entry point
 /// directly (in-process, faster). We keep this function small and
 /// dispatch-only so the command modules remain easy to snapshot.
+///
+/// When the binary called [`signal::enable`], a command that polls the
+/// shutdown flag, or runs a multi-step operation, installs the SIGINT and
+/// SIGTERM handlers here ([`signal::defers_interrupt`]); every other command
+/// keeps the default action. A caller that did not call [`signal::enable`]
+/// gets no signal handler.
 #[must_use]
 #[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
 pub fn dispatch(argv: &[String]) -> u8 {
@@ -59,6 +65,9 @@ pub fn dispatch(argv: &[String]) -> u8 {
     }
     let cmd = &argv[cmd_idx];
     let rest: Vec<String> = argv.iter().skip(cmd_idx + 1).cloned().collect();
+    if signal::defers_interrupt(cmd, &rest) {
+        signal::install();
+    }
 
     match cmd.as_str() {
         "-h" | "--help" | "help" => {

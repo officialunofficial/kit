@@ -1292,9 +1292,14 @@ Remote / sync:
   `--force`. When the remote head differs from the lease, a push without
   `--force` fails as a non-fast-forward before it uploads anything. A
   remote head that already equals the tip means an earlier attempt landed:
-  the push succeeds and writes nothing. `-u`/`--set-upstream` records the pushed remote as the
+  the push succeeds and writes nothing. The push reads the remote's head
+  every time and never trusts the tracking ref alone, so a remote that lost
+  the branch, for example one deleted and made again, gets it again. A
+  push without `--force-with-lease` creates a branch the remote does not
+  hold. `-u`/`--set-upstream` records the pushed remote as the
   branch's upstream even if one was already set. `--dry-run`
-  resolves the push plan without contacting the remote. Every endpoint
+  resolves the push plan without contacting the remote, so it goes by the
+  tracking ref. Every endpoint
   flows through the per-endpoint credential-trust gate, which is keyed on
   the resolved endpoint URL, never the remote name. On success `push`
   prints git's `To <url>` plus ref-update summary (or `Everything
@@ -2106,10 +2111,12 @@ parsing stderr.
 ### Environment variables
 
 - **`GIT_EDITOR` / `EDITOR` / `VISUAL`** &mdash; the editor `kit commit`
-  opens when neither `-m` nor `-F` is supplied, tried in that order. If
-  none is set it falls back to `vi`, matching git. In a headless or
-  non-interactive context (CI, an agent), always pass `-m`/`-F` so the
-  commit never blocks on an editor.
+  opens when neither `-m` nor `-F` is supplied, tried in that order, and
+  the editor of `kit tag -a` and `kit rebase -i`. If none is set it falls
+  back to `vi`, matching git. An editor that is set always runs, terminal
+  or not, so `EDITOR="code --wait"` works from a script. When none is set
+  and stdin is not a terminal (CI, an agent), these commands start no `vi`
+  and fail at once with a message: pass `-m`/`-F`, or set an editor.
 - **`NO_COLOR`** &mdash; if set (any value, including empty) ANSI color on
   stdout is suppressed. See <https://no-color.org>.
 - **`CLICOLOR_FORCE=1`** &mdash; force ANSI color even when stdout is piped.
@@ -2149,11 +2156,30 @@ that kit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 
-- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** set a graceful-shutdown flag.
-  Long-running operations (push, pull, clone, log) poll it at natural
-  checkpoints and exit with `tempfail` (75) so the operation can be
-  retried. Wired via `signal-hook`'s `flag` module so the CLI stays
-  under its crate-level `#![deny(unsafe_code)]`.
+- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** stop a local command at once.
+  Every write is a temp file renamed into place, so a stopped command
+  leaves no half-written ref or index. `checkout` and `reset --hard`
+  write the files first and then the branch, HEAD and the index
+  together, as git does: a stopped one leaves its branch, HEAD and the
+  index where they were, the files it wrote show as local changes (new
+  files as untracked), and the same command run again with `-f`
+  finishes it.
+  `kit gc` sweeps the object temp files a stopped command leaves, the
+  next restore that writes into a directory (a checkout, `kit reset
+  --hard`, a pull) removes the worktree temp files left there, and a temp
+  file left beside a ref is never read as one.
+- `push`, `pull`, `fetch`, `clone`, `log`, `reflog`, `grant`, `epoch` and
+  `visibility` instead set a graceful-shutdown flag on the first signal.
+  They poll it at natural checkpoints and exit with `tempfail` (75) so the
+  operation can be retried. `merge`, `rebase`, `cherry-pick`, `revert`,
+  `stash`, `bisect`, `worktree`, `remote` and `git pull` let the first
+  signal pass, so a multi-step operation is not cut between two writes.
+  In all of them a second signal stops the command at once. Wired via
+  `signal-hook`'s `flag` module so the CLI stays under its crate-level
+  `#![deny(unsafe_code)]`.
+- While an editor runs (`kit commit`, `kit tag -a`, `kit rebase -i`), kit
+  ignores `SIGINT` and `SIGQUIT`, as git does: the editor gets Ctrl-C, and
+  kit waits for it to exit. `SIGTERM` still ends kit.
 - **`SIGPIPE`** is ignored. Pipelines like `kit log | head -1` exit
   cleanly without a "Broken pipe" message &mdash; the next write just
   propagates `EPIPE` as a normal I/O error. This is the Rust runtime
