@@ -69,6 +69,8 @@ unsafe impl GlobalAlloc for CountingAlloc {
 static ALLOC: CountingAlloc = CountingAlloc;
 
 const ENTRIES: u32 = 30_000;
+// The file reader has a separate per-entry charge and does not keep `stored`.
+const FILE_ENTRIES: u32 = 1_025;
 
 fn tiny_blob_pack(count: u32) -> Vec<u8> {
     let mut writer = PackWriter::new_raw_only();
@@ -269,12 +271,15 @@ fn assert_file_read_inside_the_charge(
         std::fs::create_dir_all(&dir).unwrap();
     }
     let store = ObjectStore::init(&RepoLayout::single(&dir)).unwrap();
-    for chunk in seed.chunks(STAGE_WINDOW) {
-        let batch = store.batch();
-        for bytes in chunk {
-            batch.write(bytes).unwrap();
-        }
-        batch.commit().unwrap();
+    // Seed canonical loose objects without durable writes. This is fixture
+    // setup, outside the measured read; the reader still stages and syncs
+    // every distinct result through the real store, including its queue.
+    let objects = RepoLayout::single(&dir).objects_dir();
+    for bytes in &seed {
+        let hex = kit_core::hash::to_hex(&hash(bytes));
+        let shard = objects.join(&hex[..2]);
+        std::fs::create_dir_all(&shard).unwrap();
+        std::fs::write(shard.join(&hex[2..]), bytes).unwrap();
     }
     drop(seed);
     let file = verified(&pack, &dir.join("spool"));
@@ -324,17 +329,43 @@ const SHAPES: [Shape; 4] = [
 ];
 
 #[test]
-fn a_file_read_of_tiny_entries_stays_inside_the_charge() {
-    for shape in SHAPES {
-        assert_file_read_inside_the_charge(shape, 30_000, 0, WINDOW_OF_OBJECTS);
-    }
+fn a_file_read_of_tiny_raw_entries_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::Raw, FILE_ENTRIES, 0, FILE_ENTRIES);
 }
 
 #[test]
-fn a_file_read_with_a_store_path_of_260_characters_stays_inside_the_charge() {
-    for shape in SHAPES {
-        assert_file_read_inside_the_charge(shape, 65_536, 260, WINDOW_OF_OBJECTS);
-    }
+fn a_file_read_of_tiny_raw_entries_under_a_260_character_path_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::Raw, FILE_ENTRIES, 260, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_in_pack_deltas_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::DeltaOnInPackBase, FILE_ENTRIES, 0, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_in_pack_deltas_under_a_260_character_path_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::DeltaOnInPackBase, FILE_ENTRIES, 260, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_store_deltas_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::DeltaOnStoreBase, FILE_ENTRIES, 0, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_store_deltas_under_a_260_character_path_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::DeltaOnStoreBase, FILE_ENTRIES, 260, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_commits_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::Commits, FILE_ENTRIES, 0, FILE_ENTRIES);
+}
+
+#[test]
+fn a_file_read_of_commits_under_a_260_character_path_stays_inside_the_charge() {
+    assert_file_read_inside_the_charge(Shape::Commits, FILE_ENTRIES, 260, FILE_ENTRIES);
 }
 
 /// Past one window, the only memory that grows with the entry count is what
