@@ -602,6 +602,8 @@ where
         0,
         progress.is_some().then_some(&mut total),
     )?;
+    #[cfg(not(target_arch = "wasm32"))]
+    sweep_restore_scratch(&store.spool_dir());
     fs::create_dir_all(root)?;
     if let Some(callback) = progress.as_mut() {
         callback(0, total);
@@ -624,6 +626,7 @@ where
         &mut progress,
         total,
         &mut last_progress,
+        &std::sync::OnceLock::new(),
     )?;
     if let Some(callback) = progress.as_mut() {
         callback(
@@ -651,6 +654,7 @@ fn restore_tree_to_worktree_inner<F>(
     progress: &mut Option<&mut dyn FnMut(usize, usize)>,
     total: usize,
     last_progress: &mut std::time::Instant,
+    pool: &std::sync::OnceLock<FilePool>,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -683,107 +687,161 @@ where
         remove_stale_temps(target_dir, &tree.entries);
     }
 
-    for entry in &tree.entries {
-        if !crate::object::TreeEntry::validate_name(&entry.name) {
-            continue;
-        }
-        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
-        let base_entry = base_entries.get(entry.name.as_slice());
-        // Identical to what the worktree already holds (see
-        // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
-        // A clean restore checked the subtree it does not sweep before it
-        // started ([`check_unswept`]).
-        if base_entry.is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash) {
-            continue;
-        }
-        let full_path = if path_prefix.is_empty() {
-            name.to_string()
+    let parallel = !tree.entries.iter().any(|entry| {
+        !entry.name.is_ascii()
+            || entry
+                .name
+                .to_ascii_lowercase()
+                .starts_with(TMP_PREFIX.as_bytes())
+    });
+    for window in tree.entries.chunks(256) {
+        let mut staged = if parallel {
+            stage_files(
+                pool,
+                store,
+                target_dir,
+                window,
+                observed.is_some(),
+                |entry| {
+                    let base = base_entries.get(entry.name.as_slice());
+                    !base
+                        .is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash)
+                        && std::str::from_utf8(&entry.name).is_ok_and(|name| {
+                            let path = name_path(path_prefix, name);
+                            options
+                                .sparse_patterns
+                                .as_deref()
+                                .is_none_or(|p| matches_sparse(p, &path, false))
+                        })
+                },
+            )
+            .map_err(|error| prefix_error(error, path_prefix))?
         } else {
-            format!("{path_prefix}/{name}")
+            StagedWindow::empty(window.len())
         };
-        // NOTE: ignore rules do NOT gate materialization. Tree entries are
-        // tracked content and must always be written (git parity — skipping
-        // them would desync the index from the worktree). Ignore rules only
-        // protect *untracked* worktree files during the ignore-aware
-        // `clean_directory` sweep below.
-        match entry.mode {
-            EntryMode::Blob | EntryMode::Executable => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
-                    continue;
+        for (entry, mut prepared) in window.iter().zip(&mut staged) {
+            if !crate::object::TreeEntry::validate_name(&entry.name) {
+                continue;
+            }
+            let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+            let base_entry = base_entries.get(entry.name.as_slice());
+            // Identical to what the worktree already holds (see
+            // `restore_tree_to_worktree_with`'s `base_tree`): nothing to write.
+            // A clean restore checked the subtree it does not sweep before it
+            // started ([`check_unswept`]).
+            if base_entry
+                .is_some_and(|b| b.mode == entry.mode && b.object_hash == entry.object_hash)
+            {
+                continue;
+            }
+            let full_path = if path_prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{path_prefix}/{name}")
+            };
+            // NOTE: ignore rules do NOT gate materialization. Tree entries are
+            // tracked content and must always be written (git parity — skipping
+            // them would desync the index from the worktree). Ignore rules only
+            // protect *untracked* worktree files during the ignore-aware
+            // `clean_directory` sweep below.
+            match entry.mode {
+                EntryMode::Blob | EntryMode::Executable => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !matches_sparse(patterns, &full_path, false)
+                    {
+                        continue;
+                    }
+                    let stat = at_path(
+                        if let Some(prepared) = prepared.take() {
+                            at_path(prepared, &full_path)?.publish(
+                                entry.mode == EntryMode::Executable,
+                                || {
+                                    restore_blob_with(
+                                        store,
+                                        target_dir,
+                                        name,
+                                        entry.object_hash,
+                                        entry.mode == EntryMode::Executable,
+                                        batch_size,
+                                        read_chunks,
+                                        observed.is_some(),
+                                    )
+                                },
+                            )
+                        } else {
+                            restore_blob_with(
+                                store,
+                                target_dir,
+                                name,
+                                entry.object_hash,
+                                entry.mode == EntryMode::Executable,
+                                batch_size,
+                                read_chunks,
+                                observed.is_some(),
+                            )
+                        },
+                        &full_path,
+                    )?;
+                    report.files_written += 1;
+                    if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
+                        out.push(observation(full_path, entry.object_hash, stat));
+                    }
                 }
-                let stat = at_path(
-                    restore_blob_with(
+                EntryMode::Tree => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !could_match_descendant(patterns, &full_path)
+                    {
+                        continue;
+                    }
+                    let dir_path = target_dir.join(name);
+                    let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
+                    report.directories_created += 1;
+                    if !dir_meta.is_dir() {
+                        return Err(RestoreError::NotADirectory(dir_path));
+                    }
+                    restore_tree_to_worktree_inner(
                         store,
-                        target_dir,
-                        name,
                         entry.object_hash,
-                        entry.mode == EntryMode::Executable,
+                        &dir_path,
+                        options,
+                        &full_path,
+                        ignore,
+                        report,
+                        depth + 1,
                         batch_size,
+                        base_entry
+                            .filter(|b| b.mode == EntryMode::Tree)
+                            .map(|b| b.object_hash),
                         read_chunks,
-                        observed.is_some(),
-                    ),
-                    &full_path,
-                )?;
-                report.files_written += 1;
-                if let (Some(out), Some(stat)) = (observed.as_deref_mut(), stat) {
-                    out.push(observation(full_path, entry.object_hash, stat));
+                        observed.as_deref_mut(),
+                        progress,
+                        total,
+                        last_progress,
+                        pool,
+                    )?;
+                }
+                EntryMode::Symlink => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !matches_sparse(patterns, &full_path, false)
+                    {
+                        continue;
+                    }
+                    at_path(
+                        restore_symlink(store, target_dir, name, entry.object_hash),
+                        &full_path,
+                    )?;
+                    report.symlinks_written += 1;
                 }
             }
-            EntryMode::Tree => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !could_match_descendant(patterns, &full_path)
-                {
-                    continue;
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                if let Some(callback) = progress.as_mut() {
+                    callback(
+                        (report.files_written + report.symlinks_written) as usize,
+                        total,
+                    );
                 }
-                let dir_path = target_dir.join(name);
-                let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
-                report.directories_created += 1;
-                if !dir_meta.is_dir() {
-                    return Err(RestoreError::NotADirectory(dir_path));
-                }
-                restore_tree_to_worktree_inner(
-                    store,
-                    entry.object_hash,
-                    &dir_path,
-                    options,
-                    &full_path,
-                    ignore,
-                    report,
-                    depth + 1,
-                    batch_size,
-                    base_entry
-                        .filter(|b| b.mode == EntryMode::Tree)
-                        .map(|b| b.object_hash),
-                    read_chunks,
-                    observed.as_deref_mut(),
-                    progress,
-                    total,
-                    last_progress,
-                )?;
+                *last_progress = std::time::Instant::now();
             }
-            EntryMode::Symlink => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
-                    continue;
-                }
-                at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
-                    &full_path,
-                )?;
-                report.symlinks_written += 1;
-            }
-        }
-        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
-            if let Some(callback) = progress.as_mut() {
-                callback(
-                    (report.files_written + report.symlinks_written) as usize,
-                    total,
-                );
-            }
-            *last_progress = std::time::Instant::now();
         }
     }
     Ok(())
@@ -810,8 +868,17 @@ pub fn restore_tree(
     options: &RestoreOptions,
 ) -> RestoreResult<()> {
     check_nested_repositories(store, tree_hash, target_dir, options, None)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    sweep_restore_scratch(&store.spool_dir());
     fs::create_dir_all(target_dir)?;
-    restore_tree_inner(store, tree_hash, target_dir, options, "")
+    restore_tree_inner(
+        store,
+        tree_hash,
+        target_dir,
+        options,
+        "",
+        &std::sync::OnceLock::new(),
+    )
 }
 
 /// Refuse a file or symlink write over a directory holding a repository before
@@ -937,12 +1004,14 @@ fn check_nested_repositories_inner(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn restore_tree_inner(
     store: &ObjectStore,
     tree_hash: Hash,
     target_dir: &Path,
     options: &RestoreOptions,
     path_prefix: &str,
+    pool: &std::sync::OnceLock<FilePool>,
 ) -> RestoreResult<()> {
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
@@ -959,58 +1028,102 @@ fn restore_tree_inner(
         )?;
     }
 
-    for entry in &tree.entries {
-        if !crate::object::TreeEntry::validate_name(&entry.name) {
-            continue;
-        }
-        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
-        let full_path = if path_prefix.is_empty() {
-            name.to_string()
+    let parallel = !tree.entries.iter().any(|entry| {
+        !entry.name.is_ascii()
+            || entry
+                .name
+                .to_ascii_lowercase()
+                .starts_with(TMP_PREFIX.as_bytes())
+    });
+    for window in tree.entries.chunks(256) {
+        let mut staged = if parallel {
+            stage_files(pool, store, target_dir, window, false, |entry| {
+                std::str::from_utf8(&entry.name).is_ok_and(|name| {
+                    options
+                        .sparse_patterns
+                        .as_deref()
+                        .is_none_or(|p| matches_sparse(p, &name_path(path_prefix, name), false))
+                })
+            })
+            .map_err(|error| prefix_error(error, path_prefix))?
         } else {
-            format!("{path_prefix}/{name}")
+            StagedWindow::empty(window.len())
         };
-        match entry.mode {
-            EntryMode::Blob | EntryMode::Executable => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
-                    continue;
+        for (entry, mut prepared) in window.iter().zip(&mut staged) {
+            if !crate::object::TreeEntry::validate_name(&entry.name) {
+                continue;
+            }
+            let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+            let full_path = if path_prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{path_prefix}/{name}")
+            };
+            match entry.mode {
+                EntryMode::Blob | EntryMode::Executable => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !matches_sparse(patterns, &full_path, false)
+                    {
+                        continue;
+                    }
+                    at_path(
+                        if let Some(prepared) = prepared.take() {
+                            at_path(prepared, &full_path)?
+                                .publish(entry.mode == EntryMode::Executable, || {
+                                    restore_blob(
+                                        store,
+                                        target_dir,
+                                        name,
+                                        entry.object_hash,
+                                        entry.mode == EntryMode::Executable,
+                                    )
+                                    .map(|()| None)
+                                })
+                                .map(|_| ())
+                        } else {
+                            restore_blob(
+                                store,
+                                target_dir,
+                                name,
+                                entry.object_hash,
+                                entry.mode == EntryMode::Executable,
+                            )
+                        },
+                        &full_path,
+                    )?;
                 }
-                at_path(
-                    restore_blob(
+                EntryMode::Tree => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !could_match_descendant(patterns, &full_path)
+                    {
+                        continue;
+                    }
+                    let dir_path = target_dir.join(name);
+                    // Refuse to follow a symlink that took the place of the dir.
+                    let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
+                    if !dir_meta.is_dir() {
+                        return Err(RestoreError::NotADirectory(dir_path));
+                    }
+                    restore_tree_inner(
                         store,
-                        target_dir,
-                        name,
                         entry.object_hash,
-                        entry.mode == EntryMode::Executable,
-                    ),
-                    &full_path,
-                )?;
-            }
-            EntryMode::Tree => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !could_match_descendant(patterns, &full_path)
-                {
-                    continue;
+                        &dir_path,
+                        options,
+                        &full_path,
+                        pool,
+                    )?;
                 }
-                let dir_path = target_dir.join(name);
-                // Refuse to follow a symlink that took the place of the dir.
-                let dir_meta = ensure_directory_at(target_dir, name, &full_path)?;
-                if !dir_meta.is_dir() {
-                    return Err(RestoreError::NotADirectory(dir_path));
+                EntryMode::Symlink => {
+                    if let Some(patterns) = options.sparse_patterns.as_deref()
+                        && !matches_sparse(patterns, &full_path, false)
+                    {
+                        continue;
+                    }
+                    at_path(
+                        restore_symlink(store, target_dir, name, entry.object_hash),
+                        &full_path,
+                    )?;
                 }
-                restore_tree_inner(store, entry.object_hash, &dir_path, options, &full_path)?;
-            }
-            EntryMode::Symlink => {
-                if let Some(patterns) = options.sparse_patterns.as_deref()
-                    && !matches_sparse(patterns, &full_path, false)
-                {
-                    continue;
-                }
-                at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
-                    &full_path,
-                )?;
             }
         }
     }
@@ -1126,6 +1239,406 @@ where
         }
         _ => Err(RestoreError::NotABlob),
     }
+}
+
+fn prefix_error(error: RestoreError, prefix: &str) -> RestoreError {
+    match error {
+        RestoreError::File { path, source } => RestoreError::File {
+            path: name_path(prefix, &path),
+            source,
+        },
+        error => error,
+    }
+}
+
+// Only temporary files are written concurrently. Namespace changes, observations,
+// and callbacks stay on the calling thread in tree order.
+struct PreparedFile {
+    temporary: PathBuf,
+    destination: PathBuf,
+    written: Option<fs::Metadata>,
+    published: bool,
+}
+
+impl Drop for PreparedFile {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
+}
+
+impl PreparedFile {
+    fn publish(
+        mut self,
+        executable: bool,
+        fallback: impl FnOnce() -> RestoreResult<Option<StatFields>>,
+    ) -> RestoreResult<Option<StatFields>> {
+        if let Err(error) = finish_atomic_write(&self.temporary, &self.destination, executable) {
+            // Bind mounts can reject a rename even when device ids match.
+            if error.kind() == io::ErrorKind::CrossesDevices {
+                drop(self);
+                return fallback();
+            }
+            return Err(error.into());
+        }
+        self.published = true;
+        Ok(self
+            .written
+            .as_ref()
+            .and_then(|meta| observe_written(meta, &self.destination)))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_files(
+    pool: &std::sync::OnceLock<FilePool>,
+    store: &ObjectStore,
+    dir: &Path,
+    entries: &[TreeEntry],
+    observe: bool,
+    selected: impl Fn(&TreeEntry) -> bool,
+) -> RestoreResult<StagedWindow> {
+    let empty = || StagedWindow::empty(entries.len());
+    // Keep tiny directories and single large files on their existing path.
+    // A tracked temporary-name spelling must never alias another writer's temp.
+    if entries.len() < 32
+        || entries.iter().any(|e| {
+            !e.name.is_ascii()
+                || e.name
+                    .get(..TMP_PREFIX.len())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(TMP_PREFIX.as_bytes()))
+        })
+    {
+        return Ok(empty());
+    }
+    let jobs: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(e.mode, EntryMode::Blob | EntryMode::Executable)
+                && TreeEntry::validate_name(&e.name)
+                && selected(e)
+        })
+        .collect();
+    if jobs.len() < 32 {
+        return Ok(empty());
+    }
+    stage_jobs(pool, store, dir, entries.len(), &jobs, observe)
+}
+
+// Results arrive while the caller publishes earlier paths. Dropping a window
+// cancels queued work and drops every unconsumed temporary file.
+struct StagedWindow {
+    slots: Vec<Option<RestoreResult<PreparedFile>>>,
+    ready: Vec<bool>,
+    next: usize,
+    receiver: Option<std::sync::mpsc::Receiver<(usize, Option<RestoreResult<PreparedFile>>)>>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StagedWindow {
+    fn empty(len: usize) -> Self {
+        Self {
+            slots: (0..len).map(|_| None).collect(),
+            ready: vec![true; len],
+            next: 0,
+            receiver: None,
+            stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Iterator for StagedWindow {
+    type Item = Option<RestoreResult<PreparedFile>>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.next;
+        if index == self.slots.len() {
+            return None;
+        }
+        while !self.ready[index] {
+            match self
+                .receiver
+                .as_ref()
+                .and_then(|receiver| receiver.recv().ok())
+            {
+                Some((index, prepared)) => {
+                    self.slots[index] = prepared;
+                    self.ready[index] = true;
+                }
+                None => self.ready.fill(true),
+            }
+        }
+        self.next += 1;
+        Some(self.slots[index].take())
+    }
+}
+
+impl Drop for StagedWindow {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type FileJob = Box<dyn FnOnce(&Path) + Send>;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct FilePool {
+    sender: Option<std::sync::mpsc::Sender<FileJob>>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+    scratch: Option<tempfile::TempDir>,
+    _owner: Option<fs::File>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FilePool {
+    fn new(store: &ObjectStore) -> Self {
+        let staging = fs::create_dir_all(store.spool_dir()).ok().and_then(|()| {
+            if !fs::symlink_metadata(store.spool_dir()).is_ok_and(|meta| meta.is_dir()) {
+                return None;
+            }
+            sweep_restore_scratch(&store.spool_dir());
+            let scratch = tempfile::Builder::new()
+                .prefix("restore-")
+                .tempdir_in(store.spool_dir())
+                .ok()?;
+            let owner = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(scratch.path().join("owner"))
+                .ok()?;
+            owner.try_lock().ok()?;
+            Some((scratch, owner))
+        });
+        let (scratch, owner) = match staging {
+            Some((scratch, owner)) => (Some(scratch), Some(owner)),
+            None => (None, None),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel::<FileJob>();
+        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        let count = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(8);
+        let mut workers = Vec::new();
+        if count > 1
+            && let Some(scratch) = &scratch
+        {
+            for index in 0..count {
+                let directory = scratch.path().join(index.to_string());
+                if fs::create_dir(&directory).is_err() {
+                    continue;
+                }
+                let receiver = receiver.clone();
+                let worker = std::thread::Builder::new().spawn(move || {
+                    loop {
+                        let job = receiver
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .recv();
+                        match job {
+                            Ok(job) => job(&directory),
+                            Err(_) => break,
+                        }
+                    }
+                });
+                if let Ok(worker) = worker {
+                    workers.push(worker);
+                }
+            }
+        }
+        Self {
+            sender: Some(sender),
+            workers,
+            scratch,
+            _owner: owner,
+        }
+    }
+}
+
+// A kernel lock, rather than a pid, protects active restores in linked
+// worktrees and is released even when the process dies without destructors.
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_restore_scratch(dir: &Path) {
+    if !fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("restore-")
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let owner_path = path.join("owner");
+        if !fs::symlink_metadata(&owner_path).is_ok_and(|meta| meta.is_file()) {
+            // An interrupted creator may have made only the empty directory.
+            let _ = fs::remove_dir(&path);
+            continue;
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        if let Ok(owner) = options.open(owner_path)
+            && owner.try_lock().is_ok()
+        {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for FilePool {
+    fn drop(&mut self) {
+        self.sender.take();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct FilePool;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_jobs(
+    pool: &std::sync::OnceLock<FilePool>,
+    store: &ObjectStore,
+    dir: &Path,
+    len: usize,
+    jobs: &[(usize, &TreeEntry)],
+    observe: bool,
+) -> RestoreResult<StagedWindow> {
+    let pool = pool.get_or_init(|| FilePool::new(store));
+    let mut out = StagedWindow::empty(len);
+    if pool.workers.len() < 2 {
+        return Ok(out);
+    }
+    // Cross-directory renames must stay on the destination filesystem.
+    // A worktree may be mounted separately from its object store.
+    #[cfg(unix)]
+    let same_device = {
+        use std::os::unix::fs::MetadataExt;
+        pool.scratch
+            .as_ref()
+            .and_then(|scratch| fs::metadata(scratch.path()).ok())
+            .zip(fs::metadata(dir).ok())
+            .is_some_and(|(a, b)| a.dev() == b.dev())
+    };
+    #[cfg(not(unix))]
+    let same_device = false;
+    if !same_device {
+        return Ok(out);
+    }
+    let stopped = out.stopped.clone();
+    for &(index, _) in jobs {
+        out.ready[index] = false;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for worker in 0..pool.workers.len() {
+        let jobs: Vec<_> = jobs
+            .iter()
+            .skip(worker)
+            .step_by(pool.workers.len())
+            .map(|&(index, entry)| (index, entry.name.clone(), entry.object_hash))
+            .collect();
+        let store = store.clone();
+        let dir = dir.to_path_buf();
+        let stopped = stopped.clone();
+        let sender = sender.clone();
+        let job = Box::new(move |scratch: &Path| {
+            for (index, name, hash) in jobs {
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let prepared = std::str::from_utf8(&name)
+                    .map_err(|_| RestoreError::InvalidUtf8)
+                    .and_then(|name| prepare_file(&store, scratch, &dir, name, hash, observe))
+                    .transpose();
+                if prepared.as_ref().is_some_and(Result::is_err) {
+                    stopped.store(true, Ordering::Release);
+                }
+                if sender.send((index, prepared)).is_err() {
+                    break;
+                }
+            }
+        });
+        if let Some(queue) = &pool.sender {
+            queue
+                .send(job)
+                .map_err(|_| io::Error::other("restore writers stopped"))?;
+        }
+    }
+    drop(sender);
+    out.receiver = Some(receiver);
+    Ok(out)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::unnecessary_wraps)]
+fn stage_jobs(
+    _: &std::sync::OnceLock<FilePool>,
+    _: &ObjectStore,
+    _: &Path,
+    len: usize,
+    _: &[(usize, &TreeEntry)],
+    _: bool,
+) -> RestoreResult<StagedWindow> {
+    Ok(StagedWindow::empty(len))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn prepare_file(
+    store: &ObjectStore,
+    scratch: &Path,
+    dir: &Path,
+    name: &str,
+    hash: Hash,
+    observe: bool,
+) -> RestoreResult<Option<PreparedFile>> {
+    // Bound the allocation on the same open handle that supplies the bytes.
+    // Oversized or growing objects retain the original serial read path.
+    let bytes = match store.read_with_allocator(&hash, |len| {
+        if len as u64 > worktree::CHUNK_THRESHOLD + 10 {
+            Err(crate::store::StoreError::ObjectTooLarge)
+        } else {
+            Ok(Vec::with_capacity(len))
+        }
+    }) {
+        Ok(bytes) => bytes,
+        Err(crate::store::StoreError::ObjectTooLarge) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let blob =
+        match crate::serialize::deserialize(&bytes).map_err(crate::store::StoreError::from)? {
+            Object::Blob(blob) => blob,
+            Object::ChunkedBlob(_) => return Ok(None),
+            _ => return Err(RestoreError::NotABlob),
+        };
+    let (temporary, _, mut file) = create_tmp_for_write(scratch, name)?;
+    let destination = dir.join(name);
+    let mut prepared = PreparedFile {
+        temporary,
+        destination,
+        written: None,
+        published: false,
+    };
+    let result = file.write_all(&blob.data).map_err(RestoreError::from);
+    if observe && result.is_ok() {
+        prepared.written = file.metadata().ok();
+    }
+    drop(file);
+    result?;
+    Ok(Some(prepared))
 }
 
 /// Stat-cache fields in [`worktree::stat_cache_fields`] order:
@@ -1445,9 +1958,7 @@ fn finish_atomic_write(tmp_path: &Path, final_path: &Path, executable: bool) -> 
 #[cfg(unix)]
 fn apply_executable_bit(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let mut perm = fs::metadata(path)?.permissions();
-    perm.set_mode(0o755);
-    fs::set_permissions(path, perm)
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
 }
 
 #[cfg(not(unix))]
@@ -2090,6 +2601,331 @@ mod tests {
     fn put_tree_with(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn parallel_restore_writes_each_file_and_records_its_stat() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entries: Vec<_> = (0..600)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:04}").into_bytes(),
+                mode: if i % 2 == 0 {
+                    EntryMode::Executable
+                } else {
+                    EntryMode::Blob
+                },
+                object_hash: put_blob(&store, format!("content-{i}").as_bytes()),
+            })
+            .collect();
+        let tree = put_tree_with(&store, entries);
+        let mut observed = Vec::new();
+        let mut progress = Vec::new();
+        let report = restore_tree_to_worktree_progress(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+            Some(&mut observed),
+            &mut |done, total| progress.push((done, total)),
+        )
+        .unwrap();
+        assert_eq!(report.files_written, 600);
+        assert_eq!(observed.len(), 600);
+        assert_eq!(progress.first(), Some(&(0, 600)));
+        assert_eq!(progress.last(), Some(&(600, 600)));
+        assert!(progress.windows(2).all(|p| p[0].0 <= p[1].0));
+        for i in 0..600 {
+            assert_eq!(
+                fs::read(target.path().join(format!("file-{i:04}"))).unwrap(),
+                format!("content-{i}").as_bytes()
+            );
+        }
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 600);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn chunked_files_restore_on_the_calling_thread() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let chunk = put_blob(&store, b"content");
+        let manifest =
+            Object::ChunkedBlob(crate::object::testing::sized(0, vec![(chunk, 7)]).unwrap());
+        let hash = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let entries = (0..64)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:04}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: hash,
+            })
+            .collect();
+        let tree = put_tree_with(&store, entries);
+        let caller = std::thread::current().id();
+        let read = |store: &ObjectStore, hashes: &[Hash]| {
+            assert_eq!(std::thread::current().id(), caller);
+            sequential_read_chunks(store, hashes)
+        };
+        restore_tree_to_worktree_with(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &read,
+        )
+        .unwrap();
+        for i in 0..64 {
+            assert_eq!(
+                fs::read(target.path().join(format!("file-{i:04}"))).unwrap(),
+                b"content"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_parallel_window_preserves_error_order_and_removes_its_temps() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let mut entries: Vec<_> = (0..64)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:04}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"new"),
+            })
+            .collect();
+        entries[17].object_hash = crate::hash::hash(b"missing");
+        let tree = put_tree_with(&store, entries);
+        for i in 0..64 {
+            fs::write(target.path().join(format!("file-{i:04}")), b"old").unwrap();
+        }
+        assert!(
+            restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default())
+                .is_err()
+        );
+        for i in 0..64 {
+            assert_eq!(
+                fs::read(target.path().join(format!("file-{i:04}"))).unwrap(),
+                if i < 17 { b"new" } else { b"old" }
+            );
+        }
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_staging_keeps_symlink_errors_in_tree_order() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let mut entries = vec![TreeEntry {
+            name: b"a-link".to_vec(),
+            mode: EntryMode::Symlink,
+            object_hash: put_blob(&store, b"/etc/passwd"),
+        }];
+        entries.extend((0..64).map(|i| TreeEntry {
+            name: format!("file-{i:04}").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: if i == 17 {
+                crate::hash::hash(b"missing")
+            } else {
+                put_blob(&store, b"new")
+            },
+        }));
+        let tree = put_tree_with(&store, entries);
+        for worktree in [false, true] {
+            let error = if worktree {
+                restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default())
+                    .map(|_| ())
+            } else {
+                restore_tree(&store, tree, target.path(), &RestoreOptions::default())
+            }
+            .unwrap_err();
+            assert!(
+                matches!(error, RestoreError::InvalidSymlinkTarget(_)),
+                "{error:?}"
+            );
+            assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn parallel_staging_obeys_sparse_selection() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entries = (0..128)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:04}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: if i >= 64 {
+                    crate::hash::hash(b"missing")
+                } else {
+                    put_blob(&store, b"new")
+                },
+            })
+            .collect();
+        let tree = put_tree_with(&store, entries);
+        let patterns = (0..64)
+            .map(|i| SparsePattern {
+                pattern: format!("file-{i:04}"),
+                negated: false,
+                dir_only: false,
+            })
+            .collect();
+        let options = RestoreOptions {
+            clean: true,
+            sparse_patterns: Some(patterns),
+        };
+        restore_tree_to_worktree(&store, &tree, target.path(), &options).unwrap();
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 64);
+    }
+
+    #[test]
+    fn a_wide_restore_refuses_a_nested_repository_before_writing() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let entries = (0..64)
+            .map(|i| TreeEntry {
+                name: format!("file-{i:04}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"new"),
+            })
+            .collect();
+        let tree = put_tree_with(&store, entries);
+        fs::create_dir_all(target.path().join("file-0032/.git")).unwrap();
+        fs::write(target.path().join("file-0032/.git/HEAD"), b"keep").unwrap();
+        let error =
+            restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default())
+                .unwrap_err();
+        assert!(matches!(error, RestoreError::NestedRepository(_)));
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(target.path().join("file-0032/.git/HEAD")).unwrap(),
+            b"keep"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cross_mount_rename_falls_back_to_a_local_temporary_file() {
+        use std::os::unix::fs::MetadataExt;
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let Ok(scratch) = TempDir::new_in("/dev/shm") else {
+            eprintln!("SKIP: no writable /dev/shm for cross-mount restore");
+            return;
+        };
+        if fs::metadata(target.path()).unwrap().dev() == fs::metadata(scratch.path()).unwrap().dev()
+        {
+            eprintln!("SKIP: /dev/shm shares the worktree filesystem");
+            return;
+        }
+        let hash = put_blob(&store, b"restored");
+        let prepared = prepare_file(&store, scratch.path(), target.path(), "file", hash, false)
+            .unwrap()
+            .unwrap();
+        prepared
+            .publish(false, || {
+                restore_blob_with(
+                    &store,
+                    target.path(),
+                    "file",
+                    hash,
+                    false,
+                    1,
+                    &sequential_read_chunks,
+                    false,
+                )
+            })
+            .unwrap();
+        assert_eq!(fs::read(target.path().join("file")).unwrap(), b"restored");
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_next_restore_cleans_abandoned_staging_and_preserves_live_staging() {
+        let (_d, store) = fresh_store();
+        fs::create_dir_all(store.spool_dir()).unwrap();
+        let abandoned = store.spool_dir().join("restore-abandoned");
+        let live = store.spool_dir().join("restore-live");
+        let empty = store.spool_dir().join("restore-empty");
+        for path in [&abandoned, &live, &empty] {
+            fs::create_dir(path).unwrap();
+        }
+        fs::write(abandoned.join("owner"), b"").unwrap();
+        fs::write(abandoned.join("data"), b"staged").unwrap();
+        let owner = fs::File::create(live.join("owner")).unwrap();
+        owner.lock().unwrap();
+        fs::write(live.join("data"), b"live").unwrap();
+        let pool = FilePool::new(&store);
+        assert!(!abandoned.exists());
+        assert!(!empty.exists());
+        assert_eq!(fs::read(live.join("data")).unwrap(), b"live");
+        drop(pool);
+        drop(owner);
+        drop(FilePool::new(&store));
+        assert_eq!(fs::read_dir(store.spool_dir()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_never_follows_a_symlinked_spool_directory() {
+        let (_d, store) = fresh_store();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), store.spool_dir()).unwrap();
+        let pool = FilePool::new(&store);
+        assert!(pool.workers.is_empty());
+        assert!(pool.scratch.is_none());
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_oversized_plain_blob_stays_on_the_serial_path() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let hash = put_blob(
+            &store,
+            &vec![b'x'; usize::try_from(worktree::CHUNK_THRESHOLD).unwrap() + 1],
+        );
+        assert!(
+            prepare_file(&store, scratch.path(), target.path(), "large", hash, false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(target.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_restore_removes_its_worker_directories_on_success_and_error() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        for fail in [false, true] {
+            let entries = (0..64)
+                .map(|i| TreeEntry {
+                    name: format!("file-{i:04}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: if fail && i == 17 {
+                        crate::hash::hash(b"missing")
+                    } else {
+                        put_blob(&store, b"new")
+                    },
+                })
+                .collect();
+            let tree = put_tree_with(&store, entries);
+            let result =
+                restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default());
+            assert_eq!(result.is_err(), fail);
+            if store.spool_dir().exists() {
+                assert_eq!(fs::read_dir(store.spool_dir()).unwrap().count(), 0);
+            }
+        }
     }
 
     #[test]
