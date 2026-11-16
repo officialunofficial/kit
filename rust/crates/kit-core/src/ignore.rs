@@ -432,14 +432,16 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
 
 fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
-    if let Some(config) = config {
-        append_external(&mut patterns, &config.join("git/ignore"))?;
-    }
+    // Standalone tree builders have no repository config. This also keeps
+    // standalone snapshots independent of the caller's global ignore file.
     if root.join(".kit").exists() {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
+        if let Some(config) = config {
+            append_external(&mut patterns, &config.join("git/ignore"))?;
+        }
         let layout =
             crate::layout::discover(root).map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
         append_external(&mut patterns, &layout.common_dir().join("info/exclude"))?;
