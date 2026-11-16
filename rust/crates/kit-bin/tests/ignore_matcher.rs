@@ -574,7 +574,10 @@ fn clean_preserves_ignored_files_in_directories_with_literal_backslashes() {
     fs::write(root.join(r"a\b/secret.env"), "private").unwrap();
     let result = run_in(root, x, &["clean", "-fd"]);
     assert!(result.status.success(), "{result:?}");
-    assert_eq!(fs::read_to_string(root.join(r"a\b/secret.env")).unwrap(), "private");
+    assert_eq!(
+        fs::read_to_string(root.join(r"a\b/secret.env")).unwrap(),
+        "private"
+    );
 }
 
 #[test]
@@ -588,11 +591,17 @@ fn restore_can_recover_with_unreadable_root_and_global_ignore_files() {
     fs::write(root.join(".gitignore"), [0xff, b'\n']).unwrap();
     let restored = run_in(root, x, &["restore", "--force", ".gitignore"]);
     assert!(restored.status.success(), "{restored:?}");
-    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "*.local\n");
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        "*.local\n"
+    );
     fs::create_dir_all(x.join("git")).unwrap();
     fs::write(x.join("git/ignore"), [0xff, b'\n']).unwrap();
     fs::write(root.join("tracked"), "modified").unwrap();
     let restored = run_in(root, x, &["restore", "--force", "tracked"]);
     assert!(restored.status.success(), "{restored:?}");
-    assert_eq!(fs::read_to_string(root.join("tracked")).unwrap(), "committed");
+    assert_eq!(
+        fs::read_to_string(root.join("tracked")).unwrap(),
+        "committed"
+    );
 }
