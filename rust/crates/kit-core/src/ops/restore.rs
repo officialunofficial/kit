@@ -1845,7 +1845,7 @@ fn check_level_in_parallel(
 fn check_unswept_dir(
     store: &ObjectStore,
     unswept: &Unswept,
-    _ignore: &IgnoreList,
+    ignore: &IgnoreList,
 ) -> RestoreResult<Vec<Unswept>> {
     if unswept.depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -1875,7 +1875,7 @@ fn check_unswept_dir(
     while let Some((path, full_path, is_dir)) = untracked.pop() {
         let parent = path.parent().unwrap_or(&unswept.dir);
         if !lists.contains_key(parent) {
-            let local = ignore::load(parent).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            let local = ignore.load_directory(parent).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
             lists.insert(parent.to_path_buf(), local);
         }
         let local = &lists[parent];
@@ -2118,10 +2118,10 @@ fn is_repository_name(name: &str) -> bool {
 fn sweep_unlisted_dir(
     dir: &Path,
     prefix: &str,
-    _ignore: &IgnoreList,
+    ignore: &IgnoreList,
     sparse_patterns: Option<&[SparsePattern]>,
 ) {
-    let Ok(local) = ignore::load(dir) else {
+    let Ok(local) = ignore.load_directory(dir) else {
         return;
     };
     let ignore = &local;

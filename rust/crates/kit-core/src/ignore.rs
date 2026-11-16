@@ -38,7 +38,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Hard cap on a single ignore file (1 MiB).
 pub const MAX_IGNORE_FILE_BYTES: u64 = 1024 * 1024;
@@ -251,6 +251,7 @@ const MIN_INDEXED_LITERALS: usize = 32;
 /// Parsed ignore-list (the merged `.gitignore` + `.kitignore` patterns).
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
+    root: Option<PathBuf>,
     patterns: Vec<Pattern>,
     /// `None` when the list has too few literal-basename patterns to index.
     index: Option<LiteralIndex>,
@@ -276,6 +277,7 @@ impl IgnoreList {
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            root: None,
             patterns: Vec::new(),
             index: None,
         }
@@ -306,7 +308,11 @@ impl IgnoreList {
             }
             index
         });
-        Self { patterns, index }
+        Self { root: None, patterns, index }
+    }
+
+    pub(crate) fn load_directory(&self, dir: &Path) -> Result<Self, IgnoreError> {
+        load_from(self.root.as_deref().unwrap_or(dir), dir)
     }
 
     /// Borrow the parsed patterns.
@@ -413,10 +419,11 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
-    let root = dir
-        .ancestors()
-        .find(|p| p.join(".kit").exists() || p.join(".git").exists())
-        .unwrap_or(dir);
+    let root = dir.ancestors().find(|p| p.join(".kit").exists()).unwrap_or(dir);
+    load_from(root, dir)
+}
+
+fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
     let mut patterns = Vec::new();
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
@@ -450,7 +457,9 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
             append_file(&mut patterns, &directory.join(name), &prefix)?;
         }
     }
-    Ok(IgnoreList::from_patterns(patterns))
+    let mut list = IgnoreList::from_patterns(patterns);
+    list.root = Some(root.to_path_buf());
+    Ok(list)
 }
 
 fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result<(), IgnoreError> {

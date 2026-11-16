@@ -254,11 +254,6 @@ fn retained_content_hash(
     Ok(fresh)
 }
 
-/// `rel_dir` is the path of `dir` relative to the repo root (empty at the
-/// root), so ignore patterns can be matched against full repo-relative paths
-/// rather than bare basenames. `parent_ignored` carries down whether an
-/// ancestor directory is ignored (git "everything under an excluded dir is
-/// excluded"); `index` is the tracked set used to exempt tracked content.
 fn directory_ignores<'a>(
     dir: &Path,
     inherited: &'a IgnoreList,
@@ -267,12 +262,17 @@ fn directory_ignores<'a>(
     if keep_inherited {
         Ok(std::borrow::Cow::Borrowed(inherited))
     } else {
-        ignore::load(dir)
+        inherited.load_directory(dir)
             .map(std::borrow::Cow::Owned)
             .map_err(|e| WorktreeError::Io(io::Error::other(e)))
     }
 }
 
+/// `rel_dir` is the path of `dir` relative to the repo root (empty at the
+/// root), so ignore patterns can be matched against full repo-relative paths
+/// rather than bare basenames. `parent_ignored` carries down whether an
+/// ancestor directory is ignored (git "everything under an excluded dir is
+/// excluded"); `index` is the tracked set used to exempt tracked content.
 #[allow(clippy::too_many_arguments)]
 fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     sink: &S,

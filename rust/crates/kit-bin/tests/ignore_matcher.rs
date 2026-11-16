@@ -465,3 +465,50 @@ fn nested_kitignore_wins_and_excluded_parent_rules_are_not_read() {
     assert!(!root.join("sub/new.log").exists());
     assert!(root.join("sub/keep.log").exists());
 }
+
+#[test]
+fn nested_rules_survive_stash_sweeps_and_skipped_tracked_subtrees() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/tracked"), "base").unwrap();
+    fs::write(root.join("sub/.gitignore"), "*.local\n").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "base"]).status.success());
+    fs::write(root.join("sub/keep.local"), "private").unwrap();
+    fs::write(root.join("new"), "stash this").unwrap();
+    let saved = run_in(root, x, &["stash"]);
+    assert!(saved.status.success(), "{saved:?}");
+    assert_eq!(fs::read_to_string(root.join("sub/keep.local")).unwrap(), "private");
+    assert!(!root.join("new").exists());
+    let popped = run_in(root, x, &["stash", "pop"]);
+    assert!(popped.status.success(), "{popped:?}");
+    assert_eq!(fs::read_to_string(root.join("sub/keep.local")).unwrap(), "private");
+    assert!(root.join("new").exists());
+}
+
+#[test]
+fn nested_ignore_scope_treats_directory_glob_characters_literally() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    for dir in ["wild[ab]*", "wildaX"] { fs::create_dir(root.join(dir)).unwrap(); }
+    fs::write(root.join("wild[ab]*/.gitignore"), "/hidden\n").unwrap();
+    fs::write(root.join("wild[ab]*/hidden"), "ignore").unwrap();
+    fs::write(root.join("wildaX/hidden"), "keep").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(!tracked.lines().any(|p| p == "wild[ab]*/hidden"));
+    assert!(tracked.lines().any(|p| p == "wildaX/hidden"));
+}
+
+#[test]
+fn malformed_nested_ignore_aborts_clean_before_deleting_any_file() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("victim"), "keep on failure").unwrap();
+    fs::write(root.join("sub/.kitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+    let cleaned = run_in(root, x, &["clean", "-fdx"]);
+    assert!(!cleaned.status.success(), "{cleaned:?}");
+    assert!(root.join("victim").exists());
+}
