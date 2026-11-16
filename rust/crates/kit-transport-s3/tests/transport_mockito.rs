@@ -151,17 +151,22 @@ fn upload_pack_201_created() {
 }
 
 #[test]
-fn upload_pack_403_access_denied() {
+fn upload_pack_403_names_the_s3_error() {
     let mut server = mockito::Server::new();
-    let _m = server
+    let m = server
         .mock("PUT", mockito::Matcher::Any)
         .with_status(403)
+        .with_body("<Error><Code>AccessDenied</Code><Message>private details</Message></Error>")
+        .expect(1)
         .create();
     let t = build_transport(&server.url());
-    assert!(matches!(
-        t.upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None),
-        Err(TransportError::AccessDenied)
-    ));
+    let error = t
+        .upload_pack(&kit_core::protocol::SliceBody(b"x"), &sample_key(), None)
+        .unwrap_err();
+    assert!(matches!(error, TransportError::RemoteError(_)));
+    assert!(error.to_string().contains("S3 HTTP 403: AccessDenied"));
+    assert!(!error.to_string().contains("private details"));
+    m.assert();
 }
 
 #[test]

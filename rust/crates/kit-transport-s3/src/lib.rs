@@ -18,7 +18,7 @@
 //! [`TransportError::AccessDenied`].
 //!
 //! Retry policy mirrors SPEC-TRANSPORT §7 via
-//! [`kit_core::protocol::BackoffIterator`]: 5xx and HTTP 429 retry up to
+//! [`kit_core::protocol::BackoffIterator`]: 5xx, HTTP 408 and 429 retry up to
 //! 5 attempts; `412 Precondition Failed` NEVER retries so CAS writes
 //! can't silently turn into duplicate PUTs.
 //!
@@ -331,7 +331,7 @@ impl S3Transport {
     // -- HTTP core --
 
     /// Make a signed HTTP request with exponential-backoff retry on
-    /// 5xx / 429 / connection failures. 4xx other than 429 returns
+    /// 5xx / 408 / 429 / connection failures. Other 4xx returns
     /// immediately.
     fn http_request(
         &self,
@@ -344,15 +344,16 @@ impl S3Transport {
     ) -> TransportResult<HttpResponse> {
         self.retrying(|| {
             self.http_request_once(method, key, query, payload, extra_headers, body_limit)
+                .map_err(AttemptError::from)
         })
     }
 
     /// Run `attempt` on the SPEC-TRANSPORT §7 ladder: again after a 5xx, a
-    /// 429 or a connection failure, until the ladder runs out. Any other
+    /// 408, 429 or a connection failure, until the ladder runs out. Any other
     /// error returns at once.
     fn retrying(
         &self,
-        mut attempt: impl FnMut() -> TransportResult<HttpResponse>,
+        mut attempt: impl FnMut() -> Result<HttpResponse, AttemptError>,
     ) -> TransportResult<HttpResponse> {
         let mut iter = (self.backoff)();
         loop {
@@ -360,7 +361,7 @@ impl S3Transport {
                 Ok(resp) => {
                     let status = resp.status;
                     // Retry on 5xx / 429.
-                    if is_retryable(&TransportError::ServerError { status })
+                    if (status == 408 || is_retryable(&TransportError::ServerError { status }))
                         && let Some(d) = iter.next()
                     {
                         (self.sleeper)(d);
@@ -368,14 +369,22 @@ impl S3Transport {
                     }
                     return Ok(resp);
                 }
-                Err(TransportError::ConnectionFailed) => {
-                    if let Some(d) = iter.next() {
-                        (self.sleeper)(d);
+                Err(error) => {
+                    let retry = matches!(
+                        error,
+                        AttemptError::Stalled
+                            | AttemptError::Retryable(_)
+                            | AttemptError::Transport(TransportError::ConnectionFailed)
+                    );
+                    if retry && let Some(delay) = iter.next() {
+                        (self.sleeper)(delay);
                         continue;
                     }
-                    return Err(TransportError::ConnectionFailed);
+                    return Err(match error {
+                        AttemptError::Stalled => TransportError::ConnectionFailed,
+                        AttemptError::Retryable(error) | AttemptError::Transport(error) => error,
+                    });
                 }
-                Err(e) => return Err(e),
             }
         }
     }
@@ -483,11 +492,8 @@ impl S3Transport {
             let (url, headers) =
                 self.signed_parts(&Method::PUT, object_key, "", &payload_sha256, &[]);
             let sent = self.put.send(&url, headers, pack, self.stall);
-            stalled.set(matches!(sent, Err(PutError::Stalled)));
-            sent.map_err(|error| match error {
-                PutError::Stalled => TransportError::ConnectionFailed,
-                PutError::Transport(error) => error,
-            })
+            stalled.set(matches!(sent, Err(AttemptError::Stalled)));
+            sent
         });
         match result {
             Err(TransportError::ConnectionFailed) if stalled.get() => {
@@ -563,13 +569,14 @@ struct PackPut {
 }
 
 /// Why a pack `PUT` attempt failed.
-enum PutError {
+enum AttemptError {
     /// No byte moved for the stall bound.
     Stalled,
     Transport(TransportError),
+    Retryable(TransportError),
 }
 
-impl From<TransportError> for PutError {
+impl From<TransportError> for AttemptError {
     fn from(error: TransportError) -> Self {
         Self::Transport(error)
     }
@@ -596,17 +603,18 @@ impl PackPut {
     ///
     /// # Errors
     /// [`TransportError::ProtocolError`] when `pack` cannot be read or ends
-    /// early: a local failure, never retried. [`PutError::Stalled`] after
+    /// early: a local failure, never retried. [`AttemptError::Stalled`] after
     /// `stall` with no progress. [`TransportError::ConnectionFailed`] for any
     /// other failure to send, a thread or runtime that cannot start
-    /// included.
+    /// included. A refused 4xx upload other than 408 or 429 returns
+    /// [`TransportError::RemoteError`] with its status and S3 code.
     fn send(
         &self,
         url: &str,
         headers: Vec<(&'static str, String)>,
         pack: &dyn PackBody,
         stall: Duration,
-    ) -> Result<HttpResponse, PutError> {
+    ) -> Result<HttpResponse, AttemptError> {
         let len = pack.len();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -618,12 +626,19 @@ impl PackPut {
                 .spawn_scoped(scope, move || feed(pack, len, &tx))
                 .map_err(|_| TransportError::ConnectionFailed)?;
             let progress = Arc::new(Progress::new());
+            let ready = Arc::new(tokio::sync::Notify::new());
+            let notified = Arc::clone(&ready).notified_owned();
+            let wait = (stall / 2).min(Duration::from_secs(1));
             let mut request = self
                 .client
                 .put(url)
                 .header(reqwest::header::CONTENT_LENGTH, len)
+                .header(reqwest::header::EXPECT, "100-continue")
                 .body(reqwest::Body::wrap(FedBody {
                     rx,
+                    gate: Some(Box::pin(async move {
+                        let _ = tokio::time::timeout(wait, notified).await;
+                    })),
                     rest: bytes::Bytes::new(),
                     len,
                     progress: Arc::clone(&progress),
@@ -631,15 +646,29 @@ impl PackPut {
             for (name, value) in headers {
                 request = request.header(name, value);
             }
+            let mut request: http::Request<reqwest::Body> = request
+                .build()
+                .map_err(|_| TransportError::ProtocolError)?
+                .try_into()
+                .map_err(|_| TransportError::ProtocolError)?;
+            hyper::ext::on_informational(&mut request, move |response| {
+                if response.status() == http::StatusCode::CONTINUE {
+                    ready.notify_one();
+                }
+            });
+            let request =
+                reqwest::Request::try_from(request).map_err(|_| TransportError::ProtocolError)?;
             let exchange = async {
-                let mut response = request
-                    .send()
+                let mut response = self
+                    .client
+                    .execute(request)
                     .await
                     .map_err(|_| TransportError::ConnectionFailed)?;
                 progress.mark();
                 let status = response.status().as_u16();
-                // An error answer's body is never read (see
-                // [`extract_response`]).
+                if (400..500).contains(&status) && !matches!(status, 408 | 429) {
+                    return Err(client_error(&mut response, status, stall / 2).await);
+                }
                 let mut body = Vec::new();
                 if (200..300).contains(&status) {
                     while let Some(chunk) = response
@@ -649,7 +678,9 @@ impl PackPut {
                     {
                         progress.mark();
                         if body.len() + chunk.len() > SMALL_RESPONSE_LIMIT {
-                            return Err(TransportError::PayloadTooLarge(body.len() + chunk.len()));
+                            return Err(
+                                TransportError::PayloadTooLarge(body.len() + chunk.len()).into()
+                            );
                         }
                         body.extend_from_slice(&chunk);
                     }
@@ -663,13 +694,65 @@ impl PackPut {
             runtime.shutdown_background();
             match feeder.join() {
                 Ok(Ok(())) => match sent {
-                    Some(result) => result.map_err(PutError::from),
-                    None => Err(PutError::Stalled),
+                    Some(result) => result,
+                    None => Err(AttemptError::Stalled),
                 },
                 Ok(Err(_)) | Err(_) => Err(TransportError::ProtocolError.into()),
             }
         })
     }
+}
+
+/// Keep a refused upload's status even when its advisory body is cut short.
+/// Only the bounded S3 code is reported; the body can contain credentials.
+async fn client_error(
+    response: &mut reqwest::Response,
+    status: u16,
+    timeout: Duration,
+) -> AttemptError {
+    let mut code = response
+        .headers()
+        .get("x-amz-error-code")
+        .and_then(|value| value.to_str().ok())
+        .and_then(s3_code);
+    if code.is_none() {
+        let mut body = Vec::new();
+        let read = async {
+            while let Ok(Some(chunk)) = response.chunk().await {
+                if body.len() + chunk.len() > SMALL_RESPONSE_LIMIT {
+                    break;
+                }
+                body.extend_from_slice(&chunk);
+            }
+        };
+        let _ = tokio::time::timeout(timeout, read).await;
+        code = std::str::from_utf8(&body)
+            .ok()
+            .and_then(|text| extract_element(text, "Code"))
+            .and_then(|value| s3_code(&value));
+    }
+    let transient = matches!(
+        code.as_deref(),
+        Some("RequestTimeout" | "RequestTimeoutException" | "InternalError" | "SlowDown")
+    );
+    let error = TransportError::RemoteError(format!(
+        "S3 HTTP {status}: {}",
+        code.as_deref().unwrap_or("unknown error code")
+    ));
+    if transient {
+        AttemptError::Retryable(error)
+    } else {
+        AttemptError::Transport(error)
+    }
+}
+
+fn s3_code(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    .then(|| value.to_owned())
 }
 
 /// The time a pack `PUT` last moved, as nanoseconds from its start.
@@ -771,6 +854,8 @@ const PUT_SLICE: usize = 64 * 1024;
 /// slices of at most [`PUT_SLICE`], then its end once the feeder is done.
 /// Handing a slice to the connection is progress.
 struct FedBody {
+    // Wait for 100 Continue or a bounded fallback before sending any bytes.
+    gate: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
     rx: tokio::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
     /// What is left of the chunk being sent.
     rest: bytes::Bytes,
@@ -786,6 +871,10 @@ impl http_body::Body for FedBody {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        if let Some(gate) = self.gate.as_mut() {
+            std::task::ready!(gate.as_mut().poll(cx));
+            self.gate = None;
+        }
         if self.rest.is_empty() {
             match std::task::ready!(self.rx.poll_recv(cx)) {
                 Some(Ok(chunk)) => self.rest = bytes::Bytes::from(chunk),
@@ -1979,6 +2068,121 @@ mod tests {
             }
         });
         (endpoint, taken)
+    }
+
+    #[test]
+    fn early_client_error_is_not_retried_and_names_the_code() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        for status in [400, 403, 404] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                assert!(reader.buffer().is_empty(), "body sent before Continue");
+                if status == 400 {
+                    let body = "<Error><Code>AccessDenied</Code></Error>";
+                    write!(reader.get_mut(), "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                } else {
+                    write!(reader.get_mut(), "HTTP/1.1 {status} Error\r\nx-amz-error-code: AccessDenied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                }
+                // Close immediately, without reading the upload body.
+            });
+            let t = stalling_transport(&endpoint, Duration::from_secs(5));
+            let error = t
+                .upload_pack(
+                    &kit_core::protocol::SliceBody(&vec![7; 16 << 20]),
+                    &PackKey::new([0; 32]),
+                    None,
+                )
+                .unwrap_err();
+            server.join().unwrap();
+            assert!(!is_retryable(&error), "{error:?}");
+            assert!(error.to_string().contains("AccessDenied"), "{error}");
+        }
+    }
+
+    #[test]
+    fn transient_upload_statuses_are_retried() {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        for (status, code) in [
+            (408, ""),
+            (429, ""),
+            (500, ""),
+            (503, ""),
+            (400, "RequestTimeout"),
+            (400, "RequestTimeoutException"),
+            (400, "InternalError"),
+            (400, "SlowDown"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let server = thread::spawn(move || {
+                for attempt in 0..2 {
+                    let start = std::time::Instant::now();
+                    let stream = loop {
+                        match listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(start.elapsed() < Duration::from_secs(10), "missing retry");
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(error) => panic!("accept: {error}"),
+                        }
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut len = 0;
+                    loop {
+                        let mut line = String::new();
+                        assert!(reader.read_line(&mut line).unwrap() > 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        if let Some(value) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
+                        {
+                            len = value.trim().parse::<u64>().unwrap();
+                        }
+                    }
+                    if attempt == 0 {
+                        let body = format!("<Error><Code>{code}</Code></Error>");
+                        write!(reader.get_mut(), "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    } else {
+                        reader
+                            .get_mut()
+                            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                            .unwrap();
+                        assert_eq!(
+                            std::io::copy(&mut reader.by_ref().take(len), &mut io::sink()).unwrap(),
+                            len
+                        );
+                        reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    }
+                }
+            });
+            let t = stalling_transport(&endpoint, Duration::from_secs(5));
+            let result = t.upload_pack(
+                &kit_core::protocol::SliceBody(&[7; 1024]),
+                &PackKey::new([0; 32]),
+                None,
+            );
+            server.join().unwrap();
+            assert!(result.is_ok(), "{status} {code}: {result:?}");
+        }
     }
 
     #[test]
