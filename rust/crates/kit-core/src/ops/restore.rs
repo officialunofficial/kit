@@ -579,8 +579,13 @@ fn restore_tree_to_worktree_impl<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    // Load the root-level ignore list. Missing = empty list.
-    let ignore_list = ignore::load(root).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+    // Only a clean sweep uses ignore rules. A non-clean restore must also
+    // be able to recover a malformed ignore file.
+    let ignore_list = if opts.clean {
+        ignore::load(root).map_err(|e| RestoreError::Io(io::Error::other(e)))?
+    } else {
+        IgnoreList::new()
+    };
     if opts.clean
         && let Some(base) = base_tree
     {

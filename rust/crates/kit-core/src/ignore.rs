@@ -348,8 +348,10 @@ impl IgnoreList {
             let prefix = current
                 .strip_prefix(root)
                 .map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?
-                .to_string_lossy()
-                .replace('\\', "/");
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             if list.is_ignored_with_ancestors(&prefix, true) {
                 break;
             }

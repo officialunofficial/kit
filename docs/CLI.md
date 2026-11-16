@@ -1814,7 +1814,7 @@ every visited directory. Patterns are relative to their file’s directory.
 Deeper files win; an excluded directory cannot be re-included from below.
 `.gitignore` is applied first and `.kitignore` last, so
 under gitignore's last-match-wins rule a repo's own `.kitignore` can override
-(including re-include via `!`) anything `.gitignore` set. Matching is honored
+(including re-include via `!`) rules from `.gitignore` in the same directory. Matching is honored
 by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
 worktree tree-builder.
 
