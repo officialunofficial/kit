@@ -634,7 +634,7 @@ fn add_refuses_unrepresentable_native_paths_instead_of_aliasing_them() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn add_refuses_non_utf8_native_paths_instead_of_staging_replacements() {
     use std::os::unix::ffi::OsStringExt;

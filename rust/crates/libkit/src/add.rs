@@ -834,11 +834,7 @@ fn route_path(
         path: abs.clone(),
         source,
     })?;
-    let rel_str = abs
-        .strip_prefix(root)
-        .unwrap_or(rel)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
     if !index::validate_index_path(&rel_str) {
         return Err(Error::InvalidPath(rel_str));
     }
@@ -964,6 +960,16 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
     idx.upsert_entry(entry);
 }
 
+// Keep native filename characters inside each component. Only native
+// separators become index separators; lossy conversion would alias files.
+fn path_text(path: &Path) -> Result<String, Error> {
+    let components = path.components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| Error::InvalidPath(path.display().to_string()))?;
+    Ok(components.join("/"))
+}
+
 fn is_ignored_untracked(
     ignores: &IgnoreList,
     path: &Path,
@@ -1008,11 +1014,7 @@ fn add_tree(
         let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
-        let rel_path = p
-            .strip_prefix(root)
-            .unwrap_or(&p)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel_path = path_text(p.strip_prefix(root).unwrap_or(&p))?;
         // An ignore rule hides untracked content only. A tracked file stays
         // in view, and so does a directory that holds tracked content, so
         // `add .` and `add -A` refresh the tracked changes. The bit of an
@@ -1021,6 +1023,9 @@ fn add_tree(
         let entry_ignored = parent_ignored || ignores.is_ignored(&rel_path, is_dir);
         if entry_ignored && !index_tracks_path_or_descendant(idx, &rel_path) {
             continue;
+        }
+        if !index::validate_index_path(&rel_path) {
+            return Err(Error::InvalidPath(rel_path));
         }
         if meta.file_type().is_dir() {
             add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;
@@ -1124,11 +1129,7 @@ fn patch_one_file(
         path: abs.clone(),
         source,
     })?;
-    let rel_str = abs
-        .strip_prefix(root)
-        .unwrap_or(rel)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
     if !index::validate_index_path(&rel_str) {
         return Err(Error::InvalidPath(rel_str));
     }
@@ -1323,6 +1324,15 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), Error> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn native_path_text_preserves_boundaries_and_refuses_lossy_names() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(path_text(Path::new(r"a\b/file")).unwrap(), r"a\b/file");
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        assert!(matches!(path_text(Path::new(&invalid)), Err(Error::InvalidPath(_))));
+    }
+
     struct NoChooser;
     impl HunkChooser for NoChooser {
         fn choose(&mut self, _: &str, _: &[PatchHunk]) -> io::Result<Choice> {
