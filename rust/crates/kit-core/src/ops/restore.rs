@@ -657,10 +657,13 @@ where
     }
     let scoped;
     let ignore = if options.clean {
-        scoped = ignore.load_directory(target_dir)
+        scoped = ignore
+            .load_directory(target_dir)
             .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
         &scoped
-    } else { ignore };
+    } else {
+        ignore
+    };
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -4129,7 +4132,10 @@ mod tests {
         fs::write(out.join("secret.env"), "private").unwrap();
         let empty = put_tree_with(&store, Vec::new());
         restore_tree_to_worktree(&store, &empty, &out, &RestoreOptions::default()).unwrap();
-        assert_eq!(fs::read_to_string(out.join("secret.env")).unwrap(), "private");
+        assert_eq!(
+            fs::read_to_string(out.join("secret.env")).unwrap(),
+            "private"
+        );
     }
 
     #[test]
@@ -4140,7 +4146,9 @@ mod tests {
         fs::write(out.join(".gitignore"), "*.env\n").unwrap();
         fs::write(out.join("secret.env"), "private").unwrap();
         let hash = crate::worktree::build_tree(&store, &out).unwrap();
-        let Object::Tree(tree) = store.read_object(&hash).unwrap() else { panic!("not a tree") };
+        let Object::Tree(tree) = store.read_object(&hash).unwrap() else {
+            panic!("not a tree")
+        };
         assert!(!tree.entries.iter().any(|e| e.name == b"secret.env"));
     }
 
@@ -4149,16 +4157,36 @@ mod tests {
         let (_repo, store) = fresh_store();
         let target = TempDir::new().unwrap();
         fs::create_dir(target.path().join("sub")).unwrap();
-        fs::write(target.path().join("sub/.gitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
-        let sub = put_tree_with(&store, vec![TreeEntry {
-            name: b"tracked".to_vec(), mode: EntryMode::Blob, object_hash: put_blob(&store, b"target"),
-        }]);
-        let tree = put_tree_with(&store, vec![TreeEntry {
-            name: b"sub".to_vec(), mode: EntryMode::Tree, object_hash: sub,
-        }]);
-        let opts = RestoreOptions { clean: false, ..RestoreOptions::default() };
+        fs::write(
+            target.path().join("sub/.gitignore"),
+            vec![b'a'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let sub = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"sub".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: sub,
+            }],
+        );
+        let opts = RestoreOptions {
+            clean: false,
+            ..RestoreOptions::default()
+        };
         restore_tree_to_worktree(&store, &tree, target.path(), &opts).unwrap();
-        assert_eq!(fs::read(target.path().join("sub/tracked")).unwrap(), b"target");
+        assert_eq!(
+            fs::read(target.path().join("sub/tracked")).unwrap(),
+            b"target"
+        );
     }
 
     #[test]

@@ -970,7 +970,8 @@ fn is_ignored_untracked(
     relative: &str,
     is_dir: bool,
 ) -> Result<bool, Error> {
-    let scoped = ignores.load_directory(path.parent().unwrap_or(path))
+    let scoped = ignores
+        .load_directory(path.parent().unwrap_or(path))
         .map_err(Error::IgnoreFile)?;
     Ok(scoped.is_ignored_with_ancestors(relative, is_dir))
 }

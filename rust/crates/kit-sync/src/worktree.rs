@@ -509,8 +509,11 @@ fn directory_ignore<'a>(
     use std::collections::hash_map::Entry;
     match cache.entry(parent.to_path_buf()) {
         Entry::Occupied(entry) => Ok(entry.into_mut()),
-        Entry::Vacant(entry) => Ok(entry.insert(inherited.load_directory(parent)
-            .map_err(|e| format!("read ignore file: {e}"))?)),
+        Entry::Vacant(entry) => Ok(entry.insert(
+            inherited
+                .load_directory(parent)
+                .map_err(|e| format!("read ignore file: {e}"))?,
+        )),
     }
 }
 
