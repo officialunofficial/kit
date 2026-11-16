@@ -7,6 +7,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Choose `VISUAL` before `EDITOR`, after `GIT_EDITOR`.
+
 ### Added
 
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.

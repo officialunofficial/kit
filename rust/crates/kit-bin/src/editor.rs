@@ -2,7 +2,7 @@
 //! `kit rebase -i`.
 //!
 //! Behaviour:
-//! * Honour `$GIT_EDITOR` first, then `$EDITOR`, then `$VISUAL`.
+//! * Honour `$GIT_EDITOR` first, then `$VISUAL`, then `$EDITOR`.
 //! * Fall back to `vi` when no env var is set, so `kit commit` works
 //!   out-of-the-box.
 //! * An editor the user set is always started, terminal or not, as git
@@ -27,8 +27,8 @@ pub const MAX_COMMIT_MSG_BYTES: u64 = 1024 * 1024;
 ///
 /// The editor is chosen in this order:
 /// 1. `$GIT_EDITOR`
-/// 2. `$EDITOR`
-/// 3. `$VISUAL`
+/// 2. `$VISUAL`
+/// 3. `$EDITOR`
 /// 4. platform default (`vi`)
 ///
 /// The editor invocation parses the chosen value as a shell-like
@@ -157,7 +157,7 @@ fn pick_editor_with(resolver: impl Fn(&str) -> Option<String>) -> String {
 /// The editor the user set: `resolver` is called once per candidate env
 /// var, and the first value that is not blank wins.
 fn set_editor_with(resolver: impl Fn(&str) -> Option<String>) -> Option<String> {
-    ["GIT_EDITOR", "EDITOR", "VISUAL"]
+    ["GIT_EDITOR", "VISUAL", "EDITOR"]
         .into_iter()
         .find_map(|var| resolver(var).filter(|v| !v.trim().is_empty()))
 }
@@ -218,13 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn pick_editor_prefers_editor_over_visual() {
+    fn pick_editor_prefers_visual_over_editor() {
         let got = pick_editor_with(|name| match name {
             "EDITOR" => Some("from-editor".to_string()),
             "VISUAL" => Some("from-visual".to_string()),
             _ => None,
         });
-        assert_eq!(got, "from-editor");
+        assert_eq!(got, "from-visual");
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
         assert!(!is_no_terminal(&io::Error::other("other")));
         let only =
             |var: &'static str| move |name: &str| (name == var).then(|| "my-editor".to_string());
-        for var in ["GIT_EDITOR", "EDITOR", "VISUAL"] {
+        for var in ["GIT_EDITOR", "VISUAL", "EDITOR"] {
             assert!(check_usable_with(false, only(var)).is_ok(), "{var}");
         }
         assert!(check_usable_with(false, |_| Some("  ".to_string())).is_err());
