@@ -254,6 +254,21 @@ fn retained_content_hash(
     Ok(fresh)
 }
 
+fn directory_ignores<'a>(
+    dir: &Path,
+    inherited: &'a IgnoreList,
+    keep_inherited: bool,
+) -> WorktreeResult<std::borrow::Cow<'a, IgnoreList>> {
+    if keep_inherited {
+        Ok(std::borrow::Cow::Borrowed(inherited))
+    } else {
+        inherited
+            .load_directory(dir)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| WorktreeError::Io(io::Error::other(e)))
+    }
+}
+
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
 /// root), so ignore patterns can be matched against full repo-relative paths
 /// rather than bare basenames. `parent_ignored` carries down whether an
@@ -271,6 +286,8 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     parent_ignored: bool,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
+    let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
+    let ignores = scoped.as_ref();
     let mut entries: Vec<TreeEntry> = Vec::new();
     // Cache-miss regular files collected during the walk below, hashed
     // together (sequentially or fanned out) once the walk finishes —

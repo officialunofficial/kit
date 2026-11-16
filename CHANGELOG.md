@@ -13,6 +13,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Keep native path components in ignore checks and refuse filenames the index cannot represent.
 - Stop automated bisect when another command changes the session, preserving its state and worktree.
 - Refuse restore paths that alias another tree entry or an existing spelling on the destination filesystem before changing tracked files.
 - Report full disks during add and checkout with an actionable message and exit 74, distinct from a branch that already exists.
@@ -25,6 +26,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
 

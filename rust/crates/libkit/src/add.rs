@@ -834,11 +834,7 @@ fn route_path(
         path: abs.clone(),
         source,
     })?;
-    let rel_str = abs
-        .strip_prefix(root)
-        .unwrap_or(rel)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
     if !index::validate_index_path(&rel_str) {
         return Err(Error::InvalidPath(rel_str));
     }
@@ -848,7 +844,7 @@ fn route_path(
     // A path that is named and ignored needs `force`. A path that is tracked
     // is never ignored.
     let already_tracked = previous_status != EntryStatus::Removed && existing_pos.is_some();
-    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
+    if !force && !already_tracked && is_ignored_untracked(ignores, &abs, &rel_str, meta.is_dir())? {
         return Err(Error::Ignored(rel_str));
     }
     // A tracked file whose time, size and mode class match is staged to the
@@ -964,6 +960,29 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
     idx.upsert_entry(entry);
 }
 
+// Keep native filename characters inside each component. Only native
+// separators become index separators; lossy conversion would alias files.
+fn path_text(path: &Path) -> Result<String, Error> {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| Error::InvalidPath(path.display().to_string()))?;
+    Ok(components.join("/"))
+}
+
+fn is_ignored_untracked(
+    ignores: &IgnoreList,
+    path: &Path,
+    relative: &str,
+    is_dir: bool,
+) -> Result<bool, Error> {
+    let scoped = ignores
+        .load_directory(path.parent().unwrap_or(path))
+        .map_err(Error::IgnoreFile)?;
+    Ok(scoped.is_ignored_with_ancestors(relative, is_dir))
+}
+
 /// Walk `dir` using metadata and link targets. Record a placeholder for each
 /// pending hash so the index has the exact paths before any object is stored.
 #[allow(clippy::too_many_arguments)] // the state of one walk
@@ -976,6 +995,13 @@ fn add_tree(
     seen: &mut HashSet<String>,
     pending: &mut Vec<PendingHash>,
 ) -> Result<(), Error> {
+    let local;
+    let ignores = if dir != root && !parent_ignored {
+        local = ignores.load_directory(dir).map_err(Error::IgnoreFile)?;
+        &local
+    } else {
+        ignores
+    };
     let rd = std::fs::read_dir(dir).map_err(|source| Error::ReadDir {
         path: dir.to_path_buf(),
         source,
@@ -989,18 +1015,24 @@ fn add_tree(
         let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
-        let rel_path = p
-            .strip_prefix(root)
-            .unwrap_or(&p)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let native_relative = p.strip_prefix(root).unwrap_or(&p);
+        // Lossy text is only for ignore decisions. Unrepresentable names can
+        // never be tracked; route_path rejects them if a file is included.
+        let rel_path = native_relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
         // An ignore rule hides untracked content only. A tracked file stays
         // in view, and so does a directory that holds tracked content, so
         // `add .` and `add -A` refresh the tracked changes. The bit of an
         // ignored ancestor goes down, so the untracked and ignored children of
         // a tracked directory stay out.
         let entry_ignored = parent_ignored || ignores.is_ignored(&rel_path, is_dir);
-        if entry_ignored && !index_tracks_path_or_descendant(idx, &rel_path) {
+        if entry_ignored
+            && (native_relative.to_str().is_none()
+                || !index_tracks_path_or_descendant(idx, &rel_path))
+        {
             continue;
         }
         if meta.file_type().is_dir() {
@@ -1105,11 +1137,7 @@ fn patch_one_file(
         path: abs.clone(),
         source,
     })?;
-    let rel_str = abs
-        .strip_prefix(root)
-        .unwrap_or(rel)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
     if !index::validate_index_path(&rel_str) {
         return Err(Error::InvalidPath(rel_str));
     }
@@ -1126,7 +1154,7 @@ fn patch_one_file(
     let already_tracked = idx
         .find_entry(&rel_str)
         .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed);
-    if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, false) {
+    if !force && !already_tracked && is_ignored_untracked(ignores, &abs, &rel_str, false)? {
         return Err(Error::Ignored(rel_str));
     }
 
@@ -1304,6 +1332,18 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), Error> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn native_path_text_preserves_boundaries_and_refuses_lossy_names() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_eq!(path_text(Path::new(r"a\b/file")).unwrap(), r"a\b/file");
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        assert!(matches!(
+            path_text(Path::new(&invalid)),
+            Err(Error::InvalidPath(_))
+        ));
+    }
+
     struct NoChooser;
     impl HunkChooser for NoChooser {
         fn choose(&mut self, _: &str, _: &[PatchHunk]) -> io::Result<Choice> {

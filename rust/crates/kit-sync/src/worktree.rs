@@ -478,13 +478,17 @@ pub(crate) fn check_restore_safe(
 
     if options.clean {
         let mut kept = std::collections::HashMap::new();
+        let mut ignores = std::collections::HashMap::from([(root.to_path_buf(), ignore.clone())]);
         for path in &worktree_paths {
+            let full_path = root.join(path);
+            let parent = full_path.parent().unwrap_or(root);
+            let ignore = directory_ignore(&mut ignores, &ignore, parent)?;
             if !index_tracks_path_or_descendant(&tracked, path)
                 && restore_affects_path(options, path)
                 && path != ".kitignore"
                 && path != ".gitignore"
                 && (expected.refuse_untracked_dirs || !is_real_dir(path))
-                && !is_ignored_worktree_path(root, &ignore, path)
+                && !is_ignored_worktree_path(root, ignore, path)
                 && (!expected.restore_temp_files || !is_restore_temp(root, &tracked, path))
                 && !sweep_keeps_path(store, target_tree, root, path, &mut kept)
                     .map_err(|e| format!("check untracked repository at '{path}': {e}"))?
@@ -495,6 +499,22 @@ pub(crate) fn check_restore_safe(
     }
 
     Ok(())
+}
+
+fn directory_ignore<'a>(
+    cache: &'a mut std::collections::HashMap<std::path::PathBuf, kit_core::ignore::IgnoreList>,
+    inherited: &kit_core::ignore::IgnoreList,
+    parent: &Path,
+) -> Result<&'a kit_core::ignore::IgnoreList, String> {
+    use std::collections::hash_map::Entry;
+    match cache.entry(parent.to_path_buf()) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => Ok(entry.insert(
+            inherited
+                .load_directory(parent)
+                .map_err(|e| format!("read ignore file: {e}"))?,
+        )),
+    }
 }
 
 /// Only an unlisted directory with its own metadata marker is kept whole.

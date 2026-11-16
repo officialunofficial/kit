@@ -579,10 +579,12 @@ fn restore_tree_to_worktree_impl<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
-    // Load the root-level ignore list. Missing = empty list.
-    let ignore_list = match ignore::load(root) {
-        Ok(il) => il,
-        Err(_) => IgnoreList::new(),
+    // Only a clean sweep uses ignore rules. A non-clean restore must also
+    // be able to recover a malformed ignore file.
+    let ignore_list = if opts.clean {
+        ignore::load(root).map_err(|e| RestoreError::Io(io::Error::other(e)))?
+    } else {
+        IgnoreList::new()
     };
     if opts.clean
         && let Some(base) = base_tree
@@ -658,6 +660,15 @@ where
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
+    let scoped;
+    let ignore = if options.clean {
+        scoped = ignore
+            .load_directory(target_dir)
+            .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+        &scoped
+    } else {
+        ignore
+    };
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -1874,8 +1885,17 @@ fn check_unswept_dir(
             None => untracked.push((entry.path(), name_path(&unswept.path, name), is_dir)),
         }
     })?;
+    let mut lists = std::collections::HashMap::new();
     while let Some((path, full_path, is_dir)) = untracked.pop() {
-        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
+        let parent = path.parent().unwrap_or(&unswept.dir);
+        if !lists.contains_key(parent) {
+            let local = ignore
+                .load_directory(parent)
+                .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            lists.insert(parent.to_path_buf(), local);
+        }
+        let local = &lists[parent];
+        if local.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
         }
         if !is_dir {
@@ -2006,7 +2026,6 @@ fn clean_directory(
         is_dir: bool,
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
-
     let read = match fs::read_dir(target_dir) {
         Ok(r) => r,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -2112,6 +2131,10 @@ fn sweep_unlisted_dir(
     ignore: &IgnoreList,
     sparse_patterns: Option<&[SparsePattern]>,
 ) {
+    let Ok(local) = ignore.load_directory(dir) else {
+        return;
+    };
+    let ignore = &local;
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
@@ -4102,6 +4125,109 @@ mod tests {
             fs::read(target.path().join("dist/local.tmp")).unwrap(),
             b"local",
             "an untracked file under an ignored dir must survive the clean sweep"
+        );
+    }
+
+    #[test]
+    fn clean_restore_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let empty = put_tree_with(&store, Vec::new());
+        restore_tree_to_worktree(&store, &empty, &out, &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(out.join("secret.env")).unwrap(),
+            "private"
+        );
+    }
+
+    #[test]
+    fn snapshot_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let hash = crate::worktree::build_tree(&store, &out).unwrap();
+        let Object::Tree(tree) = store.read_object(&hash).unwrap() else {
+            panic!("not a tree")
+        };
+        assert!(!tree.entries.iter().any(|e| e.name == b"secret.env"));
+    }
+
+    #[test]
+    fn non_clean_restores_do_not_read_nested_ignore_files() {
+        let (_repo, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join("sub")).unwrap();
+        fs::write(
+            target.path().join("sub/.gitignore"),
+            vec![b'a'; 1024 * 1024 + 1],
+        )
+        .unwrap();
+        let sub = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"sub".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: sub,
+            }],
+        );
+        let opts = RestoreOptions {
+            clean: false,
+            ..RestoreOptions::default()
+        };
+        restore_tree_to_worktree(&store, &tree, target.path(), &opts).unwrap();
+        assert_eq!(
+            fs::read(target.path().join("sub/tracked")).unwrap(),
+            b"target"
+        );
+    }
+
+    #[test]
+    fn clean_restore_keeps_files_ignored_before_ancestor_rules_change() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".gitignore"), "*.env\n").unwrap();
+        fs::create_dir(target.path().join("config")).unwrap();
+        fs::write(target.path().join("config/secret.env"), "private data").unwrap();
+        let config = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"tracked".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"target"),
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![
+                TreeEntry {
+                    name: b".gitignore".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: put_blob(&store, b""),
+                },
+                TreeEntry {
+                    name: b"config".to_vec(),
+                    mode: EntryMode::Tree,
+                    object_hash: config,
+                },
+            ],
+        );
+        restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.path().join("config/secret.env")).unwrap(),
+            "private data"
         );
     }
 

@@ -343,3 +343,342 @@ fn add_explicit_ignored_path_refused_without_force() {
         "-f must stage the ignored path"
     );
 }
+
+#[test]
+fn nested_ignore_rules_match_git_and_clean_preserves_reincluded_files() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::create_dir_all(x.join("git")).unwrap();
+    fs::write(x.join("git/ignore"), "*.global\n*.log\n").unwrap();
+    fs::create_dir_all(root.join(".kit/info")).unwrap();
+    fs::write(root.join(".kit/info/exclude"), "!info.global\n").unwrap();
+    fs::write(root.join(".git/info/exclude"), "!info.global\n").unwrap();
+    fs::write(root.join(".gitignore"), "blocked/\n*.tmp\n!root.global\n").unwrap();
+    fs::create_dir_all(root.join("sub/deep")).unwrap();
+    fs::create_dir_all(root.join("blocked")).unwrap();
+    fs::write(
+        root.join("sub/.gitignore"),
+        "!keep.tmp\n/local\n!keep.log\n",
+    )
+    .unwrap();
+    fs::write(root.join("sub/deep/.gitignore"), "keep.tmp\n").unwrap();
+    fs::write(root.join("blocked/.gitignore"), "!keep.tmp\n").unwrap();
+    let cases = [
+        ("a.global", true),
+        ("root.global", false),
+        ("info.global", false),
+        ("a.tmp", true),
+        ("sub/keep.tmp", false),
+        ("sub/drop.tmp", true),
+        ("sub/local", true),
+        ("sub/deep/local", false),
+        ("sub/deep/keep.tmp", true),
+        ("blocked/keep.tmp", true),
+        ("sub/keep.log", false),
+    ];
+    for (path, ignored) in cases {
+        fs::write(root.join(path), "data").unwrap();
+        let git = std::process::Command::new("git")
+            .args(["check-ignore", "-v", "--no-index", path])
+            .current_dir(root)
+            .env("XDG_CONFIG_HOME", x)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        let detail = String::from_utf8_lossy(&git.stdout);
+        let git_ignored = git.status.success()
+            && !detail
+                .split('\t')
+                .next()
+                .unwrap_or("")
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .starts_with('!');
+        assert_eq!(git_ignored, ignored, "git {path}: {detail}");
+    }
+    let others = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
+    let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
+    for (path, ignored) in cases {
+        assert_eq!(
+            others.lines().any(|line| line == path),
+            !ignored,
+            "ls-files {path}"
+        );
+        assert_eq!(
+            status.lines().any(|line| line.ends_with(path)),
+            !ignored,
+            "status {path}: {status}"
+        );
+    }
+    assert!(run_in(root, x, &["clean", "-fdX"]).status.success());
+    for (path, ignored) in cases {
+        assert_eq!(root.join(path).exists(), !ignored, "clean -X {path}");
+    }
+    assert!(run_in(root, x, &["add", "sub/keep.tmp"]).status.success());
+    assert!(!run_in(root, x, &["add", "sub/local"]).status.success());
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.lines().any(|line| line == "sub/keep.log"));
+}
+
+#[test]
+fn nested_kitignore_wins_and_excluded_parent_rules_are_not_read() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join(".gitignore"), "*.tmp\nblocked/\n").unwrap();
+    fs::write(root.join("sub/.gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("sub/.kitignore"), "!keep.log\n!keep.tmp\n").unwrap();
+    fs::write(root.join("sub/keep.log"), "keep").unwrap();
+    fs::write(root.join("sub/keep.tmp"), "keep").unwrap();
+    fs::create_dir(root.join("blocked")).unwrap();
+    fs::write(root.join("blocked/.gitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+    fs::write(root.join("blocked/keep.tmp"), "keep").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.contains("sub/keep.tmp"));
+    assert!(tracked.contains("sub/keep.log"));
+    assert!(!tracked.contains("blocked/"));
+    assert!(
+        !run_in(root, x, &["add", "blocked/keep.tmp"])
+            .status
+            .success()
+    );
+    // -x intentionally removes every untracked file, including re-inclusions.
+    fs::write(root.join("sub/new.log"), "remove").unwrap();
+    assert!(run_in(root, x, &["clean", "-fdx"]).status.success());
+    assert!(!root.join("sub/new.log").exists());
+    assert!(root.join("sub/keep.log").exists());
+}
+
+#[test]
+fn nested_rules_survive_stash_sweeps_and_skipped_tracked_subtrees() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/tracked"), "base").unwrap();
+    fs::write(root.join("sub/.gitignore"), "*.local\n").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "base"]).status.success());
+    fs::write(root.join("sub/keep.local"), "private").unwrap();
+    fs::write(root.join("new"), "stash this").unwrap();
+    let saved = run_in(root, x, &["stash"]);
+    assert!(saved.status.success(), "{saved:?}");
+    assert_eq!(
+        fs::read_to_string(root.join("sub/keep.local")).unwrap(),
+        "private"
+    );
+    assert!(!root.join("new").exists());
+    let popped = run_in(root, x, &["stash", "pop"]);
+    assert!(popped.status.success(), "{popped:?}");
+    assert_eq!(
+        fs::read_to_string(root.join("sub/keep.local")).unwrap(),
+        "private"
+    );
+    assert!(root.join("new").exists());
+}
+
+#[test]
+fn nested_ignore_scope_treats_directory_glob_characters_literally() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    for dir in ["wild[ab]*", "wildaX"] {
+        fs::create_dir(root.join(dir)).unwrap();
+    }
+    fs::write(root.join("wild[ab]*/.gitignore"), "/hidden\n").unwrap();
+    fs::write(root.join("wild[ab]*/hidden"), "ignore").unwrap();
+    fs::write(root.join("wildaX/hidden"), "keep").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(!tracked.lines().any(|p| p == "wild[ab]*/hidden"));
+    assert!(tracked.lines().any(|p| p == "wildaX/hidden"));
+}
+
+#[test]
+fn malformed_nested_ignore_aborts_clean_before_deleting_any_file() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("victim"), "keep on failure").unwrap();
+    fs::write(root.join("sub/.kitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+    let cleaned = run_in(root, x, &["clean", "-fdx"]);
+    assert!(!cleaned.status.success(), "{cleaned:?}");
+    assert!(root.join("victim").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn global_ignore_symlinks_are_followed_and_nested_ones_are_skipped() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(x.join("git")).unwrap();
+    fs::write(x.join("rules"), "*.local\n").unwrap();
+    std::os::unix::fs::symlink(x.join("rules"), x.join("git/ignore")).unwrap();
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::write(root.join("sub/rules"), "*.skip\n").unwrap();
+    std::os::unix::fs::symlink("rules", root.join("sub/.gitignore")).unwrap();
+    fs::write(root.join("sub/visible.skip"), "keep").unwrap();
+    fs::write(root.join("sub/private.local"), "ignore").unwrap();
+    fs::write(root.join("sub/public"), "keep").unwrap();
+    let status = run_in(root, x, &["status", "--porcelain"]);
+    assert!(status.status.success(), "{status:?}");
+    assert!(!out_str(&status).contains("private.local"));
+    assert!(out_str(&status).contains("sub/public"));
+    assert!(out_str(&status).contains("sub/visible.skip"));
+}
+
+#[test]
+fn nested_kit_metadata_does_not_change_the_outer_ignore_scope() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join("nested")).unwrap();
+    assert!(run_in(&root.join("nested"), x, &["init"]).status.success());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::write(root.join("nested/.kitignore"), "!keep.log\n").unwrap();
+    fs::write(root.join("nested/keep.log"), "keep").unwrap();
+    fs::write(root.join("nested/drop.log"), "ignore").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert!(tracked.lines().any(|p| p == "nested/keep.log"));
+    assert!(!tracked.lines().any(|p| p == "nested/drop.log"));
+    let others = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
+    assert!(!others.contains("nested/drop.log"));
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_preserves_ignored_files_in_directories_with_literal_backslashes() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    fs::write(root.join(r"a\b/.gitignore"), "*.env\n").unwrap();
+    fs::write(root.join(r"a\b/secret.env"), "private").unwrap();
+    let result = run_in(root, x, &["clean", "-fd"]);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        fs::read_to_string(root.join(r"a\b/secret.env")).unwrap(),
+        "private"
+    );
+}
+
+#[test]
+fn restore_can_recover_with_unreadable_root_and_global_ignore_files() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+    fs::write(root.join("tracked"), "committed").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "base"]).status.success());
+    fs::write(root.join(".gitignore"), [0xff, b'\n']).unwrap();
+    let restored = run_in(root, x, &["restore", "--force", ".gitignore"]);
+    assert!(restored.status.success(), "{restored:?}");
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        "*.local\n"
+    );
+    fs::create_dir_all(x.join("git")).unwrap();
+    fs::write(x.join("git/ignore"), [0xff, b'\n']).unwrap();
+    fs::write(root.join("tracked"), "modified").unwrap();
+    let restored = run_in(root, x, &["restore", "--force", "tracked"]);
+    assert!(restored.status.success(), "{restored:?}");
+    assert_eq!(
+        fs::read_to_string(root.join("tracked")).unwrap(),
+        "committed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn add_matches_native_backslashes_before_index_path_validation() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "a\\\\b/\n").unwrap();
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    fs::write(root.join(r"a\b/secret.env"), "private").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    let tracked = out_str(&run_in(root, x, &["ls-files"]));
+    assert_eq!(tracked, ".gitignore");
+    assert!(
+        !run_in(root, x, &["add", r"a\b/secret.env"])
+            .status
+            .success()
+    );
+    assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
+}
+
+#[cfg(unix)]
+#[test]
+fn add_refuses_unrepresentable_native_paths_instead_of_aliasing_them() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    fs::write(root.join(r"a\b/file"), "private").unwrap();
+    for args in [
+        &["add", "."][..],
+        &["add", r"a\b/file"],
+        &["add", "-n", "."],
+    ] {
+        assert!(!run_in(root, x, args).status.success(), "{args:?}");
+        assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn add_refuses_non_utf8_native_paths_instead_of_staging_replacements() {
+    use std::os::unix::ffi::OsStringExt;
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let name = std::ffi::OsString::from_vec(vec![0xff]);
+    fs::write(root.join(name), "private").unwrap();
+    assert!(!run_in(root, x, &["add", "."]).status.success());
+    assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn add_skips_empty_or_ignored_content_in_unrepresentable_directories() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    fs::write(root.join(r"a\b/ignored.log"), "private").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn add_skips_ignored_non_utf8_native_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "junk*\nbuild*/\n").unwrap();
+    let file = std::ffi::OsString::from_vec(b"junk\xff".to_vec());
+    let dir = std::ffi::OsString::from_vec(b"build\xff".to_vec());
+    fs::write(root.join(file), "private").unwrap();
+    fs::create_dir(root.join(&dir)).unwrap();
+    fs::write(root.join(dir).join("secret.env"), "private").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
+}

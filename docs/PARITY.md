@@ -276,8 +276,11 @@ its own `Writing objects` and `Unpacking objects` lines with real counts.
   compares the index with the working tree. `kit diff --staged` matches Git.
 - **Untracked directories.** `status` lists each untracked file. Git lists the
   directory, for example `u/`.
-- **Ignore files.** kit reads `.gitignore` and `.kitignore` at the repository
-  root. kit does not read ignore files in subdirectories.
+- **Ignore files.** kit reads `.gitignore` and `.kitignore` in each visited
+  directory. Deeper files win, with `.kitignore` last at each level.
+  Per-directory rules override `.kit/info/exclude`, then the global
+  `$XDG_CONFIG_HOME/git/ignore` (default `~/.config/git/ignore`).
+  kit does not read Git’s `core.excludesFile` config key.
 - **Conflict markers.** kit labels the sides `ours` and `theirs`. Git uses
   `HEAD` and the name of the merged branch.
 - **Author and date.** `log` prints the signing identity, for example
