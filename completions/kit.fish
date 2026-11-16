@@ -5,10 +5,7 @@
 #   cp kit.fish ~/.config/fish/completions/
 # or copy to a system completions dir on your distribution.
 #
-# Scope: subcommand completion + top-level flags. Completing sub-options
-# (branch names, remote URLs, etc.) is deferred so this file stays small
-# and easy to verify by eye — matches the bash/zsh completions shipped
-# alongside it.
+# Argument names come from the private, local-only kit __complete helper.
 
 # Disable file completion at the top level; we'll only complete known
 # subcommands until the user provides one.
@@ -527,3 +524,9 @@ complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcom
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from remove move" -s f -l force -d "Override the safety check (twice for a locked tree)"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from prune" -l dry-run -d "Report what would be pruned"
 complete -c kit -n "__fish_seen_subcommand_from worktree; and __fish_seen_subcommand_from lock" -l reason -d "Why the tree is locked" -r
+
+function __kit_argument_names
+    set -l words (commandline -opc)
+    command kit __complete $words[2..-1] 2>/dev/null
+end
+complete -c kit -n 'test (count (commandline -opc)) -gt 1' -a '(__kit_argument_names)'

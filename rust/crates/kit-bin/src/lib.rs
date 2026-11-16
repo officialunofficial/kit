@@ -16,6 +16,7 @@ mod admission_helper;
 pub mod clap_args;
 pub mod cli;
 pub mod commands;
+mod completion;
 pub mod config;
 pub mod editor;
 mod environment;
@@ -70,6 +71,7 @@ pub fn dispatch(argv: &[String]) -> u8 {
     }
 
     match cmd.as_str() {
+        "__complete" => completion::run(&rest),
         "-h" | "--help" | "help" => {
             let mut stdout = std::io::stdout().lock();
             let _ = stdout.write_all(cli::HELP_TEXT.as_bytes());

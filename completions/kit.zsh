@@ -6,10 +6,17 @@
 # /usr/local/share/zsh/site-functions/_kit on macOS Homebrew), then
 # restart zsh or run `compinit`.
 #
-# Scope: subcommand completion + common flags. Argument-level completion
-# (branch names, remotes) is deferred.
+# Argument names come from the private, local-only kit __complete helper.
 
 _kit() {
+    if (( CURRENT > 2 )) && [[ $PREFIX != -* ]]; then
+        local -a names
+        names=("${(@f)$(kit __complete "${words[@]:1:$((CURRENT - 2))}" 2>/dev/null)}")
+        if (( ${#names} )) && [[ -n $names[1] ]]; then
+            compadd -a names
+            return
+        fi
+    fi
     local -a commands
     commands=(
         'init:Create a new kit repository'
