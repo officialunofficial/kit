@@ -1199,6 +1199,23 @@ mod tests {
     }
 
     #[test]
+    fn previous_detached_head_stays_hard_with_missing_attestation_roots() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (previous, blob) = commit_one(&store, b"previous", b"previous", vec![]);
+        refs::write_previous_head(&md, &refs::Head::Detached(previous)).unwrap();
+        let missing = md.attestations_dir().join("99".repeat(32));
+        fs::create_dir_all(&missing).unwrap();
+        let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        assert!(store.contains(&previous) && store.contains(&blob));
+        assert_eq!(report.skipped_state_files, [missing]);
+        fs::remove_file(store.path_for(&blob)).unwrap();
+        let orphan = write_blob(&store, b"must survive failed mark");
+        assert!(run_gc(&store, &md, u64::MAX, 0, false).is_err());
+        assert!(store.contains(&previous) && store.contains(&orphan));
+    }
+
+    #[test]
     fn complete_soft_roots_do_not_restart_the_mark() {
         let (d, store) = repo();
         let md = layout(&d);
