@@ -478,13 +478,22 @@ pub(crate) fn check_restore_safe(
 
     if options.clean {
         let mut kept = std::collections::HashMap::new();
+        let mut ignores = std::collections::HashMap::from([(root.to_path_buf(), ignore)]);
         for path in &worktree_paths {
+            let full_path = root.join(path);
+            let parent = full_path.parent().unwrap_or(root);
+            if !ignores.contains_key(parent) {
+                let local = kit_core::ignore::load(parent)
+                    .map_err(|e| format!("read ignore file: {e}"))?;
+                ignores.insert(parent.to_path_buf(), local);
+            }
+            let ignore = &ignores[parent];
             if !index_tracks_path_or_descendant(&tracked, path)
                 && restore_affects_path(options, path)
                 && path != ".kitignore"
                 && path != ".gitignore"
                 && (expected.refuse_untracked_dirs || !is_real_dir(path))
-                && !is_ignored_worktree_path(root, &ignore, path)
+                && !is_ignored_worktree_path(root, ignore, path)
                 && (!expected.restore_temp_files || !is_restore_temp(root, &tracked, path))
                 && !sweep_keeps_path(store, target_tree, root, path, &mut kept)
                     .map_err(|e| format!("check untracked repository at '{path}': {e}"))?
@@ -786,7 +795,7 @@ pub use kit_core::index::{
 #[must_use]
 pub fn is_ignored_worktree_path(
     root: &Path,
-    _ignore: &kit_core::ignore::IgnoreList,
+    ignore: &kit_core::ignore::IgnoreList,
     path: &str,
 ) -> bool {
     let full_path = root.join(path);
@@ -795,9 +804,7 @@ pub fn is_ignored_worktree_path(
     };
     // Match on the repo-relative path, and treat a path under an ignored
     // directory as ignored too (no top-down walk here to carry that bit).
-    kit_core::ignore::load(full_path.parent().unwrap_or(root)).map_or(true, |ignore| {
-        ignore.is_ignored_with_ancestors(path, meta.is_dir())
-    })
+    ignore.is_ignored_with_ancestors(path, meta.is_dir())
 }
 
 pub fn current_head_tree(layout: &RepoLayout, store: &ObjectStore) -> Result<Option<Hash>, String> {
