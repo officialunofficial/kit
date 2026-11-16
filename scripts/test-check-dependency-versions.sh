@@ -98,6 +98,11 @@ fixture workspace-drift
 sed -i.bak 's/"1.2.3"/"1.2.2"/' "$work/workspace-drift/rust/Cargo.toml"
 expect workspace-drift fail "$work/workspace-drift"
 
+# A compatible lock-only update must still raise the manifest lower bound.
+fixture lock-only-update
+sed -i.bak 's/version = "0.4.1"/version = "0.4.2"/' "$work/lock-only-update/rust/Cargo.lock"
+expect lock-only-update fail "$work/lock-only-update"
+
 fixture internal-caret
 sed -i.bak 's/"=0.5.0"/"0.5"/' "$work/internal-caret/rust/crates/a/Cargo.toml"
 expect internal-caret fail "$work/internal-caret"

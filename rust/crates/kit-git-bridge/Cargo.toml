@@ -24,7 +24,7 @@ kit-core = { version = "=0.8.1", path = "../kit-core" }
 # integrity rides on the carried BLAKE3 + Ed25519 material.
 sha1 = { version = "0.11.0", default-features = false }
 # loose-object zlib encoding; default backend is the pure-Rust miniz_oxide.
-flate2 = "1.1.10"
+flate2 = "1.1.11"
 
 [dev-dependencies]
 tempfile = "3.27.0"
