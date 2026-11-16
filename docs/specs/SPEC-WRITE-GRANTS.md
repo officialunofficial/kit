@@ -206,6 +206,8 @@ flag       = "c" / "u" / "f" / "d"
 - A pattern MUST NOT be, or begin with, `refs/kit/packmap/` or
   `refs/kit/tagmap/`. Packmap and tag map refs are never matched
   directly; §8.3 covers them through their branch or their tag.
+- `refs/kit/attestmap` requires an exact, not prefix, pattern, authorized
+  independently of branch and tag scopes. It is not a packmap alias.
 - Flags: `c` create, `u` update, `f` force, `d` delete. §8 defines what
   each permits.
 
@@ -709,7 +711,9 @@ authority source are not limited by ref scopes.
 ### 8.1 Effective flags
 
 The **effective flags** of a grant for a ref `R` are the union of the
-flags of every entry whose pattern matches `R` (§3.3). A ref that no
+flags of every entry whose pattern matches `R` (§3.3).
+For `refs/kit/attestmap`, only the exact pattern contributes flags;
+prefix patterns, including `refs/*` and `refs/kit/*`, grant it nothing. A ref that no
 pattern matches has no flags, and every change to it is
 `permission_denied`.
 
@@ -746,6 +750,14 @@ determines the required flag from the request and the ref's state at
 - `BeginUpload` names the ref its ticket will advance. It needs `write`
   and a ref-scope entry that matches that ref, with any flag. It changes
   no ref, so no flag is required.
+
+For `refs/kit/attestmap`, an indexed server treats a `Match` update as
+`u` when the new chain lists every old pack in its original oldest-first
+order. This includes append and re-baseline without compaction. Compaction
+replaces pack ids and requires `f`, like a branch rewrite. Any other
+replacement also needs `f`. A server that cannot check this inclusion MUST require `f`.
+Creation and deletion retain the `c` and `d` rules. Attestation scopes do
+not authorize changes to branch heads.
 
 ### 8.3 Packmap coverage
 

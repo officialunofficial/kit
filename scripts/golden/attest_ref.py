@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import sys
+import struct
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import disclosure_ref as d  # noqa: E402
@@ -101,6 +102,13 @@ def main():
     expect(sig_entry["keyid"] == "blake3:" + blake3(public).hex(), "key id")
     expect(d.ed25519_verify(public, message, signature), "signature does not verify")
     expect(signature == expected, "signature differs from the seed signature")
+    blob = b"\x01KOB1\x01" + struct.pack("<I", len(raw)) + raw
+    prefix = b"KIT\x00" + struct.pack("<II", 1, 1) + b"\x00" + struct.pack("<I", len(blob)) + blob
+    pack = prefix + blake3(prefix)
+    node = b"KPKL\x01\x00\x01" + blake3(pack)
+    for name, expected_bytes in [("pack_basic", pack), ("node_basic", node)]:
+        expect(o.read(root, D, name + ".bin") == expected_bytes, name + " bytes")
+        expect(man[name] == blake3(expected_bytes).hex(), name + " manifest")
     if o.FAILURES:
         sys.exit(1)
     print("OK")

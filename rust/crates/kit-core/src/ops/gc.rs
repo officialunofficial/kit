@@ -18,7 +18,7 @@
 //!   the `ORIG_HEAD` saved by those ops and by `reset`, and the conflict
 //!   sidecar's base/ours/theirs blob hashes.
 //! - **Attestations** — every `attestations/<commit>/` directory pins
-//!   its commit so an attested commit is never orphaned.
+//!   its subject only while its whole closure is available.
 //! - **Recovery log** — every commit recorded as superseded by a
 //!   history-rewriting op (see [`super::recovery`]); retained so it stays
 //!   recoverable until `recovery::expire` drops it past the window.
@@ -27,6 +27,8 @@
 //! `rebase` are unrecoverable from the opaque-digest history journal, so
 //! [`super::recovery`] logs them (the commands record the old tip before
 //! moving the ref) and they are roots here.
+
+mod soft;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -217,9 +219,12 @@ fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoo
         })?;
     }
 
-    // Attested commits — pinned so an attestation never dangles.
+    // An attestation retains a complete subject closure, if still available.
     for h in attested_commits(layout.common_dir())? {
-        add(h, &mut roots);
+        soft.push(SoftRoot {
+            hash: h,
+            state_file: layout.attestations_dir().join(hash::to_hex(&h)),
+        });
     }
 
     // A crash may leave a history intent before its target ref is published.
@@ -674,44 +679,10 @@ fn live_objects_observed(
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
     let (hard, soft) = collect_root_sets(layout)?;
-    let mut skipped = BTreeSet::new();
-    let mut present = Vec::new();
-    for root in soft {
-        match store.object_type(&root.hash) {
-            Ok(_) => present.push(root),
-            Err(StoreError::ObjectNotFound(_)) => {
-                skipped.insert(root.state_file);
-            }
-            // A read that fails for another reason is not a missing object.
-            Err(error) => return Err(error.into()),
-        }
+    if soft.is_empty() {
+        return Ok((mark_live_observed(store, &hard, limits, progress)?, vec![]));
     }
-    let mut roots = hard.clone();
-    roots.extend(present.iter().map(|root| root.hash));
-    let live = match mark_live_observed(store, &roots, limits, progress) {
-        Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
-            // An object is missing. A soft root whose closure an older gc
-            // pruned in part is what this can be, so walk each alone. Only a
-            // root whose own closure misses an object is skipped. The walk of
-            // the roots that stay then fails on a missing object that a hard
-            // root reaches, as it did before.
-            let mut kept = hard;
-            for root in present {
-                match mark_live_observed(store, &BTreeSet::from([root.hash]), limits, progress) {
-                    Ok(_) => {
-                        kept.insert(root.hash);
-                    }
-                    Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
-                        skipped.insert(root.state_file);
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            mark_live_observed(store, &kept, limits, progress)?
-        }
-        other => other?,
-    };
-    Ok((live, skipped.into_iter().collect()))
+    soft::mark(store, hard, soft, limits, progress)
 }
 
 /// Outcome of a [`run_gc`] sweep.
@@ -735,7 +706,8 @@ pub struct GcReport {
     pub bytes_reclaimed: u64,
     /// True if this was a dry run (nothing deleted).
     pub dry_run: bool,
-    /// State files of an unfinished merge, cherry-pick, revert, rebase or
+    /// Attestation subject directories or state files of an unfinished
+    /// merge, cherry-pick, revert, rebase or
     /// bisect that name an object, or a closure, that the store no longer
     /// holds in full, which an older gc pruned. Gc skipped those roots and went on. Each file is listed once.
     pub skipped_state_files: Vec<PathBuf>,
@@ -1216,6 +1188,95 @@ mod tests {
         let (prev, _) = commit_one(&s, b"prev", b"prev", vec![]);
         refs::write_previous_head(&md, &refs::Head::Detached(prev)).unwrap();
         assert!(collect_roots(&md).unwrap().contains(&prev));
+    }
+
+    #[test]
+    fn soft_chunked_subjects_keep_shared_chunks_and_skip_missing_chunks() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let chunk = write_blob(&store, b"abc");
+        let manifest = |id| {
+            store
+                .write(
+                    &serialize::serialize(&Object::ChunkedBlob(
+                        crate::object::ChunkedBlob::new(3, 0, [(id, 3)]).unwrap(),
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        let good = manifest(chunk);
+        let bad = manifest([0x88; 32]);
+        for root in [good, bad] {
+            fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&root))).unwrap();
+        }
+        let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        assert!(store.contains(&good) && store.contains(&chunk));
+        assert!(!store.contains(&bad));
+        assert_eq!(
+            report.skipped_state_files,
+            [md.attestations_dir().join(hash::to_hex(&bad))]
+        );
+    }
+
+    #[test]
+    fn missing_hard_closure_still_aborts_with_soft_attestation_roots() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (hard, blob) = commit_one(&store, b"hard", b"hard", vec![]);
+        write_ref(&md, "refs/heads/main", &hard);
+        let orphan = write_blob(&store, b"orphan");
+        fs::create_dir_all(md.attestations_dir().join("99".repeat(32))).unwrap();
+        fs::remove_file(store.path_for(&blob)).unwrap();
+        assert!(run_gc(&store, &md, u64::MAX, 0, false).is_err());
+        assert!(store.contains(&hard) && store.contains(&orphan));
+    }
+
+    #[test]
+    fn soft_roots_share_complete_and_missing_history_scans() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (base, _) = commit_one(&store, b"base", b"base", vec![]);
+        let (one, _) = commit_one(&store, b"one", b"one", vec![base]);
+        let (two, _) = commit_one(&store, b"two", b"two", vec![one]);
+        let mut graph = soft::SoftGraph::new(&store, MarkLimits::DEFAULT);
+        assert_eq!(graph.classify(two).unwrap(), None);
+        let scanned = graph.scanned();
+        assert_eq!(graph.classify(one).unwrap(), None);
+        assert_eq!(graph.classify(base).unwrap(), None);
+        assert_eq!(graph.scanned(), scanned);
+        let missing = [0x77; 32];
+        let (bad_one, _) = commit_one(&store, b"bad", b"bad", vec![missing]);
+        let (bad_two, _) = commit_one(&store, b"bad2", b"bad2", vec![bad_one]);
+        assert_eq!(graph.classify(bad_two).unwrap(), Some(missing));
+        let scanned = graph.scanned();
+        assert_eq!(graph.classify(bad_one).unwrap(), Some(missing));
+        assert_eq!(graph.scanned(), scanned);
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&two))).unwrap();
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&bad_two))).unwrap();
+        let (live, skipped) = live_objects_with(&store, &md, MarkLimits::DEFAULT).unwrap();
+        assert!(live.contains(&base) && live.contains(&one) && live.contains(&two));
+        assert!(!live.contains(&bad_one) && !live.contains(&bad_two));
+        assert_eq!(
+            skipped,
+            [md.attestations_dir().join(hash::to_hex(&bad_two))]
+        );
+    }
+
+    #[test]
+    fn attestation_with_missing_subject_or_closure_is_skipped() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let absent = [0xa5; 32];
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&absent))).unwrap();
+        let (attested, blob) = commit_one(&s, b"attested", b"payload", vec![]);
+        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&attested))).unwrap();
+        // Remove one object to simulate a partly swept closure.
+        fs::remove_file(s.path_for(&blob)).unwrap();
+        let (_, skipped) =
+            live_objects_observed(&s, &md, MarkLimits::DEFAULT, &mut |_, _, _| {}).unwrap();
+        assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&absent))));
+        assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&attested))));
     }
 
     #[test]

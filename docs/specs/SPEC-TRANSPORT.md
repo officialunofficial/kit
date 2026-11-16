@@ -257,6 +257,114 @@ The CLI prints `! [rejected] <t> -> <t> (<reason>)` for each refused tag. It
 exits 1 after everything else is published. `clone` and `pull` do the same.
 A refused tag is tried and reported again by the next fetch.
 
+### 1.5 Attestation synchronization
+
+The repository-wide `refs/kit/attestmap` ref points to an unchanged KPKL
+v1 pack-list chain. Its entries name SPEC-PACKFILE v1 or v2 attestation
+packs (SPEC-ATTESTATIONS §7.3).
+
+Fetch defaults on. The client snapshots the ref before listing branches
+and tags, then processes attestations after publishing fetched objects.
+An unchanged repository cursor permits skipping the read only when the
+recorded attestation mode and attestmap head also match. Connect always
+reads the ref. Without an advertised Connect capability, clients MUST
+warn and skip attestations. They MUST NOT use branch pack lists instead.
+
+Readers MUST bound each node by `packlist_node_bound(4096)` bytes and
+verify its content address. A walk MUST stop at 100,000 nodes or 100,000
+listed packs. It MUST detect cycles. Before downloading a pack, check its
+declared length against `max_pack_bytes`; check the actual length, pack
+key, and trailer too. Stream entries, rejecting the pack at its first
+delta, non-blob object, or envelope over 1 MiB. Check compressed entries'
+uncompressed length before allocation or inflation; at most 1 MiB plus
+the ten-byte canonical blob header. The wire payload is bounded by the
+Zstandard compress bound of that maximum plus the four-byte claim.
+Strict-decode each envelope as in-toto DSSE and derive its first subject.
+Envelopes remain provisional until the whole pack verifies. Download to a
+file and verify its key and trailer before streaming the entries, or spool
+provisional entries to disk until verification; do not stage a whole pack's
+decoded envelopes in memory.
+
+Readers MUST enforce a 64 MiB total decoded-byte budget per pack and a
+512 MiB total per attestation fetch. Applications MAY lower these budgets.
+Count canonical blob bytes, including the ten-byte header, for raw entries and the declared uncompressed length
+for zstd-raw entries. Check both totals before allocating or decoding the
+entry. Never refund charges from a rejected pack. The limits allow roughly
+20,000 to 65,000 typical 1–3 KB envelopes per pack and 170,000 to 500,000
+per fetch, while bounding repeated 1 MiB claims. Writers MUST split at
+both the wire cap and the 64 MiB decoded cap. A pack over its decoded cap
+is rejected. Exhausting the fetch budget stops only the attestation work
+with a warning: do not mark the deferred pack processed, and do not publish
+a complete cursor no-op record. Retain already processed packs; a later
+fetch resumes the deferred work with a fresh budget.
+
+Save only envelopes whose subject exists in the local store, under the
+worktree lock. Drop absent subjects without retry; explicit refetch clears
+the remote's processed record. Count stored, dropped, and rejected entries.
+A rejected pack or envelope warns and MUST NOT fail the code fetch.
+Record rejected packs as processed so they are not downloaded repeatedly.
+
+Push is opt-in. It sends only envelopes made locally, excluding every id
+marked fetched from any remote. Select subjects in the remote's closure
+after code publication and exclude ids in its push cache. This also runs
+when code refs are up to date. Split packs at `max_pack_bytes`, upload them,
+and append a node using `Missing` or `Match(old)` CAS. On conflict, re-read
+and retry within the existing budget without re-uploading the pack.
+Re-baseline past depth 64. Above 4,096 listed packs, the next writer with
+force permission automatically compacts the listed envelopes into bounded
+packs and publishes one baseline node. Compaction replaces pack ids and
+requires `f`; update permission `u` alone preserves every old pack id.
+There is no permission-discovery verb. The client attempts the compacted
+CAS using the transport's existing write path. If a grant refuses it,
+skip attestations with one `warning:` saying a writer with force permission
+must compact. The code push still succeeds. A writer known to hold only
+`u` may skip the attempt and emit the same warning. No client falls back
+to branch pack lists. Unreferenced uploads from a refused CAS confer no
+membership or publication.
+An attestation failure warns without failing the code push.
+
+Publishing is permanent on remotes without pack gc. Warn once per remote
+before first publication. Removing published envelopes resets the whole
+log and requires force permission; deleting a local envelope cannot retract
+its published bytes.
+
+#### Synchronization records
+
+The common directory holds separate fetch and push records. Neither is
+an object `AppliedPacks` record, and branch self-heal MUST NOT clear them.
+Key each by the length-prefixed remote name, exact configured remote URL,
+repository address, and origin. The URL is hashed, never stored as text.
+Files use that digest with `.attest-fetch` and `.attest-push` suffixes in
+`applied-packs/.cursors`. Invalidate disposable cursor and attestation
+records on any remote configuration change, including set-url, removal,
+and rename; never reuse a record for another repository.
+
+A record contains LF-separated fields: `kit-attestation-record-v1`, the
+processed head as lowercase hex or `-`, the warning flag (`0` or `1`),
+then sorted unique lowercase 64-hex ids. Fetch ids name processed packs;
+push ids name published envelopes and its head is absent. Append the
+lowercase BLAKE3 of all preceding bytes, including the final LF, without
+a final newline. Readers reject corruption, duplicates, unsorted ids,
+and fetch records over `192 + 65 * 100000` bytes or 100,000 pack ids.
+Push records have no pack-walk bound. Retain up to 1,000,000 sorted
+published ids, pruning higher ids when needed, while preserving the warning
+flag. Decode checks the full checksum and ordering even for pruned ids,
+without copying the input or allocating more than the retained set.
+Encode prunes to the same bound; file loaders MUST bound reads to the
+encoded maximum (`192 + 65 * 1000000` bytes), or stream and prune an
+oversized cache while retaining its header and warning flag. Pruning may
+repeat publication, never invalidate the permanent-publication warning.
+Losing a disposable cache only causes duplicate work.
+
+Before saving a fetched envelope, durably create its provenance marker at
+`attestations/.fetched/<att-id>` in the common directory. A marker's
+presence excludes the id from locally made envelopes. Remote removal and
+rename MUST retain markers. An unreadable marker MUST NOT confer local
+authorship. Unlike caches, provenance MUST NOT be discarded on corruption.
+The fetch cursor record must include attestation mode and observed head;
+changing mode or an incomplete attestation run invalidates cursor no-op.
+
+
 ## 2. Error taxonomy
 
 Implementations MAY wrap transport-specific errors internally but

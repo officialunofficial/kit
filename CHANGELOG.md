@@ -14,6 +14,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Keep native path components in ignore checks and refuse filenames the index cannot represent.
+- Require an exact attestation-log grant scope and retire synchronization caches when remote configuration changes.
+
 - Stop automated bisect when another command changes the session, preserving its state and worktree.
 - Refuse restore paths that alias another tree entry or an existing spelling on the destination filesystem before changing tracked files.
 - Report full disks during add and checkout with an actionable message and exit 74, distinct from a branch that already exists.
@@ -33,6 +35,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Accept `stash push -u` and `--include-untracked`; refuse existing untracked destinations before restoring files.
 - Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
 - Save selected file or directory paths with `stash push [--] <path>...`, preserving other worktree and staged changes. The local stash record carries scope; earlier entries cannot be applied.
+- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 512 MiB per fetch.
+- `verify-attest --predicate-type` succeeds when any bound envelope has a trusted signature for the requested predicate; unrelated untrusted envelopes remain in the report.
+- Gc skips and reports attested subjects with missing objects or incomplete closures, sharing history scans across roots.
+
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
 

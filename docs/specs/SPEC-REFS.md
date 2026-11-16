@@ -61,7 +61,13 @@ refs/tags/<name>                   tag refs
 refs/remotes/<remote>/<name>       remote-tracking branch refs
 refs/kit/packmap/<name>           pack map of branch <name> (pushed with it)
 refs/kit/tagmap/<name>            tag map of tag <name> (pushed with it)
+refs/kit/attestmap                repository-wide attestation pack-list head
 ```
+
+`refs/kit/attestmap` holds the BLAKE3 of a KPKL v1 node. Its chain lists
+attestation packs, independently of branch and tag object packs
+(SPEC-TRANSPORT §1.5). It differs from the git mirror ref
+`refs/kit/attestations` (SPEC-GIT-BRIDGE §11).
 
 A **tag map** `refs/kit/tagmap/<t>` is valued like a pack map: the
 BLAKE3 of a packlist node whose chain rebuilds the closure of the value
@@ -83,7 +89,7 @@ fails the §3 grammar is refused as §3 says. The local and client-side
 transports (file, s3, memory) are not servers and are unaffected.
 
 *Informative.* Every kit client writes only `refs/heads/`, `refs/tags/`,
-`refs/kit/packmap/` and `refs/kit/tagmap/` names. A third-party client could have left a
+`refs/kit/packmap/`, `refs/kit/tagmap/`, and `refs/kit/attestmap` names. A third-party client could have left a
 grammar-valid name as a file at the served root (`main` as
 `<root>/main`). The server does not serve such files, and `docs/CLI.md`
 ("Refs outside `refs/`") says how an operator finds and moves them.

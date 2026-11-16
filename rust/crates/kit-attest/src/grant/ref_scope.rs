@@ -182,9 +182,12 @@ impl RefPattern {
     pub fn matches(&self, ref_name: &str) -> bool {
         match self {
             Self::Exact(name) => ref_name == name,
-            Self::Prefix(prefix) => ref_name
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|rest| rest.starts_with('/')),
+            Self::Prefix(prefix) => {
+                ref_name != kit_core::refs::ATTESTMAP_REF
+                    && ref_name
+                        .strip_prefix(prefix.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
         }
     }
 }
@@ -314,6 +317,23 @@ mod tests {
         let s = RefScopes::parse(field).unwrap();
         assert_eq!(s.to_string(), field);
         s
+    }
+
+    #[test]
+    fn attestmap_requires_an_exact_scope_even_under_broad_prefixes() {
+        let name = kit_core::refs::ATTESTMAP_REF;
+        for prefix in ["refs/*", "refs/kit/*"] {
+            let pattern = RefPattern::parse(prefix).unwrap();
+            assert!(!pattern.matches(name));
+            assert_eq!(
+                scopes(&format!("{prefix}=cufd")).effective_flags(name),
+                RefFlags::EMPTY
+            );
+        }
+        let flags = RefFlags::parse("cu").unwrap();
+        assert_eq!(scopes("refs/kit/attestmap=cu").effective_flags(name), flags);
+        let combined = scopes("refs/kit/*=f;refs/kit/attestmap=cu");
+        assert_eq!(combined.effective_flags(name), flags);
     }
 
     /// SPEC-WRITE-GRANTS §3.3: a pattern follows the SPEC-REFS §3 grammar

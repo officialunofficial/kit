@@ -62,7 +62,7 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Bisect in progress | `.kit/bisect` | `orig_head`, the bad commit, every good and skipped commit |
 | Operation result tree | `.kit/KIT_OP_RESULT` and `.kit/rebase-apply/KIT_OP_RESULT` | the tree a merge, cherry-pick, revert or rebase wrote, until the operation ends |
 | Conflict sidecar | `.kit/kit-conflicts` and `.kit/rebase-apply/kit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
-| Attestations | `.kit/attestations/<commit-hex>/` | each attested commit (dir name) |
+| Attestations | `.kit/attestations/<commit-hex>/` | each attested subject (dir name), as a soft root |
 | Pending history publication | `.kit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
 | Recovery log | `.kit/recovery-log` | each superseded commit (until expired) |
 
@@ -108,11 +108,11 @@ set. In particular:
   atomic-write temp files are ignored.)
 - A root or referenced object missing from the store during the closure
   walk (`StoreError::ObjectNotFound`) propagates. One kind of root is the
-  exception: the result tree of an operation in progress and the commits of a
+  exception: attested subjects, the result tree of an operation in progress and the commits of a
   bisect are named by a state file alone, and an older gc may have pruned
   them, or a part of what they reach. When the store lacks such an object, or
   an object that the closure of such a root reaches, gc skips the root, lists
-  the state file in `GcReport::skipped_state_files` and `kit gc` warns with
+  the state file (or attestation subject directory) in `GcReport::skipped_state_files` and `kit gc` warns with
   its path. An object that a ref or any other root reaches is never skipped.
   The objects that a skipped root would have kept are live only if another
   root reaches them.
@@ -136,6 +136,15 @@ set. In particular:
   object against the `LiveSet` and applies the age rules, so it never holds
   the id of every loose object. The dry run and the real run visit the same
   candidates.
+
+Soft-root completeness is memoized across all hard and soft roots. Gc reads
+each metadata object and checks each distinct chunk once, propagates missing
+closure results to every dependent root, then marks only complete roots
+from the cached edges. Shared history is not walked separately per root.
+The cache holds at most `MAX_REACHABLE` metadata nodes, eight times that
+many metadata edges, and `MAX_LIVE_CHUNKS` chunk references. A cap or a
+non-missing read error aborts before deletion, preserving the fail-closed
+rule. A missing soft root or descendant is skipped and reported.
 
 ## Recovery log
 

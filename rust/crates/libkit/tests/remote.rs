@@ -361,3 +361,21 @@ fn rename_into_an_occupied_sibling_fails_closed() {
         "{events:?}"
     );
 }
+
+#[test]
+fn changing_a_remote_url_invalidates_attestation_caches_but_keeps_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = kit_core::layout::RepoLayout::single(dir.path());
+    std::fs::create_dir_all(layout.common_dir()).unwrap();
+    let mut config = libkit::config::Config::default();
+    libkit::remote::add(&layout, &mut config, Some("origin"), "kit+file:///a").unwrap();
+    let cache = layout.applied_packs_dir().join(".cursors");
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("cached.attest-push"), b"cache").unwrap();
+    let provenance = kit_sync::attestation_records::fetched_path(&layout, &[1; 32]);
+    std::fs::create_dir_all(provenance.parent().unwrap()).unwrap();
+    std::fs::write(&provenance, b"").unwrap();
+    libkit::remote::set_url(&layout, &mut config, "origin", "kit+file:///b").unwrap();
+    assert!(!cache.exists());
+    assert!(provenance.exists());
+}
