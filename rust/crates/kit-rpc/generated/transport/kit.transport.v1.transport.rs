@@ -2522,7 +2522,7 @@ pub struct UpdateRefRequest {
     /// Field 5: `delete`
     #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
     pub delete: ::core::option::Option<bool>,
-    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.1).
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
     ///
     /// Field 6: `ticket_ids`
     #[serde(
@@ -6494,7 +6494,7 @@ pub struct GetServerInfoResponse {
         skip_serializing_if = "::core::option::Option::is_none"
     )]
     pub max_tickets_per_advance: ::core::option::Option<u32>,
-    /// Ticketed attestmap writes and reads (STC §4.1); absent means unsupported.
+    /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
     ///
     /// Field 23: `supports_attestations`
     #[serde(

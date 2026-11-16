@@ -3106,7 +3106,7 @@ pub struct UpdateRefRequestView<'a> {
     ///
     /// Field 5: `delete`
     pub delete: ::core::option::Option<bool>,
-    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.1).
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
     ///
     /// Field 6: `ticket_ids`
     pub ticket_ids: ::buffa::RepeatedView<'a, &'a [u8]>,
@@ -3447,7 +3447,7 @@ impl UpdateRefRequestOwnedView {
     pub fn delete(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().delete
     }
-    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.1).
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
     ///
     /// Field 6: `ticket_ids`
     #[must_use]
@@ -8919,7 +8919,7 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 22: `max_tickets_per_advance`
     pub max_tickets_per_advance: ::core::option::Option<u32>,
-    /// Ticketed attestmap writes and reads (STC §4.1); absent means unsupported.
+    /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
     ///
     /// Field 23: `supports_attestations`
     pub supports_attestations: ::core::option::Option<bool>,
@@ -9731,7 +9731,7 @@ impl GetServerInfoResponseOwnedView {
     pub fn max_tickets_per_advance(&self) -> ::core::option::Option<u32> {
         self.0.reborrow().max_tickets_per_advance
     }
-    /// Ticketed attestmap writes and reads (STC §4.1); absent means unsupported.
+    /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
     ///
     /// Field 23: `supports_attestations`
     #[must_use]

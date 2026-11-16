@@ -364,7 +364,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// # Errors
     /// Transport, remote or decoding failures.
     pub async fn server_info(&self) -> Result<GetServerInfoResponse, Error> {
-        let info: GetServerInfoResponse = self.rpc()
+        let info: GetServerInfoResponse = self
+            .rpc()
             .unary_with(
                 "GetServerInfo",
                 &crate::proto::GetServerInfoRequest::default(),
