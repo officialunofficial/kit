@@ -4546,4 +4546,24 @@ mod random_input_tests {
             assert_eq!(got, want, "round {round}");
         }
     }
+    #[test]
+    fn clean_restore_keeps_files_ignored_before_ancestor_rules_change() {
+        let (_d, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join(".gitignore"), "*.env\n").unwrap();
+        fs::create_dir(target.path().join("config")).unwrap();
+        fs::write(target.path().join("config/secret.env"), "private data").unwrap();
+        let config = put_tree_with(&store, vec![TreeEntry {
+            name: b"tracked".to_vec(), mode: EntryMode::Blob,
+            object_hash: put_blob(&store, b"target"),
+        }]);
+        let tree = put_tree_with(&store, vec![
+            TreeEntry { name: b".gitignore".to_vec(), mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"") },
+            TreeEntry { name: b"config".to_vec(), mode: EntryMode::Tree, object_hash: config },
+        ]);
+        restore_tree_to_worktree(&store, &tree, target.path(), &RestoreOptions::default()).unwrap();
+        assert_eq!(fs::read_to_string(target.path().join("config/secret.env")).unwrap(), "private data");
+    }
+
 }
