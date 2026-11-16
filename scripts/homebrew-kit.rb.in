@@ -1,0 +1,39 @@
+class Kit < Formula
+  desc "Content-addressed VCS for creative work"
+  homepage "https://github.com/officialunofficial/kit"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "https://github.com/officialunofficial/kit/releases/download/v@VERSION@/kit-@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "https://github.com/officialunofficial/kit/releases/download/v@VERSION@/kit-@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/officialunofficial/kit/releases/download/v@VERSION@/kit-@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@aarch64-unknown-linux-gnu@"
+    end
+    on_intel do
+      url "https://github.com/officialunofficial/kit/releases/download/v@VERSION@/kit-@VERSION@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@x86_64-unknown-linux-gnu@"
+    end
+  end
+
+  def install
+    bin.install "kit"
+    man1.install "share/man/man1/kit.1"
+    bash_completion.install "share/completions/kit.bash" => "kit"
+    zsh_completion.install "share/completions/_kit"
+    fish_completion.install "share/completions/kit.fish"
+  end
+
+  test do
+    assert_match "kit #{version}", shell_output("#{bin}/kit --version")
+  end
+end
