@@ -148,7 +148,7 @@ fn process(
     let listed: BTreeSet<_> = packs.iter().copied().collect();
     record.ids.retain(|id| listed.contains(id));
     record.head = None;
-    let mut budget = kit_attest::pack::DecodeBudget::default();
+    let mut budget = kit_attest::pack::DecodeBudget::new(options.attestation_decode_bytes);
     let max = source
         .upload_limits()
         .max_pack_bytes
@@ -199,7 +199,6 @@ fn process(
                 }
             }
         }
-        persist(&path, &record)?;
     }
     record.head = head;
     persist(&path, &record)?;

@@ -20,8 +20,6 @@ fn snapshot_precedes_listing_and_a_late_ci_envelope_waits_for_its_code() {
     };
     use kit_sync::{RemoteSource, SourceError};
     use std::cell::Cell;
-    let tx = kit_transport_memory::MemoryTransport::new();
-    attestation_fetch::code(&tx);
     struct Racing<'a> {
         tx: &'a kit_transport_memory::MemoryTransport,
         raced: Cell<bool>,
@@ -62,6 +60,8 @@ fn snapshot_precedes_listing_and_a_late_ci_envelope_waits_for_its_code() {
             kit_sync::TransportSource::new(self.tx).download_pack(key, name, sink)
         }
     }
+    let tx = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&tx);
     let source = Racing {
         tx: &tx,
         raced: Cell::new(false),
@@ -141,4 +141,32 @@ fn off_switch_never_reads_a_hostile_attestation_log_and_reenable_fetches_it() {
     )
     .unwrap();
     assert_eq!(report.attestations_stored, 1);
+}
+
+#[test]
+fn decoded_budget_defers_without_recording_a_complete_cursor_and_resumes() {
+    use kit_core::{hash::hash, layout::RepoLayout};
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, tree) = attestation_fetch::code(&tx);
+    let first = attestation_fetch::envelope(tip);
+    let second = attestation_fetch::envelope(tree);
+    for env in [&first, &second] { attestation_fetch::append(&tx, &kit_attest::pack::build(&[env], 4096).unwrap()); }
+    let temp = tempfile::tempdir().unwrap();
+    let remote = kit_sync::CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() };
+    kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
+    let source = kit_sync::TransportSource::new(&tx);
+    let mut options = kit_sync::SyncOptions::default();
+    options.attestation_decode_bytes = (first.len().max(second.len()) + 10) as u64;
+    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(report.attestations_stored, 1);
+    assert_eq!(report.attestations_rejected, 0);
+    assert_eq!(report.attestation_warnings.len(), 1);
+    let layout = RepoLayout::single(temp.path());
+    let path = kit_sync::attestation_records::path(&layout, &source, "origin", "", false);
+    let record = kit_sync::attestation_records::Record::decode(&std::fs::read(path).unwrap(), kit_sync::attestation_records::RecordKind::Fetch).unwrap();
+    assert!(record.head.is_none()); assert_eq!(record.ids.len(), 1);
+    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(report.attestations_stored, 1);
+    assert!(report.attestation_warnings.is_empty());
+    assert!(kit_sync::attestation_records::fetched_path(&layout, &hash(&second)).exists());
 }

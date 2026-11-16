@@ -129,6 +129,8 @@ pub struct SyncOptions {
     pub refetch_attestations: bool,
     /// Exact configured remote URL, used only to key disposable records.
     pub remote_url: String,
+    /// Maximum decoded attestation bytes per fetch, capped at 512 MiB.
+    pub attestation_decode_bytes: u64,
 }
 
 impl SyncOptions {
@@ -187,6 +189,7 @@ impl Default for SyncOptions {
             attestations: true,
             refetch_attestations: false,
             remote_url: String::new(),
+            attestation_decode_bytes: kit_attest::pack::MAX_FETCH_DECODED_BYTES,
         }
     }
 }

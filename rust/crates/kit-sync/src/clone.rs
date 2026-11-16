@@ -286,7 +286,9 @@ pub fn clone(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<CloneReport, CloneError> {
     let layout = init_clone_dir(dir, remote)?;
-    let report = pull(dir, source, &remote.name, options, observer)?;
+    let mut options = options.clone();
+    options.remote_url.clone_from(&remote.url);
+    let report = pull(dir, source, &remote.name, &options, observer)?;
     Ok(CloneReport {
         layout_root: layout.worktree_root().to_path_buf(),
         pull: report,
