@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kit_core::KitError;
-use kit_core::hash::{Hash, ZERO};
+use kit_core::hash::{self, Hash, ZERO};
 use kit_core::ignore::{self, IgnoreError, IgnoreList};
 use kit_core::index::{self, EntryStatus, Index, IndexEntry, IndexError};
 use kit_core::layout::RepoLayout;
@@ -273,6 +273,29 @@ pub fn stage(
     lock_observer: &dyn Observer<lock::Event>,
     observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
+    stage_with_limit(
+        layout,
+        store_config,
+        cwd,
+        request,
+        chooser,
+        lock_observer,
+        observer,
+        index::MAX_INDEX_BYTES,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stage_with_limit(
+    layout: &RepoLayout,
+    store_config: &StoreConfig<'_>,
+    cwd: &Path,
+    request: &Request<'_>,
+    chooser: &mut dyn HunkChooser,
+    lock_observer: &dyn Observer<lock::Event>,
+    observer: &dyn Observer<Event>,
+    limit: u64,
+) -> Result<(), Error> {
     let store = store_config.open(layout).map_err(Error::NotARepository)?;
     let _lock = lock::acquire_worktree(layout, lock_observer)?;
 
@@ -286,7 +309,7 @@ pub fn stage(
         if request.paths.is_empty() {
             return Err(Error::PatchNeedsPaths);
         }
-        return patch(layout, &store, request, chooser, observer);
+        return patch(layout, &store, request, chooser, observer, limit);
     }
 
     if request.all && request.update {
@@ -310,29 +333,13 @@ pub fn stage(
     let hash_only = HashOnlySink::new();
     let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &hash_only } else { &batch };
 
-    if request.all {
-        add_whole_tree(cwd, sink, &mut idx)?;
-    } else if request.paths.is_empty() {
-        return Err(Error::NoPaths);
-    } else {
-        // An ignored path that is named is refused. The ignore files load once
-        // for all the paths.
-        let ignores = ignore::load(cwd).map_err(Error::IgnoreFile)?;
-        for target in request.paths {
-            if target == "." {
-                add_whole_tree(cwd, sink, &mut idx)?;
-            } else {
-                // The walk of the whole tree cannot leave the repository. A
-                // named path can, through a symlink above it.
-                let p = Path::new(target);
-                let abs = if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    cwd.join(p)
-                };
-                ensure_within_repo(cwd, &abs)?;
-                add_one(cwd, p, sink, &mut idx, &ignores, request.force)?;
-            }
+    let pending = prepare(cwd, request, &mut idx, limit)?;
+    let hashed = hash_pending_batch(&pending, sink);
+    for (p, outcome) in pending.into_iter().zip(hashed) {
+        match outcome {
+            HashOutcome::Done(file) => stage_hashed(&mut idx, p.rel_str, file),
+            HashOutcome::Failed(e) => return Err(e),
+            HashOutcome::Skipped => {}
         }
     }
 
@@ -395,6 +402,7 @@ fn event_path(event: &Event) -> &str {
 pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Error> {
     let root = layout.worktree_root();
     let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Refresh)?;
+    check_size(&idx, index::MAX_INDEX_BYTES)?;
     let previous = idx.clone();
 
     // The objects of the restage share one durability batch. It commits
@@ -546,49 +554,81 @@ fn retain_content_identities(
     Ok(())
 }
 
-/// Stage every file under `root` that the ignore files do not match, then
-/// record the deletion of each tracked path that is gone.
-fn add_whole_tree(
+/// Resolve the complete request using metadata and link targets only. The
+/// projected entries include tombstones and directory conflict removals.
+fn prepare(
     root: &Path,
-    sink: &(dyn ObjectSink + Sync),
+    request: &Request<'_>,
     idx: &mut Index,
-) -> Result<(), Error> {
+    limit: u64,
+) -> Result<Vec<PendingHash>, Error> {
     let ignores = ignore::load(root).map_err(Error::IgnoreFile)?;
-    let mut seen = HashSet::new();
     let mut pending = Vec::new();
-    add_tree(
-        root,
-        root,
-        false,
-        sink,
-        idx,
-        &ignores,
-        &mut seen,
-        &mut pending,
-    )?;
-
-    // The walk only inspects metadata, which is cheap. The open, the read and
-    // the hash are the cost, and they run here.
-    let hashed = hash_pending_batch(&pending, sink);
-
-    // One failure ends the call, and the caller writes nothing on an error.
-    // The first failure in walk order is the one to report, the file that a
-    // sequential run would have stopped on. The entries staged before it are
-    // lost with `idx`.
-    for (p, outcome) in pending.into_iter().zip(hashed) {
-        match outcome {
-            HashOutcome::Done(hashed_file) => {
-                stage_hashed(idx, p.rel_str.clone(), hashed_file);
-                seen.insert(p.rel_str);
+    if !request.all && request.paths.is_empty() {
+        return Err(Error::NoPaths);
+    }
+    let targets = if request.all {
+        vec![".".to_owned()]
+    } else {
+        request.paths.to_vec()
+    };
+    for target in &targets {
+        let p = Path::new(target);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        };
+        if request.patch {
+            let meta = abs.symlink_metadata().map_err(|source| Error::Metadata {
+                path: abs.clone(),
+                source,
+            })?;
+            if !meta.is_file() {
+                return Err(Error::PatchRegularOnly(target.clone()));
             }
-            HashOutcome::Failed(e) => return Err(e),
-            // The file ran after an earlier failure. The failure comes in the
-            // walk before this file or after it, and the loop reaches it.
-            HashOutcome::Skipped => {}
+        }
+        if target == "." {
+            let mut seen = HashSet::new();
+            add_tree(root, root, false, idx, &ignores, &mut seen, &mut pending)?;
+            mark_missing_paths_removed(root, idx, &seen);
+        } else {
+            ensure_within_repo(root, &abs)?;
+            if let Routed::NeedsHash(p) = route_path(root, p, idx, &ignores, request.force)? {
+                stage_hashed(
+                    idx,
+                    p.rel_str.clone(),
+                    (p.previous_status, ZERO, (0, 0, 0, 0)),
+                );
+                pending.push(p);
+            }
         }
     }
+    let mut seen = HashSet::new();
+    pending.retain(|p| seen.insert(p.rel_str.clone()));
+    check_size(idx, limit)?;
+    Ok(pending)
+}
 
-    mark_missing_paths_removed(root, idx, &seen);
+fn check_size(idx: &Index, limit: u64) -> Result<(), Error> {
+    // SPEC-INDEX: magic, version, count, checksum; status, hash, four stat fields, path length.
+    let header = 4 + 1 + 4 + hash::HASH_LEN as u64;
+    let fixed_entry = 1 + hash::HASH_LEN as u64 + 4 * 8 + 2;
+    let bytes = header
+        + idx
+            .entries
+            .iter()
+            .map(|e| fixed_entry + e.path.len() as u64)
+            .sum::<u64>();
+    if bytes > limit {
+        // Keep the write refusal and its exit code without changing the public error API.
+        return Err(Error::WriteIndex(IndexError::Io(io::Error::other(
+            format!(
+                "index limit {limit} bytes exceeded: {} files (including deletions) require {bytes} bytes",
+                idx.entries.len()
+            ),
+        ))));
+    }
     Ok(())
 }
 
@@ -655,6 +695,7 @@ struct PendingHash {
     abs: PathBuf,
     rel_str: String,
     previous_status: EntryStatus,
+    symlink_target: Option<String>,
 }
 
 /// What [`route_path`] decided for one path.
@@ -666,13 +707,12 @@ enum Routed {
 }
 
 /// Check `abs` and `rel`, apply the ignore and the stat cache, and stage a
-/// symlink at once, because that needs no read of the content. A regular file
+/// symlink target without storing it. A file or link
 /// comes back as a [`PendingHash`], so a caller with many files can hash them
 /// in parallel.
 fn route_path(
     root: &Path,
     rel: &Path,
-    sink: &dyn ObjectSink,
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
@@ -715,6 +755,7 @@ fn route_path(
             abs,
             rel_str,
             previous_status,
+            symlink_target: None,
         }))
     } else if meta.file_type().is_symlink() {
         let target = std::fs::read_link(&abs).map_err(|source| Error::ReadLink {
@@ -727,24 +768,12 @@ fn route_path(
         if !worktree::validate_symlink_target(&target_str) {
             return Err(Error::InvalidSymlinkTarget(target_str));
         }
-        let blob = Object::Blob(Blob {
-            data: target_str.into_bytes(),
-        });
-        let ser = serialize::serialize(&blob).map_err(Error::Serialize)?;
-        let h = sink.put(&ser).map_err(Error::Store)?;
-        let entry = IndexEntry {
-            path: rel_str.clone(),
-            // A symlink never matches the stat cache.
-            status: EntryStatus::Symlink,
-            object_hash: h,
-            mtime_ns: 0,
-            size: 0,
-            ino: 0,
-            ctime_ns: 0,
-        };
-        idx.remove_directory_conflicts(&entry.path);
-        idx.upsert_entry(entry);
-        Ok(Routed::Done(rel_str))
+        Ok(Routed::NeedsHash(PendingHash {
+            abs,
+            rel_str,
+            previous_status: EntryStatus::Symlink,
+            symlink_target: Some(target_str),
+        }))
     } else {
         Err(Error::NotRegular(abs))
     }
@@ -783,6 +812,14 @@ fn hash_pending(
     p: &PendingHash,
     chunk_fanout: bool,
 ) -> Result<HashedFile, Error> {
+    if let Some(target) = &p.symlink_target {
+        let blob = Object::Blob(Blob {
+            data: target.as_bytes().to_vec(),
+        });
+        let ser = serialize::serialize(&blob).map_err(Error::Serialize)?;
+        let h = sink.put(&ser).map_err(Error::Store)?;
+        return Ok((EntryStatus::Symlink, h, (0, 0, 0, 0)));
+    }
     let result = if chunk_fanout {
         worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
             fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
@@ -819,35 +856,13 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
     idx.upsert_entry(entry);
 }
 
-fn add_one(
-    root: &Path,
-    rel: &Path,
-    sink: &(dyn ObjectSink + Sync),
-    idx: &mut Index,
-    ignores: &IgnoreList,
-    force: bool,
-) -> Result<String, Error> {
-    match route_path(root, rel, sink, idx, ignores, force)? {
-        Routed::Done(rel_str) => Ok(rel_str),
-        Routed::NeedsHash(p) => {
-            // A single path is never one of many workers, so the chunk
-            // fan-out is the only parallelism a large file can have.
-            let hashed = hash_pending(sink, &p, true)?;
-            stage_hashed(idx, p.rel_str.clone(), hashed);
-            Ok(p.rel_str)
-        }
-    }
-}
-
-/// Walk `dir` and send each file and symlink through [`route_path`]. A symlink
-/// and a stat cache hit are staged on the visit. A regular file that needs its
-/// hash goes into `pending`.
+/// Walk `dir` using metadata and link targets. Record a placeholder for each
+/// pending hash so the index has the exact paths before any object is stored.
 #[allow(clippy::too_many_arguments)] // the state of one walk
 fn add_tree(
     root: &Path,
     dir: &Path,
     parent_ignored: bool,
-    sink: &dyn ObjectSink,
     idx: &mut Index,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
@@ -881,15 +896,23 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, sink, idx, ignores, seen, pending)?;
+            add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The decision to include is made, so `force` skips the second
             // look at the ignore rules in `route_path`.
-            match route_path(root, &p, sink, idx, ignores, true)? {
+            match route_path(root, &p, idx, ignores, true)? {
                 Routed::Done(rel) => {
                     seen.insert(rel);
                 }
-                Routed::NeedsHash(pend) => pending.push(pend),
+                Routed::NeedsHash(pend) => {
+                    stage_hashed(
+                        idx,
+                        pend.rel_str.clone(),
+                        (pend.previous_status, ZERO, (0, 0, 0, 0)),
+                    );
+                    seen.insert(pend.rel_str.clone());
+                    pending.push(pend);
+                }
             }
         }
     }
@@ -917,9 +940,11 @@ fn patch(
     request: &Request<'_>,
     chooser: &mut dyn HunkChooser,
     observer: &dyn Observer<Event>,
+    limit: u64,
 ) -> Result<(), Error> {
     let root = layout.worktree_root();
     let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::ReadIndex)?;
+    prepare(root, request, &mut idx.clone(), limit)?;
     let ignores = ignore::load(root).map_err(Error::IgnoreFile)?;
     let mut any_staged = false;
     for target in request.paths {
@@ -1165,4 +1190,102 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    struct NoChooser;
+    impl HunkChooser for NoChooser {
+        fn choose(&mut self, _: &str, _: &[PatchHunk]) -> io::Result<Choice> {
+            panic!("must refuse before reading content")
+        }
+    }
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(root).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(snapshot(&p));
+            } else {
+                out.push((p.clone(), std::fs::read(p).unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+    #[test]
+    fn oversized_request_leaves_no_objects_temps_or_partial_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let layout = RepoLayout::single(root);
+        ObjectStore::init(&layout).unwrap();
+        kit_core::refs::init(&layout).unwrap();
+        kit_core::refs::write_head_branch(&layout, "main").unwrap();
+        std::fs::write(root.join("first"), "first content").unwrap();
+        std::fs::write(root.join("second"), "second content").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("first", root.join("link")).unwrap();
+        // Warm the persistent lock file before taking the snapshot.
+        drop(lock::acquire_worktree(&layout, &crate::NoopObserver).unwrap());
+        let before = snapshot(&root.join(".kit"));
+        let paths = ["first".to_owned(), "second".to_owned()];
+        for (targets, count) in [
+            (&paths[..], 2),
+            (&[".".to_owned()][..], if cfg!(unix) { 3 } else { 2 }),
+        ] {
+            for (dry_run, patch) in [(false, false), (true, false), (false, true)] {
+                if patch && targets[0] == "." {
+                    continue;
+                }
+                let request = Request {
+                    all: false,
+                    update: false,
+                    patch,
+                    force: false,
+                    dry_run,
+                    paths: targets,
+                };
+                let err = stage_with_limit(
+                    &layout,
+                    &StoreConfig {
+                        environment: &crate::Environment::new(root),
+                        observer: &crate::NoopObserver,
+                    },
+                    root,
+                    &request,
+                    &mut NoChooser,
+                    &crate::NoopObserver,
+                    &crate::NoopObserver,
+                    100,
+                )
+                .unwrap_err();
+                assert!(matches!(err, Error::WriteIndex(_)));
+                let message = err.to_string();
+                assert!(message.contains("100 bytes"), "{message}");
+                assert!(message.contains(&format!("{count} files")), "{message}");
+                assert_eq!(snapshot(&root.join(".kit")), before);
+            }
+        }
+    }
+    #[test]
+    fn repeated_paths_only_hash_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), "content").unwrap();
+        let mut idx = Index::new();
+        let paths = ["file".to_owned(), ".".to_owned(), "file".to_owned()];
+        let request = Request {
+            all: false,
+            update: false,
+            patch: false,
+            force: false,
+            dry_run: false,
+            paths: &paths,
+        };
+        let pending = prepare(dir.path(), &request, &mut idx, 1000).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(idx.entries.len(), 1);
+        assert_eq!(idx.serialize().len(), 41 + 67 + 4);
+    }
 }

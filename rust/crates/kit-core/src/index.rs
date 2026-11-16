@@ -38,8 +38,10 @@ use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
 pub const MAGIC: [u8; 4] = *b"KIDX";
 /// Checksummed index format. Other versions are rejected without rewriting.
 pub const FORMAT_VERSION: u8 = 0x03;
-/// Hard cap on a serialised index file (64 MiB), per SPEC-INDEX §4.
-pub const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+/// Hard cap on a serialised index file (256 MiB), per SPEC-INDEX §5.
+/// Fits two million entries with an average path length of 64 bytes:
+/// 41 + 2,000,000 × (67 + 64) = 262,000,041 bytes.
+pub const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 /// Hard cap on a single entry's path length (SPEC-INDEX §2).
 pub const MAX_PATH_LEN: usize = 4096;
 
@@ -1717,5 +1719,30 @@ mod tests {
         let mut via_upsert = Index::new();
         via_upsert.upsert_entry(blob_entry("a.txt"));
         assert_eq!(via_field_push, via_upsert);
+    }
+    #[test]
+    fn index_bound_fits_two_million_files_with_64_byte_paths() {
+        let required = 41 + 2_000_000 * (67 + 64);
+        assert!(MAX_INDEX_BYTES >= required);
+        // Exercise both byte readers above the old 64 MiB bound.
+        let entries = (0..530_000)
+            .map(|i| IndexEntry {
+                path: format!("{i:064}"),
+                status: EntryStatus::Blob,
+                object_hash: [1; 32],
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            })
+            .collect();
+        let idx = Index::from_entries(entries);
+        let bytes = idx.serialize();
+        assert!(bytes.len() > 64 * 1024 * 1024);
+        assert_eq!(deserialize(&bytes).unwrap().entries.len(), 530_000);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        write_index(&layout, &idx).unwrap();
+        assert_eq!(read_index(&layout).unwrap().entries.len(), 530_000);
     }
 }
