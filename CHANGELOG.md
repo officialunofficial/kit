@@ -30,9 +30,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Support capability-gated Connect attestation reads and atomic writes with upload reservations.
 - Fetch, clone and pull portable attestations by default, with opt-out and explicit refetch controls.
-
 - Add `libkit::transfer::fetch_with_options` and `pull_with_options` for explicit attestation controls.
-
 - Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
 - Trust extra CA certificates for S3 HTTPS endpoints through `KIT_SSL_CA_FILE`.
 - Complete local branch, remote, and tag names in bash, zsh, and fish.

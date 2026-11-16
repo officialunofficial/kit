@@ -1164,6 +1164,7 @@ Remote / sync:
 - `kit remote get-url <name>` &mdash; print a remote's URL (use `default` for
   the flat default remote). `kit remote set-url <name> <url>` &mdash; change an
   existing remote's URL (validated like `remote add`).
+
 Clone, fetch and pull also fetch portable attestations by default. They read
 `refs/kit/attestmap` before listing code, then save valid envelopes whose
 subjects exist locally. Signature trust remains a `verify-attest` decision.

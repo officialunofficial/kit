@@ -18,19 +18,7 @@ fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
     let absent = attestation_fetch::envelope([99; 32]);
     let bytes = kit_attest::pack::build(&[&env, &absent], 4096).unwrap();
     attestation_fetch::append(&memory, &bytes);
-    // A valid code pack is hostile in the attestation namespace: its entries
-    // are trees and commits, rather than plain envelope blobs.
-    let code_head = memory.read_ref("refs/kit/packmap/main").unwrap().unwrap();
-    let code_node = memory
-        .download_blob(&PackKey::from_hash(code_head), None, 4096)
-        .unwrap();
-    let code_pack = kit_core::transfer::decode_packlist(&code_node)
-        .unwrap()
-        .packs[0];
-    let code_bytes = memory
-        .download_blob(&PackKey::from_hash(code_pack), None, 4096)
-        .unwrap();
-    attestation_fetch::append(&memory, &code_bytes);
+    attestation_fetch::append(&memory, &attestation_fetch::hostile_claim());
     let mut server = mockito::Server::new();
     let mut mocks = vec![];
     let refs = memory.list_refs("refs/").unwrap();
@@ -115,6 +103,7 @@ fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
     assert_eq!(report.pull.fetch.attestations_dropped, 1);
     assert_eq!(report.pull.fetch.attestations_rejected, 1);
     assert_eq!(report.pull.fetch.attestation_warnings.len(), 1);
+    assert!(report.pull.fetch.attestation_warnings[0].contains("decoded cap"));
     assert_eq!(
         kit_sync::fetch(&dir, &source, "origin", &options, &kit_sync::NoopObserver)
             .unwrap()

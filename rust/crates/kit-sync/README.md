@@ -89,15 +89,19 @@ use the `with_*` setters.
 When the remote offers a repository cursor (SPEC-TRANSPORT §1.2), fetch reads
 it before it lists the branches. After a fetch that completes, it records the
 cursor, a digest of the remote-tracking refs, whether it verified
-signatures, whether it fetched tags, and a digest of the local tags. A fetch
-that refused a tag or could not list the tags records nothing. The next fetch
+signatures, whether it fetched tags, and a digest of the local tags. It also
+records the effective attestation mode and the processed attestmap head. A fetch
+that refused a tag, could not list tags, or left attestation work incomplete
+records nothing. The next fetch
 makes no other request when all of these hold: the fresh cursor equals the
 recorded one, the tracking refs and the local tags still match their digests,
 it fetches tags exactly when the recorded one did, the object of every tracked
 tip and every local tag is in the store, a fetch that verifies
 signatures follows one that did and finds every tracked tip recorded as
 verified (see "Verified tips" below), and a named target branch has a tracking
-ref. `FetchReport::remote_unchanged` reports the skip. It skips the closure
+ref. The effective attestation mode must match, and an enabled attestation
+checkpoint must still hold the recorded head. Explicit refetch disables this
+shortcut. `FetchReport::remote_unchanged` reports the skip. It skips the closure
 check of the tips. An object lost below a tip stays missing through such a
 fetch, and through one that does its full work too when a recorded tracking
 tip reaches the object; a fetch whose check no such tip covers heals it.
@@ -105,12 +109,13 @@ tip reaches the object; a fetch whose check no such tip covers heals it.
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an
 eight-byte little-endian byte-length prefix (empty when the source has no
-address). File contents are seven LF-separated fields, without a final LF:
-`kit-fetch-cursor-v2`, the cursor in lowercase hex, the lowercase tracking
+address). File contents are nine LF-separated fields, without a final LF:
+`kit-fetch-cursor-v3`, the cursor in lowercase hex, the lowercase tracking
 digest, `1` or `0` for signature verification, `1` or `0` for the tag phase,
-the lowercase tag digest, and lowercase BLAKE3 of the preceding six fields
-including their five separators. A record of another version is invalid. Readers cap input at
-512 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
+the lowercase tag digest, `1` or `0` for requested and supported attestations,
+the attestmap head in lowercase hex or `-`, and lowercase BLAKE3 of the
+preceding eight fields including their seven separators. A record of another
+version is invalid. Readers cap input at 640 bytes. Missing, unreadable, or invalid records cause a full fetch. You can
 delete these files.
 
 ### Verified tips

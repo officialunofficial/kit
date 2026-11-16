@@ -14,6 +14,17 @@ mod attestation_fetch {
         let head = upload(tx, &node);
         tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &head).unwrap();
     }
+    pub(crate) fn hostile_claim() -> Vec<u8> {
+        let mut bytes = b"KIT\0".to_vec();
+        bytes.extend(2u32.to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+        bytes.push(3); // zstd-raw, with a claim that must fail before inflation.
+        bytes.extend(4u32.to_le_bytes());
+        bytes.extend(u32::MAX.to_le_bytes());
+        let trailer = hash(&bytes);
+        bytes.extend(trailer);
+        bytes
+    }
     pub(crate) fn envelope(subject: Hash) -> Vec<u8> {
         let mut env = kit_attest::envelope::decode(include_bytes!("../../../../tests/golden/attest/envelope_basic.json")).unwrap();
         env.payload = format!(r#"{{"_type":"https://in-toto.io/Statement/v1","predicate":{{}},"predicateType":"https://example.com/test/v1","subject":[{{"name":"commit","digest":{{"blake3":"{}"}}}}]}}"#, to_hex(&subject)).into_bytes();
@@ -71,11 +82,10 @@ mod attestation_fetch {
         assert_eq!(report.attestations_stored, 1);
         assert_eq!(kit_sync::fetch(&dir, &source, "origin", &refetch, &NoopObserver).unwrap().attestations_stored, 0);
         // A malformed pack is recorded once; the next fetch does not reject it again.
-        let hostile = kit_core::pack::PackWriter::new_raw_only();
-        let mut bytes = hostile.finish().unwrap(); bytes[0] ^= 1;
-        append(tx, &bytes);
+        append(tx, &hostile_claim());
         let report = kit_sync::pull(&dir, &source, "origin", &options, &NoopObserver).unwrap();
         assert_eq!(report.fetch.attestations_rejected, 1);
+        assert!(report.fetch.attestation_warnings[0].contains("decoded cap"));
         assert_eq!(kit_sync::fetch(&dir, &source, "origin", &options, &NoopObserver).unwrap().attestations_rejected, 0);
         // Leave an incomplete attested closure with no hard ref root.
         refs::delete_ref(&layout, "main").unwrap();
