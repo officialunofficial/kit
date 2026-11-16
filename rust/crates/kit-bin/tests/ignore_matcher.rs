@@ -653,3 +653,33 @@ fn add_refuses_non_utf8_native_paths_instead_of_staging_replacements() {
     assert!(!run_in(root, x, &["add", "."]).status.success());
     assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
 }
+
+
+#[cfg(unix)]
+#[test]
+fn add_skips_empty_or_ignored_content_in_unrepresentable_directories() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    fs::write(root.join(r"a\b/ignored.log"), "private").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn add_skips_ignored_non_utf8_native_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "junk*\nbuild*/\n").unwrap();
+    let file = std::ffi::OsString::from_vec(b"junk\xff".to_vec());
+    let dir = std::ffi::OsString::from_vec(b"build\xff".to_vec());
+    fs::write(root.join(file), "private").unwrap();
+    fs::create_dir(root.join(&dir)).unwrap();
+    fs::write(root.join(dir).join("secret.env"), "private").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
+}
