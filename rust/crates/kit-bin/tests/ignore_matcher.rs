@@ -563,3 +563,36 @@ fn nested_kit_metadata_does_not_change_the_outer_ignore_scope() {
     ));
     assert!(!others.contains("nested/drop.log"));
 }
+
+#[cfg(unix)]
+#[test]
+fn clean_preserves_ignored_files_in_directories_with_literal_backslashes() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::create_dir(root.join(r"a\b")).unwrap();
+    fs::write(root.join(r"a\b/.gitignore"), "*.env\n").unwrap();
+    fs::write(root.join(r"a\b/secret.env"), "private").unwrap();
+    let result = run_in(root, x, &["clean", "-fd"]);
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read_to_string(root.join(r"a\b/secret.env")).unwrap(), "private");
+}
+
+#[test]
+fn restore_can_recover_with_unreadable_root_and_global_ignore_files() {
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+    fs::write(root.join("tracked"), "committed").unwrap();
+    assert!(run_in(root, x, &["add", "."]).status.success());
+    assert!(run_in(root, x, &["commit", "-m", "base"]).status.success());
+    fs::write(root.join(".gitignore"), [0xff, b'\n']).unwrap();
+    let restored = run_in(root, x, &["restore", ".gitignore"]);
+    assert!(restored.status.success(), "{restored:?}");
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "*.local\n");
+    fs::create_dir_all(x.join("git")).unwrap();
+    fs::write(x.join("git/ignore"), [0xff, b'\n']).unwrap();
+    fs::write(root.join("tracked"), "modified").unwrap();
+    let restored = run_in(root, x, &["restore", "tracked"]);
+    assert!(restored.status.success(), "{restored:?}");
+    assert_eq!(fs::read_to_string(root.join("tracked")).unwrap(), "committed");
+}
