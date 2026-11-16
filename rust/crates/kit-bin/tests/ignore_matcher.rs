@@ -586,13 +586,13 @@ fn restore_can_recover_with_unreadable_root_and_global_ignore_files() {
     assert!(run_in(root, x, &["add", "."]).status.success());
     assert!(run_in(root, x, &["commit", "-m", "base"]).status.success());
     fs::write(root.join(".gitignore"), [0xff, b'\n']).unwrap();
-    let restored = run_in(root, x, &["restore", ".gitignore"]);
+    let restored = run_in(root, x, &["restore", "--force", ".gitignore"]);
     assert!(restored.status.success(), "{restored:?}");
     assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), "*.local\n");
     fs::create_dir_all(x.join("git")).unwrap();
     fs::write(x.join("git/ignore"), [0xff, b'\n']).unwrap();
     fs::write(root.join("tracked"), "modified").unwrap();
-    let restored = run_in(root, x, &["restore", "tracked"]);
+    let restored = run_in(root, x, &["restore", "--force", "tracked"]);
     assert!(restored.status.success(), "{restored:?}");
     assert_eq!(fs::read_to_string(root.join("tracked")).unwrap(), "committed");
 }
