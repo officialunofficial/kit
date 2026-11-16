@@ -850,7 +850,7 @@ fn route_path(
     let already_tracked = previous_status != EntryStatus::Removed && existing_pos.is_some();
     let local;
     let ignores = if !force && !already_tracked {
-        local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
+        local = ignores.load_directory(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
         &local
     } else {
         ignores
@@ -985,7 +985,7 @@ fn add_tree(
 ) -> Result<(), Error> {
     let local;
     let ignores = if dir != root && !parent_ignored {
-        local = ignore::load(dir).map_err(Error::IgnoreFile)?;
+        local = ignores.load_directory(dir).map_err(Error::IgnoreFile)?;
         &local
     } else {
         ignores
@@ -1142,7 +1142,7 @@ fn patch_one_file(
         .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed);
     let local;
     let ignores = if !force && !already_tracked {
-        local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
+        local = ignores.load_directory(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
         &local
     } else {
         ignores

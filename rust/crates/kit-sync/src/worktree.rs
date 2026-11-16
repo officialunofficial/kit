@@ -478,12 +478,12 @@ pub(crate) fn check_restore_safe(
 
     if options.clean {
         let mut kept = std::collections::HashMap::new();
-        let mut ignores = std::collections::HashMap::from([(root.to_path_buf(), ignore)]);
+        let mut ignores = std::collections::HashMap::from([(root.to_path_buf(), ignore.clone())]);
         for path in &worktree_paths {
             let full_path = root.join(path);
             let parent = full_path.parent().unwrap_or(root);
             if !ignores.contains_key(parent) {
-                let local = kit_core::ignore::load(parent)
+                let local = ignore.load_directory(parent)
                     .map_err(|e| format!("read ignore file: {e}"))?;
                 ignores.insert(parent.to_path_buf(), local);
             }

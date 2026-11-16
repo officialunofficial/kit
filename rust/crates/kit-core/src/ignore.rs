@@ -252,6 +252,7 @@ const MIN_INDEXED_LITERALS: usize = 32;
 #[derive(Debug, Default, Clone)]
 pub struct IgnoreList {
     root: Option<PathBuf>,
+    directory: Option<PathBuf>,
     patterns: Vec<Pattern>,
     /// `None` when the list has too few literal-basename patterns to index.
     index: Option<LiteralIndex>,
@@ -278,6 +279,7 @@ impl IgnoreList {
     pub const fn new() -> Self {
         Self {
             root: None,
+            directory: None,
             patterns: Vec::new(),
             index: None,
         }
@@ -310,13 +312,46 @@ impl IgnoreList {
         });
         Self {
             root: None,
+            directory: None,
             patterns,
             index,
         }
     }
 
-    pub(crate) fn load_directory(&self, dir: &Path) -> Result<Self, IgnoreError> {
-        load_from(self.root.as_deref().unwrap_or(dir), dir)
+    /// Extend this snapshot with ignore files between its directory and `dir`.
+    /// Inherited rules, including global excludes, are never read again.
+    /// Paths remain relative to the original repository root, even inside a
+    /// nested repository. Excluded ancestors prevent reading deeper files.
+    /// Lists created by [`parse`] or [`Self::new`] have no filesystem source
+    /// and are returned unchanged.
+    ///
+    /// # Errors
+    /// Returns [`IgnoreError`] for malformed or unreadable local rules, or
+    /// when `dir` is not this snapshot's directory or a descendant of it.
+    pub fn load_directory(&self, dir: &Path) -> Result<Self, IgnoreError> {
+        let (Some(root), Some(directory)) = (&self.root, &self.directory) else {
+            return Ok(self.clone());
+        };
+        let suffix = dir.strip_prefix(directory).map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?;
+        let mut list = self.clone();
+        let mut current = directory.clone();
+        for component in suffix.components() {
+            if !matches!(component, std::path::Component::Normal(_)) {
+                return Err(IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, "ignore directory is not a descendant")));
+            }
+            current.push(component);
+            let prefix = current.strip_prefix(root).map_err(|e| IgnoreError::Io(io::Error::new(io::ErrorKind::InvalidInput, e)))?
+                .to_string_lossy().replace('\\', "/");
+            if list.is_ignored_with_ancestors(&prefix, true) { break; }
+            let mut patterns = list.patterns;
+            for name in [".gitignore", ".kitignore"] {
+                append_file(&mut patterns, &current.join(name), &prefix)?;
+            }
+            list = Self::from_patterns(patterns);
+        }
+        list.root = Some(root.clone());
+        list.directory = Some(dir.to_path_buf());
+        Ok(list)
     }
 
     /// Borrow the parsed patterns.
@@ -446,29 +481,13 @@ fn load_from(root: &Path, dir: &Path) -> Result<IgnoreList, IgnoreError> {
             crate::layout::discover(root).map_err(|e| IgnoreError::Io(io::Error::other(e)))?;
         append_external(&mut patterns, &layout.common_dir().join("info/exclude"))?;
     }
-    let mut dirs: Vec<_> = dir
-        .ancestors()
-        .take_while(|p| p.starts_with(root))
-        .collect();
-    dirs.reverse();
-    for directory in dirs {
-        let prefix = directory
-            .strip_prefix(root)
-            .unwrap_or(Path::new(""))
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !prefix.is_empty()
-            && IgnoreList::from_patterns(patterns.clone()).is_ignored_with_ancestors(&prefix, true)
-        {
-            break;
-        }
-        for name in [".gitignore", ".kitignore"] {
-            append_file(&mut patterns, &directory.join(name), &prefix)?;
-        }
+    for name in [".gitignore", ".kitignore"] {
+        append_file(&mut patterns, &root.join(name), "")?;
     }
     let mut list = IgnoreList::from_patterns(patterns);
     list.root = Some(root.to_path_buf());
-    Ok(list)
+    list.directory = Some(root.to_path_buf());
+    list.load_directory(dir)
 }
 
 fn append_external(patterns: &mut Vec<Pattern>, path: &Path) -> Result<(), IgnoreError> {

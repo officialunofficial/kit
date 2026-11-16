@@ -655,6 +655,9 @@ where
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
     }
+    let scoped = ignore.load_directory(target_dir)
+        .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+    let ignore = &scoped;
     let obj = store.read_object(&tree_hash)?;
     let Object::Tree(tree) = obj else {
         return Err(RestoreError::NotATree);
@@ -2012,12 +2015,6 @@ fn clean_directory(
         is_dir: bool,
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
-    let local = ignore
-        .map(|inherited| inherited.load_directory(target_dir))
-        .transpose()
-        .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
-    let ignore = local.as_ref();
-
     let read = match fs::read_dir(target_dir) {
         Ok(r) => r,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),

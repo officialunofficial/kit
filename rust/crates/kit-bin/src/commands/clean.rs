@@ -167,7 +167,7 @@ fn collect_dir(
     }
     let local;
     let ignore = if !prefix.is_empty() && !parent_ignored {
-        local = ignore::load(dir).map_err(std::io::Error::other)?;
+        local = ignore.load_directory(dir).map_err(std::io::Error::other)?;
         &local
     } else {
         ignore
