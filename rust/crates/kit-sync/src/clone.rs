@@ -92,9 +92,10 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
 
 /// What a clone writes before it makes a branch or lands `HEAD`,
 /// lock files (`*.lock`) aside.
-const UNFINISHED_CLONE_ENTRIES: [&str; 7] = [
+const UNFINISHED_CLONE_ENTRIES: [&str; 8] = [
     "HEAD",
     "applied-packs",
+    "attestations",
     "config",
     "format",
     "objects",

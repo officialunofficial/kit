@@ -69,6 +69,7 @@ mod attestation_fetch {
         let mut refetch = options.clone(); refetch.refetch_attestations = true;
         let report = kit_sync::fetch(&dir, &source, "origin", &refetch, &NoopObserver).unwrap();
         assert_eq!(report.attestations_stored, 1);
+        assert_eq!(kit_sync::fetch(&dir, &source, "origin", &refetch, &NoopObserver).unwrap().attestations_stored, 0);
         // A malformed pack is recorded once; the next fetch does not reject it again.
         let hostile = kit_core::pack::PackWriter::new_raw_only();
         let mut bytes = hostile.finish().unwrap(); bytes[0] ^= 1;

@@ -7,8 +7,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Fetch, clone and pull portable attestations by default, with opt-out and explicit refetch controls.
-
 ### Security
 
 - Redact credentials, queries, fragments, and local paths from Git export attestations and close remaining import redaction gaps. Earlier envelopes retain their old values: remove affected `.kit/attestations/<commit>/<id>.dsse` files and clear the staging ref with `git --git-dir=.kit/git/<remote>/repo.git update-ref -d refs/kit/attestations` to prevent exports from carrying them forward. The next attested export replaces the mirror ref under its lease. This cannot erase old Git objects or copies others hold; rotate exposed credentials and coordinate history cleanup with the mirror host.
@@ -31,6 +29,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Support capability-gated Connect attestation reads and atomic writes with upload reservations.
+- Fetch, clone and pull portable attestations by default, with opt-out and explicit refetch controls.
+
+- Add `libkit::transfer::fetch_with_options` and `pull_with_options` for explicit attestation controls.
 
 - Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
 - Trust extra CA certificates for S3 HTTPS endpoints through `KIT_SSL_CA_FILE`.
