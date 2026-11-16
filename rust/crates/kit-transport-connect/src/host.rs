@@ -778,7 +778,7 @@ impl RemoteSource for HostSource<'_> {
         tip: &Hash,
         keys: &[kit_core::protocol::PackKey],
     ) -> Result<(), SourceError> {
-        self.0.write_attestmap(condition, tip, keys)
+        self.0.write_attestmap(condition, tip, keys).map_err(|e| self.failure(e, false))
     }
 
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {

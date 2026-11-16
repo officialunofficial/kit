@@ -386,9 +386,9 @@ or fetching attestations; absence means warn and skip. There is no
 fallback to branch pack lists.
 
 `UpdateRefRequest.ticket_ids = 6` carries the reservation ids for this
-single-ref write. It requires `name = refs/kit/attestmap`, `delete = false`,
+single-ref write. It requires `name = refs/kit/attestmap`, `delete` absent,
 and a `MISSING` or `MATCH` condition. Each id is 32 bytes and unique; the
-§2.1 ticket limit also applies here. No other UpdateRef may carry tickets.
+§2.1 ticket limit also applies here. Other `UpdateRef` requests carrying tickets return `invalid_argument`.
 CAS failure returns `failed_precondition` and consumes no tickets.
 The ordinary `ReadRef` reads this ref under repository visibility.
 

@@ -658,7 +658,7 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     }
 
     /// Consume upload reservations atomically with an attestmap CAS.
-    /// The caller checks the session capability before uploads. The server
+    /// Discovery refuses unsupported servers before sending a write. The server
     /// decides whether the pack set needs append or force permission.
     pub async fn write_attestmap(
         &self,
@@ -677,6 +677,15 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
                 != tickets.len()
         {
             return Err(Error::Invalid("attestmap CAS or reservation count"));
+        }
+        let info = self.server_info().await?;
+        if info.protocol.as_deref() != Some("kit.transport.v1")
+            || info.spec_version.is_none_or(|version| version < 2)
+            || info.supports_attestations != Some(true) {
+            return Err(Error::Invalid("attestation log unsupported"));
+        }
+        if tickets.len() > crate::advance_ticket_limit(&info) as usize {
+            return Err(Error::Invalid("attestmap reservation count"));
         }
         reply(
             calls::update_ref_committing(

@@ -416,12 +416,12 @@ impl<
                         renewed_after_unauthenticated = true;
                         continue;
                     }
-                    if matches!(procedure, "AdvanceRefs" | "UpdateRef")
+                    if (procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
                         && matches!(mapped, SourceError::PendingVerification { .. })
                     {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
-                    } else if matches!(procedure, "AdvanceRefs" | "UpdateRef")
+                    } else if (procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
                         && ticketed
                         && matches!(mapped, SourceError::MembershipNotVisible)
                     {
@@ -434,7 +434,7 @@ impl<
                         return Err(mapped);
                     };
                     definitive = matches!(mapped, SourceError::AdmissionRequired { .. })
-                        || (matches!(procedure, "AdvanceRefs" | "UpdateRef")
+                        || ((procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
                             && (matches!(mapped, SourceError::PendingVerification { .. })
                                 || (ticketed
                                     && matches!(mapped, SourceError::MembershipNotVisible))));
@@ -854,6 +854,9 @@ impl<
         Ok(())
     }
 
+    /// Keys without a cached reservation must already be repository members
+    /// (for example BeginUpload answered AlreadyPresent). The server verifies
+    /// membership atomically; another session's unconsumed uploads do not count.
     pub(super) fn write_attestmap_committing(
         &self,
         condition: RefWriteCondition,
@@ -1183,7 +1186,7 @@ mod tests {
             let mut response = success();
             *response.body_mut() = info.encode_to_vec();
             let channel = Channel {
-                replies: RefCell::new([response].into()),
+                replies: RefCell::new([response.clone(), response].into()),
                 nonces: RefCell::new(Vec::new()),
             };
             let time = Time::default();
@@ -1210,7 +1213,12 @@ mod tests {
                     Err(SourceError::ProtocolError)
                 ));
             }
-            assert_eq!(channel.nonces.borrow().len(), 1);
+            if advertised != Some(true) {
+                assert!(matches!(futures_executor::block_on(client.write_attestmap(RefWriteCondition::Missing, [4;32], &[], None)), Err(Error::Invalid("attestation log unsupported"))));
+                assert_eq!(channel.nonces.borrow().len(), 2);
+            } else {
+                assert_eq!(channel.nonces.borrow().len(), 1);
+            }
         }
     }
 
@@ -1229,6 +1237,14 @@ mod tests {
                 _: usize,
             ) -> Result<Response<Vec<u8>>, String> {
                 self.calls.set(self.calls.get() + 1);
+                if request.uri().path().ends_with("/GetServerInfo") {
+                    let mut response = success();
+                    *response.body_mut() = proto::GetServerInfoResponse {
+                        protocol: Some("kit.transport.v1".into()), spec_version: Some(2),
+                        supports_attestations: Some(true), ..Default::default()
+                    }.encode_to_vec();
+                    return Ok(response);
+                }
                 let request = proto::UpdateRefRequest::decode_from_slice(request.body()).unwrap();
                 assert_eq!(request.name.as_deref(), Some(kit_core::refs::ATTESTMAP_REF));
                 assert_eq!(
@@ -1294,7 +1310,7 @@ mod tests {
                 source.write_state().tickets.borrow().len(),
                 if refusal.is_none() { 0 } else { 2 }
             );
-            assert_eq!(channel.calls.get(), 1);
+            assert_eq!(channel.calls.get(), 2);
         }
     }
 
