@@ -408,3 +408,18 @@ fn oversized_node_warns_without_replacing_a_completed_checkpoint() {
     assert_eq!(report.attestation_warnings.len(), 1);
     assert_eq!(std::fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn clone_resumes_after_fetch_stores_envelopes_before_checkout() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx); let env = attestation_fetch::envelope(tip);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let remote = descriptor(); kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
+    let source = kit_sync::TransportSource::new(&tx);
+    let mut options = kit_sync::SyncOptions::default(); options.remote_url.clone_from(&remote.url);
+    kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let report = kit_sync::clone(temp.path(), &source, &remote, &options, &kit_sync::NoopObserver).unwrap();
+    assert_eq!(kit_core::refs::resolve_head(&kit_core::layout::RepoLayout::single(temp.path())).unwrap(), Some(tip));
+    assert!(report.pull.fetch.attestation_warnings.is_empty());
+}
