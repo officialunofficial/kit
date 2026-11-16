@@ -298,8 +298,8 @@ per fetch, while bounding repeated 1 MiB claims. Writers MUST split at
 both the wire cap and the 64 MiB decoded cap. A pack over its decoded cap
 is rejected. Exhausting the fetch budget stops only the attestation work
 with a warning: do not mark the deferred pack processed, and do not publish
-a complete cursor no-op record. Retain already processed packs; a later
-fetch resumes the deferred work with a fresh budget.
+a complete cursor no-op record. Retain already processed packs still listed
+by the current chain; a later fetch resumes the deferred work with a fresh budget.
 
 Save only envelopes whose subject exists in the local store, under the
 worktree lock. Drop absent subjects without retry; explicit refetch clears
@@ -352,6 +352,13 @@ it remains subject to the fetch bounds. A push record MUST have no head. Append 
 lowercase BLAKE3 of all preceding bytes, including the final LF, without
 a final newline. Readers reject corruption, duplicates, unsorted ids,
 and fetch records over `192 + 65 * 100000` bytes or 100,000 pack ids.
+Before saving a fetch checkpoint, including one with deferred payload work,
+intersect processed ids with the ids listed by the fully enumerated current
+chain. Discard ids removed by compaction or reset; retain rejected pack ids
+that the chain still lists. Do not replace a checkpoint after incomplete
+chain enumeration. The pack-walk bound therefore also bounds every saved
+fetch record, regardless of the number of compactions.
+
 Push records have no pack-walk bound. Retain up to 1,000,000 sorted
 published ids, pruning higher ids when needed, while preserving the warning
 flag. Decode checks the full checksum and ordering even for pruned ids,

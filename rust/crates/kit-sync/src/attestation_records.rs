@@ -43,6 +43,7 @@ pub struct Record {
 
 impl Record {
     /// Encode in sorted order with a checksum and a distinct record tag.
+    /// Fetch callers first retain only ids in the fully enumerated current chain.
     #[must_use]
     pub fn encode(&self, kind: RecordKind) -> Vec<u8> {
         let mut body = format!(
