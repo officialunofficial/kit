@@ -389,3 +389,20 @@ fn dry_run_results_start_after_the_progress_line() {
     assert!(text.contains("\nadd 'fresh'\n"), "{text}");
     assert!(text.ends_with("add 'fresh'\n"), "{text}");
 }
+
+#[test]
+fn tracked_file_updates_report_hashed_input_bytes() {
+    let repo = repo_with_many_files(1);
+    let content = "updated tracked content";
+    fs::write(repo.path().join("f0.txt"), content).unwrap();
+    let out = run_in_with_env(repo.path(), &["add", "-u"], &[("KIT_PROGRESS", "json")]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let rows: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(rows.iter().any(|row| {
+        row["phase"] == "add" && row["bytes"].as_u64() == Some(content.len() as u64)
+    }));
+}

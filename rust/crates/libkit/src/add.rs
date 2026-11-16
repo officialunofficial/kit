@@ -321,7 +321,7 @@ fn stage_with_limit(
         return Err(Error::BulkTakesNoPaths);
     }
     if request.update {
-        return stage_tracked(layout, &store);
+        return stage_tracked_observed(layout, &store, observer);
     }
 
     let mut idx = read_or_seed_index_from_head(layout, &store).map_err(Error::ReadIndex)?;
@@ -336,14 +336,7 @@ fn stage_with_limit(
     let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &hash_only } else { &batch };
 
     let pending = prepare(cwd, request, &mut idx, limit)?;
-    let progress_sink = HashProgressSink {
-        blob_header_len: serialize::blob_prologue(0).map_err(Error::Serialize)?.len() as u64,
-        inner: sink,
-        observer: observer.concurrent(),
-        bytes: std::sync::atomic::AtomicU64::new(0),
-        next: std::sync::atomic::AtomicU64::new(100),
-        started: std::time::Instant::now(),
-    };
+    let progress_sink = HashProgressSink::new(sink, observer)?;
     observer.event(&Event::HashProgress { bytes: 0 });
     let hashed = hash_pending_batch(&pending, &progress_sink);
     observer.event(&Event::HashProgress {
@@ -414,6 +407,14 @@ fn event_path(event: &Event) -> &str {
 /// # Errors
 /// [`Error::Refresh`], with the text of the failed step.
 pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Error> {
+    stage_tracked_observed(layout, store, &crate::NoopObserver)
+}
+
+fn stage_tracked_observed(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    observer: &dyn Observer<Event>,
+) -> Result<(), Error> {
     let root = layout.worktree_root();
     let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Refresh)?;
     check_size(&idx, index::MAX_INDEX_BYTES)?;
@@ -422,6 +423,8 @@ pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Err
     // The objects of the restage share one durability batch. It commits
     // before the index write that names them.
     let batch = store.batch();
+    let progress_sink = HashProgressSink::new(&batch, observer)?;
+    observer.event(&Event::HashProgress { bytes: 0 });
 
     for entry in &mut idx.entries {
         if entry.status == EntryStatus::Removed {
@@ -457,7 +460,7 @@ pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Err
         // `hash_file`, so a large file becomes a chunked blob, and the hashes
         // of commit, status and rm agree. A symlink is one blob of its target.
         let (status, h, stat) = if meta.file_type().is_file() {
-            let (h, opened_meta) = worktree::hash_file_with_metadata(&batch, &abs)
+            let (h, opened_meta) = worktree::hash_file_with_metadata(&progress_sink, &abs)
                 .map_err(|e| Error::Refresh(format!("read/store {}: {e}", abs.display())))?;
             let stat = worktree::stat_cache_fields(&opened_meta);
             (file_status_from_meta(&opened_meta, entry.status), h, stat)
@@ -477,7 +480,7 @@ pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Err
             });
             let ser = serialize::serialize(&blob)
                 .map_err(|e| Error::Refresh(format!("serialize: {e}")))?;
-            let h = batch
+            let h = progress_sink
                 .put(&ser)
                 .map_err(|e| Error::Refresh(format!("store: {e}")))?;
             // A symlink never matches the stat cache.
@@ -496,6 +499,9 @@ pub fn stage_tracked(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Err
         entry.ctime_ns = stat.3;
     }
 
+    observer.event(&Event::HashProgress {
+        bytes: progress_sink.bytes.load(Ordering::Relaxed),
+    });
     // The objects first, then the index that names them.
     batch
         .commit()
@@ -706,7 +712,21 @@ struct HashProgressSink<'a> {
     started: std::time::Instant,
 }
 
-impl HashProgressSink<'_> {
+impl<'a> HashProgressSink<'a> {
+    fn new(
+        inner: &'a (dyn ObjectSink + Sync),
+        observer: &'a dyn Observer<Event>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            blob_header_len: serialize::blob_prologue(0).map_err(Error::Serialize)?.len() as u64,
+            inner,
+            observer: observer.concurrent(),
+            bytes: std::sync::atomic::AtomicU64::new(0),
+            next: std::sync::atomic::AtomicU64::new(100),
+            started: std::time::Instant::now(),
+        })
+    }
+
     fn note(&self, parts: &[&[u8]]) {
         if parts.first().and_then(|p| p.first()).copied()
             != Some(kit_core::object::ObjectType::Blob as u8)
