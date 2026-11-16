@@ -49,6 +49,7 @@ updates:
   # so one entry covers them.
   - package-ecosystem: "cargo"
     directory: "/rust"
+    versioning-strategy: increase
     # The buffa and connectrpc crates have committed generated code under
     # kit-rpc/generated. The code compiles only against the runtime version
     # that matches its generator. A version bump alone leaves the code stale.
