@@ -1223,10 +1223,8 @@ mod tests {
                     )),
                     Err(Error::Invalid("attestation log unsupported"))
                 ));
-                assert_eq!(channel.nonces.borrow().len(), 2);
-            } else {
-                assert_eq!(channel.nonces.borrow().len(), 1);
             }
+            assert_eq!(channel.nonces.borrow().len(), 1);
         }
     }
 

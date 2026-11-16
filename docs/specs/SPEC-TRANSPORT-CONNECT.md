@@ -157,7 +157,7 @@ headers or a bearer token. The response MAY be cached with
 | `inspection_max_objects` | Maximum distinct objects in one advance's complete inspected set. Present only when inspectors are configured; absence imposes no inspection-specific object-count limit. A client exceeding the advertised limit MUST replan into smaller advances; the server rejects the oversized advance before calling inspectors or accepting changes. |
 | `supports_pack_locations` | Whether the server supports optional `DownloadPack` locations (§6.2). Absent or false disables location negotiation. |
 | `max_pack_location_lifetime_ms` | Maximum location lifetime in milliseconds (§6.2). MUST be present and positive when `supports_pack_locations` is true; absent when support is disabled. |
-| `supports_attestations` | Field 23; true enables §4.1. Absent or false means unsupported. |
+| `supports_attestations` | Field 23; true enables §4.2. Absent or false means unsupported. |
 | `max_tickets_per_advance` | The most upload tickets one `AdvanceRefs` request may name in `ticket_ids` (§4). Absent means seven. A server that advertises it advertises at least two, because one ticket is the packmap node's. A client treats a value below two as absent and a value above 1,024 as 1,024, and reads the value once per session. A server SHOULD NOT lower the limit while pushes are in flight. |
 
 A client MUST NOT assume atomic advance without `atomic_advance = true`
@@ -378,7 +378,7 @@ publication verification still checks the destination.
 
 ---
 
-### 4.1 Attestation log capability
+### 4.2 Attestation log capability
 
 `GetServerInfo` advertises support for ticketed writes of
 `refs/kit/attestmap`. Clients MUST check the capability before publishing
@@ -1467,7 +1467,7 @@ server to give both to its admission step.
 
 ### 7.6 Upload tickets and resumable parts
 
-Ticketed attestmap writes follow §4.1 and the rules below.
+Ticketed attestmap writes follow §4.2 and the rules below.
 
 
 **Protocol requirement.**

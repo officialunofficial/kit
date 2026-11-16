@@ -334,6 +334,9 @@ impl Transport for SshTransport {
         tip: &Hash,
         _keys: &[PackKey],
     ) -> TransportResult<()> {
+        if matches!(condition, RefWriteCondition::Any) {
+            return Err(TransportError::ProtocolError);
+        }
         self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
     }
 

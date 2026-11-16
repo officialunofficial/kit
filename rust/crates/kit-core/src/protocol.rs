@@ -769,7 +769,9 @@ pub trait Transport: Send + Sync {
         false
     }
 
-    /// Publish the attestation log and consume its uploaded pack and node keys.
+    /// Publish the attestation log under Missing or Match, consuming uploaded
+    /// pack and node keys. A key without a session reservation must already
+    /// belong to the repository. Any is refused.
     fn write_attestmap(
         &self,
         condition: RefWriteCondition,
