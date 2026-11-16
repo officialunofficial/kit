@@ -764,6 +764,24 @@ impl fmt::Debug for RepoCursor {
 }
 
 pub trait Transport: Send + Sync {
+    /// Whether the remote supports the attestation log. Unknown sources refuse.
+    fn supports_attestations(&self) -> bool {
+        false
+    }
+
+    /// Publish the attestation log under Missing or Match, consuming uploaded
+    /// pack and node keys. A key without a session reservation must already
+    /// belong to the repository. Any is refused.
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        keys: &[PackKey],
+    ) -> TransportResult<()> {
+        let _ = (condition, tip, keys);
+        Err(TransportError::ProtocolError)
+    }
+
     /// Repository identity and origin used for remote error context, if available.
     /// Existing transports carry no addressing context by default.
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
@@ -1249,6 +1267,18 @@ mod tests {
         conflict_on: Option<&'static str>,
         /// A ref whose delete fails with another error.
         fail_on: Option<&'static str>,
+    }
+
+    #[test]
+    fn unknown_transports_refuse_attestations_without_a_write() {
+        let transport = RecordingTransport::default();
+        assert!(!transport.supports_attestations());
+        assert!(matches!(
+            transport.write_attestmap(RefWriteCondition::Missing, &[1; 32], &[]),
+            Err(TransportError::ProtocolError)
+        ));
+        assert!(transport.uploaded.lock().unwrap().is_none());
+        assert!(transport.stored.lock().unwrap().is_empty());
     }
 
     impl Transport for RecordingTransport {

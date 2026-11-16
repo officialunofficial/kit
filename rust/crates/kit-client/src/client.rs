@@ -103,6 +103,7 @@ pub struct Client<'a, T, S = NoSigner, C = NoClock, O = NoObserver, P: ?Sized = 
     unsigned_writes: bool,
     pack_locations: bool,
     location_lifetime: std::sync::OnceLock<Option<u64>>,
+    attestation_info: std::sync::OnceLock<GetServerInfoResponse>,
 }
 
 impl<T, S, C, O, P: ?Sized> std::fmt::Debug for Client<'_, T, S, C, O, P> {
@@ -128,6 +129,7 @@ impl<'a, T: HttpTransport> Client<'a, T> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -148,6 +150,7 @@ impl<'a, T: HttpTransport, C: Clock> Client<'a, T, NoSigner, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -181,6 +184,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 
@@ -197,6 +201,7 @@ impl<'a, T: HttpTransport, S: Signer, C: Clock> Client<'a, T, S, C> {
             unsigned_writes: false,
             pack_locations: true,
             location_lifetime: std::sync::OnceLock::new(),
+            attestation_info: std::sync::OnceLock::new(),
         }
     }
 }
@@ -255,6 +260,7 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             unsigned_writes: self.unsigned_writes,
             pack_locations: self.pack_locations,
             location_lifetime: self.location_lifetime,
+            attestation_info: self.attestation_info,
         }
     }
 
@@ -274,6 +280,7 @@ impl<'a, T, S, C, O, P: ?Sized> Client<'a, T, S, C, O, P> {
             unsigned_writes: self.unsigned_writes,
             pack_locations: self.pack_locations,
             location_lifetime: self.location_lifetime,
+            attestation_info: self.attestation_info,
         }
     }
 }
@@ -357,7 +364,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     /// # Errors
     /// Transport, remote or decoding failures.
     pub async fn server_info(&self) -> Result<GetServerInfoResponse, Error> {
-        self.rpc()
+        let info: GetServerInfoResponse = self
+            .rpc()
             .unary_with(
                 "GetServerInfo",
                 &crate::proto::GetServerInfoRequest::default(),
@@ -365,7 +373,9 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
             )
             .await
             .map(|(value, _)| value)
-            .map_err(Error::typed)
+            .map_err(Error::typed)?;
+        let _ = self.attestation_info.set(info.clone());
+        Ok(info)
     }
 
     /// One `ListRefs` page. `page_size` 0 asks for the server's maximum.
@@ -655,6 +665,53 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
     ) -> Result<Reply<UpdateRefResponse>, Error> {
         self.require_write_auth()?;
         reply(calls::update_ref(&self.rpc(), name, expected, Some(new_id), identity).await)
+    }
+
+    /// Consume upload reservations atomically with an attestmap CAS.
+    /// Discovery refuses unsupported servers before sending a write. The server
+    /// decides whether the pack set needs append or force permission.
+    pub async fn write_attestmap(
+        &self,
+        expected: RefWriteCondition,
+        new_id: Hash,
+        tickets: &[Hash],
+        identity: Option<&Identity>,
+    ) -> Result<Reply<crate::proto::UpdateRefResponse>, Error> {
+        self.require_write_auth()?;
+        if matches!(expected, RefWriteCondition::Any)
+            || tickets.len() > 1024
+            || tickets
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != tickets.len()
+        {
+            return Err(Error::Invalid("attestmap CAS or reservation count"));
+        }
+        let info = match self.attestation_info.get() {
+            Some(info) => info.clone(),
+            None => self.server_info().await?,
+        };
+        if info.protocol.as_deref() != Some("kit.transport.v1")
+            || info.spec_version.is_none_or(|version| version < 2)
+            || info.supports_attestations != Some(true)
+        {
+            return Err(Error::Invalid("attestation log unsupported"));
+        }
+        if tickets.len() > crate::advance_ticket_limit(&info) as usize {
+            return Err(Error::Invalid("attestmap reservation count"));
+        }
+        reply(
+            calls::update_ref_committing(
+                &self.rpc(),
+                kit_core::refs::ATTESTMAP_REF,
+                expected,
+                Some(new_id),
+                tickets,
+                identity,
+            )
+            .await,
+        )
     }
 
     /// `UpdateRef` with `delete`, under the same precondition rules.

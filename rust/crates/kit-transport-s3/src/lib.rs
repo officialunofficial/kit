@@ -1087,6 +1087,21 @@ fn quoted_md5(wire: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 impl Transport for S3Transport {
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
+        if matches!(condition, RefWriteCondition::Any) {
+            return Err(TransportError::ProtocolError);
+        }
+        self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
+    }
+
     /// The cursor of SPEC-TRANSPORT §6.8: a digest of the key, `ETag` and
     /// `LastModified` of every object under `refs/`, read from the listing
     /// alone. It costs one request per 1,000 refs and no ref read.

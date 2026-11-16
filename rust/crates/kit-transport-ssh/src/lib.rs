@@ -325,6 +325,21 @@ impl Drop for SshTransport {
 }
 
 impl Transport for SshTransport {
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn write_attestmap(
+        &self,
+        condition: RefWriteCondition,
+        tip: &Hash,
+        _keys: &[PackKey],
+    ) -> TransportResult<()> {
+        if matches!(condition, RefWriteCondition::Any) {
+            return Err(TransportError::ProtocolError);
+        }
+        self.update_ref(kit_core::refs::ATTESTMAP_REF, condition, tip)
+    }
+
     /// Ask the server for its repository cursor (SPEC-TRANSPORT §4.2.2). A
     /// server that predates the request answers `INVALID_REQUEST` and the
     /// transport offers none.

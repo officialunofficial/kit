@@ -3106,6 +3106,10 @@ pub struct UpdateRefRequestView<'a> {
     ///
     /// Field 5: `delete`
     pub delete: ::core::option::Option<bool>,
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
+    ///
+    /// Field 6: `ticket_ids`
+    pub ticket_ids: ::buffa::RepeatedView<'a, &'a [u8]>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for UpdateRefRequestView<'a> {
@@ -3175,6 +3179,17 @@ impl<'a> ::buffa::MessageView<'a> for UpdateRefRequestView<'a> {
                 )?;
                 view.delete = Some(::buffa::types::decode_bool(&mut cur)?);
             }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let __elem = ::buffa::types::borrow_bytes(&mut cur)?;
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&__elem),
+                )?;
+                view.ticket_ids.push(__elem);
+            }
             _ => {
                 ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                 let span_len = before_tag.len() - cur.len();
@@ -3202,6 +3217,7 @@ impl<'a> ::buffa::MessageView<'a> for UpdateRefRequestView<'a> {
             expected_id: self.expected_id.map(|b| (b).to_vec()),
             new_id: self.new_id.map(|b| (b).to_vec()),
             delete: self.delete,
+            ticket_ids: self.ticket_ids.iter().map(|b| (b).to_vec()).collect(),
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -3228,6 +3244,9 @@ impl<'a> ::buffa::ViewEncode<'a> for UpdateRefRequestView<'a> {
         if self.delete.is_some() {
             size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
         }
+        for v in &self.ticket_ids {
+            size += 1u64 + ::buffa::types::bytes_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3253,6 +3272,9 @@ impl<'a> ::buffa::ViewEncode<'a> for UpdateRefRequestView<'a> {
         }
         if let Some(v) = self.delete {
             ::buffa::types::put_bool_field(5u32, v, buf);
+        }
+        for v in &self.ticket_ids {
+            ::buffa::types::put_shared_bytes_field(6u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3289,6 +3311,13 @@ impl<'__a> ::serde::Serialize for UpdateRefRequestView<'__a> {
         }
         if let ::core::option::Option::Some(__v) = self.delete {
             __map.serialize_entry("delete", &__v)?;
+        }
+        if !self.ticket_ids.is_empty() {
+            __map
+                .serialize_entry(
+                    "ticketIds",
+                    &::buffa::json_helpers::BytesSeqJson(&self.ticket_ids),
+                )?;
         }
         __map.end()
     }
@@ -3417,6 +3446,13 @@ impl UpdateRefRequestOwnedView {
     #[must_use]
     pub fn delete(&self) -> ::core::option::Option<bool> {
         self.0.reborrow().delete
+    }
+    /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
+    ///
+    /// Field 6: `ticket_ids`
+    #[must_use]
+    pub fn ticket_ids(&self) -> &::buffa::RepeatedView<'_, &'_ [u8]> {
+        &self.0.reborrow().ticket_ids
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<UpdateRefRequestView<'static>>>
@@ -8883,6 +8919,10 @@ pub struct GetServerInfoResponseView<'a> {
     ///
     /// Field 22: `max_tickets_per_advance`
     pub max_tickets_per_advance: ::core::option::Option<u32>,
+    /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
+    ///
+    /// Field 23: `supports_attestations`
+    pub supports_attestations: ::core::option::Option<bool>,
     pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
 }
 impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
@@ -9076,6 +9116,15 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
                     ::buffa::types::decode_uint32(&mut cur)?,
                 );
             }
+            23u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                view.supports_attestations = Some(
+                    ::buffa::types::decode_bool(&mut cur)?,
+                );
+            }
             13u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -9137,6 +9186,7 @@ impl<'a> ::buffa::MessageView<'a> for GetServerInfoResponseView<'a> {
             supports_pack_locations: self.supports_pack_locations,
             max_pack_location_lifetime_ms: self.max_pack_location_lifetime_ms,
             max_tickets_per_advance: self.max_tickets_per_advance,
+            supports_attestations: self.supports_attestations,
             __buffa_unknown_fields: self.__buffa_unknown_fields.to_owned()?.into(),
             ..::core::default::Default::default()
         })
@@ -9214,6 +9264,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         if let Some(v) = self.max_tickets_per_advance {
             size += 2u64 + ::buffa::types::uint32_encoded_len(v) as u64;
         }
+        if self.supports_attestations.is_some() {
+            size += 2u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -9290,6 +9343,9 @@ impl<'a> ::buffa::ViewEncode<'a> for GetServerInfoResponseView<'a> {
         }
         if let Some(v) = self.max_tickets_per_advance {
             ::buffa::types::put_uint32_field(22u32, v, buf);
+        }
+        if let Some(v) = self.supports_attestations {
+            ::buffa::types::put_bool_field(23u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -9417,6 +9473,9 @@ impl<'__a> ::serde::Serialize for GetServerInfoResponseView<'__a> {
                     "maxTicketsPerAdvance",
                     &::buffa::json_helpers::ProtoJson(&__v),
                 )?;
+        }
+        if let ::core::option::Option::Some(__v) = self.supports_attestations {
+            __map.serialize_entry("supportsAttestations", &__v)?;
         }
         __map.end()
     }
@@ -9671,6 +9730,13 @@ impl GetServerInfoResponseOwnedView {
     #[must_use]
     pub fn max_tickets_per_advance(&self) -> ::core::option::Option<u32> {
         self.0.reborrow().max_tickets_per_advance
+    }
+    /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
+    ///
+    /// Field 23: `supports_attestations`
+    #[must_use]
+    pub fn supports_attestations(&self) -> ::core::option::Option<bool> {
+        self.0.reborrow().supports_attestations
     }
 }
 impl ::core::convert::From<::buffa::OwnedView<GetServerInfoResponseView<'static>>>
