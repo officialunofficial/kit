@@ -3002,8 +3002,8 @@ pub fn git_url_shape_one_iteration(input: &[u8]) {
 
 /// Import claims of the git bridge (`git_claim`): `claim_accepts` never
 /// panics on any payload and refuses a payload that is not a statement. A
-/// statement that holds exactly the binding is accepted, and the same
-/// statement is refused for another source. The text before the first newline
+/// statement that holds the redacted binding is accepted, and the same
+/// statement is refused for another attested source. The text before the first newline
 /// is the kit ref, and the rest is the source.
 pub fn git_claim_one_iteration(input: &[u8]) {
     use kit_attest::statement::{Statement, Subject, encode, sha256_hex};
@@ -3018,7 +3018,7 @@ pub fn git_claim_one_iteration(input: &[u8]) {
         twin: &twin,
         sha256: &sha256,
         git_id: &git_id,
-        source: "example.com/up",
+        source: "https://example.com/up",
     };
     let _ = claim_accepts(input, &fixed);
     let Ok(text) = core::str::from_utf8(input) else {
@@ -3033,8 +3033,9 @@ pub fn git_claim_one_iteration(input: &[u8]) {
     if !plain(kit_ref) || !plain(source) {
         return;
     }
+    let attested_source = kit_git_bridge::remoteid::attestation_remote(source);
     let predicate = format!(
-        "{{\"gitCommit\":\"{}\",\"refName\":\"{kit_ref}\",\"remoteUrl\":\"{source}\",\"schemaVersion\":1,\"specVersion\":{}}}",
+        "{{\"gitCommit\":\"{}\",\"refName\":\"{kit_ref}\",\"remoteUrl\":\"{attested_source}\",\"schemaVersion\":1,\"specVersion\":{}}}",
         kit_git_bridge::gitobj::sha1_hex(&git_id),
         kit_git_bridge::import::IMPORT_SPEC_VERSION
     );
@@ -3058,13 +3059,13 @@ pub fn git_claim_one_iteration(input: &[u8]) {
     };
     assert!(
         claim_accepts(statement.as_bytes(), &binding),
-        "a statement with exactly the binding is accepted"
+        "a statement with the redacted binding is accepted"
     );
     let other = ClaimBinding {
-        source: "other.example/up",
+        source: "https://other.example/up",
         ..binding
     };
-    if source != other.source {
+    if attested_source != kit_git_bridge::remoteid::attestation_remote(other.source) {
         assert!(!claim_accepts(statement.as_bytes(), &other));
     }
 }
