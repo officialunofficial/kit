@@ -21,6 +21,15 @@ pub const PUSH_CACHE_IDS: usize = 1_000_000;
 /// Fixed fields including the longest head and checksum, with room to spare.
 const FETCH_RECORD_OVERHEAD: usize = 192;
 
+/// The cache role, known from its path rather than its optional checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordKind {
+    /// Processed attestmap packs, including work before the first checkpoint.
+    Fetch,
+    /// Published envelope ids and the permanent-publication warning.
+    Push,
+}
+
 /// Processed attestmap head and pack ids, or published envelope ids.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Record {
@@ -35,17 +44,13 @@ pub struct Record {
 impl Record {
     /// Encode in sorted order with a checksum and a distinct record tag.
     #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self, kind: RecordKind) -> Vec<u8> {
         let mut body = format!(
             "kit-attestation-record-v1\n{}\n{}\n",
             self.head.as_ref().map_or_else(|| "-".into(), hash::to_hex),
             u8::from(self.warned)
         );
-        for id in self.ids.iter().take(if self.head.is_some() {
-            usize::MAX
-        } else {
-            PUSH_CACHE_IDS
-        }) {
+        for id in self.ids.iter().take(if kind == RecordKind::Push { PUSH_CACHE_IDS } else { usize::MAX }) {
             body.push_str(&hash::to_hex(id));
             body.push('\n');
         }
@@ -56,12 +61,13 @@ impl Record {
 
     /// Strict, bounded decode. Corruption invalidates the disposable cache.
     #[must_use]
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        decode_with_push_limit(bytes, PUSH_CACHE_IDS)
+    pub fn decode(bytes: &[u8], kind: RecordKind) -> Option<Self> {
+        decode_with_push_limit(bytes, kind, PUSH_CACHE_IDS)
     }
 }
 
-fn decode_with_push_limit(bytes: &[u8], push_limit: usize) -> Option<Record> {
+fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> Option<Record> {
+    if kind == RecordKind::Fetch && bytes.len() > FETCH_RECORD_OVERHEAD + 65 * WALK_LIMIT { return None; }
     let text = std::str::from_utf8(bytes).ok()?;
     let (body, checksum) = text.rsplit_once('\n')?;
     let signed_len = body.len() + 1;
@@ -76,9 +82,7 @@ fn decode_with_push_limit(bytes: &[u8], push_limit: usize) -> Option<Record> {
         "-" => None,
         hex => Some(parse_lowercase_hash(hex.as_bytes())?),
     };
-    if head.is_some() && bytes.len() > FETCH_RECORD_OVERHEAD + 65 * WALK_LIMIT {
-        return None;
-    }
+    if kind == RecordKind::Push && head.is_some() { return None; }
     let warned = match lines.next()? {
         "0" => false,
         "1" => true,
@@ -93,10 +97,10 @@ fn decode_with_push_limit(bytes: &[u8], push_limit: usize) -> Option<Record> {
             return None;
         }
         count += 1;
-        if head.is_some() && count > WALK_LIMIT {
+        if kind == RecordKind::Fetch && count > WALK_LIMIT {
             return None;
         }
-        if head.is_some() || ids.len() < push_limit {
+        if kind == RecordKind::Fetch || ids.len() < push_limit {
             ids.insert(id);
         }
         previous = Some(id);
@@ -104,7 +108,7 @@ fn decode_with_push_limit(bytes: &[u8], push_limit: usize) -> Option<Record> {
     Some(Record { head, ids, warned })
 }
 
-/// A remote cache path keyed by name, repository address and origin.
+/// A remote cache path keyed by name, URL, repository address, and origin.
 /// `push` selects published ids rather than the independent fetch record.
 #[must_use]
 pub fn path(
@@ -148,12 +152,12 @@ mod tests {
             ids: BTreeSet::from([[1; 32], [3; 32]]),
             warned: true,
         };
-        let bytes = record.encode();
-        assert_eq!(Record::decode(&bytes), Some(record));
+        let bytes = record.encode(RecordKind::Fetch);
+        assert_eq!(Record::decode(&bytes, RecordKind::Fetch), Some(record));
         let mut corrupt = bytes;
         corrupt[30] ^= 1;
-        assert!(Record::decode(&corrupt).is_none());
-        assert!(Record::decode(&Record::default().encode()).is_some());
+        assert!(Record::decode(&corrupt, RecordKind::Fetch).is_none());
+        assert!(Record::decode(&Record::default().encode(RecordKind::Fetch), RecordKind::Fetch).is_some());
     }
     #[test]
     fn fetch_record_accepts_the_full_walk_and_push_exceeds_it() {
@@ -169,7 +173,7 @@ mod tests {
             ids,
             warned: true,
         };
-        assert_eq!(Record::decode(&record.encode()), Some(record));
+        assert_eq!(Record::decode(&record.encode(RecordKind::Push), RecordKind::Push), Some(record));
         record = Record {
             head: Some([1; 32]),
             ids: (0..WALK_LIMIT)
@@ -181,7 +185,19 @@ mod tests {
                 .collect(),
             warned: false,
         };
-        assert_eq!(Record::decode(&record.encode()), Some(record));
+        assert_eq!(Record::decode(&record.encode(RecordKind::Fetch), RecordKind::Fetch), Some(record));
+    }
+
+    #[test]
+    fn headless_fetch_records_still_use_fetch_bounds() {
+        let record = Record { head: None, ids: (0..=WALK_LIMIT).map(|n| {
+            let mut h = [0;32]; h[..8].copy_from_slice(&(n as u64).to_be_bytes()); h
+        }).collect(), warned: true };
+        let bytes = record.encode(RecordKind::Fetch);
+        assert!(Record::decode(&bytes, RecordKind::Fetch).is_none());
+        assert_eq!(Record::decode(&bytes, RecordKind::Push), Some(record));
+        let pending = Record { head: None, ids: BTreeSet::from([[1;32]]), warned: false };
+        assert_eq!(Record::decode(&pending.encode(RecordKind::Fetch), RecordKind::Fetch), Some(pending));
     }
 
     #[test]
@@ -191,13 +207,13 @@ mod tests {
             ids: BTreeSet::from([[1; 32], [2; 32], [3; 32]]),
             warned: true,
         };
-        let mut bytes = record.encode();
-        let pruned = decode_with_push_limit(&bytes, 2).unwrap();
+        let mut bytes = record.encode(RecordKind::Push);
+        let pruned = decode_with_push_limit(&bytes, RecordKind::Push, 2).unwrap();
         assert!(pruned.warned);
         assert_eq!(pruned.ids.len(), 2);
         let last = bytes.len() - 1;
         bytes[last] = b'z';
-        assert!(decode_with_push_limit(&bytes, 2).is_none());
+        assert!(decode_with_push_limit(&bytes, RecordKind::Push, 2).is_none());
     }
 
     #[test]

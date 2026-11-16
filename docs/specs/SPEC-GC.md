@@ -137,14 +137,16 @@ set. In particular:
   the id of every loose object. The dry run and the real run visit the same
   candidates.
 
-Soft-root completeness is memoized across all hard and soft roots. Gc reads
-each metadata object and checks each distinct chunk once, propagates missing
-closure results to every dependent root, then marks only complete roots
-from the cached edges. Shared history is not walked separately per root.
-The cache holds at most `MAX_REACHABLE` metadata nodes, eight times that
-many metadata edges, and `MAX_LIVE_CHUNKS` chunk references. A cap or a
-non-missing read error aborts before deletion, preserving the fail-closed
-rule. A missing soft root or descendant is skipped and reported.
+Soft-root completeness is memoized across all hard and soft roots. During
+classification, gc reads each distinct metadata object and checks each
+distinct chunk once, propagating missing-closure results to dependent roots.
+It discards edge lists after each postorder verdict and retains only the
+verdicts. Then it releases that cache and runs one ordinary union mark over
+the hard roots and complete soft roots. Neither pass walks shared history
+separately for every root. The existing distinct-object and distinct-chunk
+caps apply; repeated tree entries or chunk references add no new edge cap.
+A cap or a non-missing read error aborts before deletion. A missing soft
+root or descendant is skipped and reported.
 
 ## Recovery log
 

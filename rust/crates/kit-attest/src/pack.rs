@@ -1,6 +1,8 @@
 //! Plain-blob attestation packs. Entries yielded by [`read`] are provisional
 //! until it succeeds: a sink must stage them until the key and trailer pass.
-//! This module never writes objects or decides signature trust.
+//! This module never writes objects or decides signature trust. Compressed
+//! entries require `kit-core/pack-zstd`, enabled by the native kit binaries.
+//! Builds without that feature reject compressed entries.
 
 use crate::{envelope, store::MAX_ENVELOPE_SIZE, verify::extract_primary_commit_hash};
 use kit_core::{

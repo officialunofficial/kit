@@ -3084,7 +3084,8 @@ pub fn git_claim_one_iteration(input: &[u8]) {
 pub fn attestation_pack_one_iteration(input: &[u8]) {
     let input = &input[..input.len().min(64 * 1024)];
     let mut reader = input;
-    let _ = kit_sync::attestation_records::Record::decode(input);
+    let _ = kit_sync::attestation_records::Record::decode(input, kit_sync::attestation_records::RecordKind::Fetch);
+    let _ = kit_sync::attestation_records::Record::decode(input, kit_sync::attestation_records::RecordKind::Push);
     let _ = kit_attest::pack::read(
         &mut reader,
         input.len() as u64,

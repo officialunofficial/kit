@@ -342,7 +342,10 @@ and rename; never reuse a record for another repository.
 A record contains LF-separated fields: `kit-attestation-record-v1`, the
 processed head as lowercase hex or `-`, the warning flag (`0` or `1`),
 then sorted unique lowercase 64-hex ids. Fetch ids name processed packs;
-push ids name published envelopes and its head is absent. Append the
+push ids name published envelopes and its head is absent. The decoder's
+role comes from the cache path, never from head presence. A deferred fetch
+can have no completed head yet and still retains its processed pack ids;
+it remains subject to the fetch bounds. A push record MUST have no head. Append the
 lowercase BLAKE3 of all preceding bytes, including the final LF, without
 a final newline. Readers reject corruption, duplicates, unsorted ids,
 and fetch records over `192 + 65 * 100000` bytes or 100,000 pack ids.

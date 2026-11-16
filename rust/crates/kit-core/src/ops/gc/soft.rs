@@ -1,13 +1,14 @@
 //! A shared completeness scan for hard and soft retention roots. Each object
-//! is read once. Missing-closure results propagate to every dependent root;
-//! only complete roots contribute to the final mark. Other errors fail closed.
+//! is read once during classification. Only statuses survive postorder; the
+//! existing marker then walks the complete roots together. Missing-closure
+//! results are shared across roots; other errors still fail closed.
 
-use super::{ChunkIds, GcRootsError, LiveSet, MarkLimits, SoftRoot};
+use super::{GcRootsError, LiveSet, MarkLimits, SoftRoot, mark_live_observed};
 use crate::hash::{self, Hash};
 use crate::object::ObjectType;
 use crate::ops::graph::{ClosureMode, children};
 use crate::store::{ObjectStore, StoreError};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
@@ -19,7 +20,6 @@ enum Status {
 
 struct Node {
     edges: Vec<Hash>,
-    chunks: bool,
     status: Status,
 }
 
@@ -28,8 +28,6 @@ pub(super) struct SoftGraph<'a> {
     limits: MarkLimits,
     nodes: BTreeMap<Hash, Node>,
     chunks: BTreeMap<Hash, Option<ObjectType>>,
-    object_edges: usize,
-    chunk_edges: usize,
 }
 
 impl<'a> SoftGraph<'a> {
@@ -39,8 +37,6 @@ impl<'a> SoftGraph<'a> {
             limits,
             nodes: BTreeMap::new(),
             chunks: BTreeMap::new(),
-            object_edges: 0,
-            chunk_edges: 0,
         }
     }
 
@@ -55,7 +51,6 @@ impl<'a> SoftGraph<'a> {
             Err(StoreError::ObjectNotFound(_)) => {
                 return Ok(Node {
                     edges: vec![],
-                    chunks: false,
                     status: Status::Missing(h),
                 });
             }
@@ -64,22 +59,12 @@ impl<'a> SoftGraph<'a> {
         if matches!(kind, ObjectType::Blob | ObjectType::Delta) {
             return Ok(Node {
                 edges: vec![],
-                chunks: false,
                 status: Status::Complete,
             });
         }
         let object = self.store.read_object(&h)?;
         let edges = children(&object, ClosureMode::History);
         let chunks = kind == ObjectType::ChunkedBlob;
-        let (used, cap) = if chunks {
-            (&mut self.chunk_edges, self.limits.chunk_cap)
-        } else {
-            (&mut self.object_edges, self.limits.cap.saturating_mul(8))
-        };
-        *used = used.saturating_add(edges.len());
-        if *used > cap {
-            return Err(GcRootsError::Truncated);
-        }
         let mut status = Status::Visiting;
         if chunks {
             status = Status::Complete;
@@ -107,8 +92,7 @@ impl<'a> SoftGraph<'a> {
             }
         }
         Ok(Node {
-            edges,
-            chunks,
+            edges: if chunks { vec![] } else { edges },
             status,
         })
     }
@@ -127,7 +111,11 @@ impl<'a> SoftGraph<'a> {
                         Status::Visiting => return Err(GcRootsError::Truncated),
                     }
                 }
-                self.nodes.get_mut(&h).expect("loaded node").status = status;
+                let node = self.nodes.get_mut(&h).expect("loaded node");
+                node.status = status;
+                // Completed nodes retain only their memoized verdict. Shared
+                // tree entries and repeated chunk references add no new cap.
+                node.edges = Vec::new();
                 continue;
             }
             if let Some(node) = self.nodes.get(&h) {
@@ -158,44 +146,7 @@ impl<'a> SoftGraph<'a> {
         self.nodes.len()
     }
 
-    fn live(&self, roots: &BTreeSet<Hash>) -> Result<LiveSet, GcRootsError> {
-        let mut objects = BTreeSet::new();
-        let mut ids = ChunkIds::new(self.limits.compact_floor, self.limits.chunk_cap);
-        let mut queue = VecDeque::from_iter(roots.iter().copied());
-        while let Some(h) = queue.pop_front() {
-            if !objects.insert(h) {
-                continue;
-            }
-            let node = &self.nodes[&h];
-            if node.chunks {
-                ids.extend(&node.edges)?;
-            } else {
-                queue.extend(&node.edges);
-            }
-        }
-        ids.compact()?;
-        ids.ids.retain(|h| !objects.contains(h));
-        for chunk in &ids.ids {
-            if self.chunks[chunk] != Some(ObjectType::Blob) {
-                let manifest = objects
-                    .iter()
-                    .find(|h| {
-                        let node = &self.nodes[*h];
-                        node.chunks && node.edges.contains(chunk)
-                    })
-                    .copied()
-                    .unwrap_or(hash::ZERO);
-                return Err(GcRootsError::ChunkNotBlob {
-                    manifest,
-                    chunk: *chunk,
-                });
-            }
-        }
-        Ok(LiveSet {
-            objects,
-            chunks: ids.ids,
-        })
-    }
+
 }
 
 pub(super) fn mark(
@@ -230,7 +181,10 @@ pub(super) fn mark(
             last = std::time::Instant::now();
         }
     }
-    let live = graph.live(&roots)?;
+    // Release completeness metadata before the ordinary, shared union mark.
+    // That mark retains the existing distinct-object and distinct-chunk caps.
+    drop(graph);
+    let live = mark_live_observed(store, &roots, limits, progress)?;
     progress("gc_mark", live.len(), 0);
     Ok((live, skipped.into_iter().collect()))
 }

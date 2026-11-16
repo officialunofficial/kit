@@ -1191,6 +1191,30 @@ mod tests {
     }
 
     #[test]
+    fn soft_roots_count_distinct_objects_and_chunks_not_duplicate_edges() {
+        for chunked in [false, true] {
+            let (d, store) = repo();
+            let md = layout(&d);
+            let blob = write_blob(&store, b"x");
+            let object = if chunked {
+                Object::ChunkedBlob(crate::object::ChunkedBlob::new(64, 0,
+                    (1..=64).map(|end| (blob, end))).unwrap())
+            } else {
+                Object::Tree(Tree { entries: (0..64).map(|n| TreeEntry {
+                    name: format!("f{n:03}").into_bytes(), mode: EntryMode::Blob, object_hash: blob,
+                }).collect() })
+            };
+            let root = store.write(&serialize::serialize(&object).unwrap()).unwrap();
+            fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&root))).unwrap();
+            let limits = MarkLimits { cap: 4, chunk_cap: 1, compact_floor: 1 };
+            let (live, skipped) = live_objects_with(&store, &md, limits).unwrap();
+            assert!(live.contains(&root) && live.contains(&blob));
+            assert!(skipped.is_empty());
+            assert_eq!(live.len(), 2);
+        }
+    }
+
+    #[test]
     fn soft_chunked_subjects_keep_shared_chunks_and_skip_missing_chunks() {
         let (d, store) = repo();
         let md = layout(&d);
