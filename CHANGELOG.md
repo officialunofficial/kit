@@ -7,6 +7,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Choose `VISUAL` before `EDITOR`, after `GIT_EDITOR`.
+- Include the received size and limit in oversized Connect frame errors.
+- Preserve early S3 upload refusals and report their error codes without retrying; keep retrying timeouts and throttling.
+- Resume unfinished clones that already fetched tags, validating those tags again.
+- Find generated protocol output through Cargo when the build directory is configured.
+
 ### Added
 
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.

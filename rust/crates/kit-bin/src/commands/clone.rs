@@ -94,7 +94,7 @@ pub fn run(args: &[String]) -> u8 {
         None => PathBuf::from(derive_dir_from_url(url)),
     };
     // An existing destination is refused unless it is a clone of the same
-    // remote that stopped before it made a branch, a tag or HEAD:
+    // remote that stopped before it made a branch or landed HEAD:
     // `init_clone_dir` returns that one, and the pull below resumes it. A
     // `.kit` that is a symlink is not a clone this command made.
     let existed = target.exists();
