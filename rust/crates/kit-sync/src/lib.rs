@@ -77,7 +77,7 @@ pub use native::{
     default_tls_config,
 };
 pub use observer::{NoopObserver, Observer, SyncEvent};
-pub use pull::{PullOutcome, PullReport, fetch, pull};
+pub use pull::{PullOutcome, PullReport, fetch, pull, verify_pull_tip};
 pub use source::{ErrorClassifier, RemoteSource, TransportSource};
 pub use source_error::{FailureClass, RemoteDetail, RemoteFailure, SourceError};
 pub use tags::{TAG_SELF_HEALS_PER_FETCH, TagRejectReason, TagRejection, TagWarning};

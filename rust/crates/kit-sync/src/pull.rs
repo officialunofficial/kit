@@ -60,6 +60,30 @@ pub(crate) fn open_store(
     Ok(store)
 }
 
+/// Verify the signed history of a tip before a pull uses it.
+///
+/// Checks every commit, remix and tag down to a tip recorded by an earlier
+/// verified fetch. A tracking ref alone is not proof of verification: an
+/// opt-out fetch may have written it. Uses the same history checker as fetch.
+/// This function writes nothing and honors observer cancellation.
+///
+/// The caller must hold the worktree lock from selecting `tip` through the
+/// operation that uses it. The caller must skip this call when signature
+/// verification was explicitly disabled.
+///
+/// # Errors
+/// Returns [`SyncError::UnsignedOrInvalidObject`] for an unsigned or invalid
+/// signature, [`SyncError::Interrupted`] on cancellation, or an error if the
+/// history cannot be read or exceeds the history walk's limit.
+pub fn verify_pull_tip(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tip: &Hash,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<(), SyncError> {
+    verify_history_signatures(store, observer, tip, &mut crate::anchor::load_all(layout))
+}
+
 /// Fetch the remote's refs, then fast-forward the current local branch from
 /// `refs/remotes/<remote>/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
@@ -96,14 +120,14 @@ pub fn pull(
     }
     let store = open_store(&layout, options)?;
     let lock_wait = LockWait::new(options.lock_wait);
-    let (fetch, mut verified) = fetch_objects(
+    let fetch = fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )?;
+    let _lock = acquire_worktree_lock(&layout, observer, &lock_wait)?;
     let remote_refs = list_remote_refs_parallel(&layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
-    let _lock = acquire_worktree_lock(&layout, observer, &lock_wait)?;
     let pending = PullState::read(&layout)?;
     let original_head = refs::read_head(&layout).ok();
     if matches!(original_head, Some(Head::Detached(_))) {
@@ -125,6 +149,12 @@ pub fn pull(
         options.target_branch.as_deref(),
         &remote_refs,
     )?;
+
+    // A tracking tip omitted by this fetch may come from an opt-out fetch.
+    // Check before recovery or any other worktree, index or HEAD write.
+    if options.verify_signatures {
+        verify_pull_tip(&layout, &store, &remote_tip, observer)?;
+    }
 
     let restored = resume_pull(&layout, &store, &branch, pending, local_tip, observer)?;
     let original_head = refs::read_head(&layout).ok();
@@ -159,13 +189,6 @@ pub fn pull(
         refs::RefWriteCondition::Missing
     };
 
-    // The fetch checked the history of each tip it published. The tracking
-    // ref of `branch` can hold a tip this fetch did not publish, such as one
-    // a fetch with the opt-out wrote for a branch this listing omits, so the
-    // tip the branch moves to is checked too, unless the fetch just did.
-    if options.verify_signatures {
-        verify_history_signatures(&store, observer, &remote_tip, &mut verified)?;
-    }
     let tree = load_tree_hash(&store, remote_tip)?;
     ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
     // The check above proved that the worktree and the index equal the tree
@@ -225,7 +248,6 @@ pub fn fetch(
     fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )
-    .map(|(report, _)| report)
 }
 
 fn rollback_pull_ref_and_head(

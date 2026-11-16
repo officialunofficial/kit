@@ -115,6 +115,13 @@ moves the branch to the same way. A tip published by a fetch with the opt-out,
 or by an older kit, is not recorded, so it is no stopping point. The walk
 visits at most the closure check's 10,000,000 objects.
 
+`verify_pull_tip(layout, store, tip, observer)` exposes this check for callers
+that merge or rebase after fetching. It writes nothing and uses the recorded
+verified tips as stopping points. Hold the worktree lock from selecting the tip
+through using it, and skip the call only for an explicit signature opt-out.
+All pull modes call it before changing operation state, files, the index or HEAD,
+even when the remote listing omitted a tracking branch left by an opt-out fetch.
+
 The disposable records live in **.kit/applied-packs/.verified/**, one per
 remote and branch. The filename is lowercase BLAKE3 over the remote name and
 the branch name, each with an eight-byte little-endian byte-length prefix.
