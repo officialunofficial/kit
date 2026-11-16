@@ -308,7 +308,11 @@ impl IgnoreList {
             }
             index
         });
-        Self { root: None, patterns, index }
+        Self {
+            root: None,
+            patterns,
+            index,
+        }
     }
 
     pub(crate) fn load_directory(&self, dir: &Path) -> Result<Self, IgnoreError> {
@@ -419,7 +423,10 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
-    let root = dir.ancestors().find(|p| p.join(".kit").exists()).unwrap_or(dir);
+    let root = dir
+        .ancestors()
+        .find(|p| p.join(".kit").exists())
+        .unwrap_or(dir);
     load_from(root, dir)
 }
 
@@ -1208,6 +1215,20 @@ mod tests {
         std::os::unix::fs::symlink("/dev/zero", dir.path().join(".kitignore")).unwrap();
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, IgnoreError::Io(_)));
+    }
+
+    #[test]
+    fn scoped_rules_keep_the_original_root_without_repository_metadata() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        fs::write(dir.path().join("sub/.kitignore"), "!keep.log\n/local\n").unwrap();
+        let root = load(dir.path()).unwrap();
+        let nested = root.load_directory(&dir.path().join("sub")).unwrap();
+        assert!(nested.is_ignored("sub/drop.log", false));
+        assert!(!nested.is_ignored("sub/keep.log", false));
+        assert!(nested.is_ignored("sub/local", false));
+        assert!(!nested.is_ignored("other/local", false));
     }
 
     // --- glob_match public helper --------------------------------------

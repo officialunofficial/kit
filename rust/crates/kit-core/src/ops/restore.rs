@@ -1875,7 +1875,9 @@ fn check_unswept_dir(
     while let Some((path, full_path, is_dir)) = untracked.pop() {
         let parent = path.parent().unwrap_or(&unswept.dir);
         if !lists.contains_key(parent) {
-            let local = ignore.load_directory(parent).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            let local = ignore
+                .load_directory(parent)
+                .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
             lists.insert(parent.to_path_buf(), local);
         }
         let local = &lists[parent];

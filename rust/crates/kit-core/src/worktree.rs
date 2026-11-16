@@ -262,7 +262,8 @@ fn directory_ignores<'a>(
     if keep_inherited {
         Ok(std::borrow::Cow::Borrowed(inherited))
     } else {
-        inherited.load_directory(dir)
+        inherited
+            .load_directory(dir)
             .map(std::borrow::Cow::Owned)
             .map_err(|e| WorktreeError::Io(io::Error::other(e)))
     }

@@ -479,11 +479,17 @@ fn nested_rules_survive_stash_sweeps_and_skipped_tracked_subtrees() {
     fs::write(root.join("new"), "stash this").unwrap();
     let saved = run_in(root, x, &["stash"]);
     assert!(saved.status.success(), "{saved:?}");
-    assert_eq!(fs::read_to_string(root.join("sub/keep.local")).unwrap(), "private");
+    assert_eq!(
+        fs::read_to_string(root.join("sub/keep.local")).unwrap(),
+        "private"
+    );
     assert!(!root.join("new").exists());
     let popped = run_in(root, x, &["stash", "pop"]);
     assert!(popped.status.success(), "{popped:?}");
-    assert_eq!(fs::read_to_string(root.join("sub/keep.local")).unwrap(), "private");
+    assert_eq!(
+        fs::read_to_string(root.join("sub/keep.local")).unwrap(),
+        "private"
+    );
     assert!(root.join("new").exists());
 }
 
@@ -491,7 +497,9 @@ fn nested_rules_survive_stash_sweeps_and_skipped_tracked_subtrees() {
 fn nested_ignore_scope_treats_directory_glob_characters_literally() {
     let (td, xdg) = repo();
     let (root, x) = (td.path(), xdg.path());
-    for dir in ["wild[ab]*", "wildaX"] { fs::create_dir(root.join(dir)).unwrap(); }
+    for dir in ["wild[ab]*", "wildaX"] {
+        fs::create_dir(root.join(dir)).unwrap();
+    }
     fs::write(root.join("wild[ab]*/.gitignore"), "/hidden\n").unwrap();
     fs::write(root.join("wild[ab]*/hidden"), "ignore").unwrap();
     fs::write(root.join("wildaX/hidden"), "keep").unwrap();
