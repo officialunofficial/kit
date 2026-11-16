@@ -291,7 +291,7 @@ pub fn export(
             layout,
             &store,
             &staging,
-            request.dest,
+            &bound_identity,
             &attestable,
             signer,
             &prior_state,
@@ -537,7 +537,7 @@ fn publish_attestations(
     layout: &RepoLayout,
     store: &ObjectStore,
     staging: &Path,
-    dest: &str,
+    identity: &str,
     exported: &[&Exported],
     signer: &mut SignerFactory<'_>,
     prior_state: &[map::RefState],
@@ -577,7 +577,7 @@ fn publish_attestations(
         let predicate = format!(
             "{{\"gitCommit\":\"{}\",\"mirror\":\"{}\",\"refName\":\"{}\",\"schemaVersion\":1,\"specVersion\":1}}",
             sha1_hex(&e.git_id),
-            super::json_escape(dest),
+            super::json_escape(kit_git_bridge::remoteid::attestation_remote(identity)),
             super::json_escape(&e.ref_name)
         );
         let head_bytes = store.read(&e.kit_hash).map_err(|err| {

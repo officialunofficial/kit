@@ -21,11 +21,11 @@ pub fn remote_identity(dest: &str) -> String {
     remote_identity_relative_to(dest, None)
 }
 
-/// The `remoteUrl` of an attestation for a local import source.
+/// The locator of an attestation for a local import source or export destination.
 pub const LOCAL_REMOTE: &str = "local";
 
-/// The `remoteUrl` value of a `git-import/v1` attestation for an import
-/// source whose canonical identity is `identity`.
+/// The public locator of an import or export attestation whose canonical
+/// remote identity is `identity`.
 ///
 /// A network identity is public by its nature, so the attestation
 /// carries it. A local identity is a path of the importer's machine.
@@ -33,11 +33,26 @@ pub const LOCAL_REMOTE: &str = "local";
 /// [`LOCAL_REMOTE`] in its place.
 #[must_use]
 pub fn attestation_remote(identity: &str) -> &str {
-    if identity.contains("://") {
-        identity
-    } else {
-        LOCAL_REMOTE
+    if identity.starts_with(['/', '\\']) || looks_like_dos_drive(identity) {
+        return LOCAL_REMOTE;
     }
+    let Some((scheme, rest)) = identity.split_once("://") else {
+        return LOCAL_REMOTE;
+    };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, _) = split_host_port(authority);
+    // Helper addresses and ambiguous URL authorities do not have a safe
+    // public locator. The same marker also hides paths embedded in them.
+    if scheme.eq_ignore_ascii_case("file")
+        || scheme.contains(':')
+        || path.starts_with(':')
+        || path.contains('@')
+        || authority.contains('%')
+        || (host.contains(':') && !(host.starts_with('[') && host.ends_with(']')))
+    {
+        return LOCAL_REMOTE;
+    }
+    identity
 }
 
 /// As [`remote_identity`], but resolves a non-existent relative local
@@ -51,6 +66,15 @@ fn remote_identity_relative_to(dest: &str, base: Option<&Path>) -> String {
     if let Some(rest) = dest.strip_prefix("file://") {
         let path = rest.strip_prefix("localhost").unwrap_or(rest);
         return canonical_local(path, base);
+    }
+
+    // A delimiter inside apparent userinfo makes the authority ambiguous.
+    // Keep the binding private rather than publishing a partial credential.
+    let authority = dest.split_once("://").map_or(dest, |(_, rest)| rest);
+    if let Some((prefix, _)) = authority.rsplit_once('@')
+        && prefix.contains(['?', '#'])
+    {
+        return canonical_local(dest, base);
     }
 
     // Scheme URLs.
@@ -83,6 +107,8 @@ fn remote_identity_relative_to(dest: &str, base: Option<&Path>) -> String {
     // scp-style `[user@]host:path` — a colon before the first slash.
     let first_seg = dest.split('/').next().unwrap_or(dest);
     if first_seg.contains(':') && !looks_like_dos_drive(dest) {
+        // Queries and fragments never belong in a published locator.
+        let dest = dest.find(['?', '#']).map_or(dest, |i| &dest[..i]);
         // Bracket-aware split: `[::1]:path` keeps the literal intact.
         let after_user = dest.rsplit_once('@').map_or(dest, |(_, rest)| rest);
         let (host, path) = if after_user.starts_with('[') {
@@ -249,6 +275,46 @@ mod tests {
         assert_eq!(attestation_remote(&identity), identity);
         let identity = remote_identity("git@github.com:org/repo.git");
         assert_eq!(attestation_remote(&identity), "ssh://github.com/org/repo");
+    }
+
+    #[test]
+    fn attestation_locators_drop_secrets_and_local_paths() {
+        for source in [
+            "/private/repos/mirror.git",
+            "/private/repos/https://example.com/mirror.git",
+            "file:///private/mirror.git",
+            "FILE://localhost/private/mirror.git",
+            r"C:\Users\private\mirror.git",
+            r"\\?\C:\Users\private\mirror.git",
+            r"\\server\private\mirror.git",
+        ] {
+            let identity = remote_identity(source);
+            assert_eq!(attestation_remote(&identity), LOCAL_REMOTE);
+        }
+        for source in [
+            "gcrypt::/Users/private/repo.git",
+            "hg::/private/repo.git",
+            "testgit::C:/Users/private/repo.git",
+            "gcrypt::https://user:secret@example.com/repo.git",
+            "https://user:p?ss@host/r",
+            "https://u:ab/cd@host/r",
+            "https://u:secret%40host/r",
+            "https://tok#en@host/r",
+            "https://user:1234?x@host/r",
+            "tok#en@host:r",
+            "https://user:1234?x/y@host/r",
+            "https://tok#x/y@host/r",
+            "user:1234?x/y@host:r",
+            "deploy:s3c#x/y@host:r",
+        ] {
+            assert_eq!(attestation_remote(&remote_identity(source)), LOCAL_REMOTE);
+        }
+        assert_eq!(
+            attestation_remote(&remote_identity("deploy:s3c#x@host:r")),
+            LOCAL_REMOTE
+        );
+        let identity = remote_identity("user@example.com:repo.git?token=secret#private");
+        assert_eq!(attestation_remote(&identity), "ssh://example.com/repo");
     }
 
     #[test]
