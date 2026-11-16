@@ -654,7 +654,6 @@ fn add_refuses_non_utf8_native_paths_instead_of_staging_replacements() {
     assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
 }
 
-
 #[cfg(unix)]
 #[test]
 fn add_skips_empty_or_ignored_content_in_unrepresentable_directories() {
