@@ -228,7 +228,7 @@ def walk(root, mode, payloads):
                 WRONG_INDEX[oid] = i  # the lowest wrong index is the one reported
                 break
     unreferenced = sorted((set(objects) - set(seen)) | unreferenced_junk)
-    return sorted(set(visited) - corrupt), missing, sorted(corrupt), unreferenced
+    return sorted(visited), missing, sorted(corrupt), unreferenced
 
 
 def check_vector(root_dir, sidecar_name, man):
@@ -279,10 +279,53 @@ def check_vector(root_dir, sidecar_name, man):
     return "accept"
 
 
+
+def check_conflicting_edges(root_dir):
+    """A later conflicting edge reports corruption without undoing a visit."""
+    payloads = decode_pack(o.read(root_dir, "closure", "snapshot.pack0.bin"))
+    template = next(data for data in payloads if data[0] == o.COMMIT)
+    parent_count = struct.unpack("<I", template[38:42])[0]
+    tail = template[42 + 32 * parent_count :]
+
+    def tree(entries):
+        return (bytes([o.TREE]) + o.PROLOGUE_MAGIC + b"\x01"
+                + struct.pack("<I", len(entries))
+                + b"".join(struct.pack("<I", len(name)) + name + bytes([mode]) + oid
+                           for name, mode, oid in entries))
+
+    def commit(tree_id, parents=()):
+        return (template[:6] + tree_id + struct.pack("<I", len(parents))
+                + b"".join(parents) + tail)
+
+    empty = tree([])
+    parent = commit(object_id(empty))
+    deeper = tree([(b"x", 1, object_id(parent))])
+    top = tree([(b"d", TREE_MODE, object_id(deeper))])
+    root = commit(object_id(top), [object_id(parent)])
+    supplied = [root, top, deeper, parent, empty]
+    ids, missing, corrupt, unreferenced = walk(object_id(root), HISTORY, supplied)
+    o.expect(ids == sorted(object_id(data) for data in supplied),
+             "late type conflict keeps the five objects already verified")
+    o.expect(corrupt == [object_id(parent)], "late type conflict is reported once")
+    o.expect(not missing and not unreferenced, "late conflict keeps the reached closure")
+
+    # Conflicting edges discovered before a visit must stop descent instead.
+    top = tree([(b"a", TREE_MODE, object_id(deeper)), (b"b", 1, object_id(deeper))])
+    root = commit(object_id(top))
+    ids, missing, corrupt, unreferenced = walk(object_id(root), SNAPSHOT,
+                                              [root, top, deeper, parent, empty])
+    o.expect(ids == sorted([object_id(root), object_id(top)]),
+             "early type conflict stops descent")
+    o.expect(corrupt == [object_id(deeper)], "early type conflict is reported once")
+    o.expect(not missing and unreferenced == sorted([object_id(parent), object_id(empty)]),
+             "children of an early conflict remain unreferenced")
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit("usage: closure_ref.py <rust/tests/golden>")
     root_dir = sys.argv[1]
+    check_conflicting_edges(root_dir)
     man = o.manifest(root_dir, "closure")
     seen = {}
     for fn in sorted(os.listdir(os.path.join(root_dir, "closure"))):
