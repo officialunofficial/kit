@@ -82,7 +82,7 @@ getrandom = "0.4.3"
 
 # Pure-Rust TLS root store for `HttpClient::with_tls` (Mozilla root program
 # via the `webpki-roots` crate) — no OS trust-store dependency.
-webpki-roots = "1.0.11"
+webpki-roots = "1.0.12"
 
 # Explicit dependency (beyond connectrpc's own re-export of `rustls`) so
 # this crate can deterministically install a `ring`-backed default

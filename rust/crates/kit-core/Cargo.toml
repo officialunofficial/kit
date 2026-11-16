@@ -85,7 +85,7 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 # `optional = true`, gated by the `pack-zstd` feature below, so a wasm32
 # consumer (which needs `pack.rs` to compile but never calls into pack
 # compression) can opt out via `default-features = false`.
-zstd = { version = "0.14.3", optional = true }
+zstd = { version = "0.14.4", optional = true }
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
 [target.'cfg(unix)'.dependencies]

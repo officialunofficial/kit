@@ -41,6 +41,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Check dependency versions
+        run: |
+          python3 -I -B scripts/check-dependency-versions.py
+          bash scripts/test-check-dependency-versions.sh
       - name: Set up Rust and cache
         uses: ./.github/actions/setup-rust
         with:
