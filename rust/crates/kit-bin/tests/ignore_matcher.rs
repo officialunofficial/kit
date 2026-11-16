@@ -412,11 +412,7 @@ fn nested_ignore_rules_match_git_and_clean_preserves_reincluded_files() {
         x,
         &["ls-files", "--others", "--exclude-standard"],
     ));
-    let status = out_str(&run_in(
-        root,
-        x,
-        &["status", "--porcelain"],
-    ));
+    let status = out_str(&run_in(root, x, &["status", "--porcelain"]));
     for (path, ignored) in cases {
         assert_eq!(
             others.lines().any(|line| line == path),

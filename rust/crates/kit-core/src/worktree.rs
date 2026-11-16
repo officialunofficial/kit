@@ -259,6 +259,20 @@ fn retained_content_hash(
 /// rather than bare basenames. `parent_ignored` carries down whether an
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
+fn directory_ignores<'a>(
+    dir: &Path,
+    inherited: &'a IgnoreList,
+    keep_inherited: bool,
+) -> WorktreeResult<std::borrow::Cow<'a, IgnoreList>> {
+    if keep_inherited {
+        Ok(std::borrow::Cow::Borrowed(inherited))
+    } else {
+        ignore::load(dir)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| WorktreeError::Io(io::Error::other(e)))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
@@ -271,13 +285,8 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
     parent_ignored: bool,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    let local;
-    let ignores = if !rel_dir.is_empty() && !parent_ignored {
-        local = ignore::load(dir).map_err(|e| WorktreeError::Io(io::Error::other(e)))?;
-        &local
-    } else {
-        ignores
-    };
+    let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
+    let ignores = scoped.as_ref();
     let mut entries: Vec<TreeEntry> = Vec::new();
     // Cache-miss regular files collected during the walk below, hashed
     // together (sequentially or fanned out) once the walk finishes —
