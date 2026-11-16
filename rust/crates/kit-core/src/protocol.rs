@@ -1269,6 +1269,18 @@ mod tests {
         fail_on: Option<&'static str>,
     }
 
+    #[test]
+    fn unknown_transports_refuse_attestations_without_a_write() {
+        let transport = RecordingTransport::default();
+        assert!(!transport.supports_attestations());
+        assert!(matches!(
+            transport.write_attestmap(RefWriteCondition::Missing, &[1; 32], &[]),
+            Err(TransportError::ProtocolError)
+        ));
+        assert!(transport.uploaded.lock().unwrap().is_none());
+        assert!(transport.stored.lock().unwrap().is_empty());
+    }
+
     impl Transport for RecordingTransport {
         fn upload_pack(
             &self,
