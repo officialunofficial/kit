@@ -483,7 +483,11 @@ fn run_steps(
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
         return single(None, pack_payload_cap);
     };
+    tx.observer.event(&SyncEvent::PushPlanning { done: 0 });
     let plan = tx.deltas.plan(store, tip, remote_tip)?;
+    tx.observer.event(&SyncEvent::PushPlanning {
+        done: plan.raw.len() + plan.deltas.len(),
+    });
     let cap = effective_payload_cap(pack_payload_cap, limits.max_pack_bytes)?;
     // The total, not the ticketed count: compression can merge packs and carry
     // one past the ticket threshold, and only the exact dry seal below knows.

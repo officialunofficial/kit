@@ -260,7 +260,7 @@ pub(crate) fn apply_and_verify_chain(
         require_signed,
         &mut retry,
     )?;
-    verify_closure_present(store, &tip)?;
+    verify_closure_above(store, observer, &tip, &Anchors::default())?;
     // The report covers the attempt that published.
     Ok(Applied {
         packs_downloaded: retry.packs,
@@ -287,7 +287,7 @@ pub(crate) fn persist_record(
     }
 }
 
-/// [`verify_closure_present`] down to `anchors`, or in full when there are
+/// Check presence down to `anchors`, or in full when there are
 /// none.
 fn verify_closure_above(
     store: &ObjectStore,
@@ -295,10 +295,38 @@ fn verify_closure_above(
     tip: &Hash,
     anchors: &Anchors,
 ) -> Result<(), SyncError> {
+    let done = std::cell::Cell::new(0usize);
+    let last = std::cell::Cell::new(std::time::Instant::now());
+    observer.event(&SyncEvent::ClosureProgress { done: 0 });
+    let poll = || {
+        if last.get().elapsed() >= std::time::Duration::from_millis(100) {
+            observer.event(&SyncEvent::ClosureProgress { done: done.get() });
+            last.set(std::time::Instant::now());
+        }
+        observer.cancelled()
+    };
     if anchors.is_empty() {
-        return verify_closure_present(store, tip);
+        let result = kit_core::ops::graph::check_closure_present_observed(store, tip, &|count| {
+            done.set(count);
+            poll();
+        });
+        observer.event(&SyncEvent::ClosureProgress { done: done.get() });
+        return match result {
+            Ok(false) => Ok(()),
+            Ok(true) => Err(SyncError::ClosureTooLarge(
+                kit_core::ops::graph::MAX_REACHABLE,
+            )),
+            Err(error) => Err(closure::closure_error(error)),
+        };
     }
-    closure::check_above(store, tip, anchors, &|| observer.cancelled()).map(drop)
+    let result = closure::check_above_observed(store, tip, anchors, &poll, &|count| {
+        done.set(count);
+        poll();
+    });
+    if let Ok(count) = &result {
+        observer.event(&SyncEvent::ClosureProgress { done: *count });
+    }
+    result.map(drop)
 }
 
 /// Assert that every object reachable from `tip` is already present in the
@@ -313,6 +341,7 @@ fn verify_closure_above(
 /// unchecked, which over a partially wiped store could hide missing objects,
 /// so truncation is a hard [`SyncError::ClosureTooLarge`] (deliberately not a
 /// self-heal trigger).
+#[cfg(test)]
 pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<(), SyncError> {
     match kit_core::ops::check_closure_present(store, std::iter::once(tip)) {
         Ok(false) => Ok(()),

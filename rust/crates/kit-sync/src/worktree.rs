@@ -15,9 +15,7 @@ use kit_core::index::{EntryStatus, Index, IndexEntry};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, Object};
 use kit_core::ops::diff::{DiffEntry, DiffKind, diff_trees};
-use kit_core::ops::restore::{
-    RestoreOptions, matches_sparse, nested_repository, restore_tree_to_worktree_observed,
-};
+use kit_core::ops::restore::{RestoreOptions, matches_sparse, nested_repository};
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -187,18 +185,43 @@ pub fn restore_worktree_and_index_from(
     tree_hash: Hash,
     base_tree: Option<Hash>,
 ) -> Result<(), String> {
-    let mut observed = Vec::new();
-    restore_tree_to_worktree_observed(
+    let mut stats = Vec::new();
+    kit_core::ops::restore::restore_tree_to_worktree_observed(
         store,
         &tree_hash,
         base_tree,
         layout.worktree_root(),
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,
-        Some(&mut observed),
+        Some(&mut stats),
     )
     .map_err(|e| format!("restore worktree: {e}"))?;
-    sync_index_to_tree_observed(layout, store, tree_hash, &observed)
+    sync_index_to_tree_observed(layout, store, tree_hash, &stats)
+}
+
+pub(crate) fn restore_worktree_and_index_progress(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    base_tree: Option<Hash>,
+    observer: &dyn crate::Observer<crate::SyncEvent>,
+) -> Result<(), String> {
+    if observer.concurrent().is_none() {
+        return restore_worktree_and_index_from(layout, store, tree_hash, base_tree);
+    }
+    let mut stats = Vec::new();
+    kit_core::ops::restore::restore_tree_to_worktree_progress(
+        store,
+        &tree_hash,
+        base_tree,
+        layout.worktree_root(),
+        &RestoreOptions::default(),
+        &crate::restore_fanout::read_chunks_fanout,
+        Some(&mut stats),
+        &mut |done, total| observer.event(&crate::SyncEvent::RestoreProgress { done, total }),
+    )
+    .map_err(|e| format!("restore worktree: {e}"))?;
+    sync_index_to_tree_observed(layout, store, tree_hash, &stats)
 }
 
 /// Refuse a destructive restore when the index/worktree contains user work.

@@ -71,6 +71,14 @@ struct Reporter {
     last_emit_done: usize,
     emitted: bool,
     step: Option<(usize, usize)>,
+    started: std::time::Instant,
+    last_emit: std::time::Instant,
+    json: bool,
+    bytes_total: Option<u64>,
+    phase: &'static str,
+    packed: usize,
+    unpacked: usize,
+    command_started: std::time::Instant,
 }
 
 impl Reporter {
@@ -83,14 +91,56 @@ impl Reporter {
             last_emit_done: 0,
             emitted: false,
             step: None,
+            started: std::time::Instant::now(),
+            last_emit: std::time::Instant::now(),
+            json: std::env::var("KIT_PROGRESS").as_deref() == Ok("json"),
+            packed: 0,
+            unpacked: 0,
+            command_started: std::time::Instant::now(),
+            bytes_total: None,
+            phase: if label == "Writing objects" {
+                "packing"
+            } else {
+                "unpacking"
+            },
         }
     }
 
     fn record(&mut self, event: Event) {
+        let phase = match event {
+            Event::ObjectsPacked(_) => Some(("packing", "Writing objects")),
+            Event::ObjectsUnpacked(_) => Some(("unpacking", "Unpacking objects")),
+            _ => None,
+        };
+        if let Some((phase, label)) = phase
+            && self.phase != phase
+        {
+            if self.done > 0 || self.bytes > 0 {
+                self.emit();
+            }
+            self.phase = phase;
+            self.label = label;
+            self.done = 0;
+            self.last_emit_done = 0;
+            self.bytes = 0;
+            self.bytes_total = None;
+            self.total = None;
+            self.started = self.command_started;
+            self.emitted = false;
+        }
         match event {
             Event::ObjectsPacked(n) | Event::ObjectsUnpacked(n) => {
-                self.done += n;
-                if self.done.saturating_sub(self.last_emit_done) >= REPORT_INTERVAL {
+                if matches!(event, Event::ObjectsPacked(_)) {
+                    self.packed += n;
+                    self.done = self.packed;
+                } else {
+                    self.unpacked += n;
+                    self.done = self.unpacked;
+                }
+                if matches!(event, Event::ObjectsUnpacked(_))
+                    || self.done.saturating_sub(self.last_emit_done) >= REPORT_INTERVAL
+                        && self.last_emit.elapsed() >= std::time::Duration::from_millis(100)
+                {
                     self.emit();
                 }
             }
@@ -104,12 +154,49 @@ impl Reporter {
             Event::Step { index, total } => {
                 self.finish();
                 self.done = 0;
+                self.packed = 0;
+                self.unpacked = 0;
+                self.command_started = std::time::Instant::now();
+                self.started = self.command_started;
                 self.bytes = 0;
                 self.last_emit_done = 0;
                 self.emitted = false;
                 self.step = Some((index, total));
             }
         }
+    }
+
+    fn json_line(&self) -> String {
+        serde_json::json!({
+            "phase": self.phase, "done": self.done, "total": self.total,
+            "bytes": self.bytes, "bytes_total": self.bytes_total,
+            "elapsed_ms": u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+        .to_string()
+    }
+
+    fn update(
+        &mut self,
+        phase: &'static str,
+        done: usize,
+        total: Option<usize>,
+        bytes: u64,
+        bytes_total: Option<u64>,
+    ) {
+        if self.phase != phase || bytes < self.bytes || done < self.done {
+            if self.done > 0 || self.bytes > 0 {
+                self.emit();
+            }
+            self.phase = phase;
+            self.label = phase;
+            self.started = std::time::Instant::now();
+            self.emitted = false;
+        }
+        self.done = done;
+        self.total = total;
+        self.bytes = bytes;
+        self.bytes_total = bytes_total;
+        self.emit();
     }
 
     fn label(&self) -> String {
@@ -119,23 +206,62 @@ impl Reporter {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)] // Rates and ETA are approximate display values.
     fn emit(&mut self) {
         self.last_emit_done = self.done;
         self.emitted = true;
-        let label = self.label();
+        self.last_emit = std::time::Instant::now();
+        let elapsed = self.started.elapsed();
         let mut stderr = std::io::stderr().lock();
-        let _ = match (self.total, self.bytes) {
-            (Some(total), 0) => write!(stderr, "\r{label}: {}/{total} objects", self.done),
-            (Some(total), bytes) => {
-                write!(
-                    stderr,
-                    "\r{label}: {}/{total} objects, {bytes} bytes",
-                    self.done
-                )
+        if self.json {
+            let line = self.json_line();
+            let _ = writeln!(stderr, "{line}");
+        } else {
+            let label = self.label();
+            let rate = self.bytes as f64 / elapsed.as_secs_f64().max(0.001);
+            let _ = write!(stderr, "\r{label}: {}", self.done);
+            if let Some(total) = self.total {
+                let _ = write!(stderr, "/{total}");
             }
-            (None, 0) => write!(stderr, "\r{label}: {} objects", self.done),
-            (None, bytes) => write!(stderr, "\r{label}: {} objects, {bytes} bytes", self.done),
-        };
+            if matches!(
+                self.phase,
+                "packing" | "unpacking" | "closure" | "signatures" | "push_planning"
+            ) {
+                let _ = write!(stderr, " objects");
+            }
+            if self.bytes > 0 || self.bytes_total.is_some() {
+                let _ = write!(stderr, ", {} bytes", self.bytes);
+            }
+            if let Some(total) = self.bytes_total {
+                let _ = write!(stderr, "/{total}");
+            }
+            let fraction = self
+                .bytes_total
+                .filter(|t| *t > 0)
+                .map(|t| self.bytes as f64 / t as f64)
+                .or_else(|| {
+                    self.total
+                        .filter(|t| *t > 0)
+                        .map(|t| self.done as f64 / t as f64)
+                });
+            if let Some(fraction) = fraction {
+                let _ = write!(stderr, ", {:.1}%", fraction * 100.0);
+                if fraction > 0.0 && fraction <= 1.0 {
+                    let _ = write!(
+                        stderr,
+                        ", ETA {:.0}s",
+                        elapsed.as_secs_f64() * (1.0 - fraction) / fraction
+                    );
+                }
+            }
+            if self.bytes > 0 || self.bytes_total.is_some() {
+                let _ = write!(stderr, ", {rate:.0} bytes/s");
+            } else {
+                let rate = self.done as f64 / elapsed.as_secs_f64().max(0.001);
+                let _ = write!(stderr, ", {rate:.0} items/s");
+            }
+            let _ = write!(stderr, "\x1b[K");
+        }
         let _ = stderr.flush();
     }
 
@@ -143,12 +269,15 @@ impl Reporter {
     /// self-overwriting `\r` line so later output isn't clobbered by it.
     /// A no-op when nothing was ever reported (e.g. a no-op push).
     fn finish(&mut self) {
-        if self.done == 0 && self.bytes == 0 {
+        if self.done == 0 && self.bytes == 0 && !self.emitted {
             return;
         }
         self.emit();
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, ", done.");
+        if !self.json {
+            let _ = writeln!(stderr, ", done.");
+        }
+        self.emitted = false;
     }
 }
 
@@ -217,7 +346,7 @@ struct PendingReporter {
 impl PendingReporter {
     fn new(quiet: bool, mode: Option<&str>, is_tty: bool) -> Self {
         Self {
-            quiet: quiet || mode == Some("never"),
+            quiet: quiet || matches!(mode, Some("never" | "json")),
             interactive: mode == Some("always") || is_tty,
             active: false,
         }
@@ -294,7 +423,7 @@ pub fn should_report(quiet: bool) -> bool {
         return false;
     }
     match std::env::var("KIT_PROGRESS").ok().as_deref() {
-        Some("always") => true,
+        Some("always" | "json") => true,
         Some("never") => false,
         _ => std::io::stderr().is_terminal(),
     }
@@ -363,7 +492,7 @@ pub fn start(label: &'static str, total: Option<usize>, enabled: bool, quiet: bo
                 std::io::stderr().is_terminal(),
             )),
             upload: Some(UploadReporter {
-                quiet: quiet || progress_mode.as_deref() == Some("never"),
+                quiet: quiet || matches!(progress_mode.as_deref(), Some("never" | "json")),
                 interactive: progress_mode.as_deref() == Some("always")
                     || std::io::stderr().is_terminal(),
                 active: false,
@@ -398,6 +527,25 @@ impl Terminal {
         }
     }
 
+    /// Report completed work from a local command.
+    pub(crate) fn local_progress(
+        &self,
+        phase: &'static str,
+        done: usize,
+        total: Option<usize>,
+        bytes: u64,
+    ) {
+        if let Some(reporter) = self.state().reporter.as_mut() {
+            // Parallel hashing callbacks may reach the terminal out of order.
+            let bytes = if phase == "add" && reporter.phase == phase {
+                bytes.max(reporter.bytes)
+            } else {
+                bytes
+            };
+            reporter.update(phase, done, total, bytes, None);
+        }
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         // A panic while printing leaves the state usable: it only holds
         // counters.
@@ -406,7 +554,7 @@ impl Terminal {
 
     /// Stop all progress output, and write the final progress line when
     /// anything was reported.
-    fn finish(&self) {
+    pub(crate) fn finish(&self) {
         let reporter = {
             let mut state = self.state();
             state.quiet = None;
@@ -505,7 +653,29 @@ impl Observer<libkit::lock::Event> for ServedWarning {
 }
 
 impl Observer<SyncEvent> for Terminal {
+    fn concurrent(&self) -> Option<&(dyn Observer<SyncEvent> + Sync)> {
+        self.state().reporter.is_some().then_some(self)
+    }
+
     fn event(&self, event: &SyncEvent) {
+        let progress = match event {
+            SyncEvent::DownloadProgress { bytes, bytes_total } => {
+                Some(("download", 0, None, *bytes, *bytes_total))
+            }
+            SyncEvent::ClosureProgress { done } => Some(("closure", *done, None, 0, None)),
+            SyncEvent::SignatureProgress { done } => Some(("signatures", *done, None, 0, None)),
+            SyncEvent::RestoreProgress { done, total } => {
+                Some(("restore", *done, Some(*total), 0, None))
+            }
+            SyncEvent::PushPlanning { done } => Some(("push_planning", *done, None, 0, None)),
+            _ => None,
+        };
+        if let Some((phase, done, total, bytes, bytes_total)) = progress {
+            if let Some(reporter) = self.state().reporter.as_mut() {
+                reporter.update(phase, done, total, bytes, bytes_total);
+            }
+            return;
+        }
         match event {
             SyncEvent::ObjectsPacked { count } => self.report(Event::ObjectsPacked(*count)),
             SyncEvent::PackUploaded { bytes } => self.report(Event::PackUploaded(*bytes)),
@@ -561,9 +731,69 @@ impl Observer<SyncEvent> for Terminal {
 mod tests {
     use super::*;
 
+    #[test]
+    fn progress_json_has_stable_numeric_fields_and_null_unknown_totals() {
+        let mut reporter = Reporter::new("download", None);
+        reporter.phase = "download";
+        reporter.bytes = 123;
+        let row: serde_json::Value = serde_json::from_str(&reporter.json_line()).unwrap();
+        assert_eq!(row["phase"], "download");
+        assert_eq!(row["done"], 0);
+        assert_eq!(row["bytes"], 123);
+        assert!(row["total"].is_null());
+        assert!(row["bytes_total"].is_null());
+        assert!(row["elapsed_ms"].is_u64());
+        assert_eq!(row.as_object().unwrap().len(), 6);
+    }
+
+    #[test]
+    fn packing_reports_after_planning_has_a_larger_count() {
+        let mut reporter = Reporter::new("Writing objects", None);
+        reporter.update("push_planning", 100, None, 0, None);
+        reporter.last_emit = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(101))
+            .unwrap();
+        reporter.record(Event::ObjectsPacked(8));
+        assert_eq!(reporter.last_emit_done, 0);
+        reporter.last_emit = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(101))
+            .unwrap();
+        reporter.record(Event::ObjectsPacked(8));
+        assert_eq!(reporter.last_emit_done, 16);
+    }
+
+    #[test]
+    fn unpacked_counts_and_clock_accumulate_across_downloads() {
+        let mut reporter = Reporter::new("Unpacking objects", None);
+        reporter.command_started = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        reporter.update("download", 0, None, 100, Some(100));
+        reporter.record(Event::ObjectsUnpacked(5));
+        reporter.update("download", 0, None, 100, Some(100));
+        reporter.record(Event::ObjectsUnpacked(3));
+        assert_eq!(reporter.done, 8);
+        assert_eq!(reporter.phase, "unpacking");
+        assert_eq!(reporter.started, reporter.command_started);
+        let row: serde_json::Value = serde_json::from_str(&reporter.json_line()).unwrap();
+        assert!(row["elapsed_ms"].as_u64().unwrap() >= 1000);
+    }
+
     /// A detached terminal shows nothing: its events change no state and
     /// it never touches stderr. This is the path every push/pull/fetch
     /// integration test takes.
+    #[test]
+    fn hashing_progress_keeps_the_highest_completed_byte_count() {
+        let guard = start("add", None, true, true);
+        guard.terminal().local_progress("add", 0, None, 20);
+        let started = guard.terminal().state().reporter.as_ref().unwrap().started;
+        guard.terminal().local_progress("add", 0, None, 10);
+        let state = guard.terminal().state();
+        let reporter = state.reporter.as_ref().unwrap();
+        assert_eq!(reporter.bytes, 20);
+        assert_eq!(reporter.started, started);
+    }
+
     #[test]
     fn detached_terminal_ignores_progress_events() {
         let terminal = Terminal::detached();
@@ -725,6 +955,7 @@ mod tests {
         let mut reporter = Reporter::new("Writing objects", None);
         assert_eq!(reporter.label(), "Writing objects");
         reporter.record(Event::Step { index: 2, total: 5 });
+        assert_eq!(reporter.started, reporter.command_started);
         assert_eq!(reporter.label(), "Writing objects (step 2/5)");
         assert_eq!((reporter.done, reporter.bytes), (0, 0));
 

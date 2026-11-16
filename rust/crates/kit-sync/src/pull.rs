@@ -21,8 +21,7 @@ use crate::source::RemoteSource;
 use crate::verify::verify_history_signatures;
 use crate::worktree::{
     Expected, Refusals, check_restore_safe, current_head_tree, ensure_restore_safe,
-    list_remote_refs_parallel, restore_worktree_and_index, restore_worktree_and_index_from,
-    write_ref_recording_history,
+    list_remote_refs_parallel, write_ref_recording_history,
 };
 use kit_core::ops::restore::RestoreOptions;
 
@@ -127,7 +126,7 @@ pub fn pull(
         &remote_refs,
     )?;
 
-    let restored = resume_pull(&layout, &store, &branch, pending, local_tip)?;
+    let restored = resume_pull(&layout, &store, &branch, pending, local_tip, observer)?;
     let original_head = refs::read_head(&layout).ok();
     let ref_condition = if let Some(local_tip) = local_tip {
         if local_tip == remote_tip {
@@ -185,7 +184,9 @@ pub fn pull(
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
-    if let Err(e) = restore_worktree_and_index_from(&layout, &store, tree, base_tree) {
+    if let Err(e) = crate::worktree::restore_worktree_and_index_progress(
+        &layout, &store, tree, base_tree, observer,
+    ) {
         if let Err(rollback) =
             rollback_pull_ref_and_head(&layout, &branch, local_tip, remote_tip, original_head)
         {
@@ -305,6 +306,7 @@ fn resume_pull(
     branch: &str,
     pending: Option<PullState>,
     local_tip: Option<Hash>,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<bool, SyncError> {
     let Some(state) = pending else {
         return Ok(false);
@@ -321,7 +323,8 @@ fn resume_pull(
     if head_tip != Some(tip) {
         refs::write_head_branch(layout, branch)?;
     }
-    restore_worktree_and_index(layout, store, tree).map_err(SyncError::RestoreSafety)?;
+    crate::worktree::restore_worktree_and_index_progress(layout, store, tree, None, observer)
+        .map_err(SyncError::RestoreSafety)?;
     clear_pull_head(layout)?;
     Ok(true)
 }

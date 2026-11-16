@@ -366,6 +366,33 @@ where
     check_closure_present_with_cap(store, roots, MAX_REACHABLE, MAX_CHECKED_CHUNKS)
 }
 
+/// Check the full closure and report completed non-chunk objects.
+/// Uses the same bounded chunk memory as [`check_closure_present`].
+///
+/// # Errors
+/// The errors of [`check_closure_present`].
+pub fn check_closure_present_observed(
+    store: &ObjectStore,
+    tip: &Hash,
+    progress: &dyn Fn(usize),
+) -> Result<bool, StoreError> {
+    let hooks = Hooks {
+        progress: Some(progress),
+        ..Hooks::NONE
+    };
+    walk_closure(
+        store,
+        std::iter::once(tip),
+        ClosureMode::History,
+        MAX_REACHABLE,
+        Chunks::Check {
+            memory: MAX_CHECKED_CHUNKS,
+        },
+        &hooks,
+    )
+    .map(|(_, end)| matches!(end, End::Truncated))
+}
+
 /// The most checked chunk ids [`check_closure_present`] remembers, with their
 /// lengths, about 128 MiB: the chunks of about 128 GiB of typical content.
 pub const MAX_CHECKED_CHUNKS: usize = 2_097_152;
@@ -455,6 +482,7 @@ pub fn check_closure_present_above(
         known,
         paths: true,
         stop,
+        progress: None,
     };
     let (out, end) = walk_closure(
         store,
@@ -488,6 +516,7 @@ struct Hooks<'h> {
     paths: bool,
     /// Polled every [`STOP_POLL_OBJECTS`] objects.
     stop: &'h dyn Fn() -> bool,
+    progress: Option<&'h dyn Fn(usize)>,
 }
 
 impl Hooks<'static> {
@@ -496,6 +525,7 @@ impl Hooks<'static> {
         known: &|_| Known::Unknown,
         paths: false,
         stop: &|| false,
+        progress: None,
     };
 }
 
@@ -573,6 +603,9 @@ where
         if out.contains(&h) {
             continue;
         }
+        if let Some(progress) = hooks.progress {
+            progress(out.len());
+        }
         match (hooks.known)(&h) {
             Known::Present => continue,
             Known::Missing => return Ok((out, missing(&via, h, parent))),
@@ -641,6 +674,9 @@ where
         let edges = children(&obj, mode);
         drop(obj);
         queue.extend(edges.into_iter().map(|child| (child, Some(h))));
+    }
+    if let Some(progress) = hooks.progress {
+        progress(out.len());
     }
     Ok((out, End::Complete))
 }

@@ -13,6 +13,19 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SyncEvent {
+    /// Bytes accepted by the download sink in this attempt. A retry resets bytes.
+    DownloadProgress {
+        bytes: u64,
+        bytes_total: Option<u64>,
+    },
+    /// Objects checked for presence; the total is not known during a walk.
+    ClosureProgress { done: usize },
+    /// Signed history objects checked; the total is not known during a walk.
+    SignatureProgress { done: usize },
+    /// Files restored out of the selected worktree entries.
+    RestoreProgress { done: usize, total: usize },
+    /// Outgoing objects selected so far; the final count is not known yet.
+    PushPlanning { done: usize },
     /// Local lease checks completed; a branch is about to be transferred.
     PushBranchStarted { branch: String },
     /// One outgoing object was staged into a pack.

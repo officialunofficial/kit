@@ -11,7 +11,55 @@
 //! objects of a pack applied here are unreferenced until the fetch publishes
 //! its ref, and the guard keeps gc from deleting them.
 
+use kit_core::protocol::{PackSink, TransportResult};
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+/// Borrowed sink adapter. No allocation or lock on a write; callbacks occur at
+/// most ten times a second, plus attempt boundaries and the final count.
+struct ProgressSink<'a> {
+    spool: &'a mut PackSpool,
+    observer: Option<&'a (dyn Observer<SyncEvent> + Sync)>,
+    bytes: u64,
+    total: Option<u64>,
+    last: Instant,
+}
+
+impl PackSink for ProgressSink<'_> {
+    fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+        PackSink::begin(self.spool, declared)?;
+        self.bytes = 0;
+        self.total = declared;
+        self.last = Instant::now();
+        self.emit();
+        Ok(())
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        PackSink::write(self.spool, bytes)?;
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        if self.last.elapsed() >= Duration::from_millis(100) {
+            self.last = Instant::now();
+            self.emit();
+        }
+        Ok(())
+    }
+
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        self.spool.failed()
+    }
+}
+
+impl ProgressSink<'_> {
+    fn emit(&self) {
+        if let Some(observer) = self.observer {
+            observer.event(&SyncEvent::DownloadProgress {
+                bytes: self.bytes,
+                bytes_total: self.total,
+            });
+        }
+    }
+}
 
 use kit_core::hash::Hash;
 use kit_core::pack::{PackError, PackReader, PackSpool, VerifiedPack};
@@ -58,13 +106,29 @@ fn download_verified_pack(
     source: &dyn RemoteSource,
     head_ref: &str,
     key: &PackKey,
+    observer: &dyn Observer<SyncEvent>,
 ) -> Result<VerifiedPack, SyncError> {
     let dir = store.spool_dir();
     let mut spool = PackSpool::create(&dir, PACK_BODY_LIMIT).map_err(|error| match error {
         PackError::Io(io) => spool_error(&dir, io.kind(), &io.to_string()),
         error => error.into(),
     })?;
-    let downloaded = source.download_pack(key, head_ref, &mut spool);
+    let mut sink = ProgressSink {
+        spool: &mut spool,
+        observer: observer.concurrent(),
+        bytes: 0,
+        total: None,
+        last: Instant::now(),
+    };
+    observer.event(&SyncEvent::DownloadProgress {
+        bytes: 0,
+        bytes_total: None,
+    });
+    let downloaded = source.download_pack(key, head_ref, &mut sink);
+    observer.event(&SyncEvent::DownloadProgress {
+        bytes: sink.bytes,
+        bytes_total: sink.total,
+    });
     if let Some(kind) = spool.failed() {
         return Err(spool_error(&dir, kind, "write failed"));
     }
@@ -125,7 +189,7 @@ pub(crate) fn apply_pack_chain(
             done.skipped += 1;
             continue;
         }
-        let pack = download_verified_pack(store, source, head_ref, &key)?;
+        let pack = download_verified_pack(store, source, head_ref, &key, observer)?;
         done.objects += apply_pack(
             store,
             observer,
@@ -181,6 +245,52 @@ mod tests {
     use kit_core::protocol::{PackSink, SliceBody, Transport as _};
     use kit_core::transfer;
     use kit_transport_memory::MemoryTransport;
+
+    #[test]
+    fn download_events_are_throttled_and_retry_lengths_reset() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<SyncEvent>>);
+        impl Observer<SyncEvent> for Recorder {
+            fn event(&self, event: &SyncEvent) {
+                self.0.lock().unwrap().push(event.clone());
+            }
+            fn concurrent(&self) -> Option<&(dyn Observer<SyncEvent> + Sync)> {
+                Some(self)
+            }
+        }
+        let recorder = Recorder::default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut spool = PackSpool::create(dir.path(), 1024).unwrap();
+        let mut sink = ProgressSink {
+            spool: &mut spool,
+            observer: recorder.concurrent(),
+            bytes: 0,
+            total: None,
+            last: Instant::now(),
+        };
+        sink.begin(Some(128)).unwrap();
+        sink.write(&[0; 64]).unwrap();
+        assert_eq!(recorder.0.lock().unwrap().len(), 1);
+        sink.last = Instant::now()
+            .checked_sub(Duration::from_millis(101))
+            .unwrap();
+        sink.write(&[0; 64]).unwrap();
+        assert_eq!(
+            recorder.0.lock().unwrap().last(),
+            Some(&SyncEvent::DownloadProgress {
+                bytes: 128,
+                bytes_total: Some(128)
+            })
+        );
+        sink.begin(None).unwrap();
+        assert_eq!(
+            recorder.0.lock().unwrap().last(),
+            Some(&SyncEvent::DownloadProgress {
+                bytes: 0,
+                bytes_total: None
+            })
+        );
+    }
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
@@ -394,6 +504,7 @@ mod tests {
             &ZeroPacks { len },
             "refs/heads/main",
             &PackKey::from_hash(h("zero pack")),
+            &NoopObserver,
         )
     }
 

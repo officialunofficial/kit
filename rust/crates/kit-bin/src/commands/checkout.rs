@@ -18,7 +18,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_observed};
+use kit_core::ops::restore::RestoreOptions;
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
@@ -348,16 +348,42 @@ pub fn run(args: &[String]) -> u8 {
     // so they are used only when that root is the worktree root.
     let is_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
     let mut observed = Vec::new();
-    let report = match restore_tree_to_worktree_observed(
-        &store,
-        &tree_hash,
-        base_tree,
-        &cwd,
-        &sparse_opts,
-        &crate::restore_fanout::read_chunks_fanout,
-        (cwd == layout.worktree_root()).then_some(&mut observed),
-    ) {
-        Ok(r) => r,
+    let progress = crate::progress::start(
+        "restore",
+        None,
+        crate::progress::should_report(false),
+        false,
+    );
+    let restored = if crate::progress::should_report(false) {
+        kit_core::ops::restore::restore_tree_to_worktree_progress(
+            &store,
+            &tree_hash,
+            base_tree,
+            &cwd,
+            &sparse_opts,
+            &crate::restore_fanout::read_chunks_fanout,
+            (cwd == layout.worktree_root()).then_some(&mut observed),
+            &mut |done, total| {
+                kit_sync::Observer::event(
+                    progress.terminal().as_ref(),
+                    &kit_sync::SyncEvent::RestoreProgress { done, total },
+                );
+            },
+        )
+    } else {
+        kit_core::ops::restore::restore_tree_to_worktree_observed(
+            &store,
+            &tree_hash,
+            base_tree,
+            &cwd,
+            &sparse_opts,
+            &crate::restore_fanout::read_chunks_fanout,
+            (cwd == layout.worktree_root()).then_some(&mut observed),
+        )
+    };
+    drop(progress);
+    let report = match restored {
+        Ok(report) => report,
         Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
     };
     if let Err(code) = remove_dropped(&cwd, &dropped) {

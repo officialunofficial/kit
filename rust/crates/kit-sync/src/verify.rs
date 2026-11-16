@@ -458,6 +458,8 @@ impl HistoryWalk<'_> {
         observer: &dyn Observer<SyncEvent>,
         tip: &Hash,
     ) -> Result<(), SyncError> {
+        let mut progress_at = std::time::Instant::now();
+        observer.event(&SyncEvent::SignatureProgress { done: 0 });
         let chunk = verify_chunk_size();
         let check = |entries: &[(Hash, Object)]| {
             verify_entries(entries, entries.len() >= verify_fanout_threshold())
@@ -523,6 +525,10 @@ impl HistoryWalk<'_> {
             entries.push((h, obj));
             if entries.len() >= chunk {
                 self.check_chunk(&entries, &check, &via)?;
+                if progress_at.elapsed() >= std::time::Duration::from_millis(100) {
+                    observer.event(&SyncEvent::SignatureProgress { done: self.read });
+                    progress_at = std::time::Instant::now();
+                }
                 entries.clear();
                 if observer.cancelled() {
                     return Err(SyncError::Interrupted);
@@ -530,6 +536,7 @@ impl HistoryWalk<'_> {
             }
         }
         self.check_chunk(&entries, &check, &via)?;
+        observer.event(&SyncEvent::SignatureProgress { done: self.read });
         self.verified.extend(seen);
         Ok(())
     }

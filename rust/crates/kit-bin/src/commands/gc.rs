@@ -30,8 +30,8 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
+use kit_core::ops::gc::run_gc_observed;
 use kit_core::ops::recovery::{self, RetentionPolicy};
-use kit_core::ops::run_gc;
 use kit_core::store::ObjectStore;
 
 use crate::clap_args;
@@ -59,6 +59,7 @@ struct GcOpts {
 }
 
 #[must_use]
+#[allow(clippy::too_many_lines)] // Lock acquisition, collection and result reporting stay together.
 pub fn run(args: &[String]) -> u8 {
     let opts = match clap_args::parse::<GcOpts>("kit gc", args) {
         Ok(o) => o,
@@ -144,11 +145,23 @@ pub fn run(args: &[String]) -> u8 {
         }
     };
 
-    let report = match run_gc(&store, &layout, now, opts.grace_secs, opts.dry_run) {
+    let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
+    let report = match run_gc_observed(
+        &store,
+        &layout,
+        now,
+        opts.grace_secs,
+        opts.dry_run,
+        &mut |phase, done, bytes| progress.terminal().local_progress(phase, done, None, bytes),
+    ) {
         Ok(r) => r,
-        Err(e) => return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR),
+        Err(e) => {
+            drop(progress);
+            return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR);
+        }
     };
 
+    drop(progress);
     let mut stderr = std::io::stderr().lock();
     for file in &report.skipped_state_files {
         let _ = writeln!(
