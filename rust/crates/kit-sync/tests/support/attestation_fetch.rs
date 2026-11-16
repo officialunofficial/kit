@@ -7,19 +7,19 @@ mod attestation_fetch {
         let key = hash(bytes);
         tx.upload_blob(bytes, &PackKey::from_hash(key), Some(ATTESTMAP_REF)).unwrap(); key
     }
-    pub fn append(tx: &dyn Transport, bytes: &[u8]) {
+    pub(crate) fn append(tx: &dyn Transport, bytes: &[u8]) {
         let key = upload(tx, bytes);
         let prev = tx.read_ref(ATTESTMAP_REF).unwrap();
         let node = kit_core::transfer::encode_packlist(prev, &[key]).unwrap();
         let head = upload(tx, &node);
         tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &head).unwrap();
     }
-    pub fn envelope(subject: Hash) -> Vec<u8> {
+    pub(crate) fn envelope(subject: Hash) -> Vec<u8> {
         let mut env = kit_attest::envelope::decode(include_bytes!("../../../../tests/golden/attest/envelope_basic.json")).unwrap();
         env.payload = format!(r#"{{"_type":"https://in-toto.io/Statement/v1","predicate":{{}},"predicateType":"https://example.com/test/v1","subject":[{{"name":"commit","digest":{{"blake3":"{}"}}}}]}}"#, to_hex(&subject)).into_bytes();
         env.encode().unwrap().into_bytes()
     }
-    pub fn code(tx: &dyn Transport) -> (Hash, Hash) {
+    pub(crate) fn code(tx: &dyn Transport) -> (Hash, Hash) {
         let key = KeyPair::generate().unwrap();
         let tree = Object::Tree(Tree { entries: vec![] });
         let tree_id = tree.id().unwrap();
@@ -40,7 +40,7 @@ mod attestation_fetch {
         tx.update_ref("refs/heads/main", RefWriteCondition::Any, &tip).unwrap();
         (tip, tree_id)
     }
-    pub fn roundtrip(tx: &dyn Transport) {
+    pub(crate) fn roundtrip(tx: &dyn Transport) {
         let (tip, tree) = code(tx);
         let envelope = envelope(tip);
         let absent = envelope_for_absent();

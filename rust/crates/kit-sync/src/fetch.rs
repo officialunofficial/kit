@@ -813,7 +813,8 @@ fn remote_unchanged(
         return Ok(false);
     }
     if options.attestations && source.supports_attestations() {
-        let path = crate::attestation_records::path(layout, source, remote, &options.remote_url, false);
+        let path =
+            crate::attestation_records::path(layout, source, remote, &options.remote_url, false);
         if crate::fetch_attestations::load_record(&path).head != record.attestmap_head {
             return Ok(false);
         }

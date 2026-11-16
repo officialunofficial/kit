@@ -1188,6 +1188,16 @@ Remote / sync:
     (mirrors `kit remote add <name> <url>` at clone time). The name
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
+Clone, fetch and pull also fetch portable attestations by default. They read
+`refs/kit/attestmap` before listing code, then save valid envelopes whose
+subjects exist locally. Signature trust remains a `verify-attest` decision.
+Use `--no-attestations` or `fetch.attestations = false` to skip this work.
+Use `--refetch-attestations` to retry every pack, including envelopes dropped
+because their subjects were absent. Refetch overrides the config opt-out;
+it conflicts with `--no-attestations`. Attestation failures print `warning:`
+and leave the code fetch successful. Connect remotes without advertised
+attestation support warn once per command and skip the log.
+
 - `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
   remote without merging. After the branches it takes every remote tag

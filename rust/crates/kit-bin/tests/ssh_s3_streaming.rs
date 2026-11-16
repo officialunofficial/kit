@@ -820,7 +820,9 @@ include!("../../kit-sync/tests/support/attestation_fetch.rs");
 #[test]
 fn ssh_fetch_keeps_attestations_outside_objects() {
     let name = "ssh_fetch_keeps_attestations_outside_objects";
-    if !in_ssh_child(name, &[]) { return; }
+    if !in_ssh_child(name, &[]) {
+        return;
+    }
     let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     let (tx, _) = ssh_remote(dir.path());

@@ -275,8 +275,13 @@ pub fn fetch_with_source(
 ///
 /// # Errors
 /// The code fetch fails. Attestation failures appear only in the report.
-pub fn fetch_with_options(cwd: &Path, source: &dyn RemoteSource, remote: &str,
-    options: &SyncOptions, observer: &dyn Observer<SyncEvent>) -> Result<kit_sync::FetchReport, Error> {
+pub fn fetch_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::FetchReport, Error> {
     Ok(kit_sync::fetch(cwd, source, remote, options, observer)?)
 }
 
@@ -284,8 +289,13 @@ pub fn fetch_with_options(cwd: &Path, source: &dyn RemoteSource, remote: &str,
 ///
 /// # Errors
 /// The code fetch or fast-forward fails.
-pub fn pull_with_options(cwd: &Path, source: &dyn RemoteSource, remote: &str,
-    options: &SyncOptions, observer: &dyn Observer<SyncEvent>) -> Result<kit_sync::PullReport, Error> {
+pub fn pull_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::PullReport, Error> {
     Ok(kit_sync::pull(cwd, source, remote, options, observer)?)
 }
 

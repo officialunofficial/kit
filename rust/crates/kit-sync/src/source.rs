@@ -361,7 +361,9 @@ impl RemoteSource for TransportSource<'_> {
                 Some(ref_hint),
                 if ref_hint == kit_core::refs::ATTESTMAP_REF {
                     crate::attestation_records::NODE_BOUND
-                } else { kit_core::transfer::MAX_PACKLIST_NODE_BYTES },
+                } else {
+                    kit_core::transfer::MAX_PACKLIST_NODE_BYTES
+                },
             )
             .map_err(SourceError::from)
     }

@@ -178,7 +178,7 @@ fn pull_one(
                                 require_signed,
                                 false,
                                 opts.tags.fetch_tags(),
-                        opts.attestations.settings(&cfg.merged, endpoint),
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
                             .map(|fetch| (fetch, None))
@@ -190,7 +190,7 @@ fn pull_one(
                                 None,
                                 require_signed,
                                 opts.tags.fetch_tags(),
-                        opts.attestations.settings(&cfg.merged, endpoint),
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
                             .map(|report| (report.fetch, Some(report.outcome)))

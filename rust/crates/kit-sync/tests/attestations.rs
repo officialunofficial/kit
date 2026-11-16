@@ -13,60 +13,132 @@ fn file_clone_fetch_pull_keep_attestations_outside_objects() {
 
 #[test]
 fn snapshot_precedes_listing_and_a_late_ci_envelope_waits_for_its_code() {
-    use std::cell::Cell;
-    use kit_core::{hash::Hash, protocol::{PackKey, PackSink}, refs::Ref};
+    use kit_core::{
+        hash::Hash,
+        protocol::{PackKey, PackSink},
+        refs::Ref,
+    };
     use kit_sync::{RemoteSource, SourceError};
+    use std::cell::Cell;
     let tx = kit_transport_memory::MemoryTransport::new();
     attestation_fetch::code(&tx);
-    struct Racing<'a> { tx: &'a kit_transport_memory::MemoryTransport, raced: Cell<bool>, late: Cell<Option<Hash>> }
+    struct Racing<'a> {
+        tx: &'a kit_transport_memory::MemoryTransport,
+        raced: Cell<bool>,
+        late: Cell<Option<Hash>>,
+    }
     impl RemoteSource for Racing<'_> {
-        fn supports_attestations(&self) -> bool { true }
+        fn supports_attestations(&self) -> bool {
+            true
+        }
         fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
             let listing = kit_sync::TransportSource::new(self.tx).list_branches()?;
             if !self.raced.replace(true) {
                 let (tip, _) = attestation_fetch::code(self.tx);
                 self.late.set(Some(tip));
                 let env = attestation_fetch::envelope(tip);
-                attestation_fetch::append(self.tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+                attestation_fetch::append(
+                    self.tx,
+                    &kit_attest::pack::build(&[&env], 4096).unwrap(),
+                );
             }
             Ok(listing)
         }
-        fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> { kit_sync::TransportSource::new(self.tx).list_refs(prefix) }
-        fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> { kit_sync::TransportSource::new(self.tx).read_ref(name) }
-        fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, SourceError> { kit_sync::TransportSource::new(self.tx).download_blob(key, name) }
-        fn download_pack(&self, key: &PackKey, name: &str, sink: &mut dyn PackSink) -> Result<(), SourceError> { kit_sync::TransportSource::new(self.tx).download_pack(key, name, sink) }
+        fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
+            kit_sync::TransportSource::new(self.tx).list_refs(prefix)
+        }
+        fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+            kit_sync::TransportSource::new(self.tx).read_ref(name)
+        }
+        fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, SourceError> {
+            kit_sync::TransportSource::new(self.tx).download_blob(key, name)
+        }
+        fn download_pack(
+            &self,
+            key: &PackKey,
+            name: &str,
+            sink: &mut dyn PackSink,
+        ) -> Result<(), SourceError> {
+            kit_sync::TransportSource::new(self.tx).download_pack(key, name, sink)
+        }
     }
-    let source = Racing { tx: &tx, raced: Cell::new(false), late: Cell::new(None) };
+    let source = Racing {
+        tx: &tx,
+        raced: Cell::new(false),
+        late: Cell::new(None),
+    };
     let temp = tempfile::tempdir().unwrap();
-    let remote = kit_sync::CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() };
+    let remote = kit_sync::CloneRemote {
+        name: "origin".into(),
+        url: "kit+memory://test".into(),
+        kind: "memory".into(),
+    };
     kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
     let options = kit_sync::SyncOptions::default();
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.attestations_dropped, 0);
     assert_eq!(report.attestations_stored, 0);
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.attestations_stored, 1);
     assert_eq!(report.attestations_dropped, 0);
 }
 
 #[test]
 fn off_switch_never_reads_a_hostile_attestation_log_and_reenable_fetches_it() {
-    use kit_core::{protocol::Transport, refs::{ATTESTMAP_REF, RefWriteCondition}};
+    use kit_core::{
+        protocol::Transport,
+        refs::{ATTESTMAP_REF, RefWriteCondition},
+    };
     let tx = kit_transport_memory::MemoryTransport::new();
     let (tip, _) = attestation_fetch::code(&tx);
     let envelope = attestation_fetch::envelope(tip);
     attestation_fetch::append(&tx, &kit_attest::pack::build(&[&envelope], 4096).unwrap());
     let temp = tempfile::tempdir().unwrap();
-    let remote = kit_sync::CloneRemote { name: "origin".into(), url: "kit+memory://test".into(), kind: "memory".into() };
+    let remote = kit_sync::CloneRemote {
+        name: "origin".into(),
+        url: "kit+memory://test".into(),
+        kind: "memory".into(),
+    };
     kit_sync::init_clone_dir(temp.path(), &remote).unwrap();
     let source = kit_sync::TransportSource::new(&tx);
     let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
-    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &[255;32]).unwrap();
-    let mut options = kit_sync::SyncOptions::default(); options.attestations = false;
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &[255; 32])
+        .unwrap();
+    let mut options = kit_sync::SyncOptions::default();
+    options.attestations = false;
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert!(report.attestation_warnings.is_empty());
-    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &head).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &head)
+        .unwrap();
     options.attestations = true;
-    let report = kit_sync::fetch(temp.path(), &source, "origin", &options, &kit_sync::NoopObserver).unwrap();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     assert_eq!(report.attestations_stored, 1);
 }

@@ -17,6 +17,16 @@ objects before a ref names them. The wait for the repository lock has no
 deadline, sends `SyncEvent::WaitingForRepoLock` once, and ends on an
 interrupt.
 
+Fetch snapshots `refs/kit/attestmap` before listing branches and tags. After
+code publication it validates bounded attestation packs and saves envelopes
+for locally present subjects. It writes fetched provenance before each
+envelope and keeps its checkpoint separate from object packs. Failures appear
+in `FetchReport::attestation_warnings` and do not fail the code fetch.
+Set `SyncOptions::attestations` to false to skip this work. Set
+`refetch_attestations` to retry dropped or rejected envelopes. Supply the exact
+configured `remote_url` to isolate checkpoints across endpoints. Connect
+sources enable this only after discovering server support.
+
 The push path plans from what changed: it walks the commits the remote lacks,
 compares each tree with the trees of its parents, and plans deltas. A chunk of
 a large file counts toward no cap. It builds and uploads packs, advances the

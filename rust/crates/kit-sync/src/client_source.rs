@@ -476,8 +476,22 @@ impl<
     /// A node is at most 1 MiB, held in memory. The caller
     /// checks it against its key.
     fn download_blob(&self, key: &PackKey, ref_hint: &str) -> Result<Vec<u8>, SourceError> {
-        let mut sink = kit_core::protocol::MemorySink::new(if ref_hint == kit_core::refs::ATTESTMAP_REF { crate::attestation_records::NODE_BOUND } else { NODE_LIMIT });
-        self.download_into(key, Some(ref_hint), if ref_hint == kit_core::refs::ATTESTMAP_REF { crate::attestation_records::NODE_BOUND } else { NODE_LIMIT }, &mut sink)?;
+        let mut sink =
+            kit_core::protocol::MemorySink::new(if ref_hint == kit_core::refs::ATTESTMAP_REF {
+                crate::attestation_records::NODE_BOUND
+            } else {
+                NODE_LIMIT
+            });
+        self.download_into(
+            key,
+            Some(ref_hint),
+            if ref_hint == kit_core::refs::ATTESTMAP_REF {
+                crate::attestation_records::NODE_BOUND
+            } else {
+                NODE_LIMIT
+            },
+            &mut sink,
+        )?;
         Ok(sink.into_bytes()?)
     }
 

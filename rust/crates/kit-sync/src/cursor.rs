@@ -184,7 +184,9 @@ impl CursorRecord {
             u8::from(self.tags),
             to_hex(&self.tag_digest),
             u8::from(self.attestations),
-            self.attestmap_head.as_ref().map_or_else(|| "-".into(), to_hex)
+            self.attestmap_head
+                .as_ref()
+                .map_or_else(|| "-".into(), to_hex)
         );
         let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
         if let Some(parent) = path.parent() {

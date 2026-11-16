@@ -174,7 +174,7 @@ fn fetch_one(
                             require_signed,
                             opts.prune,
                             opts.tags.fetch_tags(),
-                        opts.attestations.settings(&cfg.merged, endpoint),
+                            opts.attestations.settings(&cfg.merged, endpoint),
                             progress.terminal(),
                         )
                     })

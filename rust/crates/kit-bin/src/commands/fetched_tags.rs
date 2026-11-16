@@ -40,8 +40,17 @@ pub(crate) struct AttestationFlags {
     refetch_attestations: bool,
 }
 impl AttestationFlags {
-    pub(crate) fn settings<'a>(&self, config: &crate::config::Config, url: &'a str) -> (bool, bool, &'a str) {
-        (!self.no_attestations && (self.refetch_attestations || config.fetch_attestations != "false"), self.refetch_attestations, url)
+    pub(crate) fn settings<'a>(
+        &self,
+        config: &crate::config::Config,
+        url: &'a str,
+    ) -> (bool, bool, &'a str) {
+        (
+            !self.no_attestations
+                && (self.refetch_attestations || config.fetch_attestations != "false"),
+            self.refetch_attestations,
+            url,
+        )
     }
 }
 
