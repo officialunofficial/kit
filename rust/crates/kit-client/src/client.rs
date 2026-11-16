@@ -681,7 +681,8 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         let info = self.server_info().await?;
         if info.protocol.as_deref() != Some("kit.transport.v1")
             || info.spec_version.is_none_or(|version| version < 2)
-            || info.supports_attestations != Some(true) {
+            || info.supports_attestations != Some(true)
+        {
             return Err(Error::Invalid("attestation log unsupported"));
         }
         if tickets.len() > crate::advance_ticket_limit(&info) as usize {

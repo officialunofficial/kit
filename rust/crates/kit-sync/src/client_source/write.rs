@@ -421,7 +421,7 @@ impl<
                     {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
-                    } else if (procedure == "AdvanceRefs" || (procedure == "UpdateRef" && ticketed))
+                    } else if matches!(procedure, "AdvanceRefs" | "UpdateRef")
                         && ticketed
                         && matches!(mapped, SourceError::MembershipNotVisible)
                     {
@@ -855,7 +855,7 @@ impl<
     }
 
     /// Keys without a cached reservation must already be repository members
-    /// (for example BeginUpload answered AlreadyPresent). The server verifies
+    /// (for example `BeginUpload` answered `AlreadyPresent`). The server verifies
     /// membership atomically; another session's unconsumed uploads do not count.
     pub(super) fn write_attestmap_committing(
         &self,
@@ -1214,7 +1214,15 @@ mod tests {
                 ));
             }
             if advertised != Some(true) {
-                assert!(matches!(futures_executor::block_on(client.write_attestmap(RefWriteCondition::Missing, [4;32], &[], None)), Err(Error::Invalid("attestation log unsupported"))));
+                assert!(matches!(
+                    futures_executor::block_on(client.write_attestmap(
+                        RefWriteCondition::Missing,
+                        [4; 32],
+                        &[],
+                        None
+                    )),
+                    Err(Error::Invalid("attestation log unsupported"))
+                ));
                 assert_eq!(channel.nonces.borrow().len(), 2);
             } else {
                 assert_eq!(channel.nonces.borrow().len(), 1);
@@ -1240,9 +1248,12 @@ mod tests {
                 if request.uri().path().ends_with("/GetServerInfo") {
                     let mut response = success();
                     *response.body_mut() = proto::GetServerInfoResponse {
-                        protocol: Some("kit.transport.v1".into()), spec_version: Some(2),
-                        supports_attestations: Some(true), ..Default::default()
-                    }.encode_to_vec();
+                        protocol: Some("kit.transport.v1".into()),
+                        spec_version: Some(2),
+                        supports_attestations: Some(true),
+                        ..Default::default()
+                    }
+                    .encode_to_vec();
                     return Ok(response);
                 }
                 let request = proto::UpdateRefRequest::decode_from_slice(request.body()).unwrap();
