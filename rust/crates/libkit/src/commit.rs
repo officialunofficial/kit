@@ -321,8 +321,15 @@ pub fn create(
     // One durability batch holds the trees and the commit. It commits before
     // any ref names them.
     let batch = store.batch();
-    // The staged objects are verified before the tree names them.
-    let tree = worktree::build_tree_from_index_with(store, &batch, &idx, true)
+    // The staged objects are verified before the tree names them, except
+    // those the tree of `HEAD` already names at the same path with the same
+    // mode: the new tree adds no reference to them. A `HEAD` that cannot be
+    // read gives no base, and every staged object is verified.
+    let base = refs::resolve_head(layout)
+        .ok()
+        .flatten()
+        .and_then(|head| commit_tree(store, &head));
+    let tree = worktree::build_tree_from_index_against(store, &batch, &idx, true, base)
         .map_err(Error::BuildTree)?;
     refuse_discarded_merge(layout, store, pending, tree)?;
 

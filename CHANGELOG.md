@@ -54,6 +54,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_core::transfer::packlist_node_bound`, the most bytes a packlist node
   that lists a given number of packs can take. kit-client sizes the node of
   a plan with it, where it restated the node layout.
+- `kit_core::worktree::build_tree_from_index_against` builds the index tree
+  and opens only the staged objects that differ from a base tree.
+  `kit_sync::worktree::ensure_restore_safe_from` checks a restore that leaves
+  the entries of a base tree alone without opening their objects.
 
 ### Changed
 
@@ -188,6 +192,15 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fail at once when no editor is set and stdin is not a terminal, where
   they started `vi`, which waited for a terminal. An editor set in
   `GIT_EDITOR`, `EDITOR` or `VISUAL` still runs, terminal or not.
+- `kit status`, `kit commit` and `kit checkout` open only the staged objects
+  that differ from `HEAD`, not every tracked object. `commit` no longer
+  checks an object that `HEAD` names at the same path and mode, and `status`
+  and `checkout` no longer notice that it is missing. `closure verify`, a
+  push that sends the object and any read of it still check it.
+  A checkout still refuses to overwrite or remove a file whose object is
+  missing, or to write one from a missing object, and a command whose
+  restore rewrites every file (`checkout -f`, `reset --hard`, `merge` and the
+  others) still opens every object first.
 
 ### Removed
 

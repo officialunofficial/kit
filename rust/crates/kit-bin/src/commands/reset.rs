@@ -145,7 +145,7 @@ pub fn run(args: &[String]) -> u8 {
     // them ourselves; the hashes let the guard below detect local edits to
     // ignored-but-tracked files that the shared guard cannot see.
     let hard_removed: Vec<(String, EntryStatus, Hash)> = if opts.hard {
-        match super::dropped_tracked_paths(&layout, &store, tree_hash) {
+        match super::dropped_tracked_paths(&layout, &store, tree_hash, None) {
             Ok(p) => p,
             Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
         }

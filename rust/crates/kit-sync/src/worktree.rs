@@ -210,6 +210,34 @@ pub fn ensure_restore_safe(
     ensure_restore_safe_with_options(layout, store, target_tree, &RestoreOptions::default())
 }
 
+/// Refuse a restore of `entry` when the store lacks an object it needs (for
+/// a chunked file, its manifest). A check with an unchanged base does not
+/// open the objects the base names. The old side may be the worktree's only
+/// other copy, so a restore must not overwrite or remove it. The new side is
+/// read by the restore, which would otherwise fail after HEAD moved, as when
+/// the target copies an unchanged file to a new path.
+fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Result<(), String> {
+    if let Some(h) = entry.old_hash
+        && !store.contains(&h)
+    {
+        return Err(format!(
+            "restore would lose '{}': its object {} is not found in the store",
+            entry.path,
+            kit_core::hash::to_hex(&h)
+        ));
+    }
+    if let Some(h) = entry.new_hash
+        && !store.contains(&h)
+    {
+        return Err(format!(
+            "restore cannot write '{}': its object {} is not found in the store",
+            entry.path,
+            kit_core::hash::to_hex(&h)
+        ));
+    }
+    Ok(())
+}
+
 /// The refusal for a tracked path that differs from the index.
 fn local_changes_message(path: &str) -> String {
     format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
@@ -255,6 +283,11 @@ pub(crate) struct Expected<'a> {
     /// expects the tree from before the pull or the target. The index must
     /// equal one of them as a whole, the worktree each path one of them.
     pub(crate) trees: &'a [Option<Hash>],
+    /// The tree whose unchanged entries the restore leaves alone. The check
+    /// opens no object of an index entry equal to it; for each path the
+    /// restore changes it checks that the store has the old and the new
+    /// object. `None` opens every object.
+    pub(crate) unchanged_base: Option<Hash>,
     /// The restore that was interrupted may have left its temporary files,
     /// which the clean restore then sweeps.
     pub(crate) restore_temp_files: bool,
@@ -272,6 +305,24 @@ pub fn ensure_restore_safe_with_options(
     target_tree: Hash,
     options: &RestoreOptions,
 ) -> Result<(), String> {
+    ensure_restore_safe_from(layout, store, target_tree, options, None)
+}
+
+/// [`ensure_restore_safe_with_options`] for a restore that leaves alone every
+/// entry whose mode and object id are the same in `base_tree`, as
+/// [`restore_worktree_and_index_from`] does with the tree of HEAD. The check
+/// then opens no object of an index entry equal to `base_tree`; for each
+/// path the restore changes, it checks that the store has the old and the
+/// new object. Pass `None` when the restore rewrites every entry: the check
+/// then opens every object, so a missing one refuses the restore before
+/// anything is written.
+pub fn ensure_restore_safe_from(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+    base_tree: Option<Hash>,
+) -> Result<(), String> {
     let head = current_head_tree(layout, store)?;
     check_restore_safe(
         layout,
@@ -281,6 +332,7 @@ pub fn ensure_restore_safe_with_options(
         options,
         &Expected {
             trees: &[head],
+            unchanged_base: base_tree,
             restore_temp_files: false,
             refuse_untracked_dirs: false,
             refusals: &RESTORE_REFUSALS,
@@ -306,8 +358,14 @@ pub(crate) fn check_restore_safe(
     // Safety-check snapshot trees are ephemeral — in-memory overlay,
     // no durability cost, no garbage objects in the store.
     let snapshot = kit_core::store::EphemeralSink::new(store);
-    let index_tree = core_worktree::build_tree_from_index_with(store, &snapshot, idx, false)
-        .map_err(|e| format!("check index state: {e}"))?;
+    let index_tree = core_worktree::build_tree_from_index_against(
+        store,
+        &snapshot,
+        idx,
+        false,
+        expected.unchanged_base,
+    )
+    .map_err(|e| format!("check index state: {e}"))?;
 
     let affects = |path: &str| restore_affects_path(options, path);
     let staged = differ_from_every(&snapshot, expected.trees, index_tree, &affects)
@@ -344,15 +402,14 @@ pub(crate) fn check_restore_safe(
     // index equals one of them on every path the restore affects.
     let mut target_writes = Vec::new();
     for tree in expected.trees {
-        target_writes.extend(
-            diff_trees(&snapshot, *tree, Some(target_tree))
-                .map_err(|e| format!("check restore target: {e}"))?
-                .entries
-                .into_iter()
-                .filter(|entry| entry.kind != DiffKind::Removed)
-                .filter(|entry| affects(&entry.path))
-                .map(|entry| entry.path),
-        );
+        let diff = diff_trees(&snapshot, *tree, Some(target_tree))
+            .map_err(|e| format!("check restore target: {e}"))?;
+        for entry in diff.entries.into_iter().filter(|e| affects(&e.path)) {
+            ensure_restore_objects_present(store, &entry)?;
+            if entry.kind != DiffKind::Removed {
+                target_writes.push(entry.path);
+            }
+        }
     }
     target_writes.sort_unstable();
     target_writes.dedup();
