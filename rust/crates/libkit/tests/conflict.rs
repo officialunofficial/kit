@@ -449,3 +449,31 @@ fn abort_refuses_a_missing_unchanged_object_before_resetting_a_resolution() {
     assert!(error.to_string().contains("not found"), "{error}");
     assert_eq!(p.f.read("a.txt"), "my resolution\n");
 }
+
+#[test]
+fn reset_refuses_a_case_alias_before_changing_conflict_material() {
+    let f = init();
+    std::fs::write(f.path("probe"), b"probe").unwrap();
+    if !f.path("PROBE").exists() {
+        return;
+    }
+    std::fs::remove_file(f.path("probe")).unwrap();
+    let old = f.commit(&[("aaa", "keep"), ("readme", "keep readme")], &[], "old", 1);
+    let target = f.commit(&[("README", "new"), ("aaa", "new")], &[old], "target", 2);
+    f.checkout("main", old);
+    let before = std::fs::read(f.layout.worktree_state_dir().join("index")).unwrap();
+    let result = conflict::reset_paths(
+        &f.layout,
+        &f.store,
+        &[],
+        f.commit_object(target).tree_hash,
+        Some(f.commit_object(old).tree_hash),
+    );
+    assert!(result.is_err());
+    assert_eq!(std::fs::read(f.path("aaa")).unwrap(), b"keep");
+    assert_eq!(std::fs::read(f.path("readme")).unwrap(), b"keep readme");
+    assert_eq!(
+        std::fs::read(f.layout.worktree_state_dir().join("index")).unwrap(),
+        before
+    );
+}
