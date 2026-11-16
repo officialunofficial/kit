@@ -159,7 +159,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
             // The branch is written after the files, so its name is checked
             // before anything is.
             if let Err(e) = refs::check_new_name(new, refs::RefNameKind::Branch) {
-                return emit_err(&format!("create branch {new}: {e}"), exit::CANTCREAT);
+                return output_failure(&format!("create branch {new}: {e}"));
             }
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
             let start = match libkit::revspec::resolve_revision(&store, &layout, start_spec) {
@@ -342,7 +342,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         &sparse_opts,
         checked_base,
     ) {
-        return emit_err(&format!("restore: {e}"), exit::CANTCREAT);
+        return restore_failure(&e);
     }
 
     // Write the files first, then the `-b`/`-B` branch ref, HEAD and the
@@ -401,7 +401,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     drop(progress);
     let report = match restored {
         Ok(report) => report,
-        Err(e) => return emit_err(&format!("restore: {e}"), exit::CANTCREAT),
+        Err(e) => return restore_failure(&e),
     };
     if let Err(code) = remove_dropped(&cwd, &dropped) {
         return code;
@@ -425,7 +425,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)
     });
     if let Err(e) = published {
-        return emit_err(&e, exit::CANTCREAT);
+        return output_failure(&e);
     }
 
     // git-shaped switch confirmation (drop kit's non-git restored-count
@@ -506,10 +506,7 @@ fn remove_dropped(
 ) -> Result<(), u8> {
     for (path, _, _) in dropped {
         if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
-            return Err(emit_err(
-                &format!("restore: remove {path}: {e}"),
-                exit::CANTCREAT,
-            ));
+            return Err(output_failure(&format!("restore: remove {path}: {e}")));
         }
         prune_empty_parents(cwd, path);
     }
@@ -594,4 +591,56 @@ fn prepare_sparse_restore(
         clean: false,
         sparse_patterns: Some(parsed),
     })
+}
+
+fn restore_failure(error: &kit_core::ops::restore::RestoreError) -> u8 {
+    if crate::exit_map::is_full_disk(error) {
+        emit_err(
+            &format!("out of space: free disk space and retry: {error}"),
+            exit::IOERR,
+        )
+    } else {
+        output_failure(&format!("restore: {error}"))
+    }
+}
+
+// Some shared metadata writers return text. Match the standard library's
+// full-disk rendering at this boundary, including its platform OS code.
+fn output_code(message: &str) -> u8 {
+    if crate::exit_map::full_disk_text(message) {
+        exit::IOERR
+    } else {
+        exit::CANTCREAT
+    }
+}
+
+fn output_failure(message: &str) -> u8 {
+    let code = output_code(message);
+    if code == exit::IOERR {
+        emit_err(
+            &format!("out of space: free disk space and retry: {message}"),
+            code,
+        )
+    } else {
+        emit_err(message, code)
+    }
+}
+
+#[cfg(test)]
+mod full_disk_tests {
+    #[test]
+    fn full_disk_during_metadata_writes_has_an_io_exit() {
+        let error = std::io::Error::from_raw_os_error(if cfg!(windows) { 112 } else { 28 });
+        assert_eq!(super::output_code(&format!("write index: {error}")), 74);
+        assert_eq!(super::output_code("branch 'exists' already exists"), 73);
+    }
+
+    #[test]
+    fn full_disk_during_restore_has_an_io_exit() {
+        let error = kit_core::ops::restore::RestoreError::File {
+            path: "readme".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::StorageFull),
+        };
+        assert_eq!(super::restore_failure(&error), 74);
+    }
 }

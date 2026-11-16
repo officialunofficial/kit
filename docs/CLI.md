@@ -2117,6 +2117,7 @@ Based on BSD `sysexits(3)`:
 | 69   | `unavailable`    | Transport could not connect                  |
 | 70   | `software`       | Internal consistency error (a bug, not bad input) |
 | 73   | `cantcreat`      | Cannot create output file                    |
+| 74   | `ioerr`          | I/O failure, including out of disk space       |
 | 75   | `tempfail`       | Temporary failure; retry is safe             |
 | 76   | `protocol_error` | Bad URL scheme or malformed server response  |
 | 77   | `noperm`         | Permission denied                            |

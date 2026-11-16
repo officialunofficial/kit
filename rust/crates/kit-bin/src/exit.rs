@@ -31,6 +31,9 @@ pub const CANTCREAT: u8 = 73;
 /// signals a bug rather than bad input, bad config, or a transient failure.
 pub const SOFTWARE: u8 = 70;
 
+/// An input/output error, including a full disk.
+pub const IOERR: u8 = 74;
+
 /// Temporary failure; retry is safe.
 pub const TEMPFAIL: u8 = 75;
 
