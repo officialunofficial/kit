@@ -479,5 +479,8 @@ kit does not implement these flags. A command with a missing flag is
 - `rebase -i` `edit` &mdash; the todo action is not available. The `actions`
   file of a paused rebase holds a closed list of keywords, and a new keyword
   would change that state format.
-- `stash push -u` / `--include-untracked` and `stash push <pathspec>` &mdash;
-  kit rejects each form. `stash` always saves the whole working tree.
+- `stash push -a` / `--all` &mdash; ignored files are not included.
+- `switch @{-N}` with N greater than 1 &mdash; kit retains only the previous
+  HEAD. `switch -`, `checkout -`, and `@{-1}` are supported.
+- `stash push` pathspec glob and magic syntax &mdash; kit accepts file and
+  directory prefixes only. `-u` / `--include-untracked` is supported.

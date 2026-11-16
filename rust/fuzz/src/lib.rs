@@ -255,6 +255,9 @@ pub fn config_parse_one_iteration(input: &[u8]) {
 pub fn stash_list_one_iteration(input: &[u8]) {
     use kit_core::ops::stash::{deserialize_list, serialize_list};
     let input = &input[..input.len().min(MAX_INPUT)];
+    if let Some(scoped) = kit_core::ops::stash::fuzz_scope_marker(input) {
+        assert_eq!(input, &[u8::from(scoped)]);
+    }
     if let Ok(list) = deserialize_list(input) {
         assert_eq!(
             serialize_list(&list).expect("accepted list must re-encode"),
@@ -1479,6 +1482,13 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
             parse_lowercase_hash(kit_core::to_hex(&h).as_bytes()),
             Some(h)
         );
+    }
+    if let Some(head) = kit_core::refs::fuzz_parse_previous_head(input) {
+        let wire = match head {
+            kit_core::refs::Head::Branch(branch) => format!("ref: refs/heads/{branch}\n"),
+            kit_core::refs::Head::Detached(h) => format!("{}\n", kit_core::to_hex(&h)),
+        };
+        assert_eq!(wire.as_bytes(), input);
     }
     let state = kit_core::ops::pull_state::PullState {
         target: kit_core::hash::hash(input),
@@ -3200,7 +3210,14 @@ mod tests {
     fn unit_ref_wire_decode() {
         run_iterated_unit(ref_wire_decode_one_iteration).unwrap();
         let valid = "ab".repeat(32) + "\n";
-        for case in [&b""[..], b"\n", valid.as_bytes(), &[b'A'; 64][..]] {
+        for case in [
+            &b""[..],
+            b"\n",
+            valid.as_bytes(),
+            &[b'A'; 64][..],
+            b"ref: refs/heads/main\n",
+            b"ref: refs/heads/../../bad\n",
+        ] {
             run_one(case, ref_wire_decode_one_iteration).unwrap();
         }
     }

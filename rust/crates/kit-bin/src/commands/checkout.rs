@@ -110,7 +110,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     if let Some(split) = args.iter().position(|a| a == "--") {
         return restore_paths(&args[..split], &args[split + 1..]);
     }
-    let opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
+    let mut opts = match clap_args::parse::<CheckoutOpts>("kit checkout", args) {
         Ok(o) => o,
         Err(code) => return code,
     };
@@ -147,6 +147,36 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         );
     }
 
+    let old_head = match refs::read_head(&layout) {
+        Ok(h) => h,
+        Err(e) => return emit_err(&format!("read HEAD: {e}"), exit::GENERAL_ERROR),
+    };
+    // Preserve the remembered type: a branch may itself be named like a hash.
+    let previous_head = if matches!(opts.target.as_deref(), Some("-" | "@{-1}")) {
+        match refs::read_previous_head(&layout) {
+            Ok(head) => Some(head),
+            Err(_) => return emit_err("no previous branch", exit::GENERAL_ERROR),
+        }
+    } else {
+        None
+    };
+    let previous_commit = match previous_head.as_ref() {
+        Some(refs::Head::Branch(b)) => match refs::read_ref(&layout, b) {
+            Ok(Some(h)) => Some(h),
+            _ => return emit_err("no previous branch", exit::GENERAL_ERROR),
+        },
+        Some(refs::Head::Detached(h)) => Some(*h),
+        None => None,
+    };
+    if let Some(head) = &previous_head {
+        opts.target = Some(match head {
+            refs::Head::Branch(b) => b.clone(),
+            refs::Head::Detached(h) => kit_core::hash::to_hex(h),
+        });
+    }
+    let previous_is_branch = previous_head
+        .as_ref()
+        .map(|h| matches!(h, refs::Head::Branch(_)));
     // `-b`/`-B`: plan a branch create (or reset, for `-B`) at the
     // start-point (the optional positional, default HEAD). The ref is NOT
     // written here — only AFTER the destructive-restore gate passes — so a
@@ -162,7 +192,10 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
                 return output_failure(&format!("create branch {new}: {e}"));
             }
             let start_spec = opts.target.as_deref().unwrap_or("HEAD");
-            let start = match libkit::revspec::resolve_revision(&store, &layout, start_spec) {
+            let start = match previous_commit.map_or_else(
+                || libkit::revspec::resolve_revision(&store, &layout, start_spec),
+                Ok,
+            ) {
                 Ok(h) => h,
                 Err(e) => {
                     return emit_err(
@@ -216,7 +249,9 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // refuse when a sibling tree already has it checked out — branch
     // moves flow through the history-MMB ref path, which assumes one
     // writer per branch. Applies to `--force` too, like git.
-    let ends_on_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
+    let ends_on_branch = created
+        || previous_is_branch
+            .unwrap_or_else(|| matches!(refs::read_ref(&layout, name), Ok(Some(_))));
     if ends_on_branch {
         match libkit::worktrees::checked_out_elsewhere(&layout, name) {
             Ok(Some(at)) => {
@@ -237,7 +272,10 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // otherwise resolve `<name>` via the shared revspec resolver.
     let commit_hash: Hash = match &create_plan {
         Some((_, start, ..)) => *start,
-        None => match libkit::revspec::resolve_revision(&store, &layout, name) {
+        None => match previous_commit.map_or_else(
+            || libkit::revspec::resolve_revision(&store, &layout, name),
+            Ok,
+        ) {
             Ok(h) => h,
             Err(e) => {
                 return emit_err(
@@ -363,7 +401,9 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // the index can carry a stat cache for it and the next command does
     // not re-hash it. Observation paths are relative to the restore root,
     // so they are used only when that root is the worktree root.
-    let is_branch = created || matches!(refs::read_ref(&layout, name), Ok(Some(_)));
+    let is_branch = created
+        || previous_is_branch
+            .unwrap_or_else(|| matches!(refs::read_ref(&layout, name), Ok(Some(_))));
     let mut observed = Vec::new();
     let progress = crate::progress::start(
         "restore",
@@ -416,13 +456,23 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
                 Err(e) => return Err(format!("create branch {new}: {e}")),
             }
         }
+        let new_head = if is_branch {
+            refs::Head::Branch(name.to_owned())
+        } else {
+            refs::Head::Detached(commit_hash)
+        };
         if is_branch {
             refs::write_head_branch(&layout, name)
         } else {
             refs::write_head_detached(&layout, &commit_hash)
         }
         .map_err(|e| format!("update HEAD: {e}"))?;
-        super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)
+        super::sync_index_to_tree_observed(&layout, &store, tree_hash, &observed)?;
+        if old_head != new_head {
+            refs::write_previous_head(&layout, &old_head)
+                .map_err(|e| format!("save previous HEAD: {e}"))?;
+        }
+        Ok(())
     });
     if let Err(e) = published {
         return output_failure(&e);

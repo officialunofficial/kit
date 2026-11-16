@@ -27,7 +27,16 @@ of two classes:
 | Class | Contents |
 |---|---|
 | **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
-| **worktree state dir** (private to one tree) | `HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
+| **worktree state dir** (private to one tree) | `HEAD`, `PREVIOUS_HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
+
+`PREVIOUS_HEAD` holds only the previous HEAD selected by checkout or switch.
+It uses HEAD encoding: `ref: refs/heads/<branch>\n` or a lowercase commit id
+followed by a newline. It is replaced atomically under the worktree lock
+only when checkout or switch changes HEAD. It has no version or history.
+Switch reports no previous branch for a missing, unreadable or malformed file.
+Gc refuses unreadable or malformed state rather than dropping a possible root. It belongs
+to one worktree, is not cloned or transferred, and is removed with that
+worktree's state. A valid detached id is a gc root.
 
 `PULL_HEAD` is exactly 130 bytes: the target commit in canonical ref encoding
 (64 lowercase hex digits and LF), then the pre-pull tree in the same encoding.
@@ -299,6 +308,13 @@ reject the file with an invalid-format error in each of these cases:
 
 A reader MUST NOT allocate from `count` before the `count` check passes.
 Each `commit_hash` and `parent_hash` is a gc root (SPEC-GC).
+
+The local stash index wrapper carries blobs `i` (serialized index) and `p`
+(scope), plus tree `t` (staged content). The scope blob is exactly one byte:
+`0` for a full stash and `1` for selected paths. Other values or a missing
+marker refuse apply and pop. Full stashes retain the whole-worktree restore
+guard; selected stashes guard only their saved paths. No earlier wrapper
+shape is read as a compatibility case.
 
 Reference implementation: `kit-core/src/ops/stash.rs`
 (`serialize_list`, `deserialize_list`). The uniqueness test in

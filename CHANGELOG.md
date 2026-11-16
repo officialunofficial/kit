@@ -29,6 +29,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Read nested `.gitignore` and `.kitignore` files, `.kit/info/exclude`, and the default global Git ignore file.
 - Trust extra CA certificates for S3 HTTPS endpoints through `KIT_SSL_CA_FILE`.
 - Complete local branch, remote, and tag names in bash, zsh, and fish.
+- Return to the previous branch or detached HEAD with `switch -`, `checkout -`, or `@{-1}`.
+- Accept `stash push -u` and `--include-untracked`; refuse existing untracked destinations before restoring files.
+- Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
+- Save selected file or directory paths with `stash push [--] <path>...`, preserving other worktree and staged changes. The local stash record carries scope; earlier entries cannot be applied.
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
 
