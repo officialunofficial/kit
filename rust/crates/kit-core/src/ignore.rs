@@ -1298,7 +1298,10 @@ mod tests {
         assert!(deep.is_ignored("sub/deep/private.env", false));
         assert!(deep.is_ignored("sub/deep/private.local", false));
         assert!(sub.load_directory(dir.path()).is_err());
-        assert!(sub.load_directory(&dir.path().join("sub/../other")).is_err());
+        assert!(
+            sub.load_directory(&dir.path().join("sub/../other"))
+                .is_err()
+        );
     }
 
     // --- glob_match public helper --------------------------------------

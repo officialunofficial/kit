@@ -556,6 +556,10 @@ fn nested_kit_metadata_does_not_change_the_outer_ignore_scope() {
     let tracked = out_str(&run_in(root, x, &["ls-files"]));
     assert!(tracked.lines().any(|p| p == "nested/keep.log"));
     assert!(!tracked.lines().any(|p| p == "nested/drop.log"));
-    let others = out_str(&run_in(root, x, &["ls-files", "--others", "--exclude-standard"]));
+    let others = out_str(&run_in(
+        root,
+        x,
+        &["ls-files", "--others", "--exclude-standard"],
+    ));
     assert!(!others.contains("nested/drop.log"));
 }
