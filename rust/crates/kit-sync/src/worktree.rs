@@ -482,13 +482,7 @@ pub(crate) fn check_restore_safe(
         for path in &worktree_paths {
             let full_path = root.join(path);
             let parent = full_path.parent().unwrap_or(root);
-            if !ignores.contains_key(parent) {
-                let local = ignore
-                    .load_directory(parent)
-                    .map_err(|e| format!("read ignore file: {e}"))?;
-                ignores.insert(parent.to_path_buf(), local);
-            }
-            let ignore = &ignores[parent];
+            let ignore = directory_ignore(&mut ignores, &ignore, parent)?;
             if !index_tracks_path_or_descendant(&tracked, path)
                 && restore_affects_path(options, path)
                 && path != ".kitignore"
@@ -505,6 +499,19 @@ pub(crate) fn check_restore_safe(
     }
 
     Ok(())
+}
+
+fn directory_ignore<'a>(
+    cache: &'a mut std::collections::HashMap<std::path::PathBuf, kit_core::ignore::IgnoreList>,
+    inherited: &kit_core::ignore::IgnoreList,
+    parent: &Path,
+) -> Result<&'a kit_core::ignore::IgnoreList, String> {
+    use std::collections::hash_map::Entry;
+    match cache.entry(parent.to_path_buf()) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => Ok(entry.insert(inherited.load_directory(parent)
+            .map_err(|e| format!("read ignore file: {e}"))?)),
+    }
 }
 
 /// Only an unlisted directory with its own metadata marker is kept whole.
