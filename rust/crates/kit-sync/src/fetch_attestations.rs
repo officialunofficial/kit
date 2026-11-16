@@ -1,6 +1,6 @@
 //! Bounded attestation reads, isolated from object application and its caches.
 use std::{collections::BTreeSet, io::{Read, Seek, SeekFrom, Write}, path::Path};
-use kit_core::{hash::Hash, layout::RepoLayout, protocol::{PackKey, PackSink, PACK_BODY_LIMIT}, refs::ATTESTMAP_REF, store::ObjectStore};
+use kit_core::{hash::Hash, layout::RepoLayout, protocol::{PackKey, PACK_BODY_LIMIT}, refs::ATTESTMAP_REF, store::ObjectStore};
 use crate::{attestation_records::{self, Record, RecordKind, NODE_BOUND, WALK_LIMIT}, FetchReport, RemoteSource, SyncOptions, Observer, SyncEvent, lock::{LockWait, wait_for_worktree_lock}};
 
 pub(crate) fn snapshot(source: &dyn RemoteSource, options: &SyncOptions, report: &mut FetchReport) -> Option<Option<Hash>> {
@@ -142,7 +142,7 @@ fn process_pack(store: &ObjectStore, layout: &RepoLayout, source: &dyn RemoteSou
         let parent = marker.parent().ok_or("missing provenance directory")?;
         std::fs::create_dir_all(parent)?;
         crate::applied_packs::write_atomic(&marker, b"")?;
-        crate::applied_packs::sync_parent_dir(layout.attestations_dir())?;
+        crate::applied_packs::sync_parent_dir(&layout.attestations_dir())?;
         crate::applied_packs::sync_parent_dir(layout.common_dir())?;
         kit_attest::store::save(layout, &subject, &bytes)?;
         report.attestations_stored += 1;

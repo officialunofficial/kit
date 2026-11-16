@@ -485,7 +485,7 @@ fn fetch_objects_inner(
     // prune.
     if !options.prune
         && let Some(cursor) = &cursor
-        && remote_unchanged(store, layout, &cursor_path, cursor, remote, options)?
+        && remote_unchanged(store, layout, source, &cursor_path, cursor, remote, options)?
     {
         report.remote_unchanged = true;
         return Ok(());
@@ -794,9 +794,11 @@ fn prune_tracking(
 /// opt-out left for a branch the remote no longer lists. A fetch that takes
 /// tags does not trust one that did not, nor the reverse. A fetch of a named
 /// branch needs its tracking ref.
+#[allow(clippy::too_many_arguments)]
 fn remote_unchanged(
     store: &ObjectStore,
     layout: &RepoLayout,
+    source: &dyn RemoteSource,
     path: &std::path::Path,
     cursor: &kit_core::protocol::RepoCursor,
     remote: &str,

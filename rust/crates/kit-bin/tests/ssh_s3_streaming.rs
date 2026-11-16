@@ -706,6 +706,13 @@ mod s3 {
         Some(tx)
     }
 
+    #[test]
+    #[ignore = "needs an S3 store: set KIT_TEST_S3_ENDPOINT and its bucket and keys"]
+    fn s3_fetch_keeps_attestations_outside_objects() {
+        let Some(tx) = s3_remote() else { return };
+        attestation_fetch::roundtrip(&tx);
+    }
+
     fn rand_bytes() -> [u8; 32] {
         let mut out = [0u8; 32];
         let nanos = std::time::SystemTime::now()
@@ -806,4 +813,16 @@ mod s3 {
         let len = push_and_fetch_one_pack(&tx, &remote, 17_000, "S3");
         assert!(len > 1 << 30, "{len}");
     }
+}
+
+include!("../../kit-sync/tests/support/attestation_fetch.rs");
+
+#[test]
+fn ssh_fetch_keeps_attestations_outside_objects() {
+    let name = "ssh_fetch_keeps_attestations_outside_objects";
+    if !in_ssh_child(name, &[]) { return; }
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _) = ssh_remote(dir.path());
+    attestation_fetch::roundtrip(&tx);
 }
