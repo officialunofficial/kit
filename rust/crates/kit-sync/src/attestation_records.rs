@@ -50,7 +50,11 @@ impl Record {
             self.head.as_ref().map_or_else(|| "-".into(), hash::to_hex),
             u8::from(self.warned)
         );
-        for id in self.ids.iter().take(if kind == RecordKind::Push { PUSH_CACHE_IDS } else { usize::MAX }) {
+        for id in self.ids.iter().take(if kind == RecordKind::Push {
+            PUSH_CACHE_IDS
+        } else {
+            usize::MAX
+        }) {
             body.push_str(&hash::to_hex(id));
             body.push('\n');
         }
@@ -67,7 +71,9 @@ impl Record {
 }
 
 fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> Option<Record> {
-    if kind == RecordKind::Fetch && bytes.len() > FETCH_RECORD_OVERHEAD + 65 * WALK_LIMIT { return None; }
+    if kind == RecordKind::Fetch && bytes.len() > FETCH_RECORD_OVERHEAD + 65 * WALK_LIMIT {
+        return None;
+    }
     let text = std::str::from_utf8(bytes).ok()?;
     let (body, checksum) = text.rsplit_once('\n')?;
     let signed_len = body.len() + 1;
@@ -82,7 +88,9 @@ fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> 
         "-" => None,
         hex => Some(parse_lowercase_hash(hex.as_bytes())?),
     };
-    if kind == RecordKind::Push && head.is_some() { return None; }
+    if kind == RecordKind::Push && head.is_some() {
+        return None;
+    }
     let warned = match lines.next()? {
         "0" => false,
         "1" => true,
@@ -157,7 +165,13 @@ mod tests {
         let mut corrupt = bytes;
         corrupt[30] ^= 1;
         assert!(Record::decode(&corrupt, RecordKind::Fetch).is_none());
-        assert!(Record::decode(&Record::default().encode(RecordKind::Fetch), RecordKind::Fetch).is_some());
+        assert!(
+            Record::decode(
+                &Record::default().encode(RecordKind::Fetch),
+                RecordKind::Fetch
+            )
+            .is_some()
+        );
     }
     #[test]
     fn fetch_record_accepts_the_full_walk_and_push_exceeds_it() {
@@ -173,7 +187,10 @@ mod tests {
             ids,
             warned: true,
         };
-        assert_eq!(Record::decode(&record.encode(RecordKind::Push), RecordKind::Push), Some(record));
+        assert_eq!(
+            Record::decode(&record.encode(RecordKind::Push), RecordKind::Push),
+            Some(record)
+        );
         record = Record {
             head: Some([1; 32]),
             ids: (0..WALK_LIMIT)
@@ -185,19 +202,37 @@ mod tests {
                 .collect(),
             warned: false,
         };
-        assert_eq!(Record::decode(&record.encode(RecordKind::Fetch), RecordKind::Fetch), Some(record));
+        assert_eq!(
+            Record::decode(&record.encode(RecordKind::Fetch), RecordKind::Fetch),
+            Some(record)
+        );
     }
 
     #[test]
     fn headless_fetch_records_still_use_fetch_bounds() {
-        let record = Record { head: None, ids: (0..=WALK_LIMIT).map(|n| {
-            let mut h = [0;32]; h[..8].copy_from_slice(&(n as u64).to_be_bytes()); h
-        }).collect(), warned: true };
+        let record = Record {
+            head: None,
+            ids: (0..=WALK_LIMIT)
+                .map(|n| {
+                    let mut h = [0; 32];
+                    h[..8].copy_from_slice(&(n as u64).to_be_bytes());
+                    h
+                })
+                .collect(),
+            warned: true,
+        };
         let bytes = record.encode(RecordKind::Fetch);
         assert!(Record::decode(&bytes, RecordKind::Fetch).is_none());
         assert_eq!(Record::decode(&bytes, RecordKind::Push), Some(record));
-        let pending = Record { head: None, ids: BTreeSet::from([[1;32]]), warned: false };
-        assert_eq!(Record::decode(&pending.encode(RecordKind::Fetch), RecordKind::Fetch), Some(pending));
+        let pending = Record {
+            head: None,
+            ids: BTreeSet::from([[1; 32]]),
+            warned: false,
+        };
+        assert_eq!(
+            Record::decode(&pending.encode(RecordKind::Fetch), RecordKind::Fetch),
+            Some(pending)
+        );
     }
 
     #[test]

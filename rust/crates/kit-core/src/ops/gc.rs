@@ -1197,16 +1197,30 @@ mod tests {
             let md = layout(&d);
             let blob = write_blob(&store, b"x");
             let object = if chunked {
-                Object::ChunkedBlob(crate::object::ChunkedBlob::new(64, 0,
-                    (1..=64).map(|end| (blob, end))).unwrap())
+                Object::ChunkedBlob(
+                    crate::object::ChunkedBlob::new(64, 0, (1..=64).map(|end| (blob, end)))
+                        .unwrap(),
+                )
             } else {
-                Object::Tree(Tree { entries: (0..64).map(|n| TreeEntry {
-                    name: format!("f{n:03}").into_bytes(), mode: EntryMode::Blob, object_hash: blob,
-                }).collect() })
+                Object::Tree(Tree {
+                    entries: (0..64)
+                        .map(|n| TreeEntry {
+                            name: format!("f{n:03}").into_bytes(),
+                            mode: EntryMode::Blob,
+                            object_hash: blob,
+                        })
+                        .collect(),
+                })
             };
-            let root = store.write(&serialize::serialize(&object).unwrap()).unwrap();
+            let root = store
+                .write(&serialize::serialize(&object).unwrap())
+                .unwrap();
             fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&root))).unwrap();
-            let limits = MarkLimits { cap: 4, chunk_cap: 1, compact_floor: 1 };
+            let limits = MarkLimits {
+                cap: 4,
+                chunk_cap: 1,
+                compact_floor: 1,
+            };
             let (live, skipped) = live_objects_with(&store, &md, limits).unwrap();
             assert!(live.contains(&root) && live.contains(&blob));
             assert!(skipped.is_empty());

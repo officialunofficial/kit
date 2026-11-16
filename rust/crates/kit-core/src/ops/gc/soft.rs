@@ -145,8 +145,6 @@ impl<'a> SoftGraph<'a> {
     pub(super) fn scanned(&self) -> usize {
         self.nodes.len()
     }
-
-
 }
 
 pub(super) fn mark(
