@@ -327,7 +327,7 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
         };
 
         // Check out the candidate so the command tests its actual tree.
-        if let Err(code) = checkout(cwd, &format::hex_hash(&hash)) {
+        if let Err(code) = checkout(cwd, &format::hex_hash(&hash), &state) {
             let _ = restore_head(cwd, &state);
             return code;
         }
@@ -348,6 +348,7 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
             }
         };
 
+        let previous = state.clone();
         match classify(code) {
             Verdict::Good => state.good_hashes.push(hash),
             Verdict::Bad => state.bad_hash = Some(hash),
@@ -363,8 +364,8 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
                 );
             }
         }
-        if let Err(code) = persist_locked(layout, &state) {
-            let _ = restore_head(cwd, &state);
+        if let Err(code) = persist_locked(layout, &previous, &state) {
+            let _ = restore_head(cwd, &previous);
             return code;
         }
     }
@@ -372,10 +373,20 @@ fn run_automated(store: &ObjectStore, cwd: &Path, layout: &RepoLayout, argv: &[S
 
 /// Write the bisect state under the worktree lock. `bisect run` cannot hold
 /// the lock for its whole loop, because each candidate is checked out by a
-/// child `kit checkout` that takes the same lock. The candidates are between
+/// `kit checkout` that takes the same lock. The candidates are between
 /// the endpoints the state already names, so `gc` keeps them without it.
-fn persist_locked(layout: &RepoLayout, state: &BisectState) -> Result<(), u8> {
+fn persist_locked(
+    layout: &RepoLayout,
+    previous: &BisectState,
+    state: &BisectState,
+) -> Result<(), u8> {
     let _lock = super::acquire_worktree_lock(layout)?;
+    if read_state(layout).as_ref().ok() != Some(previous) {
+        return Err(emit_err(
+            "bisect state changed while the command ran; stopping",
+            exit::GENERAL_ERROR,
+        ));
+    }
     write_state(layout, state)
         .map_err(|e| emit_err(&format!("persist state: {e}"), persist_exit(&e)))
 }
@@ -391,59 +402,21 @@ fn persist_exit(e: &kit_core::ops::bisect::BisectError) -> u8 {
     }
 }
 
-/// Restore the worktree + HEAD to where bisect started, re-exec'ing
+/// Restore the worktree + HEAD to where bisect started, checking out
 /// `kit checkout` on the original branch (or detached original HEAD).
 fn restore_head(cwd: &Path, state: &BisectState) -> Result<(), u8> {
     let target = match state.orig_branch.as_deref() {
         Some(branch) => branch.to_string(),
         None => format::hex_hash(&state.orig_head),
     };
-    checkout(cwd, &target)
+    checkout(cwd, &target, state)
 }
 
-/// Re-exec this same binary as `kit checkout --force <target>` to
-/// materialize a commit into the worktree, reusing checkout's full
-/// safety/index handling and discarding the test command's tracked-file
-/// scribbles. On failure prints the child's diagnostics and returns a code.
-///
-/// This is deliberately its own small self-exec rather than reusing
-/// `mcp::run_subprocess`: that helper wraps the result in an MCP
-/// `CallOutcome`, whereas here we only need the raw exit status plus stderr
-/// passthrough. Sparse caveat: the child checkout does not re-apply a
-/// persisted sparse cone (checkout only honors an explicit `--sparse`), so
-/// in a sparse repo each candidate materializes the full tree — a
-/// pre-existing checkout limitation, documented on `bisect run` in
-/// `docs/CLI.md`.
-fn checkout(cwd: &Path, target: &str) -> Result<(), u8> {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            return Err(emit_err(
-                &format!("cannot locate kit binary: {e}"),
-                exit::GENERAL_ERROR,
-            ));
-        }
-    };
-    let out = Command::new(exe)
-        // `--force`: discard the test command's scribbles on tracked files
-        // so the next candidate materializes cleanly (git bisect resets the
-        // worktree between candidates).
-        .args(["checkout", "--force", target])
-        .current_dir(cwd)
-        .env("NO_COLOR", "1")
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => {
-            let mut stderr = std::io::stderr().lock();
-            let _ = stderr.write_all(&o.stderr);
-            Err(exit::GENERAL_ERROR)
-        }
-        Err(e) => Err(emit_err(
-            &format!("checkout {target}: {e}"),
-            exit::GENERAL_ERROR,
-        )),
-    }
+/// Checkout checks the expected bisect state while holding the same lock as
+/// the worktree write, so a reset or mark cannot slip between them.
+fn checkout(_cwd: &Path, target: &str, state: &BisectState) -> Result<(), u8> {
+    let code = super::checkout::run_bisect(&["--force".to_owned(), target.to_owned()], state);
+    if code == exit::OK { Ok(()) } else { Err(code) }
 }
 
 fn report_step(store: &ObjectStore, state: &BisectState) -> u8 {

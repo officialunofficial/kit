@@ -98,6 +98,15 @@ const RESTORE_USAGE: &str = "usage: kit checkout [-f] [<rev>] -- <path>...";
 #[must_use]
 #[allow(clippy::too_many_lines)] // linear flow: create-branch + switch + report
 pub fn run(args: &[String]) -> u8 {
+    run_inner(args, None)
+}
+
+pub(super) fn run_bisect(args: &[String], state: &kit_core::ops::bisect::BisectState) -> u8 {
+    run_inner(args, Some(state))
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState>) -> u8 {
     if let Some(split) = args.iter().position(|a| a == "--") {
         return restore_paths(&args[..split], &args[split + 1..]);
     }
@@ -129,6 +138,14 @@ pub fn run(args: &[String]) -> u8 {
         Ok(l) => l,
         Err(code) => return code,
     };
+    if bisect.is_some_and(|state| {
+        kit_core::ops::bisect::read_state(&layout).as_ref().ok() != Some(state)
+    }) {
+        return emit_err(
+            "bisect state changed while the command ran; stopping",
+            exit::GENERAL_ERROR,
+        );
+    }
 
     // `-b`/`-B`: plan a branch create (or reset, for `-B`) at the
     // start-point (the optional positional, default HEAD). The ref is NOT

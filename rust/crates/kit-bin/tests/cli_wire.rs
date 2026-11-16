@@ -2352,3 +2352,45 @@ fn repository_conflict_refuses_before_files_index_or_head_change() {
         assert_eq!(fs::read(root.join(".kit/index")).unwrap(), index);
     }
 }
+
+#[test]
+fn bisect_run_preserves_a_reset_or_mark_made_by_its_command() {
+    for (action, status) in [("reset", 0), ("skip", 0), ("reset", 128), ("skip", 128)] {
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        make_commit(td.path(), "marker", b"one", "one");
+        let good = head_hash(td.path());
+        make_commit(td.path(), "marker", b"two", "two");
+        make_commit(td.path(), "marker", b"three", "three");
+        let bad = head_hash(td.path());
+        assert!(run_in(td.path(), &["bisect", "start"]).status.success());
+        assert!(
+            run_in(td.path(), &["bisect", "good", &good])
+                .status
+                .success()
+        );
+        assert!(run_in(td.path(), &["bisect", "bad", &bad]).status.success());
+        let script = format!(
+            "'{}' bisect {action}; cp .kit/HEAD head-after; [ ! -f .kit/bisect ] || cp .kit/bisect state-after; exit {status}",
+            kit_bin()
+        );
+        let out = run_in(td.path(), &["bisect", "run", "sh", "-c", &script]);
+        assert!(!out.status.success(), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("bisect state changed"),
+            "{out:?}"
+        );
+        assert_eq!(
+            fs::read(td.path().join(".kit/HEAD")).unwrap(),
+            fs::read(td.path().join("head-after")).unwrap()
+        );
+        if action == "reset" {
+            assert!(!td.path().join(".kit/bisect").exists());
+        } else {
+            assert_eq!(
+                fs::read(td.path().join(".kit/bisect")).unwrap(),
+                fs::read(td.path().join("state-after")).unwrap()
+            );
+        }
+    }
+}

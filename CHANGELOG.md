@@ -9,6 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Stop automated bisect when another command changes the session, preserving its state and worktree.
+
 - Choose `VISUAL` before `EDITOR`, after `GIT_EDITOR`.
 - Include the received size and limit in oversized Connect frame errors.
 - Preserve early S3 upload refusals and report their error codes without retrying; keep retrying timeouts and throttling.
