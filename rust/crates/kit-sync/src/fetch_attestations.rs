@@ -368,7 +368,7 @@ fn save_staged(
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::fs::File::open(&marker)?
+                std::fs::OpenOptions::new().write(true).open(&marker)?
             }
             Err(error) => return Err(error.into()),
         };
