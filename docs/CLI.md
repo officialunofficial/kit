@@ -1810,7 +1810,9 @@ Config / keys / version:
 ## Ignore files
 
 kit reads ignore patterns from **both** `.gitignore` and `.kitignore` at
-the repository root. `.gitignore` is applied first and `.kitignore` last, so
+every visited directory. Patterns are relative to their file’s directory.
+Deeper files win; an excluded directory cannot be re-included from below.
+`.gitignore` is applied first and `.kitignore` last, so
 under gitignore's last-match-wins rule a repo's own `.kitignore` can override
 (including re-include via `!`) anything `.gitignore` set. Matching is honored
 by `add`, `clean`, `ls-files --others`, `restore`/`checkout`, and the
@@ -1821,7 +1823,7 @@ v1 subset:
 
 - A pattern with no `/` (other than a trailing one) matches at **any depth**
   (`*.log` matches `a/b/c.log`). A pattern containing a `/` &mdash; including a
-  leading `/` &mdash; is **anchored** to the repo root (`/foo` matches only the
+  leading `/` &mdash; is **anchored** to its ignore file’s directory (`/foo` matches only the
   top-level `foo`; `src/gen` only that path).
 - `*` and `?` match within a single path segment; `[abc]`, `[a-z]`, and
   `[!abc]` character classes are supported; `\` escapes the next character.
@@ -1834,9 +1836,12 @@ v1 subset:
 - `.kit` and `.git` are always ignored (matched on the basename, ASCII
   case-insensitively).
 
-**Deferred (documented non-goals for now):** nested per-directory
-ignore files (only the repo root is read), global excludes
-(`core.excludesFile`), and escaped trailing spaces.
+Global patterns come from `$XDG_CONFIG_HOME/git/ignore`, or
+`~/.config/git/ignore` when `XDG_CONFIG_HOME` is unset. `.kit/info/exclude`
+overrides the global file, and per-directory files override both.
+kit does not read Git config or `core.excludesFile`.
+
+**Deferred (documented non-goals for now):** escaped trailing spaces.
 
 ## Divergences from Git
 

@@ -580,10 +580,7 @@ where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
     // Load the root-level ignore list. Missing = empty list.
-    let ignore_list = match ignore::load(root) {
-        Ok(il) => il,
-        Err(_) => IgnoreList::new(),
-    };
+    let ignore_list = ignore::load(root).map_err(|e| RestoreError::Io(io::Error::other(e)))?;
     if opts.clean
         && let Some(base) = base_tree
     {
@@ -1848,7 +1845,7 @@ fn check_level_in_parallel(
 fn check_unswept_dir(
     store: &ObjectStore,
     unswept: &Unswept,
-    ignore: &IgnoreList,
+    _ignore: &IgnoreList,
 ) -> RestoreResult<Vec<Unswept>> {
     if unswept.depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -1874,8 +1871,16 @@ fn check_unswept_dir(
             None => untracked.push((entry.path(), name_path(&unswept.path, name), is_dir)),
         }
     })?;
+    let mut lists = std::collections::HashMap::new();
     while let Some((path, full_path, is_dir)) = untracked.pop() {
-        if ignore.is_ignored_with_ancestors(&full_path, is_dir) {
+        let parent = path.parent().unwrap_or(&unswept.dir);
+        if !lists.contains_key(parent) {
+            let local = ignore::load(parent)
+                .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+            lists.insert(parent.to_path_buf(), local);
+        }
+        let local = &lists[parent];
+        if local.is_ignored_with_ancestors(&full_path, is_dir) {
             continue;
         }
         if !is_dir {
@@ -2006,6 +2011,9 @@ fn clean_directory(
         is_dir: bool,
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
+    let local = ignore.map(|_| ignore::load(target_dir)).transpose()
+        .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
+    let ignore = local.as_ref();
 
     let read = match fs::read_dir(target_dir) {
         Ok(r) => r,
@@ -2109,9 +2117,11 @@ fn is_repository_name(name: &str) -> bool {
 fn sweep_unlisted_dir(
     dir: &Path,
     prefix: &str,
-    ignore: &IgnoreList,
+    _ignore: &IgnoreList,
     sparse_patterns: Option<&[SparsePattern]>,
 ) {
+    let Ok(local) = ignore::load(dir) else { return; };
+    let ignore = &local;
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };

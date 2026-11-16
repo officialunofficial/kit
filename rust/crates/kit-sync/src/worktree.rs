@@ -786,7 +786,7 @@ pub use kit_core::index::{
 #[must_use]
 pub fn is_ignored_worktree_path(
     root: &Path,
-    ignore: &kit_core::ignore::IgnoreList,
+    _ignore: &kit_core::ignore::IgnoreList,
     path: &str,
 ) -> bool {
     let full_path = root.join(path);
@@ -795,7 +795,8 @@ pub fn is_ignored_worktree_path(
     };
     // Match on the repo-relative path, and treat a path under an ignored
     // directory as ignored too (no top-down walk here to carry that bit).
-    ignore.is_ignored_with_ancestors(path, meta.is_dir())
+    kit_core::ignore::load(full_path.parent().unwrap_or(root))
+        .map_or(true, |ignore| ignore.is_ignored_with_ancestors(path, meta.is_dir()))
 }
 
 pub fn current_head_tree(layout: &RepoLayout, store: &ObjectStore) -> Result<Option<Hash>, String> {

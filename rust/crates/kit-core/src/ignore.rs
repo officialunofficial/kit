@@ -27,13 +27,13 @@
 //! ASCII case-insensitively, so `.KIT` can't bypass on case-insensitive
 //! filesystems — the Git CVE-2021-21300 family).
 //!
-//! Both `.gitignore` and `.kitignore` are read from the repository root;
+//! Both `.gitignore` and `.kitignore` are read in each visited directory;
 //! `.gitignore` patterns are applied first and `.kitignore` last, so a
 //! repo's own `.kitignore` takes precedence under last-match-wins.
 //!
-//! **Deferred (documented non-goals for this pass):** nested per-directory
-//! ignore files (only the root is read), global excludes
-//! (`core.excludesFile`), and escaped trailing spaces.
+//! Deeper rules take precedence. Excluded directories are not entered.
+//! The default global Git ignore file precedes `.kit/info/exclude`, which
+//! precedes per-directory rules. Escaped trailing spaces remain deferred.
 
 use std::collections::HashMap;
 use std::fs;
@@ -398,8 +398,10 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
     f(&buf[..len])
 }
 
-/// Load and merge `.gitignore` then `.kitignore` from `dir`. Returns an
-/// empty list if neither file is present.
+/// Load ignore rules for `dir`, relative to its repository root.
+/// Global rules and `.kit/info/exclude` precede ancestor and local files.
+/// Call this when entering a directory, before testing its children.
+/// An excluded ancestor stops loading deeper files.
 ///
 /// `.gitignore` patterns come first so a repo's own `.kitignore` wins under
 /// last-match-wins.
@@ -411,16 +413,48 @@ fn with_segments<R>(trimmed: &str, f: impl FnOnce(&[&str]) -> R) -> R {
 ///   file unignored, so the load fails instead.
 /// - [`IgnoreError::Io`] for other filesystem failures.
 pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
+    let root = dir.ancestors().find(|p| p.join(".kit").exists() || p.join(".git").exists())
+        .unwrap_or(dir);
     let mut patterns = Vec::new();
-    for name in [".gitignore", ".kitignore"] {
-        if let Some(list) = load_one(&dir.join(name))? {
-            patterns.extend(list.patterns);
-        }
-        if patterns.len() > MAX_IGNORE_PATTERNS {
-            return Err(IgnoreError::TooManyPatterns);
+    let config = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")));
+    if let Some(config) = config {
+        append_file(&mut patterns, &config.join("git/ignore"), "")?;
+    }
+    append_file(&mut patterns, &root.join(".kit/info/exclude"), "")?;
+    let mut dirs: Vec<_> = dir.ancestors().take_while(|p| p.starts_with(root)).collect();
+    dirs.reverse();
+    for directory in dirs {
+        let prefix = directory.strip_prefix(root).unwrap_or(Path::new(""))
+            .to_string_lossy().replace('\\', "/");
+        if !prefix.is_empty() && IgnoreList::from_patterns(patterns.clone())
+            .is_ignored_with_ancestors(&prefix, true) { break; }
+        for name in [".gitignore", ".kitignore"] {
+            append_file(&mut patterns, &directory.join(name), &prefix)?;
         }
     }
     Ok(IgnoreList::from_patterns(patterns))
+}
+
+fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result<(), IgnoreError> {
+    if let Some(list) = load_one(path)? {
+        if patterns.len() + list.patterns.len() > MAX_IGNORE_PATTERNS {
+            return Err(IgnoreError::TooManyPatterns);
+        }
+        for mut pattern in list.patterns {
+            if !prefix.is_empty() {
+                let mut segments: Vec<_> = prefix.split('/').map(|s| Segment::Glob(s.chars().flat_map(|c| {
+                    if matches!(c, '*' | '?' | '[' | '\\') { vec!['\\', c] } else { vec![c] }
+                }).collect())).collect();
+                segments.append(&mut pattern.segments);
+                pattern.segments = segments;
+                pattern.basename_kind = None;
+            }
+            patterns.push(pattern);
+        }
+    }
+    Ok(())
 }
 
 /// Read and parse a single ignore file, or `None` if it is absent.
@@ -431,7 +465,7 @@ pub fn load(dir: &Path) -> Result<IgnoreList, IgnoreError> {
 fn load_one(path: &Path) -> Result<Option<IgnoreList>, IgnoreError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(None),
         Err(e) => return Err(IgnoreError::Io(e)),
     };
     if !meta.file_type().is_file() {

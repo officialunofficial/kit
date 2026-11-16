@@ -848,6 +848,11 @@ fn route_path(
     // A path that is named and ignored needs `force`. A path that is tracked
     // is never ignored.
     let already_tracked = previous_status != EntryStatus::Removed && existing_pos.is_some();
+    let local;
+    let ignores = if !force && !already_tracked {
+        local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
+        &local
+    } else { ignores };
     if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, meta.is_dir()) {
         return Err(Error::Ignored(rel_str));
     }
@@ -976,6 +981,11 @@ fn add_tree(
     seen: &mut HashSet<String>,
     pending: &mut Vec<PendingHash>,
 ) -> Result<(), Error> {
+    let local;
+    let ignores = if dir != root && !parent_ignored {
+        local = ignore::load(dir).map_err(Error::IgnoreFile)?;
+        &local
+    } else { ignores };
     let rd = std::fs::read_dir(dir).map_err(|source| Error::ReadDir {
         path: dir.to_path_buf(),
         source,
@@ -1126,6 +1136,11 @@ fn patch_one_file(
     let already_tracked = idx
         .find_entry(&rel_str)
         .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed);
+    let local;
+    let ignores = if !force && !already_tracked {
+        local = ignore::load(abs.parent().unwrap_or(root)).map_err(Error::IgnoreFile)?;
+        &local
+    } else { ignores };
     if !force && !already_tracked && ignores.is_ignored_with_ancestors(&rel_str, false) {
         return Err(Error::Ignored(rel_str));
     }
