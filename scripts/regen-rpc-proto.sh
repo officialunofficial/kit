@@ -16,18 +16,9 @@ cd "$(dirname "$0")/.."
 
 GEN_DIR=rust/crates/kit-rpc/generated
 
-KIT_RPC_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p kit-rpc
-
-# A mixed-feature build can also put transport schemas at OUT_DIR's root.
-# Reusing an OUT_DIR updates the codegen marker, not necessarily the directory
-# mtime, so select by marker timestamp and copy only the RPC schema catalog.
-out_marker=$(ls -t rust/target/debug/build/kit-rpc-*/out/.kit-rpc-codegen 2>/dev/null | head -n 1)
-out_dir="${out_marker%/.kit-rpc-codegen}"
-
-if [ -z "${out_dir}" ]; then
-    echo "error: no buffa codegen output found under rust/target/debug/build/kit-rpc-*/out" >&2
-    exit 1
-fi
+# Cargo reports the actual OUT_DIR, including configured build directories.
+out_dir=$(KIT_RPC_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p kit-rpc \
+    --message-format=json | python3 scripts/codegen-out-dir.py .kit-rpc-codegen)
 
 rm -f "$GEN_DIR"/*.rs
 mkdir -p "$GEN_DIR"

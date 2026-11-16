@@ -11,30 +11,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# $1 = human label, $2 = generated/ dir to refresh, $3 = build-dir glob for
-# the crate's build-script OUT_DIRs, $4 = codegen marker file name (each
-# consumer's build.rs writes its own; see their `cargo:rerun-if-env-changed`
-# env var). Picks the freshest OUT_DIR carrying that marker — staging-mode
-# runs fill OUT_DIR with the same file set, so the marker is what
-# distinguishes a true codegen run.
+# $1 = human label, $2 = generated directory, $3 = Cargo's OUT_DIR.
 refresh() {
-    local label="$1" gen_dir="$2" build_glob="$3" marker="$4"
-    local out="" candidate
-    # Reusing an OUT_DIR updates the marker, not necessarily its directory
-    # mtime. Select by marker mtime so an older directory with fresh codegen
-    # wins over a newer directory containing stale output.
-    # The glob expands here on purpose, so it stays unquoted.
-    # shellcheck disable=SC2086
-    for candidate in $build_glob/"$marker"; do
-        if [ -e "$candidate" ] && { [ -z "$out" ] || [ "$candidate" -nt "$out" ]; }; then
-            out="$candidate"
-        fi
-    done
-    if [ -z "${out}" ]; then
-        echo "error: no codegen output found for $label under: $build_glob" >&2
-        exit 1
-    fi
-    out="${out%/"$marker"}"
+    local label="$1" gen_dir="$2" out="$3"
     rm -f "$gen_dir"/*.rs
     mkdir -p "$gen_dir"
     # The owning crate also stages RPC schemas at OUT_DIR's root. Select
@@ -46,12 +25,12 @@ refresh() {
 }
 
 echo ">> kit-rpc transport (wasm32 target)"
-KIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p kit-rpc \
-    --features transport --target wasm32-unknown-unknown
+out_dir=$(KIT_TRANSPORT_CODEGEN=1 cargo build --manifest-path rust/Cargo.toml -p kit-rpc \
+    --features transport --target wasm32-unknown-unknown --message-format=json | \
+    python3 scripts/codegen-out-dir.py .kit-rpc-transport-codegen)
 refresh "kit-rpc transport" \
     "rust/crates/kit-rpc/generated/transport" \
-    "rust/target/wasm32-unknown-unknown/debug/build/kit-rpc-*/out" \
-    ".kit-rpc-transport-codegen"
+    "$out_dir"
 
 generated_dirs=(rust/crates/kit-rpc/generated/transport)
 # `git status --porcelain`, not only `git diff`: a new module lands untracked.
