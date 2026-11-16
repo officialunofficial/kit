@@ -1384,16 +1384,33 @@ Remote / sync:
   "old":"<hex>|null"}`, where `old` is null when the ref was already gone,
   and under `--dry-run` `{"ok":true,"dry_run":true,"remote":"...",
   "endpoint":"...","delete":"<name>"}`.
-- **Transfer progress.** `clone`/`push`/`pull`/`fetch` stream a
-  live, honest progress line on stderr while the network transfer runs &mdash;
-  `Writing objects: N objects, B bytes` while building/uploading the
-  outgoing pack, `Unpacking objects: N objects` while applying a
-  downloaded one. The counts are real (objects actually unpacked,
-  bytes actually handed to the transport); kit does not print git's
-  `Enumerating/Counting/Compressing objects` or `Total N (delta D)` lines.
-  Progress shows only when stderr is a tty; `-q`/`--quiet`
-  forces it off, and `KIT_PROGRESS=always`/`never` overrides the
-  tty-detection explicitly (mirrors `NO_COLOR`/`CLICOLOR_FORCE`).
+- **Progress.** `clone`, `push`, `pull`, `fetch`, `add`, `checkout` and `gc`
+  report completed work on stderr. Text shows the operation, counts, bytes
+  and rate. Known totals also show a percentage and ETA. Unknown totals
+  stay unknown. Stderr must be a terminal unless `KIT_PROGRESS=always`
+  forces text or `KIT_PROGRESS=json` selects newline-delimited JSON.
+  `--quiet` and `KIT_PROGRESS=never` suppress progress.
+
+  Each JSON progress record has exactly these fields:
+
+  | Field | Type | Meaning |
+  |---|---|---|
+  | `phase` | string | `download`, `closure`, `signatures`, `restore`, `push_planning`, `packing`, `unpacking`, `add`, `gc_mark` or `gc` |
+  | `done` | unsigned integer | Completed objects or files; zero for byte-only work |
+  | `total` | unsigned integer or null | Known object or file total |
+  | `bytes` | unsigned integer | Accepted download bytes, hashed input bytes, uploaded pack bytes or reclaimed gc bytes |
+  | `bytes_total` | unsigned integer or null | Declared download length, when available |
+  | `elapsed_ms` | unsigned integer | Milliseconds since this operation began |
+
+  Packing and unpacking counts accumulate across packs; their clock starts
+  with the command. Other counts describe one operation. A new pack or a
+  retry starts its byte count at zero. A changed `phase` starts its clock
+  again, as does a retry or a new pack. Download lengths describe the current attempt. Skipped packs
+  produce no download records. Progress is limited to ten updates per
+  second, plus start and final counts. An error can leave a partial count;
+  only the command's exit status indicates success. Command results and
+  warnings retain their usual output; JSON progress records start with `{`.
+
 - `kit serve [--idle-timeout-secs <secs>] [--max-session-secs <secs>] <path>` &mdash; internal SSH
   transport server. It speaks the kit-rpc SSH framing on stdin and stdout
   and has no other mode. It has no network listener. The engine is the

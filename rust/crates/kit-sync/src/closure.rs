@@ -80,7 +80,7 @@ impl Anchors {
         Ok(Self(tips))
     }
 
-    /// Whether there is no anchor, so a check walks the whole closure.
+    /// Whether no earlier closure is available.
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -99,11 +99,23 @@ impl Anchors {
 /// [`kit_core::ops::graph::MAX_REACHABLE`] objects is
 /// [`SyncError::ClosureTooLarge`], and `cancelled` turns into
 /// [`SyncError::Interrupted`].
+#[cfg(test)]
 pub(crate) fn check_above(
     store: &ObjectStore,
     tip: &Hash,
     anchors: &Anchors,
     cancelled: &dyn Fn() -> bool,
+) -> Result<usize, SyncError> {
+    check_above_observed(store, tip, anchors, cancelled, &|_| {})
+}
+
+/// A closure check with completed-object counts before each next object.
+pub(crate) fn check_above_observed(
+    store: &ObjectStore,
+    tip: &Hash,
+    anchors: &Anchors,
+    cancelled: &dyn Fn() -> bool,
+    progress: &dyn Fn(usize),
 ) -> Result<usize, SyncError> {
     let mut poll = Poll {
         reads: 0,
@@ -111,10 +123,13 @@ pub(crate) fn check_above(
     };
     let split = split(store, tip, &anchors.0, &mut poll)?;
     let covered = covered(store, &split, &mut poll)?;
+    let checked = std::cell::Cell::new(0usize);
     let known = |h: &Hash| {
+        progress(checked.get());
         if anchors.0.contains(h) || split.old.contains(h) || covered.contains(h) {
             Known::Present
         } else {
+            checked.set(checked.get() + 1);
             Known::Unknown
         }
     };

@@ -614,9 +614,15 @@ fn a_dry_run_of_a_file_of_many_chunks_stores_nothing_and_reports_what_add_stages
     f.run_with(&request, &mut NoChooser, &events).unwrap();
     assert_eq!(
         *events.0.lock().unwrap(),
-        vec![Event::WouldAdd {
-            path: "big.bin".to_owned()
-        }]
+        vec![
+            Event::HashProgress { bytes: 0 },
+            Event::HashProgress {
+                bytes: 24 * 1024 * 1024
+            },
+            Event::WouldAdd {
+                path: "big.bin".to_owned()
+            },
+        ]
     );
     assert_eq!(object_files(&f), before);
     assert!(index::read_index(&f.layout).unwrap().entries.is_empty());

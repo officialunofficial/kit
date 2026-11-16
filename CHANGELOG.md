@@ -9,6 +9,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
+- Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
+
 - Packs on disk in `kit-core`. `PackWriter::spool` builds a pack in an
   unnamed file and `finish_spool` seals it, hashing it once for both the
   trailer and the key. `PackSpool` takes a downloaded pack as it arrives and

@@ -221,6 +221,8 @@ pub trait HunkChooser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
+    /// Input bytes hashed so far, excluding object headers and manifests.
+    HashProgress { bytes: u64 },
     /// A file is binary, so it has no hunks to choose from.
     BinarySkipped {
         /// The path.
@@ -334,7 +336,19 @@ fn stage_with_limit(
     let sink: &(dyn ObjectSink + Sync) = if request.dry_run { &hash_only } else { &batch };
 
     let pending = prepare(cwd, request, &mut idx, limit)?;
-    let hashed = hash_pending_batch(&pending, sink);
+    let progress_sink = HashProgressSink {
+        blob_header_len: serialize::blob_prologue(0).map_err(Error::Serialize)?.len() as u64,
+        inner: sink,
+        observer: observer.concurrent(),
+        bytes: std::sync::atomic::AtomicU64::new(0),
+        next: std::sync::atomic::AtomicU64::new(100),
+        started: std::time::Instant::now(),
+    };
+    observer.event(&Event::HashProgress { bytes: 0 });
+    let hashed = hash_pending_batch(&pending, &progress_sink);
+    observer.event(&Event::HashProgress {
+        bytes: progress_sink.bytes.load(Ordering::Relaxed),
+    });
     for (p, outcome) in pending.into_iter().zip(hashed) {
         match outcome {
             HashOutcome::Done(file) => stage_hashed(&mut idx, p.rel_str, file),
@@ -679,6 +693,79 @@ fn hash_pending_batch(pending: &[PendingHash], sink: &(dyn ObjectSink + Sync)) -
     fanout::map_seq_or_par(pending, hash_fanout_threshold(), |p, is_par| {
         hash_one(sink, &aborted, p, !is_par)
     })
+}
+
+/// Counts only blob payloads after the sink accepted them. The byte counter
+/// and emission deadline are atomic; the hot path takes no progress lock.
+struct HashProgressSink<'a> {
+    blob_header_len: u64,
+    inner: &'a (dyn ObjectSink + Sync),
+    observer: Option<&'a (dyn Observer<Event> + Sync)>,
+    bytes: std::sync::atomic::AtomicU64,
+    next: std::sync::atomic::AtomicU64,
+    started: std::time::Instant,
+}
+
+impl HashProgressSink<'_> {
+    fn note(&self, parts: &[&[u8]]) {
+        if parts.first().and_then(|p| p.first()).copied()
+            != Some(kit_core::object::ObjectType::Blob as u8)
+        {
+            return;
+        }
+        let bytes = parts
+            .iter()
+            .map(|p| p.len() as u64)
+            .sum::<u64>()
+            .saturating_sub(self.blob_header_len);
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let next = self.next.load(Ordering::Relaxed);
+        if now >= next
+            && self
+                .next
+                .compare_exchange(
+                    next,
+                    now.saturating_add(100),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            && let Some(observer) = self.observer
+        {
+            observer.event(&Event::HashProgress {
+                bytes: self.bytes.load(Ordering::Relaxed),
+            });
+        }
+    }
+}
+
+impl ObjectSink for HashProgressSink<'_> {
+    fn put(&self, bytes: &[u8]) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put(bytes)?;
+        self.note(&[bytes]);
+        Ok(hash)
+    }
+    fn put_parts(&self, parts: &[&[u8]]) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put_parts(parts)?;
+        self.note(parts);
+        Ok(hash)
+    }
+    fn put_chunk_parts(
+        &self,
+        parts: &[&[u8]],
+        origin: kit_core::store::ChunkOrigin<'_>,
+    ) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put_chunk_parts(parts, origin)?;
+        self.note(parts);
+        Ok(hash)
+    }
+    fn has(&self, hash: &Hash) -> bool {
+        self.inner.has(hash)
+    }
+    fn checkpoint(&self) -> kit_core::store::StoreResult<()> {
+        self.inner.checkpoint()
+    }
 }
 
 /// The result of the hash of one pending file.

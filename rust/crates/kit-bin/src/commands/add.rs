@@ -72,7 +72,7 @@ impl HunkChooser for StdinChooser {
 }
 
 /// Prints the notices of `-p` on stderr and the lines of `-n` on stdout.
-struct AddNotices;
+struct AddNotices(crate::progress::Guard);
 
 /// `<verb> '<path>'`, with the C-style quoting of `ls-files` for a path with
 /// special bytes.
@@ -84,8 +84,14 @@ fn dry_run_line(verb: &str, path: &str) -> String {
 }
 
 impl Observer<Event> for AddNotices {
+    fn concurrent(&self) -> Option<&(dyn Observer<Event> + Sync)> {
+        Some(self)
+    }
     fn event(&self, event: &Event) {
         match event {
+            Event::HashProgress { bytes } => {
+                self.0.terminal().local_progress("add", 0, None, *bytes);
+            }
             Event::BinarySkipped { path } => {
                 eprintln!("{path}: binary file — skipped (use `kit add` to stage whole)");
             }
@@ -95,8 +101,14 @@ impl Observer<Event> for AddNotices {
                 selected,
                 total,
             } => eprintln!("{path}: staged {selected} of {total} hunks"),
-            Event::WouldAdd { path } => println!("{}", dry_run_line("add", path)),
-            Event::WouldRemove { path } => println!("{}", dry_run_line("remove", path)),
+            Event::WouldAdd { path } => {
+                self.0.terminal().finish();
+                println!("{}", dry_run_line("add", path));
+            }
+            Event::WouldRemove { path } => {
+                self.0.terminal().finish();
+                println!("{}", dry_run_line("remove", path));
+            }
             _ => {}
         }
     }
@@ -131,7 +143,12 @@ pub fn run(args: &[String]) -> u8 {
             },
             &mut StdinChooser,
             &crate::progress::ServedWarning,
-            &AddNotices,
+            &AddNotices(crate::progress::start(
+                "add",
+                None,
+                crate::progress::should_report(false),
+                false,
+            )),
         )
     }) {
         Ok(()) => exit::OK,

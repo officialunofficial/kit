@@ -524,15 +524,31 @@ impl ChunkIds {
 /// This function reads nothing for deletion and deletes nothing. A caller must
 /// run it to the end, every type read included, before it lists or deletes
 /// any object.
+#[cfg(test)]
 fn mark_live(
     store: &ObjectStore,
     roots: &BTreeSet<Hash>,
     limits: MarkLimits,
 ) -> Result<LiveSet, GcRootsError> {
+    mark_live_observed(store, roots, limits, &mut |_, _, _| {})
+}
+
+fn mark_live_observed(
+    store: &ObjectStore,
+    roots: &BTreeSet<Hash>,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+) -> Result<LiveSet, GcRootsError> {
+    let mut last_progress = std::time::Instant::now();
+    progress("gc_mark", 0, 0);
     let mut objects: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
     let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
     while let Some(h) = queue.pop_front() {
+        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+            progress("gc_mark", objects.len(), 0);
+            last_progress = std::time::Instant::now();
+        }
         if objects.contains(&h) {
             continue;
         }
@@ -576,6 +592,7 @@ fn mark_live(
             },
         });
     }
+    progress("gc_mark", objects.len() + chunks.len(), 0);
     Ok(LiveSet { objects, chunks })
 }
 
@@ -635,10 +652,20 @@ pub(crate) fn live_objects(
 /// [`GcRootsError::Truncated`] past [`MAX_REACHABLE`] objects,
 /// [`GcRootsError::TooManyChunks`] past [`MAX_LIVE_CHUNKS`] distinct chunks,
 /// or [`GcRootsError::ChunkNotBlob`] for a chunk of another kind.
+#[cfg(test)]
 fn live_objects_with(
     store: &ObjectStore,
     layout: &RepoLayout,
     limits: MarkLimits,
+) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
+    live_objects_observed(store, layout, limits, &mut |_, _, _| {})
+}
+
+fn live_objects_observed(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
     let (hard, soft) = collect_root_sets(layout)?;
     let mut skipped = BTreeSet::new();
@@ -655,7 +682,7 @@ fn live_objects_with(
     }
     let mut roots = hard.clone();
     roots.extend(present.iter().map(|root| root.hash));
-    let live = match mark_live(store, &roots, limits) {
+    let live = match mark_live_observed(store, &roots, limits, progress) {
         Err(GcRootsError::Store(StoreError::ObjectNotFound(_))) => {
             // An object is missing. A soft root whose closure an older gc
             // pruned in part is what this can be, so walk each alone. Only a
@@ -664,7 +691,7 @@ fn live_objects_with(
             // root reaches, as it did before.
             let mut kept = hard;
             for root in present {
-                match mark_live(store, &BTreeSet::from([root.hash]), limits) {
+                match mark_live_observed(store, &BTreeSet::from([root.hash]), limits, progress) {
                     Ok(_) => {
                         kept.insert(root.hash);
                     }
@@ -674,7 +701,7 @@ fn live_objects_with(
                     Err(error) => return Err(error),
                 }
             }
-            mark_live(store, &kept, limits)?
+            mark_live_observed(store, &kept, limits, progress)?
         }
         other => other?,
     };
@@ -757,7 +784,52 @@ fn run_gc_with_hook(
     grace_secs: u64,
     dry_run: bool,
     limits: MarkLimits,
+    before_prune: impl FnMut(&Hash),
+) -> Result<GcReport, GcRootsError> {
+    run_gc_with_progress_hook(
+        store,
+        layout,
+        now_secs,
+        grace_secs,
+        dry_run,
+        limits,
+        before_prune,
+        &mut |_, _, _| {},
+    )
+}
+
+/// Run garbage collection with completed object and reclaimed byte counts.
+#[allow(clippy::too_many_arguments)]
+pub fn run_gc_observed(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+) -> Result<GcReport, GcRootsError> {
+    run_gc_with_progress_hook(
+        store,
+        layout,
+        now_secs,
+        grace_secs,
+        dry_run,
+        MarkLimits::DEFAULT,
+        |_| {},
+        progress,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gc_with_progress_hook(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    limits: MarkLimits,
     mut before_prune: impl FnMut(&Hash),
+    progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<GcReport, GcRootsError> {
     // Refuse to delete through a symlinked store: if `.kit` or
     // `.kit/objects` is a symlink, `remove_object` would unlink the
@@ -771,7 +843,9 @@ fn run_gc_with_hook(
 
     // Compute the keep-set FIRST, to the end; if this fails we list and
     // delete nothing.
-    let (live, skipped_state_files) = live_objects_with(store, layout, limits)?;
+    let (live, skipped_state_files) = live_objects_observed(store, layout, limits, progress)?;
+    progress("gc", 0, 0);
+    let mut last_progress = std::time::Instant::now();
 
     let mut report = GcReport {
         dry_run,
@@ -781,6 +855,10 @@ fn run_gc_with_hook(
     for shard in 0..=u8::MAX {
         for h in store.list_shard(shard)? {
             report.scanned += 1;
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                progress("gc", report.scanned - 1, report.bytes_reclaimed);
+                last_progress = std::time::Instant::now();
+            }
             if live.contains(&h) {
                 report.live += 1;
                 report.live_chunks += usize::from(live.contains_chunk(&h));
@@ -812,6 +890,7 @@ fn run_gc_with_hook(
         }
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
+    progress("gc", report.scanned, report.bytes_reclaimed);
     Ok(report)
 }
 

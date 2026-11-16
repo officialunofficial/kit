@@ -280,6 +280,75 @@ pub struct RestoreReport {
     pub directories_created: u32,
 }
 
+/// Count metadata entries only, without reading file bodies.
+fn count_restore_files(
+    store: &ObjectStore,
+    tree: Hash,
+    base: Option<Hash>,
+    opts: &RestoreOptions,
+    prefix: &str,
+    depth: usize,
+) -> RestoreResult<usize> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(RestoreError::TreeTooDeep);
+    }
+    let Object::Tree(tree) = store.read_object(&tree)? else {
+        return Err(RestoreError::NotATree);
+    };
+    let base = base.and_then(|h| store.read_object(&h).ok());
+    let base = match &base {
+        Some(Object::Tree(t)) => Some(t),
+        _ => None,
+    };
+    let mut total = 0;
+    for entry in tree.entries {
+        if !TreeEntry::validate_name(&entry.name) {
+            continue;
+        }
+        let old = base.and_then(|t| {
+            t.entries
+                .binary_search_by(|e| e.name.cmp(&entry.name))
+                .ok()
+                .map(|i| &t.entries[i])
+        });
+        if old.is_some_and(|e| e.mode == entry.mode && e.object_hash == entry.object_hash) {
+            continue;
+        }
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let path = if opts.sparse_patterns.is_none() {
+            String::new()
+        } else if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.mode == EntryMode::Tree {
+            if opts
+                .sparse_patterns
+                .as_deref()
+                .is_none_or(|p| could_match_descendant(p, &path))
+            {
+                total += count_restore_files(
+                    store,
+                    entry.object_hash,
+                    old.filter(|e| e.mode == EntryMode::Tree)
+                        .map(|e| e.object_hash),
+                    opts,
+                    &path,
+                    depth + 1,
+                )?;
+            }
+        } else if opts
+            .sparse_patterns
+            .as_deref()
+            .is_none_or(|p| matches_sparse(p, &path, false))
+        {
+            total += 1;
+        }
+    }
+    Ok(total)
+}
+
 /// Materialise `tree_hash` into `root` as a working tree.
 ///
 /// Thin wrapper around [`restore_tree`] that additionally:
@@ -323,6 +392,7 @@ pub fn restore_tree_to_worktree(
         1,
         None,
         &sequential_read_chunks,
+        None,
         None,
     )
 }
@@ -439,6 +509,38 @@ pub fn restore_tree_to_worktree_observed<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        if opts.sparse_patterns.is_some() {
+            None
+        } else {
+            base_tree
+        },
+        read_chunks,
+        observed,
+        None,
+    )
+}
+
+/// Restore files and report completed files out of the selected entries.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_tree_to_worktree_progress<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: &mut dyn FnMut(usize, usize),
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
     let base = if opts.sparse_patterns.is_some() {
         None
     } else {
@@ -453,6 +555,7 @@ where
         base,
         read_chunks,
         observed,
+        Some(progress),
     )
 }
 
@@ -471,6 +574,7 @@ fn restore_tree_to_worktree_impl<F>(
     base_tree: Option<Hash>,
     read_chunks: &F,
     observed: Option<&mut Vec<worktree::StatObservation>>,
+    mut progress: Option<&mut dyn FnMut(usize, usize)>,
 ) -> RestoreResult<RestoreReport>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -487,9 +591,23 @@ where
         skipped_subtrees(store, *tree, base, root, "", 0, &mut skipped)?;
         check_unswept(store, skipped, &ignore_list)?;
     }
-    check_nested_repositories(store, *tree, root, opts, base_tree)?;
+    let mut total = 0;
+    check_nested_repositories_inner(
+        store,
+        *tree,
+        root,
+        opts,
+        base_tree,
+        "",
+        0,
+        progress.is_some().then_some(&mut total),
+    )?;
     fs::create_dir_all(root)?;
+    if let Some(callback) = progress.as_mut() {
+        callback(0, total);
+    }
     let mut report = RestoreReport::default();
+    let mut last_progress = std::time::Instant::now();
     restore_tree_to_worktree_inner(
         store,
         *tree,
@@ -503,7 +621,16 @@ where
         base_tree,
         read_chunks,
         observed,
+        &mut progress,
+        total,
+        &mut last_progress,
     )?;
+    if let Some(callback) = progress.as_mut() {
+        callback(
+            (report.files_written + report.symlinks_written) as usize,
+            total,
+        );
+    }
     Ok(report)
 }
 
@@ -521,6 +648,9 @@ fn restore_tree_to_worktree_inner<F>(
     base_tree: Option<Hash>,
     read_chunks: &F,
     mut observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: &mut Option<&mut dyn FnMut(usize, usize)>,
+    total: usize,
+    last_progress: &mut std::time::Instant,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -628,6 +758,9 @@ where
                         .map(|b| b.object_hash),
                     read_chunks,
                     observed.as_deref_mut(),
+                    progress,
+                    total,
+                    last_progress,
                 )?;
             }
             EntryMode::Symlink => {
@@ -642,6 +775,15 @@ where
                 )?;
                 report.symlinks_written += 1;
             }
+        }
+        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+            if let Some(callback) = progress.as_mut() {
+                callback(
+                    (report.files_written + report.symlinks_written) as usize,
+                    total,
+                );
+            }
+            *last_progress = std::time::Instant::now();
         }
     }
     Ok(())
@@ -687,9 +829,10 @@ pub fn check_nested_repositories(
     options: &RestoreOptions,
     base: Option<Hash>,
 ) -> RestoreResult<()> {
-    check_nested_repositories_inner(store, tree, root, options, base, "", 0)
+    check_nested_repositories_inner(store, tree, root, options, base, "", 0, None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_nested_repositories_inner(
     store: &ObjectStore,
     tree: Hash,
@@ -698,6 +841,7 @@ fn check_nested_repositories_inner(
     base: Option<Hash>,
     prefix: &str,
     depth: usize,
+    mut count: Option<&mut usize>,
 ) -> RestoreResult<()> {
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -742,10 +886,25 @@ fn check_nested_repositories_inner(
         }) {
             continue;
         }
+        if !is_tree && let Some(count) = count.as_deref_mut() {
+            *count += 1;
+        }
         let target = dir.join(name);
         // A non-directory ancestor is replaced by the restore. Its descendants
         // do not exist yet; following a symlink here would inspect another tree.
         if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+            if is_tree && let Some(count) = count.as_deref_mut() {
+                *count += count_restore_files(
+                    store,
+                    entry.object_hash,
+                    base_entry
+                        .filter(|e| e.mode == EntryMode::Tree)
+                        .map(|e| e.object_hash),
+                    options,
+                    &path,
+                    depth + 1,
+                )?;
+            }
             continue;
         }
         if is_tree {
@@ -769,6 +928,7 @@ fn check_nested_repositories_inner(
                     .map(|e| e.object_hash),
                 &path,
                 depth + 1,
+                count.as_deref_mut(),
             )?;
         } else if let Some(entry) = nested_repository(&target)? {
             return Err(RestoreError::NestedRepository(name_path(&path, &entry)));
@@ -1930,6 +2090,56 @@ mod tests {
     fn put_tree_with(store: &ObjectStore, entries: Vec<TreeEntry>) -> Hash {
         let bytes = serialize::serialize(&Object::Tree(Tree { entries })).unwrap();
         store.write(&bytes).unwrap()
+    }
+
+    #[test]
+    fn restore_progress_counts_only_selected_files_and_finishes_at_total() {
+        let (_dir, store) = fresh_store();
+        let blob = put_blob(&store, b"data");
+        let subtree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"a".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            }],
+        );
+        let tree = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"nested".to_vec(),
+                mode: EntryMode::Tree,
+                object_hash: subtree,
+            }],
+        );
+        let target = tempfile::tempdir().unwrap();
+        let mut events = Vec::new();
+        restore_tree_to_worktree_progress(
+            &store,
+            &tree,
+            None,
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+            None,
+            &mut |done, total| events.push((done, total)),
+        )
+        .unwrap();
+        assert_eq!(events.first(), Some(&(0, 1)));
+        assert_eq!(events.last(), Some(&(1, 1)));
+        events.clear();
+        restore_tree_to_worktree_progress(
+            &store,
+            &tree,
+            Some(tree),
+            target.path(),
+            &RestoreOptions::default(),
+            &sequential_read_chunks,
+            None,
+            &mut |done, total| events.push((done, total)),
+        )
+        .unwrap();
+        assert!(events.iter().all(|e| *e == (0, 0)));
     }
 
     #[test]
