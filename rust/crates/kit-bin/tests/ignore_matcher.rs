@@ -633,3 +633,15 @@ fn add_refuses_unrepresentable_native_paths_instead_of_aliasing_them() {
         assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn add_refuses_non_utf8_native_paths_instead_of_staging_replacements() {
+    use std::os::unix::ffi::OsStringExt;
+    let (td, xdg) = repo();
+    let (root, x) = (td.path(), xdg.path());
+    let name = std::ffi::OsString::from_vec(vec![0xff]);
+    fs::write(root.join(name), "private").unwrap();
+    assert!(!run_in(root, x, &["add", "."]).status.success());
+    assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
+}
