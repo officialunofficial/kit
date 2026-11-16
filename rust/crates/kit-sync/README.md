@@ -436,9 +436,10 @@ other coding is refused, and an inflated body is bounded by the same response
 limit as a plain one), refuses cleartext `http` to any host but loopback unless
 `allow_insecure_http(true)`, never follows a redirect (a signed request must not be
 replayed to another origin), bounds every response while receiving it, and
-bounds metadata requests by 30 seconds and `UploadPack`, `UploadPart` and
-`DownloadPack` by 300 seconds, including receipt of the response body. These
-defaults replace the previous ten-minute bound. Use `with_metadata_timeout` and
+bounds metadata requests by 30 seconds, including receipt of the response body.
+`UploadPack`, `UploadPart` and `DownloadPack` have no total bound of their own:
+they fail once 60 seconds pass with no data moving either way, so a slow link
+that keeps moving finishes a pack of any size. Use `with_metadata_timeout` and
 `with_transfer_timeout` to tune them independently, or `with_timeout` to set both.
 Supplied `user-agent` and gzip/identity-compatible `accept-encoding` values are
 preserved. Negotiation naming another coding (including wildcards or a coding

@@ -31,6 +31,22 @@ fn dir(layout: &RepoLayout) -> PathBuf {
     layout.applied_packs_dir().join(".verified")
 }
 
+/// Drop every record. A history walk then stops at no recorded tip.
+///
+/// # Errors
+/// The records cannot be removed.
+pub(crate) fn forget_all(layout: &RepoLayout) -> std::io::Result<()> {
+    remove_dir_if_present(&dir(layout))
+}
+
+/// Remove `path` and everything under it; a missing one is already removed.
+pub(crate) fn remove_dir_if_present(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// The record of `branch` of `remote`. Length prefixes keep two different
 /// pairs from naming one file.
 pub(crate) fn path(layout: &RepoLayout, remote: &str, branch: &str) -> PathBuf {

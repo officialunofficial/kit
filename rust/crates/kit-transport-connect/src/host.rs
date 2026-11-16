@@ -5,8 +5,8 @@ use crate::{
 };
 use http::HeaderMap;
 use kit_client::{
-    Clock, RefTarget, RequestContext, RequestHeaders, RequestPolicy, Signer,
-    UnsignedRequestContext, Veto,
+    Clock, FailureDiagnostic, FailureKind, RefTarget, RequestContext, RequestHeaders,
+    RequestPolicy, Signer, UnsignedRequestContext, Veto,
 };
 use kit_core::hash::Hash;
 use kit_core::protocol::{AdvanceOutcome, BackoffIterator, CommitOutcome, TransportError};
@@ -101,6 +101,10 @@ pub(crate) struct HostPolicy<'a> {
     deadline: Cell<i64>,
     base_deadline: Cell<i64>,
     attempt_deadline: Cell<Option<Instant>>,
+    /// The channel's text for the current attempt's stall, if it stalled.
+    /// The client reports a stall as a transient failure, which is retried
+    /// like a lost connection; the text is kept so the last one is shown.
+    stalled: RefCell<Option<String>>,
     saved: Cell<(u64, u32, u32)>,
 }
 impl<'a> HostPolicy<'a> {
@@ -119,6 +123,7 @@ impl<'a> HostPolicy<'a> {
             deadline: Cell::new((host.now)().saturating_add(7 * 24 * 60 * 60 * 1000)),
             base_deadline: Cell::new((host.now)().saturating_add(7 * 24 * 60 * 60 * 1000)),
             attempt_deadline: Cell::new(None),
+            stalled: RefCell::new(None),
             saved: Cell::new((0, 0, 0)),
         }
     }
@@ -168,8 +173,17 @@ impl<'a> HostPolicy<'a> {
         }
         headers
     }
+    /// Whether `error` is the transient failure the channel reports for a
+    /// stall, so [`Self::map_failure`] names the stall.
+    pub(crate) fn stalled_out(&self, error: &SourceError) -> bool {
+        matches!(error, SourceError::ServerError { status: 503 }) && self.stalled.borrow().is_some()
+    }
     pub(crate) fn map_failure(&self, error: SourceError) -> TransportError {
-        if matches!(error, SourceError::Deadline) && self.attempt_expired() {
+        if matches!(error, SourceError::ServerError { status: 503 })
+            && let Some(cause) = self.stalled.take()
+        {
+            TransportError::RemoteError(cause)
+        } else if matches!(error, SourceError::Deadline) && self.attempt_expired() {
             TransportError::RemoteError("client-side deadline exceeded".into())
         } else if matches!(error, SourceError::Deadline) && self.saw_pending.get() {
             TransportError::RemoteError("pending verification ticket deadline expired".into())
@@ -227,6 +241,8 @@ impl<'a> HostPolicy<'a> {
         }
         Ok(())
     }
+    /// A transfer has no time limit of its own beyond the operation's: the
+    /// channel ends one that moves no data for its stall bound.
     fn attempt_budget(&self, procedure: &str) -> Duration {
         if matches!(
             procedure,
@@ -234,7 +250,7 @@ impl<'a> HostPolicy<'a> {
                 | kit_client::procedures::UPLOAD_PART
                 | "/kit.transport.v1.TransportService/DownloadPack"
         ) {
-            self.host.pack_transfer_timeout
+            self.remaining()
         } else {
             self.host.unary_timeout
         }
@@ -295,6 +311,12 @@ impl<'a> HostPolicy<'a> {
     }
 }
 impl RequestPolicy for HostPolicy<'_> {
+    fn map_failure(&self, failure: &FailureDiagnostic<'_>) -> Option<kit_client::Error> {
+        if failure.kind == FailureKind::Stalled {
+            self.stalled.replace(Some(failure.cause.to_owned()));
+        }
+        None
+    }
     fn request_timeout(&self, procedure: &str) -> Option<Duration> {
         if self.attempt_deadline.get().is_none() {
             self.begin_attempt(procedure);
@@ -383,6 +405,7 @@ impl RequestPolicy for HostPolicy<'_> {
 }
 impl WriteRecovery for HostPolicy<'_> {
     fn before_attempt(&self, procedure: &str, deadline: Option<i64>) -> Result<(), SourceError> {
+        self.stalled.replace(None);
         self.begin_attempt(procedure);
         self.deadline
             .set(deadline.map_or(self.base_deadline.get(), |deadline| {
@@ -427,6 +450,7 @@ impl WriteRecovery for HostPolicy<'_> {
     }
     fn before_call(&self, procedure: &str) -> Result<(), SourceError> {
         self.attempt_deadline.set(None);
+        self.stalled.replace(None);
         self.deadline.set(self.base_deadline.get());
         self.check_deadline()?;
         self.saw_pending.set(false);
@@ -733,7 +757,7 @@ pub(crate) struct HostSource<'a>(
 );
 impl HostSource<'_> {
     fn failure(&self, error: SourceError, upload: bool) -> SourceError {
-        if matches!(error, SourceError::Deadline) {
+        if matches!(error, SourceError::Deadline) || self.1.stalled_out(&error) {
             self.1.map_failure(error).into()
         } else {
             map_source(error, upload).into()

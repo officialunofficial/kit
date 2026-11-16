@@ -93,11 +93,22 @@ pub fn run(args: &[String]) -> u8 {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),
     };
-    if target.exists() {
-        return emit_err(
+    // An existing destination is refused unless it is a clone of the same
+    // remote that stopped before it made a branch, a tag or HEAD:
+    // `init_clone_dir` returns that one, and the pull below resumes it. A
+    // `.kit` that is a symlink is not a clone this command made.
+    let existed = target.exists();
+    let already_exists = || {
+        emit_err(
             &format!("destination '{}' already exists", target.display()),
             exit::CANTCREAT,
-        );
+        )
+    };
+    if existed
+        && !std::fs::symlink_metadata(target.join(kit_core::store::KIT_DIR))
+            .is_ok_and(|meta| meta.is_dir())
+    {
+        return already_exists();
     }
     // git prints this before doing any work; match the shape. Honest
     // per-object transfer progress streams on stderr during the
@@ -105,7 +116,7 @@ pub fn run(args: &[String]) -> u8 {
     // end — kit does not print git's
     // Enumerating/Counting/Compressing/`Total N (delta D)` lines (see
     // docs/CLI.md).
-    {
+    if !existed {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "Cloning into '{}'...", target.display());
     }
@@ -120,8 +131,17 @@ pub fn run(args: &[String]) -> u8 {
     // consistently with what `.kit/config` records.
     let target_layout = match kit_sync::init_clone_dir(&target, &remote) {
         Ok(layout) => layout,
+        Err(kit_sync::CloneInitError::AlreadyInitialized) if existed => return already_exists(),
         Err(e) => return emit_err(&e.to_string(), clone_init_exit_code(&e)),
     };
+    if existed {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "Resuming the unfinished clone in '{}'...",
+            target.display()
+        );
+    }
 
     // Clone establishes trust for a brand-new endpoint, so it
     // bypasses `open_trusted`'s credential gate — but it must still thread
@@ -137,7 +157,8 @@ pub fn run(args: &[String]) -> u8 {
     // Fail closed by default: verify unless `--no-verify-signatures`
     // or the user-scoped `pull.require_signed = false` config opted out.
     // `merged` only ever carries user-scoped + built-in values here (the
-    // repo config we just wrote holds only `remote_endpoint`/`remote_type`),
+    // repo config holds only `remote_endpoint`/`remote_type`: this clone
+    // wrote it, or, on a resume, it is byte for byte the one it would write),
     // so a hostile remote cannot influence this via its own repo config —
     // there isn't one yet.
     let require_signed = !opts.no_verify_signatures && merged.pull_require_signed_or_default();

@@ -63,6 +63,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `add` refuses an index above its byte limit before hashing files or writing
   objects; the error names the limit and file count.
+- A pack transfer over Connect or S3 fails after 60 s with no data moving,
+  not after a total time (300 s over Connect), and is retried like a lost
+  connection; a slow link that keeps moving now finishes a large pack.
+  `kit-client` reports such a stall as `FailureKind::Stalled`.
+- `kit clone` into an unfinished clone of the same remote resumes it,
+  keeping the packs it already has and checking everything again; any other
+  existing destination is still refused. `kit_sync::init_clone_dir` returns
+  such a clone where it returned `AlreadyInitialized`.
 - A fetch checks the closure of a new tip only down to the tracking tips an
   earlier fetch that verified signatures checked, the tips it published
   itself, and their history, so a fetch of one commit reads what that commit
@@ -102,9 +110,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in one sized `PUT`, and writes a `200` answer's body to the sink as it
   arrives (§6.7). A retry reads the body again from offset 0. A body over
   `PACK_BODY_LIMIT` is refused with `PayloadTooLarge` before it is read;
-  S3 used to answer `ServerError { status: 413 }`. An S3 pack `PUT` gets
-  60 s plus one second per MiB of the pack to send it and get its answer,
-  in place of 60 s. A push and a fetch of a pack of about 1 GiB each hold
+  S3 used to answer `ServerError { status: 413 }`. A push and a fetch of a pack of about 1 GiB each hold
   under 96 MiB of heap over ssh and S3 as well.
 - Connect streams packs both ways. In `kit-client`, `upload_pack` and
   `upload_part` take a `&dyn PackBody` and read it as they send: a part

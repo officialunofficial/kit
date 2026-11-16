@@ -36,6 +36,14 @@ pub struct CursorRecord {
     pub tag_digest: Hash,
 }
 
+/// Drop every record. A fetch then reads the remote in full.
+///
+/// # Errors
+/// The records cannot be removed.
+pub(crate) fn forget_all(layout: &RepoLayout) -> std::io::Result<()> {
+    crate::anchor::remove_dir_if_present(&layout.applied_packs_dir().join(".cursors"))
+}
+
 /// The record file of `remote`, keyed like a fetch checkpoint so that a
 /// remote renamed to another repository never reuses it.
 pub(crate) fn path(layout: &RepoLayout, source: &dyn RemoteSource, remote: &str) -> PathBuf {

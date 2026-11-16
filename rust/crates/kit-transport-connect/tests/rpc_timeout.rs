@@ -1,23 +1,26 @@
 //! Integration test for: per-verb-class client timeouts.
 //!
 //! `ConnectTransport` applies a short `UNARY_TIMEOUT` to cheap unary RPCs
-//! (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`) and a much
-//! longer `PACK_TRANSFER_TIMEOUT` to the pack-transfer RPCs
+//! (`ListRefs`/`ReadRef`/`UpdateRef`/`AdvanceRefs`/`PackExists`) and a stall
+//! bound, `PACK_TRANSFER_TIMEOUT`, to the pack-transfer RPCs
 //! (`UploadPack`/`DownloadPack`) — independently configurable via
-//! `with_unary_timeout`/`with_pack_transfer_timeout`.
+//! `with_unary_timeout`/`with_pack_transfer_timeout`. A transfer that keeps
+//! moving data runs past its stall bound; one that stops is retried on the
+//! connection ladder and then fails with the stall's text.
 //!
 //! This drives a real (in-process) Connect server, per
 //! SPEC-TRANSPORT-CONNECT's testing-decisions bar (mirrors
 //! `tests/roundtrip.rs`'s "a real server, not a mock standing in for one").
 //! Both the `ListRefs` and `DownloadPack` handlers are deliberately slow by
 //! the same fixed delay; the test asserts a short `unary_timeout` fails the
-//! `ListRefs` call fast (nowhere near the 300s budget) while a
+//! `ListRefs` call fast while a
 //! *longer* `pack_transfer_timeout` on the very same client instance lets
 //! the equally-slow `DownloadPack` call succeed — proving the two timeout
 //! classes are wired independently rather than sharing one client-wide
 //! deadline.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -27,10 +30,22 @@ use kit_core::protocol::{PackKey, Transport, TransportError};
 use kit_transport_connect::{ConnectTransport, generated};
 
 /// Deliberately slow `TransportService`: `list_refs` and `download_pack`
-/// each sleep for `delay` before responding. No other verb is exercised by
-/// this test; their bodies are trivial stand-ins that satisfy the trait.
+/// each sleep for `delay` before responding. `download_pack` then sends
+/// `chunks` chunks of [`CHUNK`] bytes of `7`, `gap` apart, and counts its
+/// calls. No other verb is exercised by this test; their bodies are trivial
+/// stand-ins that satisfy the trait.
 struct SlowService {
     delay: Duration,
+    chunks: u64,
+    gap: Duration,
+    downloads: Arc<AtomicUsize>,
+}
+
+const CHUNK: u64 = 1024;
+
+/// The pack a [`SlowService`] serves.
+fn pack(chunks: u64) -> Vec<u8> {
+    vec![7; usize::try_from(chunks * CHUNK).expect("test pack size")]
 }
 
 #[allow(refining_impl_trait)]
@@ -150,36 +165,48 @@ impl generated::TransportService for SlowService {
         _ctx: RequestContext,
         request: ServiceRequest<'_, generated::DownloadPackRequest>,
     ) -> ServiceResult<ServiceStream<generated::DownloadPackResponse>> {
+        self.downloads.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         let msg = request.to_owned_message();
         let pack_id = msg.pack_id.unwrap_or_default();
-        let data = b"slow-pack-payload".to_vec();
-        #[allow(clippy::cast_possible_truncation)]
-        let total_bytes = data.len() as u64;
+        let (chunks, gap) = (self.chunks, self.gap);
         let header = generated::DownloadPackResponse {
             body: Some(
                 generated::DownloadPackHeader {
-                    total_bytes: Some(total_bytes),
+                    total_bytes: Some(chunks * CHUNK),
                     ..Default::default()
                 }
                 .into(),
             ),
             ..Default::default()
         };
-        let chunk = generated::DownloadPackResponse {
-            body: Some(
-                generated::PackChunk {
-                    pack_id: Some(pack_id),
-                    offset: Some(0),
-                    data: Some(data),
-                    last: Some(true),
-                    ..Default::default()
+        let body = futures::stream::unfold(0, move |index| {
+            let pack_id = pack_id.clone();
+            async move {
+                if index == chunks {
+                    return None;
                 }
-                .into(),
-            ),
-            ..Default::default()
-        };
-        Response::stream_ok(futures::stream::iter([Ok(header), Ok(chunk)]))
+                tokio::time::sleep(gap).await;
+                let chunk = generated::DownloadPackResponse {
+                    body: Some(
+                        generated::PackChunk {
+                            pack_id: Some(pack_id),
+                            offset: Some(index * CHUNK),
+                            data: Some(pack(1)),
+                            last: Some(index + 1 == chunks),
+                            ..Default::default()
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                };
+                Some((Ok(chunk), index + 1))
+            }
+        });
+        Response::stream_ok(futures::StreamExt::chain(
+            futures::stream::iter([Ok(header)]),
+            body,
+        ))
     }
 
     async fn get_authority_generation(
@@ -241,12 +268,11 @@ impl generated::TransportService for SlowService {
     }
 }
 
-/// Bind a real Connect server on an ephemeral loopback port, whose
-/// `ListRefs`/`DownloadPack` handlers each sleep `delay` before responding.
-/// Returns the port, a shutdown trigger, and the server thread's join
-/// handle — mirrors `tests/roundtrip.rs::spawn_server`.
+/// Bind a real Connect server on an ephemeral loopback port that runs
+/// `service`. Returns the port, a shutdown trigger, and the server thread's
+/// join handle — mirrors `tests/roundtrip.rs::spawn_server`.
 fn spawn_slow_server(
-    delay: Duration,
+    service: SlowService,
 ) -> (
     u16,
     tokio::sync::oneshot::Sender<()>,
@@ -271,7 +297,7 @@ fn spawn_slow_server(
                 .port();
             addr_tx.send(port).expect("send bound port to test thread");
 
-            let service = Arc::new(SlowService { delay });
+            let service = Arc::new(service);
             let router = Router::new().add_service(service);
 
             bound
@@ -296,7 +322,12 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     let short_unary_timeout = Duration::from_millis(50);
     let ample_pack_transfer_timeout = Duration::from_secs(5);
 
-    let (port, shutdown, handle) = spawn_slow_server(handler_delay);
+    let (port, shutdown, handle) = spawn_slow_server(SlowService {
+        delay: handler_delay,
+        chunks: 1,
+        gap: Duration::ZERO,
+        downloads: Arc::default(),
+    });
     let uri: http::Uri = format!("http://127.0.0.1:{port}")
         .parse()
         .expect("valid loopback URI");
@@ -312,7 +343,7 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     let elapsed = start.elapsed();
     assert!(
         elapsed < Duration::from_secs(2),
-        "unary_timeout must fire well before the 300s default \
+        "unary_timeout must fire well before the transfer bound \
          (and before the handler's own 300ms delay would have finished \
          naturally is irrelevant — 50ms must win): took {elapsed:?}"
     );
@@ -322,13 +353,13 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
     );
 
     // -- pack-transfer call: same slow handler, must still succeed ------
-    let key = PackKey::new(kit_core::hash::hash(b"slow-pack-payload"));
+    let key = PackKey::new(kit_core::hash::hash(&pack(1)));
     let start = Instant::now();
     let bytes = client
         .download_blob(&key, None, u64::MAX)
         .expect("a DownloadPack call within pack_transfer_timeout must succeed");
     let elapsed = start.elapsed();
-    assert_eq!(bytes, b"slow-pack-payload".to_vec());
+    assert_eq!(bytes, pack(1));
     assert!(
         elapsed >= handler_delay,
         "sanity check: the handler's delay must actually have been waited out, took {elapsed:?}"
@@ -338,6 +369,109 @@ fn unary_timeout_fires_fast_while_pack_transfer_timeout_covers_the_same_delay() 
         "must succeed comfortably inside the pack-transfer budget, took {elapsed:?}"
     );
 
+    let _ = shutdown.send(());
+    handle.join().expect("server thread joins cleanly");
+}
+
+fn two_retries() -> kit_core::protocol::BackoffIterator {
+    kit_core::protocol::BackoffIterator::with(Duration::ZERO, Duration::ZERO, 2)
+}
+
+fn no_sleep(_: Duration) {}
+
+#[test]
+fn a_slow_download_that_keeps_moving_outlives_the_stall_bound() {
+    // Fourteen chunks 250 ms apart take 3.5 s in all, past the 3 s bound.
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let (port, shutdown, handle) = spawn_slow_server(SlowService {
+        delay: Duration::ZERO,
+        chunks: 14,
+        gap: Duration::from_millis(250),
+        downloads: Arc::clone(&downloads),
+    });
+    let uri: http::Uri = format!("http://127.0.0.1:{port}")
+        .parse()
+        .expect("valid loopback URI");
+    let client = ConnectTransport::connect_for_test_with_retry(uri, two_retries, no_sleep)
+        .with_pack_transfer_timeout(Duration::from_secs(3));
+    let key = PackKey::new(kit_core::hash::hash(&pack(14)));
+    let start = Instant::now();
+    let bytes = client
+        .download_blob(&key, None, u64::MAX)
+        .expect("a download that keeps moving must not stall");
+    assert_eq!(bytes, pack(14));
+    assert!(start.elapsed() >= Duration::from_millis(3500));
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "no attempt stalled");
+    let _ = shutdown.send(());
+    handle.join().expect("server thread joins cleanly");
+}
+
+#[test]
+fn a_stalled_download_is_retried_then_fails_naming_the_stall() {
+    // The header arrives, then nothing for 8 s on every attempt.
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let (port, shutdown, handle) = spawn_slow_server(SlowService {
+        delay: Duration::ZERO,
+        chunks: 1,
+        gap: Duration::from_secs(8),
+        downloads: Arc::clone(&downloads),
+    });
+    let uri: http::Uri = format!("http://127.0.0.1:{port}")
+        .parse()
+        .expect("valid loopback URI");
+    let client = ConnectTransport::connect_for_test_with_retry(uri, two_retries, no_sleep)
+        .with_pack_transfer_timeout(Duration::from_millis(300));
+    let key = PackKey::new(kit_core::hash::hash(&pack(1)));
+    let start = Instant::now();
+    let error = client
+        .download_blob(&key, None, u64::MAX)
+        .expect_err("a download that stops must fail");
+    assert_eq!(
+        error.to_string(),
+        "remote error: transfer stalled: no data for 300 ms"
+    );
+    assert_eq!(
+        downloads.load(Ordering::SeqCst),
+        3,
+        "the first attempt and two retries"
+    );
+    assert!(start.elapsed() < Duration::from_secs(6));
+    let _ = shutdown.send(());
+    handle.join().expect("server thread joins cleanly");
+}
+
+#[test]
+fn a_stalled_download_through_a_source_fails_naming_the_stall() {
+    // The source the sync commands use reports the stall, not a server
+    // error, once the retries are spent.
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let (port, shutdown, handle) = spawn_slow_server(SlowService {
+        delay: Duration::ZERO,
+        chunks: 1,
+        gap: Duration::from_secs(8),
+        downloads: Arc::clone(&downloads),
+    });
+    let uri: http::Uri = format!("http://127.0.0.1:{port}")
+        .parse()
+        .expect("valid loopback URI");
+    let client = ConnectTransport::connect_for_test_with_retry(uri, two_retries, no_sleep)
+        .with_pack_transfer_timeout(Duration::from_millis(300));
+    let key = PackKey::new(kit_core::hash::hash(&pack(1)));
+    let error = client
+        .with_source(|source| source.download_blob(&key, "refs/heads/main"))
+        .expect("the source opens")
+        .expect_err("a download that stops must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("transfer stalled: no data for 300 ms"),
+        "{error}"
+    );
+    assert_eq!(
+        downloads.load(Ordering::SeqCst),
+        3,
+        "the first attempt and two retries"
+    );
     let _ = shutdown.send(());
     handle.join().expect("server thread joins cleanly");
 }
