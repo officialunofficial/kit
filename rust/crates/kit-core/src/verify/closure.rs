@@ -1512,6 +1512,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(corrupt_ids(&report), vec![parent.0], "{report:?}");
+        assert_eq!(report.verified, 5, "a late conflict does not undo a visit");
     }
 
     fn remix_over(tree_hash: Hash) -> (Hash, Vec<u8>) {
