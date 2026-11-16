@@ -51,6 +51,8 @@ struct FetchOpts {
     prune: bool,
     #[command(flatten)]
     tags: super::fetched_tags::TagFlags,
+    #[command(flatten)]
+    attestations: super::fetched_tags::AttestationFlags,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","updated":[{"name":"...",
     /// "old":"<hex>|null","new":"<hex>"}]}`, plus `"pruned":["..."]` with
@@ -172,6 +174,7 @@ fn fetch_one(
                             require_signed,
                             opts.prune,
                             opts.tags.fetch_tags(),
+                        opts.attestations.settings(&cfg.merged, endpoint),
                             progress.terminal(),
                         )
                     })

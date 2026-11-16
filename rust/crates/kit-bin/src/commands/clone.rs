@@ -62,6 +62,8 @@ struct CloneOpts {
     no_verify_signatures: bool,
     #[command(flatten)]
     tags: super::fetched_tags::TagFlags,
+    #[command(flatten)]
+    attestations: super::fetched_tags::AttestationFlags,
     /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -184,6 +186,7 @@ pub fn run(args: &[String]) -> u8 {
                         opts.branch.as_deref(),
                         require_signed,
                         opts.tags.fetch_tags(),
+                        opts.attestations.settings(&merged, url),
                         progress.terminal(),
                     )
                 })

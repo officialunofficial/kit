@@ -43,6 +43,14 @@ use crate::verify::{VerifiedHistory, verify_history_signatures};
 pub struct FetchReport {
     /// Branches whose remote-tracking ref was published.
     pub branches_fetched: usize,
+    /// Envelopes saved after validating their pack and local subject.
+    pub attestations_stored: usize,
+    /// Envelopes discarded because their subjects are absent locally.
+    pub attestations_dropped: usize,
+    /// Invalid attestation packs rejected without failing code fetch.
+    pub attestations_rejected: usize,
+    /// Attestation failures, displayed as warnings by command-line callers.
+    pub attestation_warnings: Vec<String>,
     /// Branches skipped because the listing was stale (deleted since).
     pub branches_skipped: Vec<String>,
     /// Remote-tracking refs deleted because the remote no longer has the
@@ -482,6 +490,9 @@ fn fetch_objects_inner(
         report.remote_unchanged = true;
         return Ok(());
     }
+    // A failed full attempt must not leave a previous no-op proof usable.
+    let _ = std::fs::remove_file(&cursor_path);
+    let snapshot = crate::fetch_attestations::snapshot(source, options, report);
     let mut remote_refs = source
         .list_branches()
         .map_err(|error| source.repository_error(error))?;
@@ -679,7 +690,10 @@ fn fetch_objects_inner(
         }
         .run()?;
     }
-    if report.tags_incomplete() {
+    let attestation_complete = crate::fetch_attestations::run(
+        store, layout, source, observer, remote, options, lock_wait, snapshot, report,
+    );
+    if !attestation_complete || report.tags_incomplete() {
         // A refused tag is tried and reported again by the next fetch.
         return Ok(());
     }
@@ -704,6 +718,8 @@ fn fetch_objects_inner(
                 signed: require_signed,
                 tags: options.tags,
                 tag_digest,
+                attestations: options.attestations,
+                attestmap_head: snapshot.flatten(),
             };
             let _ = record.persist(&cursor_path);
         }
@@ -791,6 +807,15 @@ fn remote_unchanged(
     let Some(record) = crate::cursor::CursorRecord::load(path) else {
         return Ok(false);
     };
+    if options.refetch_attestations || record.attestations != options.attestations {
+        return Ok(false);
+    }
+    if options.attestations && source.supports_attestations() {
+        let path = crate::attestation_records::path(layout, source, remote, &options.remote_url, false);
+        if crate::fetch_attestations::load_record(&path).head != record.attestmap_head {
+            return Ok(false);
+        }
+    }
     if record.cursor != *cursor || (require_signed && !record.signed) || record.tags != options.tags
     {
         return Ok(false);

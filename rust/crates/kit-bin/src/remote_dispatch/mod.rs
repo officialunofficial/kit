@@ -484,14 +484,18 @@ pub(crate) fn pull_all_with_source(
     target_branch: Option<&str>,
     require_signed: bool,
     tags: bool,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let options = kit_sync::SyncOptions::default()
+    let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
         .with_verify_signatures(require_signed)
         .with_tags(tags)
         .with_sync_policy(sync_policy(&layout));
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    options.remote_url = attestations.2.to_owned();
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
@@ -504,14 +508,18 @@ pub(crate) fn fetch_all_with_source(
     require_signed: bool,
     prune: bool,
     tags: bool,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::FetchReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let options = kit_sync::SyncOptions::default()
+    let mut options = kit_sync::SyncOptions::default()
         .with_verify_signatures(require_signed)
         .with_prune(prune)
         .with_tags(tags)
         .with_sync_policy(sync_policy(&layout));
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    options.remote_url = attestations.2.to_owned();
     Ok(kit_sync::fetch(cwd, source, remote, &options, terminal)?)
 }
 

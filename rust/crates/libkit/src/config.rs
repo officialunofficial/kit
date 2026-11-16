@@ -202,6 +202,8 @@ pub struct Config {
     /// that protects the clone against exactly that repo (see
     /// [`REPO_FORBIDDEN_KEYS`]).
     pub pull_require_signed: String,
+    /// Fetch portable attestations unless explicitly disabled.
+    pub fetch_attestations: String,
     /// `[key]` section. User-scoped keystore selectors.
     pub key: KeyConfig,
     /// `[attest]` section. Separate struct so new attest knobs don't
@@ -790,6 +792,10 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
         "signer" => {
             expect_one_of(key, val, &["file", "keystore"])?;
             val.clone_into(&mut cfg.signer);
+        }
+        "fetch.attestations" => {
+            expect_one_of(key, val, &["true", "false"])?;
+            val.clone_into(&mut cfg.fetch_attestations);
         }
         "pull.require_signed" => {
             expect_one_of(

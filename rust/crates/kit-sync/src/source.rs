@@ -359,7 +359,9 @@ impl RemoteSource for TransportSource<'_> {
             .download_blob(
                 key,
                 Some(ref_hint),
-                kit_core::transfer::MAX_PACKLIST_NODE_BYTES,
+                if ref_hint == kit_core::refs::ATTESTMAP_REF {
+                    crate::attestation_records::NODE_BOUND
+                } else { kit_core::transfer::MAX_PACKLIST_NODE_BYTES },
             )
             .map_err(SourceError::from)
     }

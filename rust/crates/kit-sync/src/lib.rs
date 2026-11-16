@@ -42,6 +42,7 @@ mod error;
 #[doc(hidden)]
 pub mod fanout;
 mod fetch;
+mod fetch_attestations;
 mod lock;
 #[cfg(feature = "connect-native")]
 mod native;
@@ -121,6 +122,12 @@ pub struct SyncOptions {
     /// local tag is never moved: a remote tag of the same name with another
     /// value is refused.
     pub tags: bool,
+    /// Fetch portable attestations after code publication. Enabled by default.
+    pub attestations: bool,
+    /// Clear the remote attestation checkpoint and retry dropped envelopes.
+    pub refetch_attestations: bool,
+    /// Exact configured remote URL, used only to key disposable records.
+    pub remote_url: String,
 }
 
 impl SyncOptions {
@@ -176,6 +183,9 @@ impl Default for SyncOptions {
             prune: false,
             lock_wait: None,
             tags: true,
+            attestations: true,
+            refetch_attestations: false,
+            remote_url: String::new(),
         }
     }
 }
