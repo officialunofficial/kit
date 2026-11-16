@@ -2013,7 +2013,7 @@ fn clean_directory(
     }
     let mut to_delete: Vec<CleanItem> = Vec::new();
     let local = ignore
-        .map(|_| ignore::load(target_dir))
+        .map(|inherited| inherited.load_directory(target_dir))
         .transpose()
         .map_err(|e| RestoreError::Io(io::Error::other(e)))?;
     let ignore = local.as_ref();
