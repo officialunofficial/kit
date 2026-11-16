@@ -229,6 +229,8 @@ message UpdateRefRequest {
   bytes new_id = 4;                  // 32-byte BLAKE3 digest to write
   // Delete the ref under its CAS precondition (SPEC-TRANSPORT-CONNECT §7.8).
   bool delete = 5;
+  // Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.1).
+  repeated bytes ticket_ids = 6;
 }
 
 message UpdateRefResponse {
@@ -405,6 +407,8 @@ message GetServerInfoResponse {
   // (SPEC-TRANSPORT-CONNECT §2.1, §4). Absent means seven; a client treats a
   // value below two as absent and a value above 1,024 as 1,024.
   uint32 max_tickets_per_advance = 22;
+  // Ticketed attestmap writes and reads (STC §4.1); absent means unsupported.
+  bool supports_attestations = 23;
 }
 
 // ----------------------------------------------------------------------------

@@ -273,7 +273,7 @@ impl<'a> HostPolicy<'a> {
     }
     fn observe_intent(&self, intent: Option<kit_client::WriteIntent<'_>>) {
         if let Some(intent) = intent
-            && intent.procedure == kit_client::procedures::ADVANCE_REFS
+            && matches!(intent.procedure, kit_client::procedures::ADVANCE_REFS | kit_client::procedures::UPDATE_REF)
         {
             self.advance_ticketed.set(intent.ticketed);
         }
@@ -765,6 +765,11 @@ impl HostSource<'_> {
     }
 }
 impl RemoteSource for HostSource<'_> {
+    fn supports_attestations(&self) -> bool { self.0.supports_attestations() }
+    fn write_attestmap(&self, condition: kit_core::refs::RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+        self.0.write_attestmap(condition, tip, keys)
+    }
+
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
         self.0.list_branches().map_err(|e| self.failure(e, false))
     }

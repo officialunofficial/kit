@@ -657,6 +657,25 @@ impl<T: HttpTransport, S: Signer, C: Clock, O: Observer, P: RequestPolicy + ?Siz
         reply(calls::update_ref(&self.rpc(), name, expected, Some(new_id), identity).await)
     }
 
+    /// Consume upload reservations atomically with an attestmap CAS.
+    /// The caller checks the session capability before uploads. The server
+    /// decides whether the pack set needs append or force permission.
+    pub async fn write_attestmap(
+        &self,
+        expected: RefWriteCondition,
+        new_id: Hash,
+        tickets: &[Hash],
+        identity: Option<&Identity>,
+    ) -> Result<Reply<crate::proto::UpdateRefResponse>, Error> {
+        self.require_write_auth()?;
+        if matches!(expected, RefWriteCondition::Any) || tickets.len() > 1024
+            || tickets.iter().collect::<std::collections::HashSet<_>>().len() != tickets.len() {
+            return Err(Error::Invalid("attestmap CAS or reservation count"));
+        }
+        reply(calls::update_ref_committing(&self.rpc(), kit_core::refs::ATTESTMAP_REF,
+            expected, Some(new_id), tickets, identity).await)
+    }
+
     /// `UpdateRef` with `delete`, under the same precondition rules.
     ///
     /// # Errors

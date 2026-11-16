@@ -416,12 +416,12 @@ impl<
                         renewed_after_unauthenticated = true;
                         continue;
                     }
-                    if procedure == "AdvanceRefs"
+                    if matches!(procedure, "AdvanceRefs" | "UpdateRef")
                         && matches!(mapped, SourceError::PendingVerification { .. })
                     {
                         saw_pending = true;
                         renewed_after_unauthenticated = false;
-                    } else if procedure == "AdvanceRefs"
+                    } else if matches!(procedure, "AdvanceRefs" | "UpdateRef")
                         && ticketed
                         && matches!(mapped, SourceError::MembershipNotVisible)
                     {
@@ -434,7 +434,7 @@ impl<
                         return Err(mapped);
                     };
                     definitive = matches!(mapped, SourceError::AdmissionRequired { .. })
-                        || (procedure == "AdvanceRefs"
+                        || (matches!(procedure, "AdvanceRefs" | "UpdateRef")
                             && (matches!(mapped, SourceError::PendingVerification { .. })
                                 || (ticketed
                                     && matches!(mapped, SourceError::MembershipNotVisible))));
@@ -844,6 +844,28 @@ impl<
             })?;
         }
         Ok(())
+    }
+
+    pub(super) fn write_attestmap_committing(&self, condition: RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), SourceError> {
+        use kit_core::refs::ATTESTMAP_REF;
+        if !self.client.supports_writes() || !self.server_info().is_some_and(|info| info.supports_attestations == Some(true)) || matches!(condition, RefWriteCondition::Any) {
+            return Err(SourceError::ProtocolError);
+        }
+        let selected = keys.iter().filter_map(|key| self.write_state().tickets.borrow()
+            .get(&(ATTESTMAP_REF.to_owned(), *key)).cloned().map(|ticket| (*key, ticket))).collect::<Vec<_>>();
+        let ids = selected.iter().map(|(_, t)| t.id.as_deref().unwrap_or_default().try_into().map_err(|_| SourceError::InvalidResponse)).collect::<Result<Vec<Hash>, _>>()?;
+        if ids.len() > self.server_info().as_ref().map_or(DEFAULT_TICKETS_PER_ADVANCE, advance_ticket_limit) as usize || ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+            return Err(SourceError::ProtocolError);
+        }
+        let deadline = selected.iter().filter_map(|(_, t)| t.expires_unix_ms).min();
+        let result = self.write_call("UpdateRef", !ids.is_empty(), deadline, |identity| {
+            self.executor.block_on(self.client.write_attestmap(condition, *tip, &ids, identity))
+        });
+        match result {
+            Ok(_) => { self.forget_committed_tickets(ATTESTMAP_REF, selected); Ok(()) },
+            Err(e) if remote_is(&e, "failed_precondition") => Err(SourceError::RefConflict),
+            Err(e) => Err(e),
+        }
     }
 
     pub(super) fn write_update_ref(

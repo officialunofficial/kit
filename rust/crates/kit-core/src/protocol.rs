@@ -764,6 +764,15 @@ impl fmt::Debug for RepoCursor {
 }
 
 pub trait Transport: Send + Sync {
+    /// Whether the remote supports the attestation log. Unknown sources refuse.
+    fn supports_attestations(&self) -> bool { false }
+
+    /// Publish the attestation log and consume its uploaded pack and node keys.
+    fn write_attestmap(&self, condition: RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> TransportResult<()> {
+        let _ = (condition, tip, keys);
+        Err(TransportError::ProtocolError)
+    }
+
     /// Repository identity and origin used for remote error context, if available.
     /// Existing transports carry no addressing context by default.
     fn repository_address(&self) -> Option<RepositoryAddress<'_>> {
