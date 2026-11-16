@@ -1480,6 +1480,13 @@ pub fn ref_wire_decode_one_iteration(input: &[u8]) {
             Some(h)
         );
     }
+    if let Some(head) = kit_core::refs::fuzz_parse_previous_head(input) {
+        let wire = match head {
+            kit_core::refs::Head::Branch(branch) => format!("ref: refs/heads/{branch}\n"),
+            kit_core::refs::Head::Detached(h) => format!("{}\n", kit_core::to_hex(&h)),
+        };
+        assert_eq!(wire.as_bytes(), input);
+    }
     let state = kit_core::ops::pull_state::PullState {
         target: kit_core::hash::hash(input),
         before_tree: kit_core::hash::hash(&input[..input.len() / 2]),
@@ -3200,7 +3207,14 @@ mod tests {
     fn unit_ref_wire_decode() {
         run_iterated_unit(ref_wire_decode_one_iteration).unwrap();
         let valid = "ab".repeat(32) + "\n";
-        for case in [&b""[..], b"\n", valid.as_bytes(), &[b'A'; 64][..]] {
+        for case in [
+            &b""[..],
+            b"\n",
+            valid.as_bytes(),
+            &[b'A'; 64][..],
+            b"ref: refs/heads/main\n",
+            b"ref: refs/heads/../../bad\n",
+        ] {
             run_one(case, ref_wire_decode_one_iteration).unwrap();
         }
     }

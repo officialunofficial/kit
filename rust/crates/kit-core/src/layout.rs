@@ -57,6 +57,7 @@
 //! | `upload-parts/`          | common   | CLI remote dispatch (resumable receipt cache, never a gc root) |
 //! | `git/`                   | common   | `kit-git-bridge`       |
 //! | `sparse/`                | common   | CLI sparse witness cache |
+//! | `PREVIOUS_HEAD`          | worktree | [`crate::refs`]         |
 //! | `HEAD`                   | worktree | [`crate::refs`]         |
 //! | `PULL_HEAD`              | worktree | `kit-sync`              |
 //! | `index`                  | worktree | [`crate::index`]        |

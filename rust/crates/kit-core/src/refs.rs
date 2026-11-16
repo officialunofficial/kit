@@ -610,6 +610,62 @@ pub fn read_head(layout: &RepoLayout) -> RefResult<Head> {
     Err(RefError::InvalidHead)
 }
 
+/// Read the previous HEAD saved by checkout in this worktree.
+/// Missing state returns `NoHead`; unreadable or malformed state is an error.
+pub fn read_previous_head(layout: &RepoLayout) -> RefResult<Head> {
+    let raw = bounded_read::read_capped(
+        &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
+        HEAD_MAX_BYTES,
+    )
+    .map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            RefError::NoHead
+        } else {
+            RefError::Io(e)
+        }
+    })?;
+    parse_previous_head(&raw)
+}
+
+fn parse_previous_head(raw: &[u8]) -> RefResult<Head> {
+    let text = core::str::from_utf8(raw).map_err(|_| RefError::InvalidHead)?;
+    if let Some(branch) = text
+        .strip_prefix(HEAD_REF_PREFIX)
+        .and_then(|s| s.strip_suffix('\n'))
+    {
+        if validate_ref_name(branch) {
+            return Ok(Head::Branch(branch.to_owned()));
+        }
+    } else if let Some(h) = text
+        .strip_suffix('\n')
+        .and_then(|s| parse_lowercase_hash(s.as_bytes()))
+    {
+        return Ok(Head::Detached(h));
+    }
+    Err(RefError::InvalidHead)
+}
+
+/// Exercise the previous HEAD byte parser without filesystem I/O.
+#[cfg(feature = "fuzzing")]
+#[must_use]
+pub fn fuzz_parse_previous_head(raw: &[u8]) -> Option<Head> {
+    parse_previous_head(raw).ok()
+}
+
+/// Atomically save one previous HEAD. The caller holds the worktree lock.
+pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
+    let body = match head {
+        Head::Branch(branch) => format!("{HEAD_REF_PREFIX}{branch}\n"),
+        Head::Detached(h) => format!("{}\n", crate::hash::to_hex(h)),
+    };
+    write_atomic(
+        &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
+        body.as_bytes(),
+        false,
+    )?;
+    Ok(())
+}
+
 /// Write `HEAD` as a symbolic ref pointing at `branch`.
 ///
 /// # Errors

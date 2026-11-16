@@ -280,6 +280,12 @@ fn collect_tree_roots(
         add(state.before_tree, roots);
     }
 
+    match refs::read_previous_head(tree) {
+        Ok(refs::Head::Detached(h)) => add(h, roots),
+        Ok(refs::Head::Branch(_)) | Err(refs::RefError::NoHead) => {}
+        Err(e) => return Err(e.into()),
+    }
+
     // ORIG_HEAD (written by reset and by the in-progress ops below).
     if let Some(h) = read_optional_hash(&tree.orig_head_file())? {
         add(h, roots);
@@ -1193,6 +1199,23 @@ mod tests {
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&orig), "ORIG_HEAD must be a root");
         assert!(roots.contains(&att), "attested commit must be a root");
+    }
+
+    #[test]
+    fn invalid_previous_head_refuses_collection_instead_of_dropping_a_root() {
+        let (d, _s) = repo();
+        let md = layout(&d);
+        fs::write(md.worktree_state_dir().join("PREVIOUS_HEAD"), b"invalid").unwrap();
+        assert!(collect_roots(&md).is_err());
+    }
+
+    #[test]
+    fn previous_detached_head_is_a_gc_root() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (prev, _) = commit_one(&s, b"prev", b"prev", vec![]);
+        refs::write_previous_head(&md, &refs::Head::Detached(prev)).unwrap();
+        assert!(collect_roots(&md).unwrap().contains(&prev));
     }
 
     #[test]
