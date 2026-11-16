@@ -57,6 +57,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `add` refuses an index above its byte limit before hashing files or writing
+  objects; the error names the limit and file count.
 - A fetch checks the closure of a new tip only down to the tracking tips an
   earlier fetch that verified signatures checked, the tips it published
   itself, and their history, so a fetch of one commit reads what that commit
