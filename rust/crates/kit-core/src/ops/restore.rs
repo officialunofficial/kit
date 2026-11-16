@@ -4119,6 +4119,47 @@ mod tests {
     }
 
     #[test]
+    fn clean_restore_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let empty = put_tree_with(&store, Vec::new());
+        restore_tree_to_worktree(&store, &empty, &out, &RestoreOptions::default()).unwrap();
+        assert_eq!(fs::read_to_string(out.join("secret.env")).unwrap(), "private");
+    }
+
+    #[test]
+    fn snapshot_uses_its_supplied_root_inside_another_repository() {
+        let (repo, store) = fresh_store();
+        let out = repo.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join(".gitignore"), "*.env\n").unwrap();
+        fs::write(out.join("secret.env"), "private").unwrap();
+        let hash = crate::worktree::build_tree(&store, &out).unwrap();
+        let Object::Tree(tree) = store.read_object(&hash).unwrap() else { panic!("not a tree") };
+        assert!(!tree.entries.iter().any(|e| e.name == b"secret.env"));
+    }
+
+    #[test]
+    fn non_clean_restores_do_not_read_nested_ignore_files() {
+        let (_repo, store) = fresh_store();
+        let target = TempDir::new().unwrap();
+        fs::create_dir(target.path().join("sub")).unwrap();
+        fs::write(target.path().join("sub/.gitignore"), vec![b'a'; 1024 * 1024 + 1]).unwrap();
+        let sub = put_tree_with(&store, vec![TreeEntry {
+            name: b"tracked".to_vec(), mode: EntryMode::Blob, object_hash: put_blob(&store, b"target"),
+        }]);
+        let tree = put_tree_with(&store, vec![TreeEntry {
+            name: b"sub".to_vec(), mode: EntryMode::Tree, object_hash: sub,
+        }]);
+        let opts = RestoreOptions { clean: false, ..RestoreOptions::default() };
+        restore_tree_to_worktree(&store, &tree, target.path(), &opts).unwrap();
+        assert_eq!(fs::read(target.path().join("sub/tracked")).unwrap(), b"target");
+    }
+
+    #[test]
     fn clean_restore_keeps_files_ignored_before_ancestor_rules_change() {
         let (_d, store) = fresh_store();
         let target = TempDir::new().unwrap();
