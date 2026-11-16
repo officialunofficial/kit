@@ -482,7 +482,11 @@ fn append_file(patterns: &mut Vec<Pattern>, path: &Path, prefix: &str) -> Result
     append_patterns(patterns, load_one(path, false)?, prefix)
 }
 
-fn append_patterns(patterns: &mut Vec<Pattern>, list: Option<IgnoreList>, prefix: &str) -> Result<(), IgnoreError> {
+fn append_patterns(
+    patterns: &mut Vec<Pattern>,
+    list: Option<IgnoreList>,
+    prefix: &str,
+) -> Result<(), IgnoreError> {
     if let Some(list) = list {
         if patterns.len() + list.patterns.len() > MAX_IGNORE_PATTERNS {
             return Err(IgnoreError::TooManyPatterns);
@@ -521,7 +525,11 @@ fn append_patterns(patterns: &mut Vec<Pattern>, list: Option<IgnoreList>, prefix
 /// error: `/dev/zero` reports length 0 and would never end. The read
 /// itself is capped, so a file that grows after the check stays bounded.
 fn load_one(path: &Path, follow: bool) -> Result<Option<IgnoreList>, IgnoreError> {
-    let meta = match if follow { fs::metadata(path) } else { fs::symlink_metadata(path) } {
+    let meta = match if follow {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    } {
         Ok(m) => m,
         Err(e)
             if matches!(
