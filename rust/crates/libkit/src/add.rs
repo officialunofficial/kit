@@ -963,7 +963,8 @@ fn stage_hashed(idx: &mut Index, rel_str: String, hashed: HashedFile) {
 // Keep native filename characters inside each component. Only native
 // separators become index separators; lossy conversion would alias files.
 fn path_text(path: &Path) -> Result<String, Error> {
-    let components = path.components()
+    let components = path
+        .components()
         .map(|component| component.as_os_str().to_str())
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| Error::InvalidPath(path.display().to_string()))?;
@@ -1330,7 +1331,10 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         assert_eq!(path_text(Path::new(r"a\b/file")).unwrap(), r"a\b/file");
         let invalid = std::ffi::OsString::from_vec(vec![0xff]);
-        assert!(matches!(path_text(Path::new(&invalid)), Err(Error::InvalidPath(_))));
+        assert!(matches!(
+            path_text(Path::new(&invalid)),
+            Err(Error::InvalidPath(_))
+        ));
     }
 
     struct NoChooser;

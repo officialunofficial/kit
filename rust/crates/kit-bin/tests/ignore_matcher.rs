@@ -617,7 +617,11 @@ fn add_matches_native_backslashes_before_index_path_validation() {
     assert!(run_in(root, x, &["add", "."]).status.success());
     let tracked = out_str(&run_in(root, x, &["ls-files"]));
     assert_eq!(tracked, ".gitignore");
-    assert!(!run_in(root, x, &["add", r"a\b/secret.env"]).status.success());
+    assert!(
+        !run_in(root, x, &["add", r"a\b/secret.env"])
+            .status
+            .success()
+    );
     assert_eq!(out_str(&run_in(root, x, &["ls-files"])), ".gitignore");
 }
 
@@ -628,7 +632,11 @@ fn add_refuses_unrepresentable_native_paths_instead_of_aliasing_them() {
     let (root, x) = (td.path(), xdg.path());
     fs::create_dir(root.join(r"a\b")).unwrap();
     fs::write(root.join(r"a\b/file"), "private").unwrap();
-    for args in [&["add", "."][..], &["add", r"a\b/file"], &["add", "-n", "."]] {
+    for args in [
+        &["add", "."][..],
+        &["add", r"a\b/file"],
+        &["add", "-n", "."],
+    ] {
         assert!(!run_in(root, x, args).status.success(), "{args:?}");
         assert!(out_str(&run_in(root, x, &["ls-files"])).is_empty());
     }
