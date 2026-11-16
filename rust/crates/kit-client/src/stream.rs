@@ -323,7 +323,7 @@ impl<S: FrameSink> Decoder<S> {
                         limit: Some(limit),
                     })
                 });
-                return Err(mapped.unwrap_or(Error::Limit("Connect frame")));
+                return Err(mapped.unwrap_or(Error::Transport(cause)));
             }
             if !matches!(self.header[0], 0 | 2) {
                 return Err(Error::Invalid("Connect frame flags/order"));
@@ -578,6 +578,15 @@ mod tests {
     use super::*;
     use crate::connect::{frame, framed};
 
+    #[test]
+    fn oversized_frame_error_names_size_and_limit() {
+        let mut decoder = Decoder::new(Frames::default(), 16);
+        let error = decoder.chunk(b"\0\0\0\0\x20").unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("size 32 exceeds limit 16"), "{text}");
+        assert_eq!(decoder.payload.capacity(), 0);
+    }
+
     #[derive(Default)]
     struct Frames(Vec<Vec<u8>>);
     impl FrameSink for Frames {
@@ -701,7 +710,7 @@ mod tests {
         let mut decoder = Decoder::new(Frames::default(), 16);
         assert!(matches!(
             decoder.chunk(b"\0\0\0\0\x20"),
-            Err(Error::Limit("Connect frame"))
+            Err(Error::Transport(_))
         ));
     }
 
@@ -821,7 +830,7 @@ mod tests {
         let over = u32::try_from(DOWNLOAD_FRAME_MAX + 1).unwrap().to_be_bytes();
         assert!(matches!(
             decoder.chunk(&[0, over[0], over[1], over[2], over[3]]),
-            Err(Error::Limit("Connect frame"))
+            Err(Error::Transport(_))
         ));
         assert_eq!(decoder.payload.capacity(), 0);
     }

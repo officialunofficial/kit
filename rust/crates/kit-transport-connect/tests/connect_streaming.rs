@@ -85,7 +85,10 @@ fn a_download_frame_over_4_mib_is_refused() {
     server.set_one_frame(true);
     let work = target(dir.path(), "refused");
     match fetch_from(&server, &work, &RetryAll::default()) {
-        Err(SyncError::Source(SourceError::InvalidResponse)) => {}
+        Err(SyncError::Source(SourceError::RemoteError(message))) => {
+            assert!(message.contains("Connect frame size"), "{message}");
+            assert!(message.contains("exceeds limit 4194304"), "{message}");
+        }
         other => panic!("expected the frame to be refused, got {other:?}"),
     }
 
