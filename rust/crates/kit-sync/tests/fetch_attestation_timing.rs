@@ -16,7 +16,7 @@ fn empty_attestation_log_has_bounded_fetch_cost() {
     let mut writer = kit_core::pack::PackWriter::new_raw_only();
     let mut put = |object: Object| -> Hash {
         let raw = kit_core::serialize::serialize(&object).unwrap();
-        let id = hash(&raw);
+        let id = object.id().unwrap();
         writer.push_raw(id, &raw).unwrap();
         id
     };
