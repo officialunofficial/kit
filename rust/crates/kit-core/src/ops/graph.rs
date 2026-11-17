@@ -879,12 +879,25 @@ mod tests {
     #[test]
     fn check_closure_present_above_polls_stop() {
         let (_d, s) = store();
-        let mut tip = None;
-        for i in 0..(STOP_POLL_OBJECTS / 3 + 2) {
-            let tree = make_single_file_tree(&s, b"f", format!("{i}").as_bytes());
-            tip = Some(make_commit(&s, tree, tip.as_slice(), &format!("c{i}")));
-        }
-        let tip = tip.unwrap();
+        // The poll depends on object count, not history depth. Publish the
+        // blobs together so fixture setup needs one batch of file barriers.
+        let batch = s.batch();
+        let entries = (0..STOP_POLL_OBJECTS)
+            .map(|i| {
+                let bytes = serialize::serialize(&Object::Blob(Blob {
+                    data: i.to_le_bytes().to_vec(),
+                }))
+                .unwrap();
+                TreeEntry {
+                    name: format!("f{i:05}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: batch.write(&bytes).unwrap(),
+                }
+            })
+            .collect();
+        batch.commit().unwrap();
+        let tree = put_tree(&s, entries);
+        let tip = make_commit(&s, tree, &[], "root");
         let unknown = |_: &Hash| Known::Unknown;
         assert_eq!(
             check_closure_present_above(&s, &tip, &unknown, usize::MAX, &|| true).unwrap(),

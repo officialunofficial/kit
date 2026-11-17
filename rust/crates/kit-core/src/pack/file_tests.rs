@@ -108,10 +108,14 @@ fn tree(blob: Hash) -> Object {
 fn assert_readers_agree(pack: &[u8], seed: &[Vec<u8>], shape: WindowShape) {
     let (slice_dir, slice_store) = fresh_store();
     let (file_dir, file_store) = fresh_store();
+    let slice_seed = slice_store.batch();
+    let file_seed = file_store.batch();
     for bytes in seed {
-        slice_store.write(bytes).unwrap();
-        file_store.write(bytes).unwrap();
+        slice_seed.write(bytes).unwrap();
+        file_seed.write(bytes).unwrap();
     }
+    slice_seed.commit().unwrap();
+    file_seed.commit().unwrap();
     let spool_dir = TempDir::new().unwrap();
     let from_slice = PackReader::read(pack, &slice_store);
     let pack_file = verified(pack, spool_dir.path());
@@ -267,7 +271,9 @@ proptest! {
     /// any shape.
     #[test]
     fn random_packs_unpack_the_same_from_a_slice_and_a_file(
-        entries in prop::collection::vec(gen_entry(), 0..80),
+        // A few windows cover the same entry shapes without thousands of
+        // durable object writes per generated case.
+        entries in prop::collection::vec(gen_entry(), 0..24),
         window_entries in 1usize..9,
         window_bytes in 1u64..4096,
     ) {

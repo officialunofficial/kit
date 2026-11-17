@@ -147,9 +147,11 @@ impl LoadedBlob {
                     if data.len() >= max_len {
                         break;
                     }
-                    data.extend_from_slice(&read_chunk_at(store, manifest, index)?);
+                    let chunk = read_chunk_at(store, manifest, index)?;
+                    // Copy only the bytes the prefix needs, within `cap`.
+                    let take = chunk.len().min(max_len - data.len());
+                    data.extend_from_slice(&chunk[..take]);
                 }
-                data.truncate(max_len);
                 Ok(Cow::Owned(data))
             }
         }
@@ -167,8 +169,9 @@ impl LoadedBlob {
     ///   manifest's `total_size`. The read stops at the first chunk that
     ///   takes the running length past `total_size`.
     /// - [`WorktreeError::ContentTooLarge`] if the manifest's `total_size`
-    ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), before any
-    ///   chunk is read.
+    ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), or the output
+    ///   buffer of `total_size` bytes cannot be reserved, before any chunk
+    ///   is read.
     pub fn into_content<S: crate::store::ObjectSource + ?Sized>(
         self,
         store: &S,
@@ -181,7 +184,14 @@ impl LoadedBlob {
                         size: manifest.total_size(),
                     });
                 }
+                // `total_size` is capped above, and the output must hold it
+                // all, so a failed reservation is a blob too large to load.
+                let size = manifest.total_size();
                 let mut data = Vec::new();
+                usize::try_from(size)
+                    .ok()
+                    .and_then(|n| data.try_reserve_exact(n).ok())
+                    .ok_or(WorktreeError::ContentTooLarge { size })?;
                 Self::Chunked(manifest).write_content(store, &mut data)?;
                 Ok(data)
             }
@@ -1453,5 +1463,24 @@ mod equality_tests {
         let manifest =
             crate::object::testing::spread(7, 0, vec![chunk(&store, b"abcdefg")]).unwrap();
         assert_eq!(LoadedBlob::Chunked(manifest).len(), 7);
+    }
+
+    /// A prefix is exactly the leading `max_len` content bytes, whether it
+    /// ends inside the first chunk, on a chunk boundary, inside a later
+    /// chunk, or past the end of the content.
+    #[test]
+    fn a_chunked_prefix_is_exactly_the_leading_bytes() {
+        let (_dir, store) = fresh_store();
+        let parts: [&[u8]; 3] = [&[1; 300], &[2; 200], &[3; 100]];
+        let content = parts.concat();
+        let blob = LoadedBlob::Chunked(manifest(&store, &parts));
+        for max_len in [0, 1, 299, 300, 301, 450, 500, 599, 600, 601, 10_000] {
+            let prefix = blob.prefix(&store, max_len).unwrap();
+            assert_eq!(
+                prefix.as_ref(),
+                &content[..max_len.min(content.len())],
+                "max_len {max_len}"
+            );
+        }
     }
 }

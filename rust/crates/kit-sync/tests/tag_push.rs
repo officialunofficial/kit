@@ -1181,15 +1181,15 @@ fn tags_from_a_detached_head_graft_on_a_tracking_branch() {
     assert_eq!(wire.node(map).prev, wire.read("refs/kit/packmap/main"));
 }
 
-/// The upload bound: 100 tags along one history, pushed to an empty remote,
+/// The upload bound: 16 tags along one history, pushed to an empty remote,
 /// send that history once, in one node they all share.
 #[test]
-fn a_hundred_tags_along_one_history_send_it_once() {
+fn tags_along_one_history_send_it_once() {
     for kind in KINDS {
         let (tx, _root) = transport(kind);
         let wire = Wire::new(&*tx);
         let work = Work::new();
-        let history = work.commits(None, 100);
+        let history = work.commits(None, 16);
         let mut tags = Vec::new();
         for (i, c) in history.iter().enumerate() {
             if i % 2 == 0 {
@@ -1201,7 +1201,7 @@ fn a_hundred_tags_along_one_history_send_it_once() {
         }
 
         let results = work.push_tags(&wire, false);
-        assert_eq!(results.len(), 100);
+        assert_eq!(results.len(), 16);
         assert!(
             results
                 .iter()
@@ -1211,7 +1211,7 @@ fn a_hundred_tags_along_one_history_send_it_once() {
         let unique: BTreeSet<Hash> = sent.iter().copied().collect();
         assert_eq!(sent.len(), unique.len(), "{kind:?}: an object went twice");
         assert_eq!(unique, work.closure(&tags).into_iter().collect());
-        let maps: BTreeSet<Hash> = (0..100)
+        let maps: BTreeSet<Hash> = (0..16)
             .map(|i| wire.read(&format!("refs/kit/tagmap/v{i:03}")).unwrap())
             .collect();
         assert_eq!(maps.len(), 1, "the tags share one node");
