@@ -64,8 +64,9 @@ fn publish(layout: &RepoLayout, store: &ObjectStore, tx: &PushContext<'_>, optio
     let max = tx.upload_limits().max_pack_bytes.unwrap_or(PACK_BODY_LIMIT).min(PACK_BODY_LIMIT);
     let mut batch = Batch::new(max);
     let mut added = Vec::new();
-    for (_, path) in &pending {
+    for (expected, path) in &pending {
         let bytes = kit_core::bounded_read::read_capped(path, kit_attest::store::MAX_ENVELOPE_SIZE as u64)?;
+        if hash::hash(&bytes) != *expected { return Err("candidate changed during push".into()); }
         // Recheck provenance after reading: a concurrent fetch must never promote bytes.
         if std::fs::symlink_metadata(attestation_records::fetched_path(layout, &hash::hash(&bytes))).is_ok() {
             return Err("candidate was recorded as fetched; retry push".into());
@@ -95,7 +96,7 @@ fn publish(layout: &RepoLayout, store: &ObjectStore, tx: &PushContext<'_>, optio
         let bytes = transfer::encode_packlist(prev, &listed)?;
         let key = PackKey::from_hash(hash::hash(&bytes));
         tx.upload_blob(&bytes, &key, ATTESTMAP_REF)?;
-        let keys: Vec<_> = listed.into_iter().map(PackKey::from_hash).chain(std::iter::once(key.clone())).collect();
+        let keys: Vec<_> = listed.into_iter().map(PackKey::from_hash).chain(std::iter::once(key)).collect();
         match tx.write_attestmap(prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match), &key.0, &keys) {
             Ok(()) => {
                 report.attestations_pushed = pending.len();
@@ -104,6 +105,7 @@ fn publish(layout: &RepoLayout, store: &ObjectStore, tx: &PushContext<'_>, optio
                 return Ok(());
             }
             Err(SourceError::RefConflict) => (),
+            Err(SourceError::AccessDenied) if compact => return Err("attestation compaction requires f permission; skipped".into()),
             Err(error) => return Err(error.into()),
         }
     }

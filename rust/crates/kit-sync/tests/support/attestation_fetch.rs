@@ -131,6 +131,7 @@ mod attestation_fetch {
                 .attestations_stored,
             0
         );
+        push_up_to_date(tx, &dir, &layout, tip);
         // A malformed pack is recorded once; the next fetch does not reject it again.
         append(tx, &hostile_claim());
         let report = kit_sync::pull(&dir, &source, "origin", &options, &NoopObserver).unwrap();
@@ -155,6 +156,36 @@ mod attestation_fetch {
         );
         assert!(!store.contains(&tip));
         assert!(path.exists());
+    }
+    fn push_up_to_date(tx: &dyn Transport, dir: &std::path::Path, layout: &RepoLayout, tip: Hash) {
+        let source = TransportSource::new(tx);
+        let mut opts = kit_sync::PushOptions::default();
+        opts.remote_name = "origin";
+        opts.target = kit_sync::PushTarget::Branch { local: "main".into(), remote: "main".into(), lease: kit_sync::PushLease::FastForward };
+        opts.attestations = true;
+        let before = tx.read_ref(ATTESTMAP_REF).unwrap();
+        let fetched = kit_sync::push(dir, &source, &opts).unwrap();
+        assert_eq!(fetched.attestations_pushed, 0);
+        assert_eq!(tx.read_ref(ATTESTMAP_REF).unwrap(), before);
+        let mut env = kit_attest::envelope::decode(&envelope(tip)).unwrap();
+        env.payload = String::from_utf8(env.payload).unwrap().replace("example.com/test/v1", "example.com/local/v1").into_bytes();
+        let bytes = env.encode().unwrap().into_bytes();
+        kit_attest::store::save(layout, &tip, &bytes).unwrap();
+        let report = kit_sync::push(dir, &source, &opts).unwrap();
+        assert_eq!(report.steps, 0);
+        assert_eq!(report.attestations_pushed, 1);
+        assert_eq!(report.attestation_warnings.len(), 1);
+        assert!(report.attestation_warnings[0].contains("permanent"));
+        let report = kit_sync::push(dir, &source, &opts).unwrap();
+        assert_eq!(report.attestations_pushed, 0);
+        assert!(report.attestation_warnings.is_empty());
+        let cache = kit_sync::attestation_records::path(layout, &source, "origin", "", true);
+        std::fs::remove_file(cache).unwrap();
+        assert_eq!(kit_sync::push(dir, &source, &opts).unwrap().attestations_pushed, 1);
+        let temp = tempfile::tempdir().unwrap();
+        let descriptor = CloneRemote { name: "origin".into(), url: "kit+memory://second".into(), kind: "memory".into() };
+        kit_sync::clone(temp.path(), &source, &descriptor, &SyncOptions::default(), &NoopObserver).unwrap();
+        assert_eq!(std::fs::read(kit_attest::store::envelope_path(&RepoLayout::single(temp.path()), &tip, &hash(&bytes))).unwrap(), bytes);
     }
     fn envelope_for_absent() -> Vec<u8> {
         envelope([42; 32])

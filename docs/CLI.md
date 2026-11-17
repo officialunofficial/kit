@@ -2279,3 +2279,9 @@ and renaming, and tag deletion suggest existing names. Push suggests a remote,
 then a local branch. Fetch and pull suggest a remote; those commands accept
 no branch argument.
 Completion reads local metadata only and stays silent outside a repository.
+
+Push publishes locally authored envelopes only with `--attestations` or
+`push.attestations = true`. It also publishes when code is up to date.
+Fetched envelopes never publish again. Attestation failures warn while the code
+push succeeds. Publication is permanent; log compaction and removal need force
+permission on `refs/kit/attestmap`.

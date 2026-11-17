@@ -18,6 +18,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+serde_json.workspace = true
 kit-attest = { version = "=0.8.1", path = "../kit-attest" }
 # `default-features = false`: the zstd C backend is this crate's own
 # `pack-zstd` feature (on by default), so an embedder can build without it.
