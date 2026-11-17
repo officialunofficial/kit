@@ -170,6 +170,56 @@ pub fn object_deserialize_one_iteration(input: &[u8]) {
     let _ = kit_core::serialize::deserialize(input);
 }
 
+/// Stored blob read (`store_read_blob`): `ObjectStore::read_object` of
+/// `Blob`-tagged bytes stored under their hash returns exactly what
+/// `serialize::deserialize` returns for those bytes, the same blob or the
+/// same decode error, and a valid blob of `input` reads back as `input`.
+/// Uses a fresh store, as [`pack_reader_one_iteration`] does.
+pub fn store_read_blob_one_iteration(input: &[u8]) {
+    let Ok(dir) = tempfile::TempDir::new() else {
+        return;
+    };
+    let layout = kit_core::layout::RepoLayout::single(dir.path());
+    let Ok(store) = kit_core::store::ObjectStore::init(&layout) else {
+        return;
+    };
+    store_read_blob_one_iteration_with_store(input, &store);
+}
+
+/// As [`store_read_blob_one_iteration`], against a caller-provided store.
+pub fn store_read_blob_one_iteration_with_store(
+    input: &[u8],
+    store: &kit_core::store::ObjectStore,
+) {
+    use kit_core::object::{Blob, Object, ObjectType};
+    use kit_core::serialize::{deserialize, serialize};
+    use kit_core::store::StoreError;
+    let input = &input[..input.len().min(MAX_INPUT)];
+    let valid = serialize(&Object::Blob(Blob {
+        data: input.to_vec(),
+    }))
+    .expect("a capped input serializes");
+    let mut tagged = vec![ObjectType::Blob as u8];
+    tagged.extend_from_slice(input);
+    for bytes in [valid.as_slice(), tagged.as_slice()] {
+        let h = store.write(bytes).expect("a small object writes");
+        let got = match store.read_object(&h) {
+            Ok(object) => Ok(object),
+            Err(StoreError::Decode(e)) => Err(e),
+            Err(other) => panic!("a stored blob read failed outside decoding: {other:?}"),
+        };
+        assert_eq!(
+            got,
+            deserialize(bytes),
+            "read_object must match deserialize"
+        );
+    }
+    match store.read_object(&kit_core::hash::hash(&valid)) {
+        Ok(Object::Blob(blob)) => assert_eq!(blob.data, input, "a valid blob reads back whole"),
+        other => panic!("a valid blob must read back, got {other:?}"),
+    }
+}
+
 /// Apply the git-bridge import parsers against `input` — the
 /// untrusted-input boundary of `kit git import` (SPEC-GIT-IMPORT §2).
 /// These accept arbitrary upstream bytes, so they must never panic,
@@ -3551,6 +3601,19 @@ mod tests {
                 .expect("store init");
         run_iterated_unit_with(&store, pack_reader_one_iteration_with_store)
             .expect("guardrails held");
+    }
+
+    #[test]
+    fn store_read_blob_target_runs_within_caps() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let store =
+            kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path()))
+                .expect("store init");
+        run_iterated_unit_with(&store, store_read_blob_one_iteration_with_store)
+            .expect("guardrails held");
+        for case in [&b""[..], b"\x00", b"x", &[0; 16]] {
+            run_one(case, store_read_blob_one_iteration).expect("guardrails held");
+        }
     }
 
     #[test]

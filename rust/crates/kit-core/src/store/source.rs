@@ -37,7 +37,7 @@ pub trait ObjectSource {
     /// # Errors
     /// As [`Self::read`], plus decode errors.
     fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        Ok(serialize::deserialize(&self.read(h)?)?)
+        Ok(serialize::deserialize_owned(self.read(h)?)?)
     }
 
     /// Read `h` without integrity verification, for display-only
@@ -306,10 +306,10 @@ impl ObjectSource for EphemeralSink<'_> {
     /// trees through this overlay, are the paths this matters for.
     fn read_object(&self, h: &Hash) -> StoreResult<Object> {
         if let Some(bytes) = self.overlay_get(h) {
-            return Ok(serialize::deserialize(&bytes)?);
+            return Ok(serialize::deserialize_owned(bytes)?);
         }
         match self.read_chunk(h) {
-            Some(read) => Ok(serialize::deserialize(&read?)?),
+            Some(read) => Ok(serialize::deserialize_owned(read?)?),
             None => self.store.read_object(h),
         }
     }

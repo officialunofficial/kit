@@ -428,6 +428,14 @@ bench = false
 required-features = ["libfuzzer"]
 
 [[bin]]
+name = "store_read_blob"
+path = "fuzz_targets/store_read_blob.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
 name = "read_to_end_capped"
 path = "fuzz_targets/read_to_end_capped.rs"
 test = false
