@@ -3342,6 +3342,10 @@ struct CountingCursor<'a> {
 }
 
 impl RemoteSource for CountingCursor<'_> {
+    fn supports_attestations(&self) -> bool {
+        self.inner.supports_attestations()
+    }
+
     fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
         self.calls.set(self.calls.get() + 1);
         self.inner.list_branches()

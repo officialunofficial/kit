@@ -614,6 +614,10 @@ impl<'a> Counting<'a> {
 }
 
 impl RemoteSource for Counting<'_> {
+    fn supports_attestations(&self) -> bool {
+        self.inner.supports_attestations()
+    }
+
     fn list_branches(&self) -> Result<Vec<Ref>, SourceError> {
         self.bump(|c| c.list += 1);
         self.inner.list_branches()

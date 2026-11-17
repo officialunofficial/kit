@@ -29,6 +29,31 @@ impl TagFlags {
     }
 }
 
+/// Controls shared by fetch, clone and pull.
+#[derive(Debug, Args)]
+pub(crate) struct AttestationFlags {
+    /// Skip portable attestations.
+    #[arg(long, conflicts_with = "refetch_attestations")]
+    no_attestations: bool,
+    /// Retry all attestation packs, including envelopes previously dropped.
+    #[arg(long)]
+    refetch_attestations: bool,
+}
+impl AttestationFlags {
+    pub(crate) fn settings<'a>(
+        &self,
+        config: &crate::config::Config,
+        url: &'a str,
+    ) -> (bool, bool, &'a str) {
+        (
+            !self.no_attestations
+                && (self.refetch_attestations || config.fetch_attestations != "false"),
+            self.refetch_attestations,
+            url,
+        )
+    }
+}
+
 /// Print one `[new tag]` line for each tag the fetch published.
 pub(crate) fn print_new(report: &FetchReport, err: &mut impl Write) {
     for name in &report.tags_fetched {
@@ -40,6 +65,9 @@ pub(crate) fn print_new(report: &FetchReport, err: &mut impl Write) {
 /// the exit status these alone give: 1 for a refusal or a failed listing,
 /// and 0 for warnings only.
 pub(crate) fn print_problems(report: &FetchReport, err: &mut impl Write) -> u8 {
+    for warning in &report.attestation_warnings {
+        let _ = writeln!(err, "warning: {warning}");
+    }
     for warning in &report.tag_warnings {
         let _ = writeln!(
             err,

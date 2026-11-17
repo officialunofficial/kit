@@ -477,6 +477,7 @@ fn push_inputs<'a>(
 
 /// Fetch the remote and fast-forward the current branch; see
 /// [`transfer::pull_with_source`]. `tags` takes the remote's tags too.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pull_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
@@ -484,19 +485,24 @@ pub(crate) fn pull_all_with_source(
     target_branch: Option<&str>,
     require_signed: bool,
     tags: bool,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let options = kit_sync::SyncOptions::default()
+    let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
         .with_verify_signatures(require_signed)
         .with_tags(tags)
         .with_sync_policy(sync_policy(&layout));
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
 /// Fetch the remote; see [`transfer::fetch_with_source`]. `tags` takes the
 /// remote's tags too, and the report names each tag published or refused.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
@@ -504,14 +510,18 @@ pub(crate) fn fetch_all_with_source(
     require_signed: bool,
     prune: bool,
     tags: bool,
+    attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::FetchReport, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let options = kit_sync::SyncOptions::default()
+    let mut options = kit_sync::SyncOptions::default()
         .with_verify_signatures(require_signed)
         .with_prune(prune)
         .with_tags(tags)
         .with_sync_policy(sync_policy(&layout));
+    options.attestations = attestations.0;
+    options.refetch_attestations = attestations.1;
+    attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::fetch(cwd, source, remote, &options, terminal)?)
 }
 

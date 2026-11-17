@@ -270,6 +270,35 @@ pub fn fetch_with_source(
     Ok(kit_sync::fetch(cwd, source, remote, &options, observer)?)
 }
 
+/// Fetch with explicit synchronization options, including attestation controls.
+/// Set `options.attestations` to false to skip attestation reads and writes.
+///
+/// # Errors
+/// The code fetch fails. Attestation failures appear only in the report.
+pub fn fetch_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::FetchReport, Error> {
+    Ok(kit_sync::fetch(cwd, source, remote, options, observer)?)
+}
+
+/// Pull with explicit synchronization options, including attestation controls.
+///
+/// # Errors
+/// The code fetch or fast-forward fails.
+pub fn pull_with_options(
+    cwd: &Path,
+    source: &dyn RemoteSource,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+) -> Result<kit_sync::PullReport, Error> {
+    Ok(kit_sync::pull(cwd, source, remote, options, observer)?)
+}
+
 fn sync_options(
     target_branch: Option<&str>,
     require_signed: bool,

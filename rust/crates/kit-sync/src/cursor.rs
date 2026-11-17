@@ -15,10 +15,10 @@ use crate::SyncError;
 use crate::source::RemoteSource;
 
 /// First field of a cursor record. It names the record format and version.
-const FETCH_CURSOR_TAG: &str = "kit-fetch-cursor-v2";
+const FETCH_CURSOR_TAG: &str = "kit-fetch-cursor-v3";
 
 /// The largest record [`parse`] accepts.
-const RECORD_MAX_BYTES: usize = 512;
+const RECORD_MAX_BYTES: usize = 640;
 
 /// What one complete fetch saw.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +34,10 @@ pub struct CursorRecord {
     pub tags: bool,
     /// [`tag_digest`] after the fetch.
     pub tag_digest: Hash,
+    /// Whether attestations were requested and supported by the source.
+    pub attestations: bool,
+    /// Snapshot of the completely processed attestation log.
+    pub attestmap_head: Option<Hash>,
 }
 
 /// Drop every record. A fetch then reads the remote in full.
@@ -103,6 +107,11 @@ pub fn parse(bytes: &[u8]) -> Option<CursorRecord> {
     let signed = parse_flag(fields.next()?)?;
     let tags = parse_flag(fields.next()?)?;
     let tag_digest = parse_lowercase_hash(fields.next()?.as_bytes())?;
+    let attestations = parse_flag(fields.next()?)?;
+    let attestmap_head = match fields.next()? {
+        "-" => None,
+        value => Some(parse_lowercase_hash(value.as_bytes())?),
+    };
     if fields.next().is_some() {
         return None;
     }
@@ -112,6 +121,8 @@ pub fn parse(bytes: &[u8]) -> Option<CursorRecord> {
         signed,
         tags,
         tag_digest,
+        attestations,
+        attestmap_head,
     })
 }
 
@@ -166,12 +177,16 @@ impl CursorRecord {
     #[doc(hidden)]
     pub fn persist(&self, path: &Path) -> std::io::Result<()> {
         let body = format!(
-            "{FETCH_CURSOR_TAG}\n{}\n{}\n{}\n{}\n{}",
+            "{FETCH_CURSOR_TAG}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             lower_hex(self.cursor.as_bytes()),
             to_hex(&self.tracking),
             u8::from(self.signed),
             u8::from(self.tags),
-            to_hex(&self.tag_digest)
+            to_hex(&self.tag_digest),
+            u8::from(self.attestations),
+            self.attestmap_head
+                .as_ref()
+                .map_or_else(|| "-".into(), to_hex)
         );
         let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
         if let Some(parent) = path.parent() {
@@ -195,6 +210,8 @@ mod tests {
             signed: true,
             tags: true,
             tag_digest: hash(b"tags"),
+            attestations: true,
+            attestmap_head: Some(hash(b"attestations")),
         };
         record.persist(&path).unwrap();
         assert_eq!(CursorRecord::load(&path), Some(record.clone()));

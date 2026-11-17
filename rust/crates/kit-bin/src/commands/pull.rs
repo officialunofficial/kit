@@ -56,6 +56,8 @@ struct PullOpts {
     no_ff: bool,
     #[command(flatten)]
     tags: super::fetched_tags::TagFlags,
+    #[command(flatten)]
+    attestations: super::fetched_tags::AttestationFlags,
     /// Emit a machine-readable JSON result object to stdout:
     /// `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
     /// "old":"<hex>|null","new":"<hex>|null","up_to_date":<bool>}`, plus
@@ -176,6 +178,7 @@ fn pull_one(
                                 require_signed,
                                 false,
                                 opts.tags.fetch_tags(),
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
                             .map(|fetch| (fetch, None))
@@ -187,6 +190,7 @@ fn pull_one(
                                 None,
                                 require_signed,
                                 opts.tags.fetch_tags(),
+                                opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
                             .map(|report| (report.fetch, Some(report.outcome)))

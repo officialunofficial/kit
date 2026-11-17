@@ -42,6 +42,7 @@ mod error;
 #[doc(hidden)]
 pub mod fanout;
 mod fetch;
+mod fetch_attestations;
 mod lock;
 #[cfg(feature = "connect-native")]
 mod native;
@@ -88,6 +89,7 @@ use kit_core::store::SyncPolicy;
 /// [`SyncOptions::default`] and set the fields you need.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[allow(clippy::struct_excessive_bools)] // Independent fetch policy switches.
 pub struct SyncOptions {
     /// Verify the Ed25519 signature of every commit, remix and tag the call
     /// introduces. `true` by default; failing closed on an unsigned or invalid
@@ -121,6 +123,14 @@ pub struct SyncOptions {
     /// local tag is never moved: a remote tag of the same name with another
     /// value is refused.
     pub tags: bool,
+    /// Fetch portable attestations after code publication. Enabled by default.
+    pub attestations: bool,
+    /// Clear the remote attestation checkpoint and retry dropped envelopes.
+    pub refetch_attestations: bool,
+    /// Exact configured remote URL, used only to key disposable records.
+    pub remote_url: String,
+    /// Maximum decoded attestation bytes per fetch, capped at 512 MiB.
+    pub attestation_decode_bytes: u64,
 }
 
 impl SyncOptions {
@@ -176,6 +186,10 @@ impl Default for SyncOptions {
             prune: false,
             lock_wait: None,
             tags: true,
+            attestations: true,
+            refetch_attestations: false,
+            remote_url: String::new(),
+            attestation_decode_bytes: kit_attest::pack::MAX_FETCH_DECODED_BYTES,
         }
     }
 }

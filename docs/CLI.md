@@ -1164,8 +1164,20 @@ Remote / sync:
 - `kit remote get-url <name>` &mdash; print a remote's URL (use `default` for
   the flat default remote). `kit remote set-url <name> <url>` &mdash; change an
   existing remote's URL (validated like `remote add`).
+
+Clone, fetch and pull also fetch portable attestations by default. They read
+`refs/kit/attestmap` before listing code, then save valid envelopes whose
+subjects exist locally. Signature trust remains a `verify-attest` decision.
+Use `--no-attestations` or `fetch.attestations = false` to skip this work.
+Use `--refetch-attestations` to retry every pack, including envelopes dropped
+because their subjects were absent. Refetch overrides the config opt-out;
+it conflicts with `--no-attestations`. Attestation failures print `warning:`
+and leave the code fetch successful. Connect remotes without advertised
+attestation support warn once per command and skip the log.
+
 - `kit clone [--depth N] [--sparse ...] [-b <branch>] [-o <name>]
-  [--tags | --no-tags] [--no-verify-signatures] [-q|--quiet] <url> [<dir>]`
+  [--tags | --no-tags] [--no-attestations | --refetch-attestations]
+  [--no-verify-signatures] [-q|--quiet] <url> [<dir>]`
   &mdash; clone a repository into `<dir>` (defaults to the final URL path
   segment). The clone takes the remote's tags as `kit fetch` does; a refused
   tag prints its line and the clone exits 1 after the checkout. `--sparse
@@ -1189,6 +1201,7 @@ Remote / sync:
     must be dot-free and ref-safe, like a named `remote add`. Tracking
     refs land under `refs/remotes/<name>/*` to match.
 - `kit fetch [<remote>] [--all] [-p|--prune] [--tags | --no-tags]
+  [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; download from
   remote without merging. After the branches it takes every remote tag
   (SPEC-TRANSPORT §1.4); `--tags` says so explicitly, and `--no-tags` skips
@@ -1229,6 +1242,7 @@ Remote / sync:
   was refused or the listing failed, or `{"ok":false,"error":"..."}` on
   failure.
 - `kit pull [<remote>] [--all] [--rebase | --no-ff] [--tags | --no-tags]
+  [--no-attestations | --refetch-attestations]
   [--no-verify-signatures] [--format=json] [-q|--quiet]` &mdash; fetch, then
   fast-forward the current branch from `refs/remotes/<remote>/<branch>`. The
   fetch takes tags and reports them as `kit fetch` does; a refused tag makes

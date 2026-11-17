@@ -1471,6 +1471,7 @@ fn published_pack_bytes(transport: &dyn Transport) -> BTreeMap<kit_core::Hash, V
 fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() {
     use kit_core::{layout::RepoLayout, refs, store::ObjectStore, to_hex};
 
+    // Compare code-transfer bytes independently of optional server capabilities.
     let template = common::Repo::new();
     template.commit_file("file.txt", b"first\n", "first");
     let layout = RepoLayout::single(template.path());
@@ -1541,7 +1542,14 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         let checkout_root = tempfile::tempdir().unwrap();
         let cloned = run(
             checkout_root.path(),
-            &["clone", "-o", "origin", &endpoint, "checkout"],
+            &[
+                "clone",
+                "--no-attestations",
+                "-o",
+                "origin",
+                &endpoint,
+                "checkout",
+            ],
         );
         assert_eq!(cloned.status.code(), Some(0), "{scheme}: {cloned:?}");
         transcript.push(endpoint_transcript(&cloned, &endpoint));
@@ -1571,7 +1579,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         );
         transcript.push(endpoint_transcript(&appended, &endpoint));
 
-        let fetched = run(&checkout, &["fetch", "origin"]);
+        let fetched = run(&checkout, &["fetch", "--no-attestations", "origin"]);
         assert_eq!(fetched.status.code(), Some(0), "{scheme}: {fetched:?}");
         transcript.push(endpoint_transcript(&fetched, &endpoint));
         assert_eq!(
@@ -1586,7 +1594,7 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
             std::fs::read(checkout.join("file.txt")).unwrap(),
             b"first\n"
         );
-        let pulled = run(&checkout, &["pull", "origin"]);
+        let pulled = run(&checkout, &["pull", "--no-attestations", "origin"]);
         assert_eq!(pulled.status.code(), Some(0), "{scheme}: {pulled:?}");
         transcript.push(endpoint_transcript(&pulled, &endpoint));
         assert_eq!(
