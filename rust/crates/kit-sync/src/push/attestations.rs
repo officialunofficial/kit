@@ -222,10 +222,10 @@ fn compact_log(tx: &PushContext<'_>, options: &PushOptions<'_>, max: u64, warnin
         for group in prepared.chunks(budget) {
             for pack in group { pack.upload(tx)?; }
             let keys: Vec<_> = group.iter().map(|pack| pack.id).collect();
-            let (next, held) = append(tx, &keys, false)?;
+            let (next, appended) = append(tx, &keys, false)?;
             expected.extend(keys.into_iter().filter(|key| !expected.contains(key)).collect::<Vec<_>>());
             head = Some(next);
-            if held != expected { break; }
+            if appended != expected { break; }
         }
         let (observed, listed) = (tx.read_ref(ATTESTMAP_REF)?, chain(tx, head)?.1);
         if observed != head || listed != expected { continue; }
