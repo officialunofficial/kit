@@ -943,3 +943,161 @@ mod storage_root {
         assert!(unix_storage_root(None, None).is_err());
     }
 }
+
+#[test]
+fn explicit_roots_and_record_names_are_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("explicit");
+    let store = SoftwareKeystore::with_root(&root);
+    let raw = SoftwareRawKeystore::with_root(&root);
+    assert_eq!(store.root(), root);
+    assert_eq!(raw.inner.root(), root);
+    assert_eq!(store.extension(), "key");
+    assert_eq!(raw.inner.extension(), "raw");
+    assert!(store.opener().is_some());
+    assert!(raw.opener().is_some());
+    #[cfg(unix)]
+    {
+        let default = SoftwareKeystore::new().unwrap();
+        assert_eq!(default.root(), default_storage_root().unwrap());
+        assert!(default.root().is_absolute());
+        assert!(default.root().ends_with("kit/keys"));
+    }
+}
+
+#[test]
+fn raw_delete_removes_only_selected_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SoftwareRawKeystore::with_root(dir.path());
+    for label in ["remove", "keep"] {
+        store
+            .import(
+                label,
+                SecretKey::new(Algorithm::Ed25519, [9; 32]),
+                KeyAttrs::default(),
+                ImportOptions::default(),
+            )
+            .unwrap();
+    }
+    let selector = KeySelector::new("remove", None).unwrap();
+    store.delete(&selector).unwrap();
+    assert!(matches!(store.open(&selector), Err(Error::KeyNotFound(_))));
+    assert_eq!(store.list().unwrap().len(), 1);
+    assert_eq!(store.list().unwrap()[0].label(), "keep");
+}
+
+#[test]
+fn missing_label_returns_key_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = software_store(dir.path());
+    assert!(matches!(
+        store.open(&KeySelector::new("missing", None).unwrap()),
+        Err(Error::KeyNotFound(_))
+    ));
+}
+
+#[test]
+fn signer_debug_identifies_key_and_redacts_secret() {
+    let signer = SoftwareSigner::new(
+        KeyLabel::new("private").unwrap(),
+        BackendKind::Software,
+        Algorithm::Ed25519,
+        *b"abcdefghijklmnopqrstuvwxyzABCDEF",
+    )
+    .unwrap();
+    let debug = format!("{signer:?}");
+    assert!(debug.contains("private"));
+    assert!(debug.contains("<redacted>"));
+    let bytes = b"abcdefghijklmnopqrstuvwxyzABCDEF";
+    assert!(!debug.contains(&format!("{bytes:?}")));
+    assert!(!debug.contains(&hex_lower(bytes)));
+    assert!(!debug.contains("abcdefghijklmnopqrstuvwxyzABCDEF"));
+}
+
+#[test]
+fn generated_secrets_are_valid_and_distinct() {
+    for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
+        let first = random_valid_secret(algorithm).unwrap();
+        let second = random_valid_secret(algorithm).unwrap();
+        validate_secret(algorithm, &first).unwrap();
+        validate_secret(algorithm, &second).unwrap();
+        assert_ne!(first, second);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn storage_walk_checks_every_ancestor_and_propagates_errors() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("keys");
+    std::fs::create_dir(&root).unwrap();
+    symlink(dir.path(), root.join("linked")).unwrap();
+    let store = software_store(&root);
+    assert!(
+        matches!(store.ensure_storage_path_not_symlink(&root.join("linked/missing")), Err(Error::Io(message)) if message.contains("symlink"))
+    );
+    std::fs::write(root.join("file"), b"not a directory").unwrap();
+    assert!(
+        matches!(store.ensure_storage_path_not_symlink(&root.join("file/child")), Err(Error::Io(message)) if message.starts_with("lstat ") && message.contains("file/child"))
+    );
+}
+
+#[test]
+fn overwrite_creates_a_missing_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = software_store(dir.path());
+    store
+        .import(
+            "new",
+            SecretKey::new(Algorithm::Ed25519, [37; 32]),
+            KeyAttrs::default(),
+            ImportOptions { overwrite: true },
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .export(&KeySelector::new("new", None).unwrap())
+            .unwrap()
+            .expose_secret(),
+        &[37; 32]
+    );
+}
+
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-keychain"),
+    all(target_os = "linux", feature = "linux-secret-service")
+))]
+#[test]
+fn protector_handles_are_distinct_hex_and_identifiers_resolve() {
+    let first = protectors::random_handle().unwrap();
+    let second = protectors::random_handle().unwrap();
+    assert_eq!(first.len(), 64);
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
+    assert_ne!(first, second);
+    #[cfg(target_os = "macos")]
+    let id = MacosKeychainProtector::ID;
+    #[cfg(target_os = "linux")]
+    let id = LinuxSecretServiceProtector::ID;
+    assert_eq!(
+        default_protector_by_id(Path::new("unused"), id)
+            .unwrap()
+            .id(),
+        id
+    );
+    assert!(default_protector_by_id(Path::new("unused"), "unknown").is_err());
+}
+
+#[test]
+fn listing_propagates_non_directory_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("ed25519"), b"not a directory").unwrap();
+    let store = software_store(dir.path());
+    assert!(
+        matches!(store.list(), Err(Error::Io(message)) if message.starts_with("read_dir ") && message.contains("ed25519"))
+    );
+}
