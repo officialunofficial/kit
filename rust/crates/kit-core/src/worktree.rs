@@ -1521,11 +1521,10 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// error if `reader` yields more than [`serialize::MAX_CHUNKED_TOTAL_SIZE`].
 ///
 /// Takes an explicit `hash_chunks` batch callback in place of a built-in
-/// sequential loop over [`store_chunk_blob`] — `kit-core` has no
-/// thread-pool dependency of its own — it stays usable from wasm
-/// targets, which have no OS threads — so the fan-out decision lives
-/// with the caller instead of living in this function, the same shape
-/// as [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback.
+/// sequential loop over [`store_chunk_blob`]. The caller chooses the
+/// scheduling policy, including a sequential callback on wasm targets
+/// without OS threads. This follows [`crate::transfer::plan_pack_with`]'s
+/// `encode_deltas` callback.
 /// `ChunkReader` cuts each window on several threads; once a batch of up to
 /// `STREAM_HASH_BATCH` chunks is in hand, hashing and storing each one
 /// is independent of every other chunk in the batch — `kit-bin`'s
