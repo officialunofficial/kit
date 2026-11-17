@@ -122,13 +122,19 @@ fn process(
         }
     }
     let mut record = load_record(&path);
-    let retry: BTreeSet<_> = record
+    // A partial record can have no completed head. An absent remote log
+    // still retires every pack of that interrupted walk.
+    if head.is_none() && !record.ids.is_empty() {
+        persist(&path, &Record::default())?;
+        return Ok(());
+    }
+    let mut retry: BTreeSet<_> = record
         .pending
         .iter()
         .filter(|(_, subjects)| subjects.iter().any(|subject| store.contains(subject)))
         .map(|(pack, _)| *pack)
         .collect();
-    if head == record.head && retry.is_empty() && (head.is_some() || record.ids.is_empty()) {
+    if head == record.head && retry.is_empty() {
         return Ok(());
     }
     let mut packs = Vec::new();
@@ -139,6 +145,7 @@ fn process(
                     let listed: BTreeSet<_> = new.iter().copied().collect();
                     record.ids.retain(|id| listed.contains(id));
                     record.pending.retain(|id, _| listed.contains(id));
+                    retry.retain(|id| listed.contains(id));
                 }
                 packs = new;
             }

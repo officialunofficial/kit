@@ -7,7 +7,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-- Retry attestations when their subjects arrive, cache bounded chain walks, and compact logs atomically without losing concurrent publications. Disposable attestation records now use v2; existing caches reset once.
+- Retry skipped attestations when their subjects arrive locally.
+- Cache broken attestation heads, bound node bytes, and walk only new nodes.
+- Compact attestation logs atomically while preserving concurrent appends and refused writes.
+- Skip the mirror warning for the sanitized `local` placeholder.
+- Defer compressed attestations when decoding support is unavailable.
+- Reset disposable attestation caches once for pending-subject records.
+- Clear obsolete pending attestation packs after log removal or compaction.
 
 - Publish locally authored attestations with `kit push --attestations` or `push.attestations = true`; publication is permanent.
 

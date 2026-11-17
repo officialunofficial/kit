@@ -462,3 +462,95 @@ fn skipped_tag_subject_is_retried_when_tags_are_enabled() {
     .unwrap();
     assert_eq!(second.attestations_stored, 1);
 }
+
+#[test]
+fn removed_log_clears_pending_packs_after_an_interrupted_fetch() {
+    use kit_sync::attestation_records::{Record, RecordKind};
+    use std::collections::{BTreeMap, BTreeSet};
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (subject, _) = attestation_fetch::code(&tx);
+    let pack = kit_attest::pack::build(&[&attestation_fetch::envelope(subject)], 4096).unwrap();
+    let key = hash(&pack);
+    attestation_fetch::append(&tx, &pack);
+    tx.delete_ref(ATTESTMAP_REF, &tx.read_ref(ATTESTMAP_REF).unwrap().unwrap())
+        .unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+    let source = TransportSource::new(&tx);
+    let path = kit_sync::attestation_records::path(&layout, &source, "origin", "", false);
+    let record = Record {
+        ids: BTreeSet::from([key]),
+        pending: BTreeMap::from([(key, BTreeSet::from([subject]))]),
+        ..Record::default()
+    };
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, record.encode(RecordKind::Fetch)).unwrap();
+    let report = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.attestations_stored, 0);
+    let after = Record::decode(&std::fs::read(path).unwrap(), RecordKind::Fetch).unwrap();
+    assert!(after.pending.is_empty());
+    assert!(after.ids.is_empty());
+}
+
+#[test]
+fn a_new_baseline_discards_retries_for_packs_it_replaces() {
+    use kit_sync::attestation_records::{Record, RecordKind};
+    use std::collections::BTreeSet;
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let main = code_on(&tx, "main", b"main");
+    let main_only: Vec<_> = TransportSource::new(&tx).list_branches().unwrap();
+    let subject = code_on(&tx, "feature", b"feature");
+    let env = attestation_fetch::envelope(subject);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&env], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+    let source = Lagging {
+        tx: &tx,
+        stale: RefCell::new(Some(main_only)),
+        node_downloads: Cell::new(0),
+        cursor: false,
+        fail_once: Cell::new(false),
+    };
+    let options = kit_sync::SyncOptions::default();
+    let first = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(first.attestations_dropped, 1);
+    let pack = kit_attest::pack::build(&[&env, &attestation_fetch::envelope(main)], 4096).unwrap();
+    let key = hash(&pack);
+    tx.upload_blob(&pack, &PackKey::from_hash(key), None)
+        .unwrap();
+    let node = kit_core::transfer::encode_packlist(None, &[key]).unwrap();
+    let head = hash(&node);
+    tx.upload_blob(&node, &PackKey::from_hash(head), None)
+        .unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &head)
+        .unwrap();
+    source.node_downloads.set(0);
+    let second = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(second.attestations_stored, 2);
+    assert_eq!(second.attestations_rejected, 0);
+    assert_eq!(source.node_downloads.get(), 2);
+    let path = kit_sync::attestation_records::path(&layout, &source, "origin", "", false);
+    let record = Record::decode(&std::fs::read(path).unwrap(), RecordKind::Fetch).unwrap();
+    assert_eq!(record.ids, BTreeSet::from([key]));
+}

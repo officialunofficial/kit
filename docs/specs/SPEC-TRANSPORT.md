@@ -377,8 +377,10 @@ it remains subject to the fetch bounds. A push record MUST have no head. Append 
 lowercase BLAKE3 of all preceding bytes, including the final LF, without
 a final newline. Readers reject corruption, duplicates, unsorted ids,
 and fetch records over `192 + 195 * 100000` bytes or 100,000 pack ids.
-On a walk reaching a baseline, retain only processed ids and pending pairs
-listed by that chain. Incremental walks retain earlier processed ids; prune
+An absent remote head clears processed ids and pending pairs, including
+records without a completed head. On a walk reaching a baseline, retain only
+processed ids and pending pairs listed by that chain, and discard queued
+retries of replaced packs. Incremental walks retain earlier processed ids; prune
 non-pending ids above 100,000. Pending pairs also have a 100,000 limit;
 excess pending subjects are rejected with a warning, while present subjects
 are still stored. Structurally failed chain walks record the observed head without processing any partial listing. Payload interruptions
