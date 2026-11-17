@@ -141,101 +141,104 @@ fn publish(
         .unwrap_or(PACK_BODY_LIMIT)
         .min(PACK_BODY_LIMIT);
     let mut batch = Batch::new(max);
-    let mut added = Vec::new();
+    let mut prepared = Vec::new();
     for (expected, path) in &pending {
-        let bytes =
-            kit_core::bounded_read::read_capped(path, kit_attest::store::MAX_ENVELOPE_SIZE as u64)?;
-        if hash::hash(&bytes) != *expected {
+        let bytes = kit_core::bounded_read::read_capped(path, kit_attest::store::MAX_ENVELOPE_SIZE as u64)?;
+        if hash::hash(&bytes) != *expected || fetched(layout, expected)? {
             return Err("candidate changed during push".into());
         }
-        // Recheck provenance after reading: a concurrent fetch must never promote bytes.
-        if std::fs::symlink_metadata(attestation_records::fetched_path(
-            layout,
-            &hash::hash(&bytes),
-        ))
-        .is_ok()
-        {
-            return Err("candidate was recorded as fetched; retry push".into());
-        }
-        batch.add(bytes, tx, &mut added)?;
+        batch.add(bytes, tx, &mut prepared)?;
     }
-    batch.flush(tx, &mut added)?;
-    for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
-        if tx.observer.cancelled() {
-            return Err("interrupted".into());
+    batch.flush(tx, &mut prepared)?;
+    let budget = tx.upload_limits().data_packs_per_advance.unwrap_or(usize::MAX).max(1);
+    for group in prepared.chunks(budget) {
+        let keys: Vec<_> = group.iter().map(|pack| pack.id).collect();
+        let (_, existing) = chain(tx, tx.read_ref(ATTESTMAP_REF)?)?;
+        if existing.len() + keys.len() > 4096 && options.control.authority.is_some_and(|a| !a.can_compact_attestations()) {
+            return Err("attestation log needs compaction, which requires the f permission; skipped".into());
         }
+        for pack in group { pack.upload(tx)?; }
+        if !record.warned {
+            report.attestation_warnings.push("publishing attestations is permanent; removal requires resetting the log with force permission".into());
+            record.warned = true;
+            persist(&path, &record)?;
+        }
+        let (_, held) = append(tx, &keys, true)?;
+        for pack in group {
+            report.attestations_pushed += pack.ids.len();
+            record.ids.extend(&pack.ids);
+        }
+        persist(&path, &record)?;
+        if held.len() > 4096 {
+            compact_log(tx, options, max, &mut report.attestation_warnings)?;
+        }
+    }
+    Ok(())
+}
+
+// Append one ticket-sized group. A deep or large log can use one small linked
+// node while compaction builds a replacement; each intermediate ref stays valid.
+fn append(tx: &PushContext<'_>, added: &[Hash], rebaseline: bool) -> Result<(Hash, Vec<Hash>), Failure> {
+    for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
         let prior = tx.read_ref(ATTESTMAP_REF)?;
         let (depth, mut packs) = chain(tx, prior)?;
-        let new: Vec<_> = added
-            .iter()
-            .copied()
-            .filter(|id| !packs.contains(id))
-            .collect();
-        if new.is_empty() {
-            break;
-        }
+        let new: Vec<_> = added.iter().copied().filter(|id| !packs.contains(id)).collect();
+        if new.is_empty() { return Ok((prior.ok_or("missing attestation head")?, packs)); }
         packs.extend_from_slice(&new);
-        let compact = packs.len() > 4096;
-        if compact
-            && options
-                .control
-                .authority
-                .is_some_and(|a| !a.can_compact_attestations())
-        {
-            return Err(
-                "attestation log needs compaction, which requires the f permission; skipped".into(),
-            );
+        let baseline = rebaseline && depth >= 64 && packs.len() <= 4096;
+        let bytes = transfer::encode_packlist(if baseline { None } else { prior }, if baseline { &packs } else { &new })?;
+        match write_node(tx, prior, &bytes, &new) {
+            Ok(head) => return Ok((head, packs)),
+            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => (),
+            Err(error) => return Err(error),
         }
-        let (prev, listed) = if compact {
-            (None, compact_packs(tx, &packs, max, &mut report.attestation_warnings)?)
-        } else if depth >= 64 {
-            (None, packs)
-        } else {
-            (prior, new)
-        };
-        if listed.len() > 4096 {
-            return Err("compacted attestation log exceeds 4096 packs".into());
-        }
-        if !record.warned {
-        report.attestation_warnings.push("publishing attestations is permanent; removal requires resetting the log with force permission".into());
-        record.warned = true;
-        persist(&path, &record)?;
-    }
-        let bytes = transfer::encode_packlist(prev, &listed)?;
-        let key = PackKey::from_hash(hash::hash(&bytes));
-        tx.upload_blob(&bytes, &key, ATTESTMAP_REF)?;
-        let keys: Vec<_> = listed
-            .into_iter()
-            .map(PackKey::from_hash)
-            .chain(std::iter::once(key))
-            .collect();
-        match tx.write_attestmap(
-            prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match),
-            &key.0,
-            &keys,
-        ) {
-            Ok(()) => {
-                report.attestations_pushed = pending.len();
-                record.ids.extend(pending.iter().map(|(id, _)| *id));
-                persist(&path, &record)?;
-                return Ok(());
-            }
-            Err(SourceError::RefConflict) => (),
-            Err(SourceError::AccessDenied) if compact => {
-                return Err("attestation compaction requires f permission; skipped".into());
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-    // Also covers a lost write response followed by a concurrent append.
-    let (_, packs) = chain(tx, tx.read_ref(ATTESTMAP_REF)?)?;
-    if added.iter().all(|id| packs.contains(id)) {
-        report.attestations_pushed = pending.len();
-        record.ids.extend(pending.iter().map(|(id, _)| *id));
-        persist(&path, &record)?;
-        return Ok(());
     }
     Err("attestation log remained busy after eight attempts".into())
+}
+fn write_node(tx: &PushContext<'_>, prior: Option<Hash>, bytes: &[u8], packs: &[Hash]) -> Result<Hash, Failure> {
+    if tx.observer.cancelled() { return Err("interrupted".into()); }
+    let id = hash::hash(bytes);
+    let key = PackKey::new(id);
+    tx.upload_blob(bytes, &key, ATTESTMAP_REF)?;
+    let keys: Vec<_> = packs.iter().copied().map(PackKey::new).chain(std::iter::once(key)).collect();
+    tx.write_attestmap(prior.map_or(RefWriteCondition::Missing, RefWriteCondition::Match), &id, &keys)?;
+    Ok(id)
+}
+fn compact_log(tx: &PushContext<'_>, options: &PushOptions<'_>, max: u64, warnings: &mut Vec<String>) -> Result<(), Failure> {
+    if options.control.authority.is_some_and(|a| !a.can_compact_attestations()) {
+        return Err("attestation compaction requires f permission; skipped".into());
+    }
+    for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
+        let prior = tx.read_ref(ATTESTMAP_REF)?;
+        let (_, original) = chain(tx, prior)?;
+        let prepared = compact_packs(tx, &original, max, warnings)?;
+        if prepared.len() > 4096 { return Err("compacted attestation log exceeds 4096 packs".into()); }
+        let compacted: Vec<_> = prepared.iter().map(|pack| pack.id).collect();
+        let budget = tx.upload_limits().data_packs_per_advance.unwrap_or(usize::MAX).max(1);
+        let mut expected = original;
+        let mut head = prior;
+        // Publish bounded groups first so every compacted pack is a repository
+        // member before the final baseline consumes its single node ticket.
+        for group in prepared.chunks(budget) {
+            for pack in group { pack.upload(tx)?; }
+            let keys: Vec<_> = group.iter().map(|pack| pack.id).collect();
+            let (next, held) = append(tx, &keys, false)?;
+            expected.extend(keys.into_iter().filter(|key| !expected.contains(key)).collect::<Vec<_>>());
+            head = Some(next);
+            if held != expected { break; }
+        }
+        let (observed, listed) = (tx.read_ref(ATTESTMAP_REF)?, chain(tx, head)?.1);
+        if observed != head || listed != expected { continue; }
+        let bytes = transfer::encode_packlist(None, &compacted)?;
+        match write_node(tx, head, &bytes, &[]) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => (),
+            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::AccessDenied)) =>
+                return Err("attestation compaction requires f permission; skipped".into()),
+            Err(error) => return Err(error),
+        }
+    }
+    Err("attestation compaction remained busy after eight attempts".into())
 }
 
 fn chain(tx: &PushContext<'_>, mut head: Option<Hash>) -> Result<(usize, Vec<Hash>), Failure> {
@@ -283,7 +286,7 @@ impl Batch {
         &mut self,
         bytes: Vec<u8>,
         tx: &PushContext<'_>,
-        keys: &mut Vec<Hash>,
+        keys: &mut Vec<Prepared>,
     ) -> Result<(), Failure> {
         if self.size + bytes.len() as u64 + 15 > self.max
             || self.decoded + bytes.len() as u64 + 10 > kit_attest::pack::MAX_PACK_DECODED_BYTES
@@ -298,7 +301,7 @@ impl Batch {
         self.bytes.push(bytes);
         Ok(())
     }
-    fn flush(&mut self, tx: &PushContext<'_>, keys: &mut Vec<Hash>) -> Result<(), Failure> {
+    fn flush(&mut self, tx: &PushContext<'_>, keys: &mut Vec<Prepared>) -> Result<(), Failure> {
         if self.bytes.is_empty() {
             return Ok(());
         }
@@ -308,11 +311,10 @@ impl Batch {
         let inputs: Vec<_> = self.bytes.iter().map(Vec::as_slice).collect();
         let bytes = kit_attest::pack::build(&inputs, self.max)?;
         let id = hash::hash(&bytes);
-        let key = PackKey::from_hash(id);
-        if !tx.pack_exists(&key, ATTESTMAP_REF)? {
-            tx.upload_pack(&SliceBody(&bytes), &key, ATTESTMAP_REF)?;
-        }
-        keys.push(id);
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new_in(&tx.spool_dir)?;
+        file.write_all(&bytes)?;
+        keys.push(Prepared { id, file, ids: self.bytes.iter().map(|bytes| hash::hash(bytes)).collect() });
         self.bytes.clear();
         self.size = 44;
         self.decoded = 0;
@@ -320,7 +322,7 @@ impl Batch {
     }
 }
 
-fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64) -> Result<Vec<Hash>, Failure> {
+fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64, warnings: &mut Vec<String>) -> Result<Vec<Prepared>, Failure> {
     let mut seen = BTreeSet::new();
     let mut batch = Batch::new(max);
     let mut keys = Vec::new();
@@ -405,5 +407,17 @@ fn fetched(layout: &RepoLayout, id: &Hash) -> Result<bool, Failure> {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
+    }
+}
+
+struct Prepared { id: Hash, file: tempfile::NamedTempFile, ids: Vec<Hash> }
+impl Prepared {
+    fn upload(&self, tx: &PushContext<'_>) -> Result<(), Failure> {
+        let key = PackKey::new(self.id);
+        if !tx.pack_exists(&key, ATTESTMAP_REF)? {
+            let bytes = kit_core::bounded_read::read_capped(self.file.path(), PACK_BODY_LIMIT)?;
+            tx.upload_pack(&SliceBody(&bytes), &key, ATTESTMAP_REF)?;
+        }
+        Ok(())
     }
 }
