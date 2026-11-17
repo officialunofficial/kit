@@ -123,6 +123,25 @@ fn sequential(
         .collect()
 }
 
+fn assert_matches_full_walk(s: &ObjectStore, tips: &[Hash], remote: Option<Hash>) -> PackPlan {
+    let limits = WalkLimits::default();
+    let held = HeldCommits::collect(s, remote, limits.objects).unwrap();
+    let expected = plan_with_held(s, tips, &held, sequential, limits).unwrap();
+    let plan = plan_tips_capped(s, tips, remote, sequential, limits).unwrap();
+    assert_eq!(plan.raw, expected.raw);
+    assert_eq!(plan.self_contained, expected.self_contained);
+    assert_eq!(plan.deltas.len(), expected.deltas.len());
+    for (actual, expected) in plan.deltas.iter().zip(&expected.deltas) {
+        assert_eq!(actual.base, expected.base);
+        assert_eq!(actual.target, expected.target);
+        assert_eq!(
+            actual.stream.bytes().unwrap(),
+            expected.stream.bytes().unwrap()
+        );
+    }
+    plan
+}
+
 /// A manifest whose chunk holds another number of bytes than its span is
 /// refused by every fetch, so the plan refuses the chunks it sends in the
 /// same way, before anything is uploaded.
@@ -846,31 +865,90 @@ fn the_cap_counts_objects_but_no_chunk() {
 }
 
 #[test]
-fn the_cap_counts_held_commits_too_and_every_path_fails() {
+fn a_linear_push_counts_only_the_remote_head_and_new_objects() {
     let (_d, s) = store();
-    let b = put_blob(&s, b"x".to_vec());
-    let t0 = tree_of(&s, &[("f", b)]);
-    let c1 = commit(&s, t0, &[], "1");
-    let c2 = commit(&s, t0, &[c1], "22");
-    let c3 = commit(&s, t0, &[c2], "333");
-    let b2 = put_blob(&s, b"y".to_vec());
-    let t1 = tree_of(&s, &[("f", b2)]);
-    let new = commit(&s, t1, &[c3], "new");
-    // Three held commits, then the new commit, its tree and its blob.
-    plan_pack_capped(&s, new, Some(c3), sequential, limits(6)).unwrap();
-    for cap in [5, 3, 2, 0] {
-        assert!(
-            matches!(
-                plan_pack_capped(&s, new, Some(c3), sequential, limits(cap)),
-                Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
-            ),
-            "cap {cap}"
-        );
+    let tree = tree_of(&s, &[("f", put_blob(&s, b"old".to_vec()))]);
+    let mut remote = commit(&s, tree, &[], "root");
+    for index in 0..128 {
+        remote = commit(&s, tree, &[remote], &format!("old-{index}"));
     }
-    // The held set alone passes at three and fails at two.
-    HeldCommits::collect(&s, Some(c3), 3).unwrap();
-    assert!(HeldCommits::collect(&s, Some(c3), 2).is_err());
-    assert!(HeldCommits::collect(&s, Some(c3), 0).is_err());
+    let blob = put_blob(&s, b"new".to_vec());
+    let changed = tree_of(&s, &[("f", blob)]);
+    let tip = commit(&s, changed, &[remote], "new");
+
+    // The boundary, new commit, changed tree and new blob fit a cap of four.
+    let plan = plan_pack_capped(&s, tip, Some(remote), sequential, limits(4)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([tip, changed, blob]));
+    for cap in [3, 2, 1, 0] {
+        assert!(matches!(
+            plan_pack_capped(&s, tip, Some(remote), sequential, limits(cap)),
+            Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+        ));
+    }
+}
+
+#[test]
+fn a_diverged_push_counts_every_held_commit_against_the_cap() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let shared = commit(&s, tree, &[root], "shared");
+    let remote = commit(&s, tree, &[shared], "remote");
+    let tip = commit(&s, tree, &[shared], "different tip");
+
+    let plan = plan_pack_capped(&s, tip, Some(remote), sequential, limits(4)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([tip]));
+    assert!(matches!(
+        plan_pack_capped(&s, tip, Some(remote), sequential, limits(3)),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn force_push_remote_ahead_and_unrelated_tips_match_the_full_walk() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let diverged = commit(&s, tree, &[root], "diverged");
+    let unrelated = commit(&s, tree, &[], "unrelated");
+    assert_eq!(
+        assert_matches_full_walk(&s, &[diverged], Some(remote)).raw,
+        vec![diverged]
+    );
+    assert!(assert_matches_full_walk(&s, &[root], Some(remote)).is_empty());
+    assert_eq!(
+        ids(&assert_matches_full_walk(&s, &[unrelated], Some(remote))),
+        BTreeSet::from([unrelated])
+    );
+}
+
+#[test]
+fn a_linear_push_with_a_tree_edge_to_held_history_uses_the_full_walk() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let changed = tree_of(&s, &[("points to root", root)]);
+    let tip = commit(&s, changed, &[remote], "new");
+
+    let plan = assert_matches_full_walk(&s, &[tip], Some(remote));
+    assert_eq!(ids(&plan), BTreeSet::from([tip, changed]));
+}
+
+#[test]
+fn a_push_of_several_linear_tips_stops_at_the_same_boundary() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let left = commit(&s, tree, &[remote], "left");
+    let right = commit(&s, tree, &[remote], "right");
+    let tips = [left, right, remote];
+
+    let plan = plan_tips_capped(&s, &tips, Some(remote), sequential, limits(3)).unwrap();
+    assert_eq!(ids(&plan), BTreeSet::from([left, right]));
+    assert_matches_full_walk(&s, &tips, Some(remote));
 }
 
 #[test]
@@ -1535,7 +1613,15 @@ proptest! {
             None => new_closure.clone(),
         };
 
-        let plan = plan_pack(&s, new, remote_tip).unwrap();
+        let plan = assert_matches_full_walk(&s, &[new], remote_tip);
+        if let Some(remote) = remote_tip {
+            // Exercise the bounded walk even when the random tips diverge.
+            let Object::Commit(new_commit) = s.read_object(&new).unwrap() else {
+                unreachable!();
+            };
+            let next = commit(&s, new_commit.tree_hash, &[remote], "linear advance");
+            assert_matches_full_walk(&s, &[next], Some(remote));
+        }
         let sent = ids(&plan);
         prop_assert!(
             old_answer.is_subset(&sent),
