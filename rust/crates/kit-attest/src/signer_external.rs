@@ -1434,14 +1434,35 @@ mod tests {
 
     #[test]
     fn stderr_capture_is_bounded_and_keeps_the_exact_prefix() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct ShortReads {
+            input: std::io::Cursor<Vec<u8>>,
+            consumed: Arc<AtomicUsize>,
+        }
+        impl Read for ShortReads {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let len = bytes.len().min(3000);
+                let count = self.input.read(&mut bytes[..len])?;
+                self.consumed.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
         assert_eq!(MAX_STDERR_DRAIN, 1_048_576);
         let bytes: Vec<u8> = (0..MAX_STDERR_DRAIN + 8192)
             .map(|i| u8::try_from(i % 251).unwrap())
             .collect();
-        let captured = spawn_stderr_drainer(std::io::Cursor::new(bytes.clone()))
-            .join()
-            .unwrap();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let captured = spawn_stderr_drainer(ShortReads {
+            input: std::io::Cursor::new(bytes.clone()),
+            consumed: consumed.clone(),
+        })
+        .join()
+        .unwrap();
         assert_eq!(captured, bytes[..MAX_STDERR_DRAIN]);
+        assert_eq!(consumed.load(Ordering::Relaxed), bytes.len());
     }
 
     #[test]
