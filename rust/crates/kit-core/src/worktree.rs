@@ -354,6 +354,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                     abs_path: entry.path(),
                     rel_path,
                     indexed,
+                    #[cfg(not(target_arch = "wasm32"))]
                     size: meta.len(),
                 });
             }
@@ -452,6 +453,7 @@ struct PendingFileHash<'e> {
     abs_path: PathBuf,
     rel_path: String,
     indexed: Option<&'e crate::index::IndexEntry>,
+    #[cfg(not(target_arch = "wasm32"))]
     size: u64,
 }
 
