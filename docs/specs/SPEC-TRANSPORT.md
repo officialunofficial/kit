@@ -272,7 +272,12 @@ warn and skip attestations. They MUST NOT use branch pack lists instead.
 
 Readers MUST bound each node by `packlist_node_bound(4096)` bytes and
 verify its content address. A walk MUST stop at 100,000 nodes or 100,000
-listed packs. It MUST detect cycles. Before downloading a pack, check its
+listed packs and enforce a 16 MiB total node-byte budget. It MUST detect cycles.
+Walk only new nodes, stopping at the last processed head or a baseline.
+Record a structurally unwalkable head (including missing, oversized or malformed nodes)
+so an unchanged head costs no further walk and permits cursor no-op.
+A changed head can resume from that checkpoint. Transport and I/O failures
+and cancellation MUST retain the preceding checkpoint and retry later. Before downloading a pack, check its
 declared length against `max_pack_bytes`; check the actual length, pack
 key, and trailer too. Stream entries, rejecting the pack at its first
 delta, non-blob object, or envelope over 1 MiB. Check compressed entries'
@@ -302,10 +307,19 @@ a complete cursor no-op record. Retain already processed packs still listed
 by the current chain; a later fetch resumes the deferred work with a fresh budget.
 
 Save only envelopes whose subject exists in the local store, under the
-worktree lock. Drop absent subjects without retry; explicit refetch clears
-the remote's processed record. Count stored, dropped, and rejected entries.
+worktree lock. Record absent subjects by pack, at most 100,000 distinct
+pack-subject pairs per record. Retry a pending pack only when at least one
+recorded subject becomes local, even when the head is unchanged. Replace
+that pack's pending subjects after retry. Never save an absent subject.
+Explicit refetch clears the remote's processed record. Count stored, dropped, and rejected entries.
 A rejected pack or envelope warns and MUST NOT fail the code fetch.
 Record rejected packs as processed so they are not downloaded repeatedly.
+A build lacking compressed-entry support MUST defer a compressed pack with
+a warning, never classify it as invalid. Compaction MUST stop with a warning
+on that condition and preserve the published chain. Deferred compressed
+packs retry on each fetch until compression support is available; the run
+keeps the preceding checkpoint and cannot record cursor no-op. Other packs
+in that walk are still processed.
 
 Push is opt-in. It sends only envelopes made locally, excluding every id
 marked fetched from any remote. Select subjects in the remote's closure
@@ -315,7 +329,13 @@ and append a node using `Missing` or `Match(old)` CAS. On conflict, re-read
 and retry within the existing budget without re-uploading the pack.
 Re-baseline past depth 64. Above 4,096 listed packs, the next writer with
 force permission automatically compacts the listed envelopes into bounded
-packs and publishes one baseline node. Compaction replaces pack ids and
+packs and publishes one baseline node with no predecessor by CAS against
+the head whose envelopes it read. Include pending local envelopes in that
+baseline. Read unpublished local envelopes from local prepared packs,
+not by downloading unconsumed uploads from the server. Never append compacted packs to the old chain. A conflict requires
+re-reading and recompacting the new head, preserving concurrent appends.
+If the replacement needs more upload tickets than one atomic write allows,
+skip it with a warning and leave the chain unchanged. Compaction replaces pack ids and
 requires `f`; update permission `u` alone preserves every old pack id.
 There is no permission-discovery verb. The client attempts the compacted
 CAS using the transport's existing write path. If a grant refuses it,
@@ -327,7 +347,9 @@ membership or publication.
 An attestation failure warns without failing the code push.
 
 Publishing is permanent on remotes without pack gc. Warn once per remote
-before first publication. Removing published envelopes resets the whole
+after the first successful publication. Do not persist the warning flag or
+published-id cache for a refused publication. Removing published envelopes
+resets the whole
 log and requires force permission; deleting a local envelope cannot retract
 its published bytes.
 
@@ -342,22 +364,25 @@ Files use that digest with `.attest-fetch` and `.attest-push` suffixes in
 records on any remote configuration change, including set-url, removal,
 and rename; never reuse a record for another repository.
 
-A record contains LF-separated fields: `kit-attestation-record-v1`, the
+A record contains LF-separated fields: `kit-attestation-record-v2`, the
 processed head as lowercase hex or `-`, the warning flag (`0` or `1`),
-then sorted unique lowercase 64-hex ids. Fetch ids name processed packs;
+then sorted unique lowercase 64-hex ids, a `pending` line, and sorted unique
+`<pack> <subject>` lines with lowercase 64-hex hashes. Pending packs MUST be
+in the processed set. Push records have no pending pairs. Fetch ids name
+processed packs;
 push ids name published envelopes and its head is absent. The decoder's
 role comes from the cache path, never from head presence. A deferred fetch
 can have no completed head yet and still retains its processed pack ids;
 it remains subject to the fetch bounds. A push record MUST have no head. Append the
 lowercase BLAKE3 of all preceding bytes, including the final LF, without
 a final newline. Readers reject corruption, duplicates, unsorted ids,
-and fetch records over `192 + 65 * 100000` bytes or 100,000 pack ids.
-Before saving a fetch checkpoint, including one with deferred payload work,
-intersect processed ids with the ids listed by the fully enumerated current
-chain. Discard ids removed by compaction or reset; retain rejected pack ids
-that the chain still lists. Do not replace a checkpoint after incomplete
-chain enumeration. The pack-walk bound therefore also bounds every saved
-fetch record, regardless of the number of compactions.
+and fetch records over `192 + 195 * 100000` bytes or 100,000 pack ids.
+On a walk reaching a baseline, retain only processed ids and pending pairs
+listed by that chain. Incremental walks retain earlier processed ids; prune
+non-pending ids above 100,000. Pending pairs also have a 100,000 limit;
+excess pending subjects are rejected with a warning, while present subjects
+are still stored. Structurally failed chain walks record the observed head without processing any partial listing. Payload interruptions
+retain the preceding checkpoint and already processed packs.
 
 Push records have no pack-walk bound. Retain up to 1,000,000 sorted
 published ids, pruning higher ids when needed, while preserving the warning

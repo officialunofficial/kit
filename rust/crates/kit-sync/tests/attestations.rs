@@ -368,11 +368,12 @@ fn fetching_an_existing_local_envelope_keeps_its_local_authorship() {
 }
 
 #[test]
-fn oversized_node_warns_without_replacing_a_completed_checkpoint() {
+fn oversized_node_is_cached_without_discarding_processed_packs() {
     use kit_core::{
         protocol::{PackKey, Transport},
         refs::{ATTESTMAP_REF, RefWriteCondition},
     };
+    use kit_sync::attestation_records::{Record, RecordKind};
     let tx = kit_transport_memory::MemoryTransport::new();
     let (tip, _) = attestation_fetch::code(&tx);
     let env = attestation_fetch::envelope(tip);
@@ -406,7 +407,20 @@ fn oversized_node_warns_without_replacing_a_completed_checkpoint() {
     )
     .unwrap();
     assert_eq!(report.attestation_warnings.len(), 1);
-    assert_eq!(std::fs::read(path).unwrap(), before);
+    let before = Record::decode(&before, RecordKind::Fetch).unwrap();
+    let after = Record::decode(&std::fs::read(path).unwrap(), RecordKind::Fetch).unwrap();
+    assert_eq!(after.head, Some(key));
+    assert_eq!(after.ids, before.ids);
+    let again = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &options,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert!(again.remote_unchanged);
+    assert!(again.attestation_warnings.is_empty());
 }
 
 #[test]

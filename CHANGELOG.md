@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Retry attestations when their subjects arrive, cache bounded chain walks, and compact logs atomically without losing concurrent publications. Disposable attestation records now use v2; existing caches reset once.
+
 - Publish locally authored attestations with `kit push --attestations` or `push.attestations = true`; publication is permanent.
 
 ### Security

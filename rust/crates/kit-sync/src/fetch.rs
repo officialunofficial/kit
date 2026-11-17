@@ -817,7 +817,13 @@ fn remote_unchanged(
     if options.attestations && source.supports_attestations() {
         let path =
             crate::attestation_records::path(layout, source, remote, &options.remote_url, false);
-        if crate::fetch_attestations::load_record(&path).head != record.attestmap_head {
+        let attestation = crate::fetch_attestations::load_record(&path);
+        if attestation.head != record.attestmap_head
+            || attestation
+                .pending
+                .values()
+                .any(|subjects| subjects.iter().any(|subject| store.contains(subject)))
+        {
             return Ok(false);
         }
     }

@@ -8,11 +8,13 @@ use kit_core::{
     layout::RepoLayout,
     refs::parse_lowercase_hash,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// Maximum packs processed during one attestation chain walk.
 pub const WALK_LIMIT: usize = 100_000;
+/// Total bytes downloaded during one attestation node walk.
+pub const WALK_BYTES: u64 = 16 * 1024 * 1024;
 /// Largest downloaded attestation pack-list node.
 pub const NODE_BOUND: u64 = kit_core::transfer::packlist_node_bound(4096);
 
@@ -31,23 +33,25 @@ pub enum RecordKind {
 }
 
 /// Processed attestmap head and pack ids, or published envelope ids.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Record {
-    /// Last completely processed chain head; absent for a push cache.
+    /// Last completed or structurally rejected chain head; absent for push.
     pub head: Option<Hash>,
     /// Processed packs for fetch; published attestation ids for push.
     pub ids: BTreeSet<Hash>,
     /// Whether the permanent-publication warning has been shown.
     pub warned: bool,
+    /// Missing subjects grouped by pack, retried only after one becomes local.
+    pub pending: BTreeMap<Hash, BTreeSet<Hash>>,
 }
 
 impl Record {
     /// Encode in sorted order with a checksum and a distinct record tag.
-    /// Fetch callers first retain only ids in the fully enumerated current chain.
+    /// Fetch callers bound ids and pending pairs before persisting.
     #[must_use]
     pub fn encode(&self, kind: RecordKind) -> Vec<u8> {
         let mut body = format!(
-            "kit-attestation-record-v1\n{}\n{}\n",
+            "kit-attestation-record-v2\n{}\n{}\n",
             self.head.as_ref().map_or_else(|| "-".into(), hash::to_hex),
             u8::from(self.warned)
         );
@@ -58,6 +62,15 @@ impl Record {
         }) {
             body.push_str(&hash::to_hex(id));
             body.push('\n');
+        }
+        body.push_str("pending\n");
+        for (pack, subjects) in &self.pending {
+            for subject in subjects {
+                body.push_str(&hash::to_hex(pack));
+                body.push(' ');
+                body.push_str(&hash::to_hex(subject));
+                body.push('\n');
+            }
         }
         let checksum = hash::to_hex(&hash::hash(body.as_bytes()));
         body.push_str(&checksum);
@@ -72,7 +85,7 @@ impl Record {
 }
 
 fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> Option<Record> {
-    if kind == RecordKind::Fetch && bytes.len() > FETCH_RECORD_OVERHEAD + 65 * WALK_LIMIT {
+    if kind == RecordKind::Fetch && bytes.len() > FETCH_RECORD_OVERHEAD + 195 * WALK_LIMIT {
         return None;
     }
     let text = std::str::from_utf8(bytes).ok()?;
@@ -82,7 +95,7 @@ fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> 
         return None;
     }
     let mut lines = body.split('\n');
-    if lines.next()? != "kit-attestation-record-v1" {
+    if lines.next()? != "kit-attestation-record-v2" {
         return None;
     }
     let head = match lines.next()? {
@@ -100,7 +113,12 @@ fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> 
     let mut ids = BTreeSet::new();
     let mut previous = None;
     let mut count = 0usize;
-    for line in lines {
+    let mut separator = false;
+    for line in lines.by_ref() {
+        if line == "pending" {
+            separator = true;
+            break;
+        }
         let id = parse_lowercase_hash(line.as_bytes())?;
         if previous.is_some_and(|old| old >= id) {
             return None;
@@ -114,7 +132,32 @@ fn decode_with_push_limit(bytes: &[u8], kind: RecordKind, push_limit: usize) -> 
         }
         previous = Some(id);
     }
-    Some(Record { head, ids, warned })
+    if !separator {
+        return None;
+    }
+    let mut pending: BTreeMap<Hash, BTreeSet<Hash>> = BTreeMap::new();
+    let mut previous = None;
+    for (count, line) in lines.enumerate() {
+        if kind == RecordKind::Push || count == WALK_LIMIT {
+            return None;
+        }
+        let (pack, subject) = line.split_once(' ')?;
+        let pair = (
+            parse_lowercase_hash(pack.as_bytes())?,
+            parse_lowercase_hash(subject.as_bytes())?,
+        );
+        if previous.is_some_and(|old| old >= pair) || !ids.contains(&pair.0) {
+            return None;
+        }
+        pending.entry(pair.0).or_default().insert(pair.1);
+        previous = Some(pair);
+    }
+    Some(Record {
+        head,
+        ids,
+        warned,
+        pending,
+    })
 }
 
 /// A remote cache path keyed by name, URL, repository address, and origin.
@@ -160,6 +203,7 @@ mod tests {
             head: Some([2; 32]),
             ids: BTreeSet::from([[1; 32], [3; 32]]),
             warned: true,
+            ..Record::default()
         };
         let bytes = record.encode(RecordKind::Fetch);
         assert_eq!(Record::decode(&bytes, RecordKind::Fetch), Some(record));
@@ -175,6 +219,23 @@ mod tests {
         );
     }
     #[test]
+    fn pending_subjects_roundtrip_with_strict_order_and_bounds() {
+        let record = Record {
+            head: Some([4; 32]),
+            ids: BTreeSet::from([[1; 32]]),
+            pending: BTreeMap::from([([1; 32], BTreeSet::from([[2; 32], [3; 32]]))]),
+            ..Record::default()
+        };
+        assert_eq!(
+            Record::decode(&record.encode(RecordKind::Fetch), RecordKind::Fetch),
+            Some(record.clone())
+        );
+        assert!(Record::decode(&record.encode(RecordKind::Push), RecordKind::Push).is_none());
+        let mut invalid = record;
+        invalid.ids.clear();
+        assert!(Record::decode(&invalid.encode(RecordKind::Fetch), RecordKind::Fetch).is_none());
+    }
+    #[test]
     fn fetch_record_accepts_the_full_walk_and_push_exceeds_it() {
         let ids = (0..=WALK_LIMIT)
             .map(|n| {
@@ -187,6 +248,7 @@ mod tests {
             head: None,
             ids,
             warned: true,
+            ..Record::default()
         };
         assert_eq!(
             Record::decode(&record.encode(RecordKind::Push), RecordKind::Push),
@@ -202,6 +264,7 @@ mod tests {
                 })
                 .collect(),
             warned: false,
+            ..Record::default()
         };
         assert_eq!(
             Record::decode(&record.encode(RecordKind::Fetch), RecordKind::Fetch),
@@ -221,6 +284,7 @@ mod tests {
                 })
                 .collect(),
             warned: true,
+            ..Record::default()
         };
         let bytes = record.encode(RecordKind::Fetch);
         assert!(Record::decode(&bytes, RecordKind::Fetch).is_none());
@@ -229,6 +293,7 @@ mod tests {
             head: None,
             ids: BTreeSet::from([[1; 32]]),
             warned: false,
+            ..Record::default()
         };
         assert_eq!(
             Record::decode(&pending.encode(RecordKind::Fetch), RecordKind::Fetch),
@@ -242,6 +307,7 @@ mod tests {
             head: None,
             ids: BTreeSet::from([[1; 32], [2; 32], [3; 32]]),
             warned: true,
+            ..Record::default()
         };
         let mut bytes = record.encode(RecordKind::Push);
         let pruned = decode_with_push_limit(&bytes, RecordKind::Push, 2).unwrap();

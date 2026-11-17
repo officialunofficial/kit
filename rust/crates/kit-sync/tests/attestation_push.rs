@@ -105,6 +105,8 @@ fn simultaneous_attesters_both_survive_cas() {
         let a = scope.spawn(|| {
             let gated = Gated {
                 deny_compaction: false,
+                members_only: false,
+                hook: None,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -115,6 +117,8 @@ fn simultaneous_attesters_both_survive_cas() {
         let b = scope.spawn(|| {
             let gated = Gated {
                 deny_compaction: false,
+                members_only: false,
+                hook: None,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -160,6 +164,8 @@ struct Gated<'a> {
     first: std::cell::Cell<bool>,
     limits: kit_core::protocol::UploadLimits,
     deny_compaction: bool,
+    members_only: bool,
+    hook: Option<&'a dyn Fn(bool)>,
 }
 impl kit_sync::RemoteSource for Gated<'_> {
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
@@ -178,6 +184,11 @@ impl kit_sync::RemoteSource for Gated<'_> {
         self.source.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        if name == ATTESTMAP_REF
+            && let Some(hook) = self.hook
+        {
+            hook(false);
+        }
         let result = self.source.read_ref(name);
         if name == ATTESTMAP_REF && self.first.replace(false) {
             self.barrier.wait();
@@ -193,6 +204,25 @@ impl kit_sync::RemoteSource for Gated<'_> {
         hint: &str,
         sink: &mut dyn kit_core::protocol::PackSink,
     ) -> Result<(), kit_sync::SourceError> {
+        if self.members_only && hint == ATTESTMAP_REF {
+            let mut head = self.source.read_ref(ATTESTMAP_REF)?;
+            let mut member = false;
+            while let Some(id) = head {
+                let node = kit_core::transfer::decode_packlist(
+                    &self.source.download_blob(&PackKey::new(id), hint)?,
+                )
+                .unwrap();
+                if PackKey::new(id) == *key || node.packs.iter().any(|id| PackKey::new(*id) == *key)
+                {
+                    member = true;
+                    break;
+                }
+                head = node.prev;
+            }
+            if !member {
+                return Err(kit_sync::SourceError::PackNotFound);
+            }
+        }
         self.source.download_pack(key, hint, sink)
     }
     fn upload_pack(
@@ -240,6 +270,9 @@ impl kit_sync::RemoteSource for Gated<'_> {
                 )));
             }
         }
+        if let Some(hook) = self.hook {
+            hook(true);
+        }
         self.source.write_attestmap(condition, tip, keys)
     }
 }
@@ -272,17 +305,36 @@ fn compaction_splits_existing_packs_under_smaller_upload_and_ticket_caps() {
         .unwrap();
     let (dir, _) = local(&tx, "example.com/new/v1");
     let source = TransportSource::new(&tx);
-    let gated = Gated {
+    let mut gated = Gated {
         deny_compaction: false,
+        members_only: true,
+        hook: None,
         source: &source,
         barrier: &std::sync::Barrier::new(1),
         first: std::cell::Cell::new(false),
         limits: kit_core::protocol::UploadLimits {
             max_pack_bytes: Some(1024),
-            data_packs_per_advance: Some(1),
+            data_packs_per_advance: Some(16),
             ..Default::default()
         },
     };
+    gated.limits.data_packs_per_advance = Some(1);
+    let refused = kit_sync::push(dir.path(), &gated, &options()).unwrap();
+    assert_eq!(refused.attestations_pushed, 0);
+    assert_eq!(tx.read_ref(ATTESTMAP_REF).unwrap(), Some(id));
+    assert!(
+        refused
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("atomic upload ticket limit"))
+    );
+    assert!(
+        !refused
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("permanent"))
+    );
+    gated.limits.data_packs_per_advance = Some(16);
     let report = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert_eq!(report.attestations_pushed, 1);
     assert!(
@@ -461,6 +513,8 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
         first: std::cell::Cell::new(false),
         limits: kit_core::protocol::UploadLimits::default(),
         deny_compaction: true,
+        members_only: false,
+        hook: None,
     };
     let result = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert!(
@@ -470,6 +524,17 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
             .any(|warning| warning.contains("requires f"))
     );
     let after = gated.read_ref(ATTESTMAP_REF).unwrap();
+    assert_eq!(after, Some(id));
+    assert_eq!(result.attestations_pushed, 0);
+    assert!(
+        !result
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("permanent"))
+    );
+    let layout = RepoLayout::single(dir.path());
+    let cache = kit_sync::attestation_records::path(&layout, &gated, "origin", "", true);
+    assert!(!cache.exists());
     let again = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert!(
         again
@@ -516,7 +581,7 @@ fn stale_subjects_never_block_commit_attestations_on_an_incomplete_tree() {
 }
 
 #[test]
-fn permanence_warning_is_observed_once_before_the_first_publication() {
+fn permanence_warning_is_recorded_only_after_publication() {
     use kit_sync::Observer;
     struct Warning<'a> {
         transport: &'a kit_transport_memory::MemoryTransport,
@@ -527,8 +592,8 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
         fn event(&self, event: &kit_sync::SyncEvent) {
             if matches!(event, kit_sync::SyncEvent::AttestationWarning { message } if message.contains("permanent"))
             {
-                assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_none());
-                assert!(!self.transport.pack_exists(&self.pack, None).unwrap());
+                assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_some());
+                assert!(self.transport.pack_exists(&self.pack, None).unwrap());
                 self.count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -555,4 +620,82 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
     let report = kit_sync::push(dir.path(), &TransportSource::new(&transport), &opts).unwrap();
     assert_eq!(report.attestations_pushed, 1);
     assert_eq!(warning.count.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn concurrent_compaction_and_append_preserve_every_envelope() {
+    for shrink in [false, true] {
+        let tx = kit_transport_memory::MemoryTransport::new();
+        let (tip, _) = attestation_fetch::code(&tx);
+        let old = kit_attest::pack::build(&[&attestation_fetch::envelope(tip)], 4096).unwrap();
+        let old_key = hash::hash(&old);
+        tx.upload_blob(&old, &PackKey::new(old_key), None).unwrap();
+        let bytes = kit_core::transfer::encode_packlist(None, &vec![old_key; 4096]).unwrap();
+        let id = hash::hash(&bytes);
+        tx.upload_blob(&bytes, &PackKey::new(id), None).unwrap();
+        tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id)
+            .unwrap();
+        let (dir, _) = local(&tx, "example.com/local/v1");
+        let reads = std::cell::Cell::new(0);
+        let fired = std::cell::Cell::new(false);
+        let remote_env = {
+            let mut env = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
+            env.payload = String::from_utf8(env.payload)
+                .unwrap()
+                .replace("example.com/test/v1", "example.com/racing/v1")
+                .into_bytes();
+            env.encode().unwrap().into_bytes()
+        };
+        let remote_pack = kit_attest::pack::build(&[&remote_env], 4096).unwrap();
+        let hook = |writing: bool| {
+            if !writing {
+                reads.set(reads.get() + 1);
+            }
+            if fired.get() || (shrink && (writing || reads.get() != 2)) || (!shrink && !writing) {
+                return;
+            }
+            fired.set(true);
+            if shrink {
+                let bytes = kit_core::transfer::encode_packlist(None, &[old_key]).unwrap();
+                let id = hash::hash(&bytes);
+                tx.upload_blob(&bytes, &PackKey::new(id), None).unwrap();
+                tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &id)
+                    .unwrap();
+            } else {
+                attestation_fetch::append(&tx, &remote_pack);
+            }
+        };
+        let source = TransportSource::new(&tx);
+        let gated = Gated {
+            source: &source,
+            barrier: &std::sync::Barrier::new(1),
+            first: std::cell::Cell::new(false),
+            limits: kit_core::protocol::UploadLimits::default(),
+            deny_compaction: false,
+            members_only: true,
+            hook: Some(&hook),
+        };
+        let report = kit_sync::push(dir.path(), &gated, &options()).unwrap();
+        assert_eq!(report.attestations_pushed, 1);
+        assert!(fired.get());
+        let clone_dir = tempfile::tempdir().unwrap();
+        let remote = CloneRemote {
+            name: "verify".into(),
+            url: "kit+memory://verify".into(),
+            kind: "memory".into(),
+        };
+        kit_sync::clone(
+            clone_dir.path(),
+            &source,
+            &remote,
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        let layout = RepoLayout::single(clone_dir.path());
+        assert_eq!(
+            kit_attest::store::list(&layout, &tip).unwrap().len(),
+            if shrink { 2 } else { 3 }
+        );
+    }
 }
