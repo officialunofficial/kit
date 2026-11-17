@@ -459,7 +459,7 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
         source: &source,
         barrier: &std::sync::Barrier::new(1),
         first: std::cell::Cell::new(false),
-        limits: Default::default(),
+        limits: kit_core::protocol::UploadLimits::default(),
         deny_compaction: true,
     };
     let result = kit_sync::push(dir.path(), &gated, &options()).unwrap();
