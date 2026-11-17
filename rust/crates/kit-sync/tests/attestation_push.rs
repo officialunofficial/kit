@@ -525,10 +525,12 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
     }
     impl Observer<kit_sync::SyncEvent> for Warning<'_> {
         fn event(&self, event: &kit_sync::SyncEvent) {
-            if matches!(event, kit_sync::SyncEvent::AttestationWarning { message } if message.contains("permanent")) {
+            if matches!(event, kit_sync::SyncEvent::AttestationWarning { message } if message.contains("permanent"))
+            {
                 assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_none());
                 assert!(!self.transport.pack_exists(&self.pack, None).unwrap());
-                self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -536,9 +538,18 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
     attestation_fetch::code(&transport);
     let (dir, _) = local(&transport, "example.com/local/v1");
     let layout = RepoLayout::single(dir.path());
-    let bytes = std::fs::read(kit_attest::store::list(&layout, &refs::read_ref(&layout, "main").unwrap().unwrap()).unwrap().remove(0)).unwrap();
+    let bytes = std::fs::read(
+        kit_attest::store::list(&layout, &refs::read_ref(&layout, "main").unwrap().unwrap())
+            .unwrap()
+            .remove(0),
+    )
+    .unwrap();
     let pack = kit_attest::pack::build(&[&bytes], kit_core::protocol::PACK_BODY_LIMIT).unwrap();
-    let warning = Warning { transport: &transport, count: std::sync::atomic::AtomicUsize::new(0), pack: PackKey::new(hash::hash(&pack)) };
+    let warning = Warning {
+        transport: &transport,
+        count: std::sync::atomic::AtomicUsize::new(0),
+        pack: PackKey::new(hash::hash(&pack)),
+    };
     let mut opts = options();
     opts.control.observer = &warning;
     let report = kit_sync::push(dir.path(), &TransportSource::new(&transport), &opts).unwrap();

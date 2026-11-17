@@ -251,7 +251,9 @@ fn publish(
         }
         if !record.warned {
             report.attestation_warnings.push(PERMANENCE_WARNING.into());
-            tx.observer.event(&crate::SyncEvent::AttestationWarning { message: PERMANENCE_WARNING.into() });
+            tx.observer.event(&crate::SyncEvent::AttestationWarning {
+                message: PERMANENCE_WARNING.into(),
+            });
             record.warned = true;
             persist(&path, &record)?;
         }
