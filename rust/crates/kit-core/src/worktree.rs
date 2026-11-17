@@ -4031,6 +4031,8 @@ mod tests {
         ];
         for (length, threads, pool) in [
             (1, 2, false),
+            (FILE_HASH_MISSES_PER_THREAD * 2 - 1, 2, false),
+            (FILE_HASH_MISSES_PER_THREAD * 2, 2, true),
             (misses.len(), 1, false),
             (misses.len(), 2, true),
         ] {
