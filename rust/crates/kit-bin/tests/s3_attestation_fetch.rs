@@ -31,8 +31,14 @@ fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
         let data = std::sync::Arc::clone(&memory);
         let ref_name = full.clone();
         mocks.push(
-            server.mock("GET", format!("/bucket/{full}").as_str()).with_status(200)
-                .with_body_from_request(move |_| format!("{}\n", to_hex(&data.read_ref(&ref_name).unwrap().unwrap())).into_bytes()).create()
+            server
+                .mock("GET", format!("/bucket/{full}").as_str())
+                .with_status(200)
+                .with_body_from_request(move |_| {
+                    format!("{}\n", to_hex(&data.read_ref(&ref_name).unwrap().unwrap()))
+                        .into_bytes()
+                })
+                .create(),
         );
         if full.starts_with("refs/kit/") {
             pending.push(value);
@@ -70,28 +76,56 @@ fn s3_clone_fetch_pull_validate_attestations_and_resume_after_rejection() {
         );
     }
     let data = std::sync::Arc::clone(&memory);
-    mocks.push(server.mock("PUT", mockito::Matcher::Regex("/bucket/(packs/|refs/kit/attestmap)".into()))
-        .with_status(200).with_body_from_request(move |request| {
-            let path = request.path().strip_prefix("/bucket/").unwrap();
-            let bytes = request.body().unwrap();
-            if let Some(hex) = path.strip_prefix("packs/") {
-                let key = kit_core::refs::parse_lowercase_hash(hex.as_bytes()).unwrap();
-                data.upload_blob(bytes, &PackKey::new(key), Some(ATTESTMAP_REF)).unwrap();
-            } else {
-                let key = kit_core::refs::parse_lowercase_hash(bytes.strip_suffix(b"\n").unwrap()).unwrap();
-                data.update_ref(path, kit_core::refs::RefWriteCondition::Any, &key).unwrap();
-            }
-            Vec::new()
-        }).create());
+    mocks.push(
+        server
+            .mock(
+                "PUT",
+                mockito::Matcher::Regex("/bucket/(packs/|refs/kit/attestmap)".into()),
+            )
+            .with_status(200)
+            .with_body_from_request(move |request| {
+                let path = request.path().strip_prefix("/bucket/").unwrap();
+                let bytes = request.body().unwrap();
+                if let Some(hex) = path.strip_prefix("packs/") {
+                    let key = kit_core::refs::parse_lowercase_hash(hex.as_bytes()).unwrap();
+                    data.upload_blob(bytes, &PackKey::new(key), Some(ATTESTMAP_REF))
+                        .unwrap();
+                } else {
+                    let key =
+                        kit_core::refs::parse_lowercase_hash(bytes.strip_suffix(b"\n").unwrap())
+                            .unwrap();
+                    data.update_ref(path, kit_core::refs::RefWriteCondition::Any, &key)
+                        .unwrap();
+                }
+                Vec::new()
+            })
+            .create(),
+    );
     let data = std::sync::Arc::clone(&memory);
-    mocks.push(server.mock("GET", mockito::Matcher::Regex("/bucket/packs/[a-f0-9]+".into()))
-        .with_status(200).with_body_from_request(move |request| {
-            let hex = request.path().strip_prefix("/bucket/packs/").unwrap();
-            let key = kit_core::refs::parse_lowercase_hash(hex.as_bytes()).unwrap();
-            data.download_blob(&PackKey::new(key), Some(ATTESTMAP_REF), 1<<20).unwrap()
-        }).create());
-    mocks.push(server.mock("HEAD", mockito::Matcher::Regex("/bucket/packs/[a-f0-9]+".into()))
-        .with_status(404).create());
+    mocks.push(
+        server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex("/bucket/packs/[a-f0-9]+".into()),
+            )
+            .with_status(200)
+            .with_body_from_request(move |request| {
+                let hex = request.path().strip_prefix("/bucket/packs/").unwrap();
+                let key = kit_core::refs::parse_lowercase_hash(hex.as_bytes()).unwrap();
+                data.download_blob(&PackKey::new(key), Some(ATTESTMAP_REF), 1 << 20)
+                    .unwrap()
+            })
+            .create(),
+    );
+    mocks.push(
+        server
+            .mock(
+                "HEAD",
+                mockito::Matcher::Regex("/bucket/packs/[a-f0-9]+".into()),
+            )
+            .with_status(404)
+            .create(),
+    );
     let tx = kit_transport_s3::S3Transport::with_parts(
         server.url(),
         "bucket",

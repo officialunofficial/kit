@@ -7,7 +7,7 @@ use crate::{
 use kit_core::{
     hash::{self, Hash},
     layout::RepoLayout,
-    protocol::{MemorySink, PACK_BODY_LIMIT, PackKey, PackBody},
+    protocol::{MemorySink, PACK_BODY_LIMIT, PackBody, PackKey},
     refs::{ATTESTMAP_REF, RefWriteCondition},
     store::ObjectStore,
     transfer::{
@@ -287,7 +287,10 @@ fn append(
             return Ok((prior.ok_or("missing attestation head")?, packs));
         }
         if packs.len() + new.len() > WALK_LIMIT {
-            return Err("attestation append exceeds the reader walk limit; reset or compact the log first".into());
+            return Err(
+                "attestation append exceeds the reader walk limit; reset or compact the log first"
+                    .into(),
+            );
         }
         packs.extend_from_slice(&new);
         let baseline = rebaseline && depth >= 64 && packs.len() <= 4096;
@@ -610,12 +613,17 @@ impl Prepared {
 }
 
 impl PackBody for Prepared {
-    fn len(&self) -> u64 { self.pack.len() }
+    fn len(&self) -> u64 {
+        self.pack.len()
+    }
     fn read_from(&self, offset: u64) -> std::io::Result<Box<dyn std::io::Read + Send + '_>> {
         if offset > self.pack.len() {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
-        Ok(Box::new(Reader { pack: &self.pack, offset }))
+        Ok(Box::new(Reader {
+            pack: &self.pack,
+            offset,
+        }))
     }
 }
 
@@ -639,7 +647,11 @@ mod tests {
         batch.flush(&context, &mut packs).unwrap();
         kit_core::pack::sweep_spool_dir(&store.spool_dir());
         packs[0].upload(&context).unwrap();
-        assert!(source.pack_exists(&PackKey::new(packs[0].id), ATTESTMAP_REF).unwrap());
+        assert!(
+            source
+                .pack_exists(&PackKey::new(packs[0].id), ATTESTMAP_REF)
+                .unwrap()
+        );
     }
     #[test]
     fn append_never_publishes_a_chain_beyond_the_reader_walk_limit() {
@@ -654,15 +666,18 @@ mod tests {
         let mut left = WALK_LIMIT;
         while left > 0 {
             let count = left.min(4096);
-            let node = transfer::encode_packlist(prior, &vec![[1;32];count]).unwrap();
+            let node = transfer::encode_packlist(prior, &vec![[1; 32]; count]).unwrap();
             let id = hash::hash(&node);
-            transport.upload_blob(&node, &PackKey::new(id), None).unwrap();
+            transport
+                .upload_blob(&node, &PackKey::new(id), None)
+                .unwrap();
             prior = Some(id);
             left -= count;
         }
-        transport.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &prior.unwrap()).unwrap();
-        assert!(append(&context, &[[2;32]], true).is_err());
+        transport
+            .update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &prior.unwrap())
+            .unwrap();
+        assert!(append(&context, &[[2; 32]], true).is_err());
         assert_eq!(transport.read_ref(ATTESTMAP_REF).unwrap(), prior);
     }
-
 }
