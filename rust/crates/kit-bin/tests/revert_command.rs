@@ -244,3 +244,36 @@ fn revert_mainline_on_a_non_merge_is_an_error() {
     );
     assert_eq!(main_tip(root), tip);
 }
+
+#[test]
+fn clean_revert_refuses_staged_local_untracked_and_nested_work() {
+    for kind in ["staged", "local", "untracked", "nested"] {
+        let td = init_repo();
+        let root = td.path();
+        commit(root, "a", b"base", "base");
+        commit(root, "b", b"restore me", "add b");
+        assert!(run_in(root, &["rm", "b"]).status.success());
+        assert!(run_in(root, &["commit", "-m", "remove b"]).status.success());
+        let before = main_tip(root);
+        match kind {
+            "staged" => {
+                fs::write(root.join("a"), "mine").unwrap();
+                assert!(run_in(root, &["add", "a"]).status.success());
+            }
+            "local" => fs::write(root.join("a"), "mine").unwrap(),
+            "untracked" => fs::write(root.join("b"), "mine").unwrap(),
+            "nested" => fs::create_dir_all(root.join("b/.git")).unwrap(),
+            _ => unreachable!(),
+        }
+        let out = run_in(root, &["revert", &before]);
+        assert!(!out.status.success(), "{kind}: {out:?}");
+        assert_eq!(main_tip(root), before);
+        if kind == "nested" {
+            assert!(root.join("b/.git").is_dir());
+        } else if kind == "untracked" {
+            assert_eq!(fs::read(root.join("b")).unwrap(), b"mine");
+        } else {
+            assert_eq!(fs::read(root.join("a")).unwrap(), b"mine");
+        }
+    }
+}

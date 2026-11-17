@@ -476,3 +476,79 @@ fn a_fast_forward_loads_no_key() {
     .unwrap();
     assert!(matches!(outcome, Outcome::FastForward { .. }));
 }
+
+#[test]
+fn merge_refuses_staged_local_untracked_and_nested_work() {
+    for no_ff in [false, true] {
+        for kind in [
+            "staged",
+            "local",
+            "untracked",
+            "nested",
+            "staged_unchanged",
+            "local_unchanged",
+        ] {
+            let f = init();
+            let base = f.commit(&[("a", "old"), ("c", "keep")], &[], "base", 1);
+            let ahead = f.commit(
+                &[("a", "new"), ("b", "new"), ("c", "keep")],
+                &[base],
+                "ahead",
+                2,
+            );
+            f.checkout("main", base);
+            refs::write_ref(&f.layout, "topic", &ahead).unwrap();
+            match kind {
+                "staged" => {
+                    f.write("a", "mine");
+                    f.stage("a");
+                }
+                "local" => f.write("a", "mine"),
+                "staged_unchanged" => {
+                    f.write("c", "mine");
+                    f.stage("c");
+                }
+                "local_unchanged" => f.write("c", "mine"),
+                "untracked" => f.write("b", "mine"),
+                "nested" => std::fs::create_dir_all(f.path("b/.git")).unwrap(),
+                _ => unreachable!(),
+            }
+            let mut request = merge_request("topic");
+            request.no_ff = no_ff;
+            assert!(start(&f, &request).is_err(), "{kind}, no_ff={no_ff}");
+            assert_eq!(refs::resolve_head(&f.layout).unwrap(), Some(base));
+            if kind == "nested" {
+                assert!(f.path("b/.git").is_dir());
+            } else if kind == "untracked" {
+                assert_eq!(f.read("b"), "mine");
+            } else if kind.ends_with("unchanged") {
+                assert_eq!(f.read("c"), "mine");
+            } else {
+                assert_eq!(f.read("a"), "mine");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_merges_leave_unchanged_files_in_place() {
+    use std::os::unix::fs::MetadataExt;
+    for no_ff in [false, true] {
+        let f = init();
+        let base = f.commit(&[("a", "keep"), ("b", "old")], &[], "base", 1);
+        let ahead = f.commit(&[("a", "keep"), ("b", "new")], &[base], "ahead", 2);
+        f.checkout("main", base);
+        refs::write_ref(&f.layout, "topic", &ahead).unwrap();
+        let before = std::fs::metadata(f.path("a")).unwrap();
+        let mut request = merge_request("topic");
+        request.no_ff = no_ff;
+        start(&f, &request).unwrap();
+        let after = std::fs::metadata(f.path("a")).unwrap();
+        assert_eq!(
+            (before.ino(), before.mtime_nsec()),
+            (after.ino(), after.mtime_nsec())
+        );
+        assert_eq!(f.read("b"), "new");
+    }
+}

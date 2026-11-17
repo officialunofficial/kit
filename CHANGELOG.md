@@ -7,6 +7,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Reuse unchanged HEAD entries during pull, clean merges and reverts, and skip unrelated ignored directories during restore checks.
 - Avoid loading unrelated verified-tip records during unchanged fetches.
 - Retry skipped attestations when their subjects arrive locally.
 - Cache broken attestation heads, bound node bytes, and walk only new nodes.
