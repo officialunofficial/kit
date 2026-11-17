@@ -723,16 +723,28 @@ impl ObjectStore {
     /// decodes this function used to pay for every tree/chunked-blob
     /// read, once inside [`Self::read`]'s verification and once here).
     /// Every other type was only ever decoded once (verification there is
-    /// a plain `BLAKE3(bytes)`, no decode), so this path is unchanged for
-    /// them.
+    /// a plain `BLAKE3(bytes)`, no decode).
+    ///
+    /// A `Blob` keeps the buffer it was read into: the 10-byte head is
+    /// shifted out in place, so the payload is never copied into a second
+    /// allocation. A head that is not the canonical prologue for the
+    /// payload's length goes to [`serialize::deserialize`], so every
+    /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        let bytes = self.read_raw(h)?;
+        let mut bytes = self.read_raw(h)?;
         let (actual, decoded) = verified_id_and_object(&bytes);
         check_hash(h, &actual)?;
-        match decoded {
-            Some(obj) => Ok(obj),
-            None => Ok(serialize::deserialize(&bytes)?),
+        if let Some(obj) = decoded {
+            return Ok(obj);
         }
+        let head = serialize::BLOB_PROLOGUE_LEN;
+        let canonical_blob = bytes.len() >= head
+            && serialize::blob_prologue(bytes.len() - head).is_ok_and(|p| p[..] == bytes[..head]);
+        if canonical_blob {
+            bytes.drain(..head);
+            return Ok(Object::Blob(crate::object::Blob { data: bytes }));
+        }
+        Ok(serialize::deserialize(&bytes)?)
     }
 
     /// Hash-verifying variant of [`object_type`](Self::object_type): reads
@@ -1414,6 +1426,114 @@ mod tests {
         let h = store.write(&bytes).unwrap();
         let parsed = store.read_object(&h).unwrap();
         assert_eq!(parsed, obj);
+    }
+
+    /// The outcome of `deserialize` for `bytes`, in `read_object`'s error
+    /// domain, rendered so two outcomes compare with `==`.
+    fn expected_read(bytes: &[u8]) -> Result<Object, String> {
+        serialize::deserialize(bytes).map_err(|e| format!("{:?}", StoreError::Decode(e)))
+    }
+
+    /// Write `bytes` verbatim, whether or not they decode. A `Blob`-tagged
+    /// object is byte-hashed, so its id is `BLAKE3(bytes)` either way.
+    fn write_verbatim(store: &ObjectStore, bytes: &[u8]) -> Hash {
+        let h = store.write(bytes).unwrap();
+        assert_eq!(h, crate::hash::hash(bytes));
+        h
+    }
+
+    /// Invariant: for any stored `Blob`-tagged bytes, `read_object` returns
+    /// exactly what `deserialize` returns, the same object or the same
+    /// decode error. A blob read skips the generic decoder, so this pins it
+    /// to that decoder on short, malformed, truncated, padded and valid
+    /// inputs alike.
+    #[test]
+    fn read_object_blob_matches_deserialize_on_edge_inputs() {
+        let (_dir, store) = fresh_store();
+        let valid = serialize::serialize(&Object::Blob(Blob {
+            data: b"payload".to_vec(),
+        }))
+        .unwrap();
+        let mut cases: Vec<Vec<u8>> = vec![
+            valid.clone(),
+            serialize::serialize(&Object::Blob(Blob { data: Vec::new() })).unwrap(),
+        ];
+        // Every proper prefix: shorter than the prologue, shorter than the
+        // length field, and shorter than the declared payload.
+        cases.extend((1..valid.len()).map(|n| valid[..n].to_vec()));
+        // Trailing bytes after the payload.
+        cases.push([valid.as_slice(), b"x"].concat());
+        // Length field one more and one less than the payload.
+        for delta in [1i64, -1] {
+            let mut v = valid.clone();
+            let len = i64::from(u32::from_le_bytes(v[6..10].try_into().unwrap())) + delta;
+            v[6..10].copy_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+            cases.push(v);
+        }
+        // Bad magic and a wrong schema version.
+        let mut bad_magic = valid.clone();
+        bad_magic[2] ^= 0xFF;
+        cases.push(bad_magic);
+        let mut bad_version = valid.clone();
+        bad_version[5] = bad_version[5].wrapping_add(1);
+        cases.push(bad_version);
+
+        for bytes in cases {
+            let h = write_verbatim(&store, &bytes);
+            let got = store.read_object(&h).map_err(|e| format!("{e:?}"));
+            assert_eq!(got, expected_read(&bytes), "input {bytes:?}");
+        }
+    }
+
+    /// A blob whose on-disk bytes no longer hash to its id reports
+    /// `HashMismatch`, never a decode error or the corrupt payload.
+    #[test]
+    fn read_object_blob_detects_corruption() {
+        let (_dir, store) = fresh_store();
+        let bytes = serialize::serialize(&Object::Blob(Blob {
+            data: b"object bytes".to_vec(),
+        }))
+        .unwrap();
+        let h = store.write(&bytes).unwrap();
+        let mut corrupt = bytes.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(store.path_for(&h), &corrupt).unwrap();
+        assert!(matches!(
+            store.read_object(&h),
+            Err(StoreError::HashMismatch { .. })
+        ));
+        // A length field that disagrees with the file still fails on the
+        // hash first, as `read` does.
+        let mut short = bytes.clone();
+        short[6] ^= 1;
+        fs::write(store.path_for(&h), &short).unwrap();
+        assert!(matches!(
+            store.read_object(&h),
+            Err(StoreError::HashMismatch { .. })
+        ));
+    }
+
+    proptest::proptest! {
+        /// Invariant: `read_object` agrees with `deserialize(read(h))` for
+        /// arbitrary `Blob`-tagged bytes and for every valid blob payload.
+        #[test]
+        fn read_object_blob_matches_deserialize(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..2048),
+            raw in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            let (_dir, store) = fresh_store();
+            let valid = serialize::serialize(&Object::Blob(Blob { data: payload.clone() })).unwrap();
+            let mut arbitrary = vec![crate::object::ObjectType::Blob as u8];
+            arbitrary.extend_from_slice(&raw);
+            for bytes in [valid, arbitrary] {
+                let h = write_verbatim(&store, &bytes);
+                let got = store.read_object(&h).map_err(|e| format!("{e:?}"));
+                proptest::prop_assert_eq!(got, expected_read(&bytes));
+                let via_trait: &dyn ObjectSource = &store;
+                let got = via_trait.read_object(&h).map_err(|e| format!("{e:?}"));
+                proptest::prop_assert_eq!(got, expected_read(&bytes));
+            }
+        }
     }
 
     /// `read_object` on a merkelized type (the path `verified_id_and_object`

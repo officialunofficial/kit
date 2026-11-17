@@ -83,6 +83,10 @@ pub fn serialize(obj: &Object) -> Result<Vec<u8>, KitError> {
     Ok(buf)
 }
 
+/// Length of [`blob_prologue`]: the object prologue plus the `u32` payload
+/// length.
+pub const BLOB_PROLOGUE_LEN: usize = PROLOGUE_LEN + 4;
+
 /// The exact byte prefix of `serialize(Object::Blob(..))` for a payload
 /// of `len` bytes: 6-byte object prologue plus the `u32` LE data
 /// length. Lets ingest write a chunk as `prologue ‖ payload` straight
@@ -94,9 +98,9 @@ pub fn serialize(obj: &Object) -> Result<Vec<u8>, KitError> {
 ///
 /// [`KitError::OversizePayload`] if `len` exceeds the wire-format
 /// `u32` cap.
-pub fn blob_prologue(len: usize) -> Result<[u8; PROLOGUE_LEN + 4], KitError> {
+pub fn blob_prologue(len: usize) -> Result<[u8; BLOB_PROLOGUE_LEN], KitError> {
     let len_le = checked_u32("blob.data", len)?.to_le_bytes();
-    let mut out = [0u8; PROLOGUE_LEN + 4];
+    let mut out = [0u8; BLOB_PROLOGUE_LEN];
     out[0] = ObjectType::Blob as u8;
     out[1..5].copy_from_slice(&MAGIC);
     out[5] = ObjectType::Blob.schema_version();

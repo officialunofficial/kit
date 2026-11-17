@@ -63,6 +63,7 @@ from recurring.
 | `fuzz_targets/ssh_cursor_reply.rs` | `kit_transport_ssh::cursor_from_reply` (an accepted cursor is 1 to 64 bytes and comes from a reply with no unknown field) |
 | `fuzz_targets/s3_cursor_listing.rs` | `kit_transport_s3::parse_cursor_page` (an accepted page holds at most one entry per `<Contents>` element, each with a key, an `ETag` and a `LastModified` time) |
 | `fuzz_targets/grant_fields_parse.rs` | The `kit_attest::grant::text` field parsers, `Capabilities::parse`, `RefFlags::parse`, `RefPattern::parse`, `RefScopes::parse`, `AcceptedSchemes::from_tokens`, `is_loopback_origin` and `Grant::parse_with_id` (an accepted value re-encodes to exactly the input; an accepted grant id is the hash of the input) |
+| `fuzz_targets/store_read_blob.rs` | `store::ObjectStore::read_object` on `Blob`-tagged bytes (returns exactly what `serialize::deserialize` returns; a valid blob reads back whole) |
 | `fuzz_targets/read_to_end_capped.rs` | `store::read_to_end_capped` (a stream is read whole exactly when it fits the limit, otherwise `ObjectTooLarge`) |
 | `fuzz_targets/self_update_extract.rs` | `self_update::extract_binary_within` (never panics; a well-formed archive extracts whole; a cap below one tar header gives `UnpackedTooLarge`; an entry cap gives `TooManyEntries`) |
 | `fuzz_targets/self_update_version.rs` | `self_update::cmp_versions` / `self_update::validate_tag` (never panic; the version order is reflexive, antisymmetric and transitive; a tag is valid exactly when it starts with `v` and the rest parses) |
@@ -133,6 +134,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `libkit::attest_signer::parse_algorithm`, `libkit::attest_signer::Kind::from_str` | None. They match a command-line word against a fixed list. Unit tests cover them. |
 | `kit_bin::commands::trust_roots::parse`, `kit_core::hash::from_hex_bytes` | `trust_roots_parse` |
 | `kit_core::store::read_to_end_capped` (private) | `read_to_end_capped` |
+| `kit_core::store::ObjectStore::read_object`, the `Blob` head check | `store_read_blob` |
 | `kit_bin::commands::self_update` `extract_binary_within` (private) | `self_update_extract` |
 | `kit_bin::commands::self_update` `parse_version`, `cmp_versions`, `validate_tag` | `self_update_version` |
 | `libkit::config::xdg_config_home` | `absolute_config_home` |
