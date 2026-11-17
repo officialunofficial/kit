@@ -729,6 +729,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                 obj.field_bool("ok", true)
                     .field_str("remote", &resolved.name)
                     .field_str("endpoint", &resolved.endpoint)
+                    .field_u64("attestations_pushed", pushed.attestations_pushed as u64)
                     .field_u64("ref_count", n as u64)
                     .field_u64("steps", pushed.steps as u64);
                 emit_json_stdout(obj);
