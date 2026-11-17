@@ -45,3 +45,6 @@ exclude_globs = [
 
 # Exercise the native compressed-attestation decoder, not only raw fallback.
 features = ["kit-core/pack-zstd"]
+
+# Allow the per-test hang deadline to fire before the mutation deadline.
+minimum_test_timeout = 180
