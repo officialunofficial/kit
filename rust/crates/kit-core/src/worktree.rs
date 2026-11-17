@@ -228,16 +228,7 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
     let mut misses = Vec::new();
-    let pending = build_tree_inner(
-        sink,
-        dir,
-        "",
-        &ignores,
-        index,
-        &by_path,
-        false,
-        &mut misses,
-    )?;
+    let pending = build_tree_inner(sink, dir, "", &ignores, index, &by_path, false, &mut misses)?;
     let mut hashed = vec![
         TreeEntry {
             name: Vec::new(),
@@ -495,9 +486,7 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let threads = available_threads();
-        if threads > 1
-            && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads)
-        {
+        if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
             let results = hash_pending_files_parallel(sink, source, misses)?;
             apply_hash_results(misses, results, entries, observations);
             return Ok(());
@@ -562,8 +551,12 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     use rayon::prelude::*;
     // Indexed collection preserves slot order, including the first error.
     // Nested BLAKE3 parallelism uses this same global pool.
-    misses.par_iter().map(|m| hash_one_pending_file(sink, source, m, true))
-        .collect::<Vec<_>>().into_iter().collect()
+    misses
+        .par_iter()
+        .map(|m| hash_one_pending_file(sink, source, m, true))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`
@@ -3933,7 +3926,9 @@ mod tests {
             panic!("tree")
         };
         assert_eq!(root.entries.len(), 34);
-        let expected = hash_file_with_metadata(&store, &work.path().join("zz-big")).unwrap().0;
+        let expected = hash_file_with_metadata(&store, &work.path().join("zz-big"))
+            .unwrap()
+            .0;
         assert_eq!(root.entries.last().unwrap().object_hash, expected);
         for (d, entry) in root.entries.iter().take(32).enumerate() {
             let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else {

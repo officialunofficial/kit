@@ -289,11 +289,30 @@ fn range_shortcuts_preserve_criss_cross_order_and_first_parent() {
     refs::write_ref(layout, "cross", &tip).unwrap();
     refs::write_ref(layout, "cut", &f.root).unwrap();
     for first_parent in [false, true] {
-        let full = hashes(log::history(&f.repo, &Query {first_parent, ..query(Some("cross"))}).unwrap());
+        let full = hashes(
+            log::history(
+                &f.repo,
+                &Query {
+                    first_parent,
+                    ..query(Some("cross"))
+                },
+            )
+            .unwrap(),
+        );
         for limit in [None, Some(0), Some(1), Some(2), Some(10)] {
             let mut expected: Vec<_> = full.iter().copied().filter(|h| *h != f.root).collect();
             expected.truncate(limit.unwrap_or(usize::MAX));
-            let got = hashes(log::history(&f.repo, &Query {first_parent, limit, ..query(Some("cut..cross"))}).unwrap());
+            let got = hashes(
+                log::history(
+                    &f.repo,
+                    &Query {
+                        first_parent,
+                        limit,
+                        ..query(Some("cut..cross"))
+                    },
+                )
+                .unwrap(),
+            );
             assert_eq!(got, expected);
         }
     }

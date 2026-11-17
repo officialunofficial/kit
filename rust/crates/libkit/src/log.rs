@@ -175,11 +175,20 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
     if !query.all
         && let Selection::Range { exclude, include } = parse_selection(query.start.as_deref())
     {
-        let Some(tip) = resolve_tip(repo, Some(&include))? else { return Ok(None); };
+        let Some(tip) = resolve_tip(repo, Some(&include))? else {
+            return Ok(None);
+        };
         if let Some(base) = resolve_tip(repo, Some(&exclude))? {
             read_commit(store, base)?;
             if range_is_closed(store, tip, base, 64, query.first_parent)? {
-                return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
+                return select(
+                    store,
+                    &[tip],
+                    &HashSet::from([base]),
+                    query,
+                    MAX_LOG_COMMITS,
+                )
+                .map(Some);
             }
             if let Some(excluded) = range_cut(store, tip, base, 4096)? {
                 return select(store, &[tip], &excluded, query, MAX_LOG_COMMITS).map(Some);
@@ -202,7 +211,13 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
 /// No ancestor of `base` can occur above the cut in an acyclic graph.
 /// An independent root needs the general exclusion walk instead. Timestamps
 /// are deliberately unused: imported commits may have arbitrarily skewed clocks.
-fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize, first_parent: bool) -> Result<bool, Error> {
+fn range_is_closed(
+    store: &ObjectStore,
+    tip: Hash,
+    base: Hash,
+    cap: usize,
+    first_parent: bool,
+) -> Result<bool, Error> {
     let mut seen = HashSet::new();
     let mut pending = vec![tip];
     while let Some(hash) = pending.pop() {
@@ -216,7 +231,13 @@ fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize, first
         if commit.parents.is_empty() {
             return Ok(false);
         }
-        pending.extend(commit.parents.iter().take(if first_parent { 1 } else { usize::MAX }).copied());
+        pending.extend(
+            commit
+                .parents
+                .iter()
+                .take(if first_parent { 1 } else { usize::MAX })
+                .copied(),
+        );
     }
     Ok(true)
 }
@@ -224,22 +245,35 @@ fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize, first
 /// Search both endpoints for a shared unread frontier. Everything below
 /// that frontier is excluded because it is reachable from the excluded tip.
 /// Keep every merge-base path rather than choosing one merge base.
-fn range_cut(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Result<Option<HashSet<Hash>>, Error> {
+fn range_cut(
+    store: &ObjectStore,
+    tip: Hash,
+    base: Hash,
+    cap: usize,
+) -> Result<Option<HashSet<Hash>>, Error> {
     let mut commits = HashMap::new();
     let mut queued = HashSet::from([tip, base]);
     let mut pending = VecDeque::from([tip]);
-    if base != tip { pending.push_back(base); }
+    if base != tip {
+        pending.push_back(base);
+    }
     let mut closed = true;
     let boundary = loop {
         if closed && pending.len() == 1 && !commits.is_empty() {
             break pending.pop_front().expect("one frontier");
         }
-        let Some(hash) = pending.pop_front() else { return Ok(None); };
-        if commits.len() >= cap { return Ok(None); }
+        let Some(hash) = pending.pop_front() else {
+            return Ok(None);
+        };
+        if commits.len() >= cap {
+            return Ok(None);
+        }
         let commit = read_commit(store, hash)?;
         closed &= !commit.parents.is_empty();
         for parent in &commit.parents {
-            if queued.insert(*parent) { pending.push_back(*parent); }
+            if queued.insert(*parent) {
+                pending.push_back(*parent);
+            }
         }
         commits.insert(hash, commit);
     };
@@ -646,8 +680,18 @@ fn walk_ordered(
 ) -> Result<(), Error> {
     let mut tips = tips.to_vec();
     loop {
-        match walk_segment(store, &tips, excluded, first_parent, (spent, max_commits), &mut emit)? {
-            Some((tail, read)) => { tips = vec![tail]; spent = read; }
+        match walk_segment(
+            store,
+            &tips,
+            excluded,
+            first_parent,
+            (spent, max_commits),
+            &mut emit,
+        )? {
+            Some((tail, read)) => {
+                tips = vec![tail];
+                spent = read;
+            }
             None => return Ok(()),
         }
     }
@@ -687,7 +731,11 @@ fn walk_segment(
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
-        let parents: Vec<_> = if merge { walked_parents(&commit, excluded, first_parent).collect() } else { Vec::new() };
+        let parents: Vec<_> = if merge {
+            walked_parents(&commit, excluded, first_parent).collect()
+        } else {
+            Vec::new()
+        };
         next = parent;
         if !emit(Entry { hash, commit }) {
             return Ok(None);
@@ -972,7 +1020,14 @@ mod tests {
         let a = put(&store, vec![missing], 1, 0);
         let b = put(&store, vec![missing], 2, 1);
         let tip = put(&store, vec![a, b], 0, 2);
-        let got = select(&store, &[tip], &HashSet::new(), &query_with(Some(3), false), 3).unwrap();
+        let got = select(
+            &store,
+            &[tip],
+            &HashSet::new(),
+            &query_with(Some(3), false),
+            3,
+        )
+        .unwrap();
         assert_eq!(ids(&got), [tip, b, a]);
     }
 
@@ -1312,14 +1367,23 @@ mod tests {
                 for first_parent in [false, true] {
                     let q = query_with(None, first_parent);
                     let got = select(&store, &[tip], &cut, &q, usize::MAX).unwrap();
-                    assert_eq!(ids(&got), reference(&store, &[tip], &base, &q), "bidirectional range seed {seed}");
+                    assert_eq!(
+                        ids(&got),
+                        reference(&store, &[tip], &base, &q),
+                        "bidirectional range seed {seed}"
+                    );
                 }
             }
             for first_parent in [false, true] {
                 if range_is_closed(&store, tip, other, usize::MAX, first_parent).unwrap() {
                     let q = query_with(None, first_parent);
-                    let cut = select(&store, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
-                    assert_eq!(ids(&cut), reference(&store, &[tip], &base, &q), "range seed {seed}");
+                    let cut =
+                        select(&store, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
+                    assert_eq!(
+                        ids(&cut),
+                        reference(&store, &[tip], &base, &q),
+                        "range seed {seed}"
+                    );
                 }
             }
             let none = HashSet::new();
