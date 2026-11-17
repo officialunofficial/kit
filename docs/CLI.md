@@ -1302,7 +1302,7 @@ attestation support warn once per command and skip the log.
 - **Library.** `clone`, `fetch` and `pull` run on the `kit-sync` crate
   (`rust/crates/kit-sync/README.md`), which an embedder can call directly.
 - `kit push [<remote> [<src>:<dst>|<branch>|<tag>]] [--all | --tags]
-  [--force|--force-with-lease] [--dry-run] [--format=json] [-q|--quiet]`,
+  [--force|--force-with-lease] [--attestations] [--dry-run] [--format=json] [-q|--quiet]`,
   `kit push --delete <remote> <branch>|<tag>`
   &mdash; push refs and packs to a remote. With no `<remote>`, pushes the
   **current branch to its upstream** (the `branch.<b>.remote`/`.merge`
@@ -1324,7 +1324,7 @@ attestation support warn once per command and skip the log.
   `--force`. When the remote head differs from the lease, a push without
   `--force` fails as a non-fast-forward before it uploads anything. A
   remote head that already equals the tip means an earlier attempt landed:
-  the push succeeds and writes nothing. The push reads the remote's head
+  the code push succeeds without advancing refs. The push reads the remote's head
   every time and never trusts the tracking ref alone, so a remote that lost
   the branch, for example one deleted and made again, gets it again. A
   push without `--force-with-lease` creates a branch the remote does not
@@ -1338,11 +1338,16 @@ attestation support warn once per command and skip the log.
   up-to-date`). `--format=json` emits one JSON object to stdout:
   `{"ok":true,"remote":"...","endpoint":"...","branch":"...",
   "remote_branch":"...","old":"<hex>|null","new":"<hex>","forced":<bool>,
-  "up_to_date":<bool>,"steps":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
+  "up_to_date":<bool>,"steps":<n>,"attestations_pushed":<n>}` on success (`steps` is 0 when up to date, otherwise the number of branch
   advances the push took; `--all` reports the total plus `ref_count`), or
   `{"ok":false,"rejected":true,
   "branch":"...","error":"..."}` on a non-fast-forward (CAS) rejection
   (`{"ok":false,"error":"..."}` for any other failure).
+  Push publishes locally authored envelopes only with `--attestations` or
+  `push.attestations = true`. It also publishes when code is up to date.
+  Fetched envelopes never publish again. Attestation failures warn while the code
+  push succeeds. Publication is permanent; log compaction and removal need force
+  permission on `refs/kit/attestmap`.
   On a V2 Connect remote, pushes at or above its advertised upload threshold
   open a signed ticket for each data pack and packmap node, then consume those
   tickets with the branch advance. A single advance carries one fewer data

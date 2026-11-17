@@ -126,11 +126,10 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
-    if key == "fetch.attestations" && !matches!(value, "true" | "false") {
-        return emit_err(
-            "fetch.attestations must be true or false",
-            exit::CONFIG_ERROR,
-        );
+    if matches!(key, "fetch.attestations" | "push.attestations")
+        && !matches!(value, "true" | "false")
+    {
+        return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
     }
     if key == "grant.webauthn_rp"
         && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
@@ -260,6 +259,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "default_branch" => Ok(take_nonempty(&mut cfg.default_branch)),
         "durability.objects" => Ok(take_nonempty(&mut cfg.durability_objects)),
         "fetch.attestations" => Ok(take_nonempty(&mut cfg.fetch_attestations)),
+        "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
         "remote_type" => Ok(take_nonempty(&mut cfg.remote_type)),
@@ -321,6 +321,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "fetch.attestations" => value.clone_into(&mut cfg.fetch_attestations),
+        "push.attestations" => value.clone_into(&mut cfg.push_attestations),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the
         // batched default when they asked for the strict per-object schedule.
@@ -381,6 +382,7 @@ const CONFIG_KEYS: &[&str] = &[
     "default_branch",
     "durability.objects",
     "fetch.attestations",
+    "push.attestations",
     "grant.webauthn_rp",
     "http.sslcainfo",
     "key.backend",
@@ -417,6 +419,7 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
         "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
         "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
+        "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),
         "remote_endpoint" => Some(Cow::Borrowed(&cfg.remote_endpoint)),
         "remote_bucket" => Some(Cow::Borrowed(&cfg.remote_bucket)),
         "remote_type" => Some(Cow::Borrowed(&cfg.remote_type)),

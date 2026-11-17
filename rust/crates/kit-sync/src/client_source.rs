@@ -344,6 +344,9 @@ impl<
     R: WriteRecovery + ?Sized,
 > RemoteSource for ClientSource<'_, T, S, C, E, O, P, R>
 {
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        self.pack_exists_via_ref(key, hint)
+    }
     fn supports_attestations(&self) -> bool {
         self.server_info()
             .is_some_and(|info| info.supports_attestations == Some(true))

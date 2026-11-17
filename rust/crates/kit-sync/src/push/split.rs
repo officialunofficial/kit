@@ -61,6 +61,11 @@ pub const MAX_CHAIN_COMMITS: usize = 1_000_000;
 /// Grants a caller can check for every advance of a split push before
 /// anything is uploaded.
 pub trait StepAuthority: Send + Sync {
+    /// Whether the selected attestmap grant allows compaction (force).
+    fn can_compact_attestations(&self) -> bool {
+        true
+    }
+
     /// Refuse the push unless the caller may perform the first advance under
     /// `first` and, when `later_steps` is set, every following advance, each
     /// of which is a `Match` on the previous step's commit.

@@ -338,6 +338,33 @@ impl std::fmt::Debug for ConnectAuthority {
 }
 
 impl StepAuthority for ConnectAuthority {
+    fn can_compact_attestations(&self) -> bool {
+        let Some(repository) = self.transport.repository() else {
+            return true;
+        };
+        if repository
+            .namespace()
+            .is_none_or(|ns| ns.to_string() == format!("ed25519-{}", self.signer_key))
+        {
+            return true;
+        }
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
+        let repository = repository.to_string();
+        let request = GrantRequest::new(
+            self.transport.origin(),
+            &repository,
+            &self.signer_key,
+            GrantOperation::Write { refs: &refs },
+        );
+        self.grants.select(&request).is_some_and(|header| {
+            self.grants
+                .header_forces(&header, kit_core::refs::ATTESTMAP_REF)
+        })
+    }
+
     fn authorize(
         &self,
         branch: &str,
@@ -1171,11 +1198,54 @@ mod tests {
             grants: Arc::new(LocalGrants::from_headers([])),
             signer_key: KEY.to_owned(),
         };
+        assert!(authority.can_compact_attestations());
         assert!(
             authority
                 .authorize("main", RefWriteCondition::Missing, true)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn attestmap_force_uses_the_selected_epoch_and_exact_scope() {
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
+        let request = request(GrantOperation::Write { refs: &refs });
+        let make = |scope, epoch| {
+            let encoded = header(
+                &format!("{NS}/photos"),
+                "write",
+                scope,
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            );
+            let mut signed = SignedHeader::parse(&encoded).unwrap();
+            signed.statement = String::from_utf8(signed.statement)
+                .unwrap()
+                .replace(&format!("\n0\n{NOW}\n"), &format!("\n{epoch}\n{NOW}\n"))
+                .into_bytes();
+            signed.encode().unwrap()
+        };
+        let force = make("refs/kit/attestmap=uf", 1);
+        let update = make("refs/kit/attestmap=u", 2);
+        for (headers, expected) in [
+            (vec![force.clone()], true),
+            (vec![update.clone()], false),
+            (vec![force, update], false),
+            (vec![make("refs/*=uf", 1)], false),
+        ] {
+            let grants = LocalGrants::from_headers(headers);
+            assert_eq!(
+                grants.select_at(&request, NOW + 2).is_some_and(
+                    |header| grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF)
+                ),
+                expected
+            );
+        }
     }
 
     mod load {

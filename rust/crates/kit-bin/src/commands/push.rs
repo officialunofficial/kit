@@ -90,6 +90,9 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
+    /// Publish locally authored attestations permanently.
+    #[arg(long)]
+    attestations: bool,
     /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -223,6 +226,10 @@ fn push_tags(
                     selection,
                     opts.force || opts.force_with_lease,
                     remote.authority.as_deref(),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
             })
@@ -392,6 +399,7 @@ fn report_up_to_date(
     remote_branch: &str,
     old: Option<kit_core::hash::Hash>,
     new: Option<kit_core::hash::Hash>,
+    attestations: usize,
 ) {
     let mut stderr = std::io::stderr().lock();
     let _ = writeln!(stderr, "Everything up-to-date");
@@ -405,6 +413,7 @@ fn report_up_to_date(
             .field_opt_hash("old", old.as_ref())
             .field_opt_hash("new", new.as_ref())
             .field_bool("forced", false)
+            .field_u64("attestations_pushed", attestations as u64)
             .field_bool("up_to_date", true)
             .field_u64("steps", 0);
         emit_json_stdout(obj);
@@ -448,6 +457,7 @@ fn push_current(
             &remote_branch,
             old_tracked,
             old_tracked,
+            0,
         );
         return exit::OK;
     }
@@ -508,9 +518,13 @@ fn push_current(
                     &remote_branch,
                     lease,
                     remote.authority.as_deref(),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
-                .map(|(tip, steps)| (old, tip, steps))
+                .map(|(tip, steps, attestations)| (old, tip, steps, attestations))
             })
             .and_then(|result| result);
         // The progress guard's final `, done.` line lands before the
@@ -520,7 +534,7 @@ fn push_current(
         outcome
     };
     match push_outcome.map_err(libkit::transfer::Error::into_published_prefix) {
-        Ok((old, new_tip, steps)) => {
+        Ok((old, new_tip, steps, attestations)) => {
             // Remember the upstream so a bare `kit push` works next
             // time (Git-like first-push convenience). Only persisted
             // when not already set, and never for a detached/forced
@@ -543,7 +557,15 @@ fn push_current(
             // The remote held the tip already. Matches git's
             // `Everything up-to-date`.
             if steps == 0 {
-                report_up_to_date(json, &resolved, &branch, &remote_branch, old, Some(new_tip));
+                report_up_to_date(
+                    json,
+                    &resolved,
+                    &branch,
+                    &remote_branch,
+                    old,
+                    Some(new_tip),
+                    attestations,
+                );
                 return exit::OK;
             }
             // git-style ref-update summary block: `To <url>` then one
@@ -574,6 +596,7 @@ fn push_current(
                     .field_opt_hash("old", old.as_ref())
                     .field_hash("new", &new_tip)
                     .field_bool("forced", forced)
+                    .field_u64("attestations_pushed", attestations as u64)
                     .field_bool("up_to_date", false)
                     .field_u64("steps", steps as u64);
                 emit_json_stdout(obj);
@@ -681,6 +704,10 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                     Some(&resolved.name),
                     opts.force,
                     remote.authority.as_deref(),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
             })
@@ -702,6 +729,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                 obj.field_bool("ok", true)
                     .field_str("remote", &resolved.name)
                     .field_str("endpoint", &resolved.endpoint)
+                    .field_u64("attestations_pushed", pushed.attestations_pushed as u64)
                     .field_u64("ref_count", n as u64)
                     .field_u64("steps", pushed.steps as u64);
                 emit_json_stdout(obj);

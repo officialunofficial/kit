@@ -2538,6 +2538,7 @@ dependencies = [
  "proptest",
  "rayon",
  "rustls",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

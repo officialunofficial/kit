@@ -204,6 +204,8 @@ pub struct Config {
     pub pull_require_signed: String,
     /// Fetch portable attestations unless explicitly disabled.
     pub fetch_attestations: String,
+    /// Publish locally authored attestations only when true.
+    pub push_attestations: String,
     /// `[key]` section. User-scoped keystore selectors.
     pub key: KeyConfig,
     /// `[attest]` section. Separate struct so new attest knobs don't
@@ -793,6 +795,10 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
             expect_one_of(key, val, &["file", "keystore"])?;
             val.clone_into(&mut cfg.signer);
         }
+        "push.attestations" => {
+            expect_one_of(key, val, &["true", "false"])?;
+            val.clone_into(&mut cfg.push_attestations);
+        }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
             val.clone_into(&mut cfg.fetch_attestations);
@@ -978,6 +984,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
         ("fetch.attestations", cfg.fetch_attestations.as_str()),
+        ("push.attestations", cfg.push_attestations.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),

@@ -358,6 +358,7 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, Error> {
 struct PushObserver<'a> {
     terminal: &'a Terminal,
     warning: Option<String>,
+    attestations: std::sync::atomic::AtomicUsize,
 }
 
 impl Observer<SyncEvent> for PushObserver<'_> {
@@ -366,6 +367,16 @@ impl Observer<SyncEvent> for PushObserver<'_> {
             && let Some(warning) = &self.warning
         {
             eprintln!("{warning}");
+        }
+        if let SyncEvent::AttestationWarning { message } = event {
+            eprintln!("warning: {message}");
+        }
+        if let SyncEvent::AttestationsPushed { count } = event {
+            self.attestations
+                .store(*count, std::sync::atomic::Ordering::Relaxed);
+            if *count > 0 {
+                eprintln!("Published {count} attestations");
+            }
         }
         self.terminal.event(event);
     }
@@ -389,10 +400,13 @@ pub(crate) fn push_all_with_source(
     remote: Option<&str>,
     force: bool,
     authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
     terminal: &Terminal,
 ) -> Result<transfer::Pushed, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
     transfer::push_all_with_source(
         cwd,
         source,
@@ -404,6 +418,7 @@ pub(crate) fn push_all_with_source(
 }
 
 /// Push local tags to the remote; see [`transfer::push_tags_with_source`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_tags_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
@@ -411,10 +426,13 @@ pub(crate) fn push_tags_with_source(
     selection: kit_sync::push::TagSelection,
     force: bool,
     authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
     terminal: &Terminal,
 ) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (settings, observer) = push_inputs(&layout, authority, terminal);
+    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
     transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
 }
 
@@ -441,11 +459,14 @@ pub(crate) fn push_branch_tracked_source(
     remote_branch: &str,
     lease: PushLease,
     authority: Option<&dyn StepAuthority>,
+    attestations: (bool, &str),
     terminal: &Terminal,
-) -> Result<(Hash, usize), Error> {
+) -> Result<(Hash, usize, usize), Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (settings, observer) = push_inputs(&layout, authority, terminal);
-    transfer::push_branch_tracked_with_source(
+    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    settings.attestations = attestations.0;
+    settings.remote_url = attestations.1;
+    let result = transfer::push_branch_tracked_with_source(
         cwd,
         source,
         remote,
@@ -454,7 +475,16 @@ pub(crate) fn push_branch_tracked_source(
         lease,
         &settings,
         &observer,
-    )
+    );
+    result.map(|(tip, steps)| {
+        (
+            tip,
+            steps,
+            observer
+                .attestations
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    })
 }
 
 /// The settings of a push from the config and the environment, and the observer
@@ -470,8 +500,13 @@ fn push_inputs<'a>(
             sync_policy: sync_policy(layout),
             rebaseline_threshold,
             authority,
+            ..transfer::PushSettings::default()
         },
-        PushObserver { terminal, warning },
+        PushObserver {
+            terminal,
+            warning,
+            attestations: std::sync::atomic::AtomicUsize::new(0),
+        },
     )
 }
 

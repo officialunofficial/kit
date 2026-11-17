@@ -67,6 +67,11 @@ pub trait RemoteSource {
     fn supports_push(&self) -> bool {
         false
     }
+    /// Check a content-addressed pack before uploading.
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        let _ = (key, hint);
+        Ok(false)
+    }
     /// Upload a sealed pack using the head ref as its authorization hint.
     /// A retry reads `pack` again from its start.
     fn upload_pack(
@@ -232,6 +237,11 @@ impl<'a> TransportSource<'a> {
 }
 
 impl RemoteSource for TransportSource<'_> {
+    fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+        self.transport
+            .pack_exists(key, Some(hint))
+            .map_err(Into::into)
+    }
     fn supports_attestations(&self) -> bool {
         self.transport.supports_attestations()
     }
