@@ -251,7 +251,12 @@ impl generated::TransportService for TestService {
                 part_size: Some(8 << 20),
                 max_parts: Some(512),
                 max_list_refs_page_size: Some(1000),
-                supports_attestations: Some(self.inner.read_ref(kit_core::refs::ATTESTMAP_REF).unwrap().is_some()),
+                supports_attestations: Some(
+                    self.inner
+                        .read_ref(kit_core::refs::ATTESTMAP_REF)
+                        .unwrap()
+                        .is_some(),
+                ),
                 atomic_advance: Some(true),
                 begin_upload_threshold_bytes: Some(0),
                 ..Default::default()
@@ -2371,29 +2376,77 @@ fn check_attestation_push(advertised: bool) {
     let (tip, _) = attestation_fetch::code(&*backend);
     let baseline = kit_core::transfer::encode_packlist(None, &[]).unwrap();
     let id = kit_core::hash::hash(&baseline);
-    backend.upload_blob(&baseline, &PackKey::new(id), None).unwrap();
-    if advertised { backend.update_ref(kit_core::refs::ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap(); }
+    backend
+        .upload_blob(&baseline, &PackKey::new(id), None)
+        .unwrap();
+    if advertised {
+        backend
+            .update_ref(
+                kit_core::refs::ATTESTMAP_REF,
+                RefWriteCondition::Missing,
+                &id,
+            )
+            .unwrap();
+    }
     let (port, shutdown, handle, calls) =
         spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
     let transport = signed_transport(&url);
     let local = tempfile::tempdir().unwrap();
-    let descriptor = kit_sync::CloneRemote { name: "origin".into(), url, kind: "http".into() };
-    kit_sync::clone(local.path(), &kit_sync::TransportSource::new(&*transport), &descriptor, &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    let descriptor = kit_sync::CloneRemote {
+        name: "origin".into(),
+        url,
+        kind: "http".into(),
+    };
+    kit_sync::clone(
+        local.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &descriptor,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     let bytes = attestation_fetch::envelope(tip);
     kit_attest::store::save(&RepoLayout::single(local.path()), &tip, &bytes).unwrap();
     let mut options = kit_sync::PushOptions::default();
     options.attestations = true;
     options.remote_name = "origin";
-    options.target = kit_sync::PushTarget::Branch { local: "main".into(), remote: "main".into(), lease: kit_sync::PushLease::FastForward };
-    let report = kit_sync::push(local.path(), &kit_sync::TransportSource::new(&*transport), &options).unwrap();
+    options.target = kit_sync::PushTarget::Branch {
+        local: "main".into(),
+        remote: "main".into(),
+        lease: kit_sync::PushLease::FastForward,
+    };
+    let report = kit_sync::push(
+        local.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &options,
+    )
+    .unwrap();
     assert_eq!(report.steps, 0);
     assert_eq!(report.attestations_pushed, usize::from(advertised));
     assert_eq!(report.attestation_warnings.len(), 1);
-    assert_eq!(calls.lock().unwrap().iter().filter(|c| c.procedure == "BeginUpload").count(), if advertised { 2 } else { 0 });
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.procedure == "BeginUpload")
+            .count(),
+        if advertised { 2 } else { 0 }
+    );
     let second = tempfile::tempdir().unwrap();
-    let cloned = kit_sync::clone(second.path(), &kit_sync::TransportSource::new(&*transport), &descriptor, &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
-    assert_eq!(cloned.pull.fetch.attestations_stored, usize::from(advertised));
+    let cloned = kit_sync::clone(
+        second.path(),
+        &kit_sync::TransportSource::new(&*transport),
+        &descriptor,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(
+        cloned.pull.fetch.attestations_stored,
+        usize::from(advertised)
+    );
     let _ = shutdown.send(());
     handle.join().unwrap();
 }

@@ -57,17 +57,34 @@ fn push_100k_files_without_attestations() {
 
     let local = tempfile::tempdir().unwrap();
     let descriptor = kit_sync::CloneRemote {
-        name: "seed".into(), url: "kit+file://seed".into(), kind: "file".into(),
+        name: "seed".into(),
+        url: "kit+file://seed".into(),
+        kind: "file".into(),
     };
     let layout = kit_sync::init_clone_dir(local.path(), &descriptor).unwrap();
-    kit_sync::fetch(local.path(), &kit_sync::TransportSource::new(&tx), "seed",
-        &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    kit_sync::fetch(
+        local.path(),
+        &kit_sync::TransportSource::new(&tx),
+        "seed",
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
     kit_core::refs::write_ref(&layout, "main", &tip).unwrap();
     let destination = tempfile::tempdir().unwrap();
     let remote = kit_transport_file::FileTransport::new(destination.path());
     let mut options = kit_sync::PushOptions::default();
-    options.target = kit_sync::PushTarget::Branch { local: "main".into(), remote: "main".into(), lease: kit_sync::PushLease::FastForward };
+    options.target = kit_sync::PushTarget::Branch {
+        local: "main".into(),
+        remote: "main".into(),
+        lease: kit_sync::PushLease::FastForward,
+    };
     let start = std::time::Instant::now();
-    kit_sync::push(local.path(), &kit_sync::TransportSource::new(&remote), &options).unwrap();
+    kit_sync::push(
+        local.path(),
+        &kit_sync::TransportSource::new(&remote),
+        &options,
+    )
+    .unwrap();
     eprintln!("push_100k_seconds={:.6}", start.elapsed().as_secs_f64());
 }

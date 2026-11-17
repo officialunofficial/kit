@@ -1208,19 +1208,33 @@ mod tests {
 
     #[test]
     fn attestmap_force_uses_the_selected_epoch_and_exact_scope() {
-        let refs = [GrantRef::new(kit_core::refs::ATTESTMAP_REF, GrantCondition::Match)];
+        let refs = [GrantRef::new(
+            kit_core::refs::ATTESTMAP_REF,
+            GrantCondition::Match,
+        )];
         let request = request(GrantOperation::Write { refs: &refs });
-        let make = |scope, epoch| header(&format!("{NS}/photos"), "write", scope, epoch, NOW + 100_000, "https://git.example.com", KEY);
-        let force = make("refs/kit/attestmap=uf", NOW);
-        let update = make("refs/kit/attestmap=u", NOW + 1);
+        let make = |scope, epoch| {
+            let encoded = header(&format!("{NS}/photos"), "write", scope, NOW, NOW + 100_000, "https://git.example.com", KEY);
+            let mut signed = SignedHeader::parse(&encoded).unwrap();
+            signed.statement = String::from_utf8(signed.statement).unwrap()
+                .replace(&format!("\n0\n{NOW}\n"), &format!("\n{epoch}\n{NOW}\n")).into_bytes();
+            signed.encode().unwrap()
+        };
+        let force = make("refs/kit/attestmap=uf", 1);
+        let update = make("refs/kit/attestmap=u", 2);
         for (headers, expected) in [
             (vec![force.clone()], true),
             (vec![update.clone()], false),
             (vec![force, update], false),
-            (vec![make("refs/*=uf", NOW)], false),
+            (vec![make("refs/*=uf", 1)], false),
         ] {
             let grants = LocalGrants::from_headers(headers);
-            assert_eq!(grants.select_at(&request, NOW + 2).is_some_and(|header| grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF)), expected);
+            assert_eq!(
+                grants.select_at(&request, NOW + 2).is_some_and(
+                    |header| grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF)
+                ),
+                expected
+            );
         }
     }
 

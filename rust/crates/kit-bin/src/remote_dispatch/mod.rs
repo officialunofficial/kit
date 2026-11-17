@@ -372,8 +372,11 @@ impl Observer<SyncEvent> for PushObserver<'_> {
             eprintln!("warning: {message}");
         }
         if let SyncEvent::AttestationsPushed { count } = event {
-            self.attestations.store(*count, std::sync::atomic::Ordering::Relaxed);
-            if *count > 0 { eprintln!("Published {count} attestations"); }
+            self.attestations
+                .store(*count, std::sync::atomic::Ordering::Relaxed);
+            if *count > 0 {
+                eprintln!("Published {count} attestations");
+            }
         }
         self.terminal.event(event);
     }
@@ -473,7 +476,15 @@ pub(crate) fn push_branch_tracked_source(
         &settings,
         &observer,
     );
-    result.map(|(tip, steps)| (tip, steps, observer.attestations.load(std::sync::atomic::Ordering::Relaxed)))
+    result.map(|(tip, steps)| {
+        (
+            tip,
+            steps,
+            observer
+                .attestations
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    })
 }
 
 /// The settings of a push from the config and the environment, and the observer
@@ -491,7 +502,11 @@ fn push_inputs<'a>(
             authority,
             ..transfer::PushSettings::default()
         },
-        PushObserver { terminal, warning, attestations: std::sync::atomic::AtomicUsize::new(0) },
+        PushObserver {
+            terminal,
+            warning,
+            attestations: std::sync::atomic::AtomicUsize::new(0),
+        },
     )
 }
 

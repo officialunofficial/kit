@@ -557,7 +557,15 @@ fn push_current(
             // The remote held the tip already. Matches git's
             // `Everything up-to-date`.
             if steps == 0 {
-                report_up_to_date(json, &resolved, &branch, &remote_branch, old, Some(new_tip), attestations);
+                report_up_to_date(
+                    json,
+                    &resolved,
+                    &branch,
+                    &remote_branch,
+                    old,
+                    Some(new_tip),
+                    attestations,
+                );
                 return exit::OK;
             }
             // git-style ref-update summary block: `To <url>` then one

@@ -228,7 +228,9 @@ pub fn push(
     let mut report = push_refs(&layout, &store, &tx, options)?;
     if options.attestations {
         attestations::run(&layout, &store, &tx, options, &mut report);
-        tx.observer.event(&SyncEvent::AttestationsPushed { count: report.attestations_pushed });
+        tx.observer.event(&SyncEvent::AttestationsPushed {
+            count: report.attestations_pushed,
+        });
         for message in &report.attestation_warnings {
             tx.observer.event(&SyncEvent::AttestationWarning {
                 message: message.clone(),
