@@ -1,3 +1,14 @@
 # Cargo builds the Kani proof modules only under `cfg(kani)`, so no test can
 # catch a mutant in them. The Kani prover runs those modules by hand.
-exclude_re = ["kani_proofs::"]
+exclude_re = [
+    "kani_proofs::",
+    # Equality returns Retry first, so > and >= make the same epoch decision.
+    'grant/epoch\.rs:.*replace > with >= in epoch_transition$',
+    # At the capture cap, <= only appends an empty slice and still drains.
+    'signer_external\.rs:.*replace < with <= in spawn_stderr_drainer$',
+    # Changing a test's fixed signing seed changes no production behavior.
+    'signer_k256\.rs:.*replace tests::fixed_secret ',
+]
+
+# Exercise the native compressed-attestation decoder, not only raw fallback.
+features = ["kit-core/pack-zstd"]
