@@ -589,3 +589,54 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod validation_contract_tests {
+    use super::*;
+
+    #[test]
+    fn native_generation_uses_fresh_valid_material() {
+        for algorithm in [Algorithm::Ed25519, Algorithm::Secp256k1, Algorithm::P256] {
+            let first = random_valid_secret(BackendKind::MacosKeychain, algorithm).unwrap();
+            let second = random_valid_secret(BackendKind::MacosKeychain, algorithm).unwrap();
+            assert_ne!(first, second);
+            SoftwareSigner::new(
+                KeyLabel::new("generated").unwrap(),
+                BackendKind::MacosKeychain,
+                algorithm,
+                first,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn unsupported_attributes_and_operational_errors_are_rejected() {
+        validate_attrs("native", &crate::KeyAttrs::default()).unwrap();
+        for attrs in [
+            crate::KeyAttrs {
+                extractable: false,
+                ..Default::default()
+            },
+            crate::KeyAttrs {
+                require_user_presence: true,
+                ..Default::default()
+            },
+            crate::KeyAttrs {
+                device_bound: true,
+                ..Default::default()
+            },
+        ] {
+            assert!(matches!(
+                validate_attrs("native", &attrs),
+                Err(Error::UnsupportedAttributes(_))
+            ));
+        }
+        assert!(!is_malformed_list_entry_error(&Error::Io(
+            "read failed".into()
+        )));
+        assert!(!is_malformed_list_entry_error(&Error::AccessDenied(
+            "denied".into()
+        )));
+    }
+}

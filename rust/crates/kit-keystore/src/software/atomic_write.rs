@@ -427,3 +427,120 @@ fn create_synced_tmp_key_file_portable(
         parent.display()
     )))
 }
+
+#[cfg(all(test, unix))]
+mod contract_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    #[test]
+    fn temporary_file_collision_preserves_existing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = OsStr::new("key");
+        let collision = temp_key_file_path(dir.path(), name, 0);
+        std::fs::write(&collision, b"existing").unwrap();
+        let path = create_synced_tmp_key_file(dir.path(), name, b"secret").unwrap();
+        assert_ne!(path, collision);
+        assert_eq!(std::fs::read(&collision).unwrap(), b"existing");
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn temporary_file_creation_propagates_noncollision_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let result = create_synced_tmp_key_file(&file, OsStr::new("key"), b"secret");
+        assert!(matches!(result, Err(Error::Io(message)) if message.contains("open tmp")));
+    }
+
+    #[test]
+    fn path_walk_rejects_symlink_ancestors_and_metadata_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        symlink(dir.path(), root.join("linked")).unwrap();
+        assert!(
+            matches!(ensure_no_symlink_path(&root, &root.join("linked/missing")), Err(Error::Io(message)) if message.contains("symlink"))
+        );
+        std::fs::write(root.join("file"), b"x").unwrap();
+        assert!(
+            matches!(ensure_no_symlink_path(&root, &root.join("file/child")), Err(Error::Io(message)) if message.starts_with("lstat ") && message.contains("file/child"))
+        );
+        assert!(ensure_owned_by_euid(&root.join("missing")).is_err());
+        ensure_owned_by_euid(&root).unwrap();
+    }
+
+    #[test]
+    fn overwrite_rejects_symlink_destination_without_touching_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"existing").unwrap();
+        let path = dir.path().join("key");
+        symlink(&target, &path).unwrap();
+        let error = write_key_file_unix(
+            dir.path(),
+            &path,
+            "key",
+            Algorithm::Ed25519,
+            b"secret",
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(error.error, Error::Io(message) if message.contains("symlink")));
+        assert_eq!(std::fs::read(target).unwrap(), b"existing");
+        assert!(path.is_symlink());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod repeated_collision_tests {
+    use super::*;
+
+    #[test]
+    fn temp_names_allow_more_than_one_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        for suffix in [String::new(), ".1".to_owned()] {
+            std::fs::write(
+                dir.path()
+                    .join(format!(".key.tmp.{}{suffix}", std::process::id())),
+                b"preserve",
+            )
+            .unwrap();
+        }
+        let created =
+            create_synced_tmp_key_file(dir.path(), std::ffi::OsStr::new("key"), b"new").unwrap();
+        assert_eq!(
+            created.file_name().unwrap(),
+            format!(".key.tmp.{}.2", std::process::id()).as_str()
+        );
+        assert_eq!(std::fs::read(created).unwrap(), b"new");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod destination_error_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_destination_metadata_is_reported_before_temp_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x".repeat(256));
+        let error = write_key_file_unix(
+            dir.path(),
+            &path,
+            "key",
+            Algorithm::Ed25519,
+            b"secret",
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error.error, Error::Io(message) if message.starts_with("lstat ")));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+}

@@ -67,3 +67,31 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod registry_contract_tests {
+    use super::*;
+
+    #[test]
+    fn native_registry_matches_compiled_platform() {
+        for (kind, compiled) in [
+            (
+                BackendKind::MacosKeychain,
+                cfg!(all(target_os = "macos", feature = "macos-keychain")),
+            ),
+            (
+                BackendKind::LinuxSecretService,
+                cfg!(all(target_os = "linux", feature = "linux-secret-service")),
+            ),
+        ] {
+            match open_backend(kind) {
+                Ok(store) => {
+                    assert!(compiled);
+                    assert_eq!(store.capabilities().backend, kind);
+                }
+                Err(Error::BackendUnavailable(_)) => assert!(!compiled),
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+        }
+    }
+}

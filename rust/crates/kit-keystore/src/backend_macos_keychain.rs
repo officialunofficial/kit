@@ -273,6 +273,17 @@ mod tests {
     fn capabilities_are_backend_accurate() {
         let capabilities = MacosKeychainKeystore::new().capabilities();
         assert_eq!(capabilities.backend, BackendKind::MacosKeychain);
+        let store = MacosKeychainKeystore::new();
+        assert!(store.generator().is_some());
+        assert!(store.importer().is_some());
+        assert!(store.opener().is_some());
+        assert!(store.lister().is_some());
+        assert!(store.exporter().is_some());
+        assert!(store.deleter().is_some());
+        assert_eq!(
+            MacosKeychainKeystore::account(&KeyLabel::new("release").unwrap(), Algorithm::Ed25519),
+            "ed25519:release"
+        );
         assert!(capabilities.can_generate);
         assert!(capabilities.can_import);
         assert!(capabilities.can_export);
