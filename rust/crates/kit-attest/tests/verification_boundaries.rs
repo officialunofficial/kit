@@ -156,6 +156,8 @@ fn loopback_rules_preserve_numeric_host_boundaries() {
         "127.255.255.255",
         "1.256.1",
         "1.1.1.1.1",
+        "1.2.3.4.0",
+        "1..1",
         "1.1.65536",
         "1.16777216",
     ] {
@@ -163,6 +165,7 @@ fn loopback_rules_preserve_numeric_host_boundaries() {
     }
     for host in [
         "1.255.1",
+        "1.0x.1",
         "1.1.65535",
         "1.16777215",
         "255.255.255.255",
