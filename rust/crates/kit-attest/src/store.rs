@@ -239,6 +239,19 @@ mod tests {
     use super::*;
     use crate::envelope::{Envelope, Sig};
 
+    #[cfg(unix)]
+    #[test]
+    fn parent_sync_tolerates_missing_directories_and_rejects_invalid_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(sync_parent_dir(&missing).is_ok());
+        std::fs::write(&missing, b"file").unwrap();
+        assert!(matches!(
+            sync_parent_dir(&missing.join("child")),
+            Err(Error::Io(_))
+        ));
+    }
+
     fn fake_hash(seed: u8) -> Hash {
         let mut h = [0u8; 32];
         for (i, b) in h.iter_mut().enumerate() {

@@ -764,6 +764,8 @@ fn extract_signature(
 }
 
 #[cfg(not(feature = "algo-p256"))]
+// Excluded from every mutation run: the standard all-features build omits this verifier.
+#[cfg_attr(false, mutants::skip)]
 fn extract_signature(
     frame: SignerFrame,
     expected_algorithm: Algorithm,
@@ -869,6 +871,8 @@ fn validate_sign_response_with_policy(
 /// Self-consistency check for builds without `algo-p256`. A WebAuthn
 /// marker is rejected because WebAuthn verification needs P-256.
 #[cfg(not(feature = "algo-p256"))]
+// Excluded from every mutation run: the standard all-features build omits this validator.
+#[cfg_attr(false, mutants::skip)]
 fn validate_sign_response_inner(
     sr: &SignResponse,
     expected_algorithm: Algorithm,
@@ -1253,6 +1257,249 @@ mod tests {
     use kit_rpc::kit::rpc::v1::signer::WebAuthnData;
 
     const PAE: &[u8] = b"DSSEv1 28 application/vnd.in-toto+json 2 {}";
+
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct WaitingChild(Child);
+
+    #[cfg(unix)]
+    impl Drop for WaitingChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    fn waiting_child() -> WaitingChild {
+        WaitingChild(
+            Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_deadline_and_termination_observe_process_liveness() {
+        let mut child = waiting_child();
+        assert_eq!(
+            wait_child_until_deadline(&mut child.0, Instant::now()),
+            None
+        );
+        assert!(child.0.try_wait().unwrap().is_none());
+        drop(child.0.stdin.take());
+        assert_eq!(
+            wait_child_until_deadline(&mut child.0, Instant::now() + Duration::from_secs(30)),
+            Some(())
+        );
+        let mut child = waiting_child();
+        terminate_child_now(&mut child.0);
+        assert!(child.0.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdout_reader_stops_after_one_eof_error() {
+        let mut child = WaitingChild(
+            Command::new("/bin/sh")
+                .args(["-c", ":"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let receiver = spawn_stdout_reader(child.0.stdout.take().unwrap());
+        child.0.wait().unwrap();
+        assert!(
+            receiver
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap()
+                .is_err()
+        );
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(30)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_conversation_reaps_the_child_and_drains_its_pipe() {
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (done, completion) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut bytes = vec![];
+            stdout.read_to_end(&mut bytes).unwrap();
+            done.send(()).unwrap();
+            bytes
+        });
+        let conv = Conversation {
+            child,
+            stderr_join: Some(handle),
+        };
+        drop(conv);
+        let was_drained = completion.recv_timeout(Duration::from_secs(30)).is_ok();
+        // Closing the separately held pipe also releases the child if Drop was removed.
+        drop(stdin);
+        if !was_drained {
+            completion.recv_timeout(Duration::from_secs(30)).unwrap();
+        }
+        assert!(was_drained);
+    }
+
+    #[test]
+    fn blocked_stderr_join_uses_its_grace_before_detaching() {
+        let (release, wait) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            wait.recv().unwrap();
+            finished.send(()).unwrap();
+            vec![]
+        });
+        let start = Instant::now();
+        detach_join_with_grace(handle);
+        let elapsed = start.elapsed();
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(elapsed >= STDERR_JOIN_GRACE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pin_prompt_budget_accepts_eight_and_refuses_the_ninth() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct Provider(Arc<AtomicUsize>);
+        impl PinProvider for Provider {
+            fn provide_pin(&self, _: &PinPromptInfo) -> Result<zeroize::Zeroizing<String>, Error> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Ok(zeroize::Zeroizing::new(String::new()))
+            }
+        }
+        for count in [8, 9] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let signer = ExternalSigner::new("/bin/cat")
+                .unwrap()
+                .with_pin_provider(Provider(calls.clone()));
+            let mut child = Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let mut conv = Conversation {
+                child,
+                stderr_join: None,
+            };
+            let (sender, receiver) = mpsc::channel();
+            for _ in 0..count {
+                sender
+                    .send(Ok(SignerFrame {
+                        body: Some(signer_frame::Body::PinPrompt(Box::default())),
+                        ..Default::default()
+                    }))
+                    .unwrap();
+            }
+            sender
+                .send(Ok(SignerFrame {
+                    body: Some(signer_frame::Body::SignResponse(Box::default())),
+                    ..Default::default()
+                }))
+                .unwrap();
+            let result = signer.read_until_terminal_frame(
+                &receiver,
+                &mut stdin,
+                Instant::now() + Duration::from_secs(30),
+                &mut conv,
+            );
+            if count == 8 {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(Error::ExternalSignerBadResponse(_))));
+            }
+            assert_eq!(calls.load(Ordering::Relaxed), 8);
+        }
+    }
+
+    #[test]
+    fn stderr_capture_is_bounded_and_keeps_the_exact_prefix() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct ShortReads {
+            input: std::io::Cursor<Vec<u8>>,
+            consumed: Arc<AtomicUsize>,
+        }
+        impl Read for ShortReads {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let len = bytes.len().min(3000);
+                let count = self.input.read(&mut bytes[..len])?;
+                self.consumed.fetch_add(count, Ordering::Relaxed);
+                Ok(count)
+            }
+        }
+        assert_eq!(MAX_STDERR_DRAIN, 1_048_576);
+        let bytes: Vec<u8> = (0..MAX_STDERR_DRAIN + 8192)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let captured = spawn_stderr_drainer(ShortReads {
+            input: std::io::Cursor::new(bytes.clone()),
+            consumed: consumed.clone(),
+        })
+        .join()
+        .unwrap();
+        assert_eq!(captured, bytes[..MAX_STDERR_DRAIN]);
+        assert_eq!(consumed.load(Ordering::Relaxed), bytes.len());
+    }
+
+    #[test]
+    fn completed_stderr_join_preserves_contents_and_panics() {
+        let handle = thread::spawn(|| vec![9, 8, 7]);
+        while !handle.is_finished() {
+            thread::yield_now();
+        }
+        assert_eq!(
+            join_until_deadline(handle, Instant::now() + Duration::from_secs(1)),
+            Some(Ok(vec![9, 8, 7]))
+        );
+        let handle = thread::spawn(|| panic!("drainer failure"));
+        while !handle.is_finished() {
+            thread::yield_now();
+        }
+        assert_eq!(
+            join_until_deadline(handle, Instant::now() + Duration::from_secs(1)),
+            Some(Err(()))
+        );
+    }
+
+    #[test]
+    fn handshake_accepts_the_exact_advertised_payload_limit() {
+        let mut hello = compatible_hello();
+        hello
+            .capabilities
+            .as_option_mut()
+            .unwrap()
+            .max_payload_bytes = Some(64);
+        let frame = SignerFrame {
+            body: Some(signer_frame::Body::HelloResponse(Box::new(hello))),
+            ..Default::default()
+        };
+        assert!(validate_hello_capabilities(&frame, Algorithm::Ed25519, 64).is_ok());
+        assert!(validate_hello_capabilities(&frame, Algorithm::Ed25519, 65).is_err());
+    }
 
     fn compatible_hello() -> kit_rpc::kit::rpc::v1::signer::HelloResponse {
         use kit_rpc::kit::rpc::v1::signer::{Capabilities, HelloResponse};

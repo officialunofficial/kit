@@ -27,6 +27,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Reject unescaped control characters in attestation envelope strings.
 - Hash worktree cache misses across directories in one shared thread pool.
 - Stop limited history at merge frontiers and closed ranges at their excluded endpoint.
 - Keep native path components in ignore checks and refuse filenames the index cannot represent.
