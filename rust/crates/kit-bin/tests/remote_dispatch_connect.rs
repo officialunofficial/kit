@@ -1542,7 +1542,14 @@ fn cli_http_and_real_https_match_file_push_goldens_and_fetch_pull_clone_bytes() 
         let checkout_root = tempfile::tempdir().unwrap();
         let cloned = run(
             checkout_root.path(),
-            &["clone", "--no-attestations", "-o", "origin", &endpoint, "checkout"],
+            &[
+                "clone",
+                "--no-attestations",
+                "-o",
+                "origin",
+                &endpoint,
+                "checkout",
+            ],
         );
         assert_eq!(cloned.status.code(), Some(0), "{scheme}: {cloned:?}");
         transcript.push(endpoint_transcript(&cloned, &endpoint));
