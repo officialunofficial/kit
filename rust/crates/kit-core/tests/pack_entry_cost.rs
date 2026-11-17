@@ -68,7 +68,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
-const ENTRIES: u32 = 30_000;
+// Thousands of distinct objects expose per-entry bookkeeping without making
+// fixture teardown remove tens of thousands of files on APFS.
+const ENTRIES: u32 = 7_500;
 // The file reader has a separate per-entry charge and does not keep `stored`.
 const FILE_ENTRIES: u32 = 1_025;
 

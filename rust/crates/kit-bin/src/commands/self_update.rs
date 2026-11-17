@@ -1211,17 +1211,24 @@ mod tests {
 
     // ---- receipts ----
 
-    fn tmp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("kit-self-update-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    #[test]
+    fn update_fixture_is_removed_when_dropped() {
+        let dir = tmp_dir("cleanup");
+        let file = dir.path().join("staged");
+        std::fs::write(&file, b"fixture").unwrap();
+        let path = file.parent().unwrap().to_path_buf();
+        drop(dir);
+        assert!(!path.exists(), "update fixture left at {}", path.display());
+    }
+
+    fn tmp_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new().prefix(name).tempdir().unwrap()
     }
 
     #[test]
     fn receipt_roundtrip() {
         let d = tmp_dir("receipt");
-        let p = d.join("installed-tag");
+        let p = d.path().join("installed-tag");
         write_receipt(&p, "v0.4.0").unwrap();
         assert_eq!(read_receipt(&p).as_deref(), Some("v0.4.0"));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "v0.4.0\n");
@@ -1230,9 +1237,9 @@ mod tests {
     #[test]
     fn read_receipt_missing_or_empty_is_none() {
         let d = tmp_dir("receipt-empty");
-        assert_eq!(read_receipt(&d.join("nope")), None);
-        std::fs::write(d.join("empty"), "\n").unwrap();
-        assert_eq!(read_receipt(&d.join("empty")), None);
+        assert_eq!(read_receipt(&d.path().join("nope")), None);
+        std::fs::write(d.path().join("empty"), "\n").unwrap();
+        assert_eq!(read_receipt(&d.path().join("empty")), None);
     }
 
     // ---- guidance ----
@@ -1342,7 +1349,7 @@ mod tests {
     #[test]
     fn staged_version_check_enforces_contract() {
         let d = tmp_dir("staged");
-        let ok = stage_binary(&d, b"#!/bin/sh\nprintf 'kit 9.9.9\\n'\n").unwrap();
+        let ok = stage_binary(d.path(), b"#!/bin/sh\nprintf 'kit 9.9.9\\n'\n").unwrap();
         check_staged_version(&ok, "9.9.9").unwrap();
         let e = check_staged_version(&ok, "9.9.8").unwrap_err();
         assert!(e.contains("self-check failed"), "{e}");
@@ -1353,8 +1360,8 @@ mod tests {
     fn staged_file_is_new_executable_and_unpredictable() {
         use std::os::unix::fs::PermissionsExt as _;
         let d = tmp_dir("staged-names");
-        let a = stage_binary(&d, b"one").unwrap();
-        let b = stage_binary(&d, b"two").unwrap();
+        let a = stage_binary(d.path(), b"one").unwrap();
+        let b = stage_binary(d.path(), b"two").unwrap();
         assert_ne!(a, b);
         assert_eq!(std::fs::read(&a).unwrap(), b"one");
         assert_eq!(
@@ -1369,14 +1376,14 @@ mod tests {
     #[test]
     fn create_new_file_refuses_symlink_and_existing_file() {
         let d = tmp_dir("create-new");
-        let target = d.join("victim");
+        let target = d.path().join("victim");
         std::fs::write(&target, b"keep").unwrap();
-        let link = d.join("link");
+        let link = d.path().join("link");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(create_new_file(&link).is_err());
         assert!(create_new_file(&target).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"keep");
-        let fresh = d.join("fresh");
+        let fresh = d.path().join("fresh");
         create_new_file(&fresh).unwrap();
         assert!(fresh.exists());
     }
@@ -1386,11 +1393,11 @@ mod tests {
     fn lax_dir_perms_refused() {
         use std::os::unix::fs::PermissionsExt as _;
         let d = tmp_dir("perms");
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let (msg, code) = refuse_lax_dir_perms(&d).unwrap_err();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (msg, code) = refuse_lax_dir_perms(d.path()).unwrap_err();
         assert_eq!(code, exit::NOPERM);
         assert!(msg.contains("writable"), "{msg}");
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
-        refuse_lax_dir_perms(&d).unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        refuse_lax_dir_perms(d.path()).unwrap();
     }
 }

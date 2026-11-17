@@ -7,7 +7,6 @@ use std::{
     fmt::Write as _,
     fs,
     path::PathBuf,
-    sync::OnceLock,
 };
 
 use commonware_codec::Write as _;
@@ -949,40 +948,57 @@ proptest! {
 
 }
 
+fn with_range_fixture<R>(use_fixture: impl FnOnce(&common::Fixture) -> R) -> R {
+    thread_local! {
+        static FIXTURE: common::Fixture = common::build_fixture();
+    }
+    FIXTURE.with(use_fixture)
+}
+
+#[test]
+fn range_fixture_is_removed_when_the_thread_ends() {
+    let path =
+        std::thread::spawn(|| with_range_fixture(|fixture| fixture.dir.path().to_path_buf()))
+            .join()
+            .unwrap();
+    assert!(!path.exists(), "range fixture left at {}", path.display());
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn built_range_round_trips(offset_seed in any::<u32>(), len_seed in any::<u32>()) {
-        static FIXTURE: OnceLock<common::Fixture> = OnceLock::new();
-        let fixture = FIXTURE.get_or_init(common::build_fixture);
-        let boundaries = chunk_boundaries(fixture);
-        let total = *boundaries.last().unwrap();
-        let offset = u64::from(offset_seed) % total;
-        let len = 1 + u64::from(len_seed) % (total - offset);
-        let proof = build_range_proof_from(
-            &fixture.store,
-            &fixture.commit_id,
-            &[b"chunked.bin"],
-            offset,
-            len,
-        ).unwrap();
-        let first = boundaries.partition_point(|&start| start <= offset) - 1;
-        let last = boundaries.partition_point(|&start| start < offset + len) - 1;
-        let actual = match proof {
-            RangeProof::Kdpb(bytes) => {
-                prop_assert_eq!(first, last);
-                let disclosed = verify_disclosure(&fixture.commit_id, &bytes).unwrap();
-                body(&disclosed).to_vec()
-            }
-            RangeProof::Kdsp(bytes) => {
-                prop_assert!(first < last);
-                verify_disclosure_span(&fixture.commit_id, &bytes).unwrap().bytes
-            }
-            _ => unreachable!("non-exhaustive RangeProof"),
-        };
-        let plaintext = common::chunked_plaintext();
-        let begin = usize::try_from(offset).unwrap();
-        let end = usize::try_from(offset + len).unwrap();
-        prop_assert_eq!(actual.as_slice(), &plaintext[begin..end]);
+        with_range_fixture(|fixture| {
+            let boundaries = chunk_boundaries(fixture);
+            let total = *boundaries.last().unwrap();
+            let offset = u64::from(offset_seed) % total;
+            let len = 1 + u64::from(len_seed) % (total - offset);
+            let proof = build_range_proof_from(
+                &fixture.store,
+                &fixture.commit_id,
+                &[b"chunked.bin"],
+                offset,
+                len,
+            ).unwrap();
+            let first = boundaries.partition_point(|&start| start <= offset) - 1;
+            let last = boundaries.partition_point(|&start| start < offset + len) - 1;
+            let actual = match proof {
+                RangeProof::Kdpb(bytes) => {
+                    prop_assert_eq!(first, last);
+                    let disclosed = verify_disclosure(&fixture.commit_id, &bytes).unwrap();
+                    body(&disclosed).to_vec()
+                }
+                RangeProof::Kdsp(bytes) => {
+                    prop_assert!(first < last);
+                    verify_disclosure_span(&fixture.commit_id, &bytes).unwrap().bytes
+                }
+                _ => unreachable!("non-exhaustive RangeProof"),
+            };
+            let plaintext = common::chunked_plaintext();
+            let begin = usize::try_from(offset).unwrap();
+            let end = usize::try_from(offset + len).unwrap();
+            prop_assert_eq!(actual.as_slice(), &plaintext[begin..end]);
+            Ok(())
+        })?;
     }
 }

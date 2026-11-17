@@ -3937,7 +3937,13 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
                     .open(target.join("big.bin"))
                     .unwrap();
                 std::thread::sleep(std::time::Duration::from_micros(200 * (round % 8)));
-                while !stop.load(Ordering::Relaxed) {
+                // Keep a slow or panicking pull from growing the fixture
+                // without a bound. Even the near-threshold case needs only
+                // a few appended bytes to cross the size check.
+                for _ in 0..4096 {
+                    if stop.load(Ordering::Relaxed) {
+                        break;
+                    }
                     file.write_all(b"x").unwrap();
                     file.flush().unwrap();
                 }
@@ -3964,6 +3970,10 @@ fn assert_growing_file_refuses_the_pull(len: usize) {
                 refused += 1;
             }
             other => panic!("expected the usual refusal or success, got {other:?}"),
+        }
+        // Exercise every append delay before ending a successful run.
+        if refused > 0 && round % 8 == 7 {
+            break;
         }
     }
     assert!(refused > 0, "no round was refused");

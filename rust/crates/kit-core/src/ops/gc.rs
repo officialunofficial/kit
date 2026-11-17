@@ -1433,12 +1433,19 @@ mod tests {
         let (kept, kept_blob) = commit_one(&s, b"deep", b"deep", vec![]);
         let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
         let name = vec!["a"; crate::refs::MAX_REF_NAME_BYTES / 2].join("/");
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            md.common_dir().join("refs/heads").join(&name),
+            md.common_dir().join("refs/heads"),
+        );
         write_ref(&md, &format!("refs/heads/{name}"), &kept);
 
         assert!(collect_roots(&md).unwrap().contains(&kept));
         run_gc(&s, &md, u64::MAX, 0, false).unwrap();
         assert!(s.contains(&kept) && s.contains(&kept_blob));
         assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
+        drop(cleanup);
+        drop(s);
+        d.close().unwrap();
     }
 
     /// Past every name the length bound allows, gc cannot tell what the
@@ -1450,6 +1457,10 @@ mod tests {
         let (kept, _) = commit_one(&s, b"deep", b"deep", vec![]);
         let (orphan, _) = commit_one(&s, b"orphan", b"orphan", vec![]);
         let name = vec!["a"; MAX_REF_WALK_DEPTH + 3].join("/");
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            md.common_dir().join("refs/heads").join(&name),
+            md.common_dir().join("refs/heads"),
+        );
         write_ref(&md, &format!("refs/heads/{name}"), &kept);
 
         assert!(matches!(
@@ -1461,6 +1472,9 @@ mod tests {
             Err(GcRootsError::RefTooDeep(_))
         ));
         assert!(s.contains(&kept) && s.contains(&orphan));
+        drop(cleanup);
+        drop(s);
+        d.close().unwrap();
     }
 
     #[test]
