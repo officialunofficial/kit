@@ -126,11 +126,6 @@ fn publish(
     if pending.is_empty() {
         return Ok(());
     }
-    if !record.warned {
-        report.attestation_warnings.push("publishing attestations is permanent; removal requires resetting the log with force permission".into());
-        record.warned = true;
-        persist(&path, &record)?;
-    }
     let max = tx
         .upload_limits()
         .max_pack_bytes
@@ -192,6 +187,11 @@ fn publish(
         if listed.len() > 4096 {
             return Err("compacted attestation log exceeds 4096 packs".into());
         }
+        if !record.warned {
+        report.attestation_warnings.push("publishing attestations is permanent; removal requires resetting the log with force permission".into());
+        record.warned = true;
+        persist(&path, &record)?;
+    }
         let bytes = transfer::encode_packlist(prev, &listed)?;
         let key = PackKey::from_hash(hash::hash(&bytes));
         tx.upload_blob(&bytes, &key, ATTESTMAP_REF)?;

@@ -130,7 +130,7 @@ pub fn run(args: &[String]) -> u8 {
         && !matches!(value, "true" | "false")
     {
         return emit_err(
-            "fetch.attestations must be true or false",
+            &format!("{key} must be true or false"),
             exit::CONFIG_ERROR,
         );
     }
