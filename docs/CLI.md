@@ -375,8 +375,8 @@ History / commits:
   commit's first parent, so a merged side branch never enters the walk at
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
-  One walk admits at most 1,000,000 commits across its selected history and
-  exclusion proof. A walk that exceeds that budget fails without printing a
+  The selected graph and retained exclusion set share a 1,000,000-commit
+  budget. Bounded range probes have a separate allowance. A walk that exceeds that budget fails without printing a
   partial answer. The merge base of `A...B` uses a separate bounded walk.
   Missing, corrupt or non-commit objects fail when inspected. Objects below
   a proven stopping boundary are not inspected. In a closed `A..B` range,

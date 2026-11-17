@@ -354,6 +354,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                     abs_path: entry.path(),
                     rel_path,
                     indexed,
+                    size: meta.len(),
                 });
             }
         } else if meta.file_type().is_dir() {
@@ -451,6 +452,7 @@ struct PendingFileHash<'e> {
     abs_path: PathBuf,
     rel_path: String,
     indexed: Option<&'e crate::index::IndexEntry>,
+    size: u64,
 }
 
 /// Below this many cache-miss files per available thread, hashing them
@@ -551,12 +553,14 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     use rayon::prelude::*;
     // Indexed collection preserves slot order, including the first error.
     // Nested BLAKE3 parallelism uses this same global pool.
-    misses
-        .par_iter()
-        .map(|m| hash_one_pending_file(sink, source, m, true))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect()
+    let results: Vec<_> = misses.par_iter().map(|m| {
+        (m.size <= CHUNK_THRESHOLD).then(|| hash_one_pending_file(sink, source, m, true))
+    }).collect();
+    // Large files use their normal cutter threads after the file pool has
+    // quiesced. A small file that grows still gets one cutter in its worker.
+    results.into_iter().zip(misses).map(|(result, miss)| {
+        result.unwrap_or_else(|| hash_one_pending_file(sink, source, miss, false))
+    }).collect()
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`

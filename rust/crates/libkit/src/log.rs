@@ -257,9 +257,8 @@ fn range_cut(
     if base != tip {
         pending.push_back(base);
     }
-    let mut closed = true;
     let boundary = loop {
-        if closed && pending.len() == 1 && !commits.is_empty() {
+        if pending.len() == 1 && !commits.is_empty() {
             break pending.pop_front().expect("one frontier");
         }
         let Some(hash) = pending.pop_front() else {
@@ -269,7 +268,7 @@ fn range_cut(
             return Ok(None);
         }
         let commit = read_commit(store, hash)?;
-        closed &= !commit.parents.is_empty();
+        if commit.parents.is_empty() { return Ok(None); }
         for parent in &commit.parents {
             if queued.insert(*parent) {
                 pending.push_back(*parent);
