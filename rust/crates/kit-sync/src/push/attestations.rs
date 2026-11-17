@@ -15,7 +15,7 @@ use kit_core::{
         walk::{HeldCommits, PushWalk},
     },
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, io::Write as _};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -77,7 +77,7 @@ fn publish(
     };
     for entry in entries {
         let entry = entry?;
-        let Some(subject) = entry.file_name().to_str().and_then(|name| refs_hash(name)) else { continue; };
+        let Some(subject) = entry.file_name().to_str().and_then(refs_hash) else { continue; };
         for path in kit_attest::store::list(layout, &subject)? {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(refs_hash) else { continue; };
             if record.ids.contains(&id) || fetched(layout, &id)? { continue; }
@@ -103,7 +103,7 @@ fn publish(
                 Ok(kit_core::object::Object::Commit(value)) => stack.extend(value.parents),
                 Ok(kit_core::object::Object::Remix(value)) => stack.extend(value.parents),
                 Ok(kit_core::object::Object::Tag(value)) => stack.push(value.target),
-                Ok(_) | Err(_) => (),
+                Ok(_) | Err(_) => {},
             }
         }
     }
@@ -189,7 +189,7 @@ fn append(tx: &PushContext<'_>, added: &[Hash], rebaseline: bool) -> Result<(Has
         let bytes = transfer::encode_packlist(if baseline { None } else { prior }, if baseline { &packs } else { &new })?;
         match write_node(tx, prior, &bytes, &new) {
             Ok(head) => return Ok((head, packs)),
-            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => (),
+            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => {},
             Err(error) => return Err(error),
         }
     }
@@ -232,7 +232,7 @@ fn compact_log(tx: &PushContext<'_>, options: &PushOptions<'_>, max: u64, warnin
         let bytes = transfer::encode_packlist(None, &compacted)?;
         match write_node(tx, head, &bytes, &[]) {
             Ok(_) => return Ok(()),
-            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => (),
+            Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::RefConflict)) => {},
             Err(error) if error.downcast_ref::<SourceError>().is_some_and(|e| matches!(e, SourceError::AccessDenied)) =>
                 return Err("attestation compaction requires f permission; skipped".into()),
             Err(error) => return Err(error),
@@ -311,7 +311,6 @@ impl Batch {
         let inputs: Vec<_> = self.bytes.iter().map(Vec::as_slice).collect();
         let bytes = kit_attest::pack::build(&inputs, self.max)?;
         let id = hash::hash(&bytes);
-        use std::io::Write as _;
         let mut file = tempfile::NamedTempFile::new_in(&tx.spool_dir)?;
         file.write_all(&bytes)?;
         keys.push(Prepared { id, file, ids: self.bytes.iter().map(|bytes| hash::hash(bytes)).collect() });
@@ -329,7 +328,7 @@ fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64, warnings: &mut 
     for id in packs.iter().collect::<BTreeSet<_>>() {
         let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
         match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
-            Ok(()) => (),
+            Ok(()) => {},
             Err(error) if error.is_not_found() => {
                 warnings.push("discarded missing attestation pack during compaction".into());
                 continue;
@@ -347,7 +346,7 @@ fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64, warnings: &mut 
         // Validate the entire pack before adding any of its envelopes.
         match kit_attest::pack::read(&mut Reader { pack: &pack, offset: 0 }, pack.len(), PACK_BODY_LIMIT, *id,
             &mut kit_attest::pack::DecodeBudget::default(), |_, _, _| {}) {
-            Ok(()) => (),
+            Ok(()) => {},
             Err(kit_attest::pack::PackError::Io(error)) => return Err(error.into()),
             Err(_) => {
                 warnings.push("discarded invalid attestation pack during compaction".into());

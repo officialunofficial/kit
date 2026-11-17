@@ -358,6 +358,7 @@ pub fn open(url: &str) -> Result<Arc<dyn Transport>, Error> {
 struct PushObserver<'a> {
     terminal: &'a Terminal,
     warning: Option<String>,
+    attestations: std::sync::atomic::AtomicUsize,
 }
 
 impl Observer<SyncEvent> for PushObserver<'_> {
@@ -369,6 +370,10 @@ impl Observer<SyncEvent> for PushObserver<'_> {
         }
         if let SyncEvent::AttestationWarning { message } = event {
             eprintln!("warning: {message}");
+        }
+        if let SyncEvent::AttestationsPushed { count } = event {
+            self.attestations.store(*count, std::sync::atomic::Ordering::Relaxed);
+            if *count > 0 { eprintln!("Published {count} attestations"); }
         }
         self.terminal.event(event);
     }
@@ -452,12 +457,12 @@ pub(crate) fn push_branch_tracked_source(
     authority: Option<&dyn StepAuthority>,
     attestations: (bool, &str),
     terminal: &Terminal,
-) -> Result<(Hash, usize), Error> {
+) -> Result<(Hash, usize, usize), Error> {
     let layout = kit_core::layout::discover(cwd)?;
     let (mut settings, observer) = push_inputs(&layout, authority, terminal);
     settings.attestations = attestations.0;
     settings.remote_url = attestations.1;
-    transfer::push_branch_tracked_with_source(
+    let result = transfer::push_branch_tracked_with_source(
         cwd,
         source,
         remote,
@@ -466,7 +471,8 @@ pub(crate) fn push_branch_tracked_source(
         lease,
         &settings,
         &observer,
-    )
+    );
+    result.map(|(tip, steps)| (tip, steps, observer.attestations.load(std::sync::atomic::Ordering::Relaxed)))
 }
 
 /// The settings of a push from the config and the environment, and the observer
@@ -484,7 +490,7 @@ fn push_inputs<'a>(
             authority,
             ..transfer::PushSettings::default()
         },
-        PushObserver { terminal, warning },
+        PushObserver { terminal, warning, attestations: std::sync::atomic::AtomicUsize::new(0) },
     )
 }
 
