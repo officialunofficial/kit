@@ -330,8 +330,13 @@ fn decoded_pack_cap_accepts_the_boundary_and_rejects_the_next_entry() {
     let envelopes = vec![bytes.as_bytes(); 64];
     let cap = 70 * 1024 * 1024;
     assert!(pack::build(&envelopes, cap).is_ok());
+    let mut tail = kit_attest::envelope::decode(ENVELOPE).unwrap();
+    tail.signatures[0].keyid = "k".into();
+    let tail = tail.encode().unwrap();
+    // A short final envelope exposes even a missing ten-byte header charge.
+    assert!(tail.len() < 64 * 10);
     let mut envelopes = vec![bytes.as_bytes(); 64];
-    envelopes.push(ENVELOPE);
+    envelopes.push(tail.as_bytes());
     assert!(matches!(
         pack::build(&envelopes, cap),
         Err(pack::PackError::Invalid("pack cap"))
