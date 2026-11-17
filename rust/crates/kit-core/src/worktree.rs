@@ -237,7 +237,14 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         };
         misses.len()
     ];
-    hash_pending_files(sink, source, &misses, &mut hashed, observations)?;
+    hash_pending_files(
+        sink,
+        source,
+        &misses,
+        &mut hashed,
+        observations,
+        available_threads(),
+    )?;
     pending.write(sink, &hashed)
 }
 
@@ -384,22 +391,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                 object_hash: crate::hash::ZERO,
             });
         } else if meta.file_type().is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            let target_str = target
-                .to_str()
-                .ok_or(WorktreeError::InvalidUtf8)?
-                .to_string();
-            if !validate_symlink_target(&target_str) {
-                return Err(WorktreeError::InvalidSymlinkTarget(target_str));
-            }
-            let target_bytes = target_str.as_bytes();
-            let prologue = serialize::blob_prologue(target_bytes.len())?;
-            let h = sink.put_parts(&[&prologue, target_bytes])?;
-            entries.push(TreeEntry {
-                name: name_str.into_bytes(),
-                mode: EntryMode::Symlink,
-                object_hash: h,
-            });
+            entries.push(symlink_entry(sink, &entry.path(), name_str.into_bytes())?);
         } else {
             // Block / char / fifo / socket — silently skip.
         }
@@ -409,6 +401,25 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         entries,
         files,
         children,
+    })
+}
+
+fn symlink_entry<S: ObjectSink + ?Sized>(
+    sink: &S,
+    path: &Path,
+    name: Vec<u8>,
+) -> WorktreeResult<TreeEntry> {
+    let target = fs::read_link(path)?;
+    let target_str = target.to_str().ok_or(WorktreeError::InvalidUtf8)?;
+    if !validate_symlink_target(target_str) {
+        return Err(WorktreeError::InvalidSymlinkTarget(target_str.to_owned()));
+    }
+    let target_bytes = target_str.as_bytes();
+    let prologue = serialize::blob_prologue(target_bytes.len())?;
+    Ok(TreeEntry {
+        name,
+        mode: EntryMode::Symlink,
+        object_hash: sink.put_parts(&[&prologue, target_bytes])?,
     })
 }
 
@@ -486,10 +497,12 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     misses: &[PendingFileHash<'_>],
     entries: &mut [TreeEntry],
     observations: &mut Vec<StatObservation>,
+    threads: usize,
 ) -> WorktreeResult<()> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = threads;
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let threads = available_threads();
         if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
             let results = hash_pending_files_parallel(sink, source, misses)?;
             apply_hash_results(misses, results, entries, observations);
@@ -978,6 +991,11 @@ fn available_threads() -> usize {
     static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *THREADS
         .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn available_threads() -> usize {
+    1
 }
 
 /// Shared chunk+scoped-thread+join scaffolding behind this module's two
@@ -3916,6 +3934,121 @@ mod tests {
         fs::write(f2_dir.path().join("locked.txt"), b"cached content").unwrap();
         let plain = build_tree(&store2, f2_dir.path()).unwrap();
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct HashThreads {
+        sink: crate::store::HashOnlySink,
+        small: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+        large: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ObjectSink for HashThreads {
+        fn put(&self, bytes: &[u8]) -> crate::store::StoreResult<Hash> {
+            self.sink.put(bytes)
+        }
+        fn put_parts(&self, parts: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            if let Some(data) = parts.get(1) {
+                let threads = if data.first() == Some(&17) {
+                    &self.large
+                } else {
+                    &self.small
+                };
+                threads.lock().unwrap().insert(std::thread::current().id());
+            }
+            self.sink.put_parts(parts)
+        }
+        fn has(&self, hash: &Hash) -> bool {
+            self.sink.has(hash)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl HashThreads {
+        fn clear(&self) {
+            self.small.lock().unwrap().clear();
+            self.large.lock().unwrap().clear();
+        }
+        fn assert_small(&self, pool: bool) {
+            let threads = self.small.lock().unwrap();
+            assert!(!threads.is_empty());
+            let main = std::thread::current().id();
+            if pool {
+                assert!(!threads.contains(&main));
+            } else {
+                assert_eq!(*threads, std::collections::HashSet::from([main]));
+            }
+        }
+        fn assert_large_outside_pool(&self) {
+            assert_eq!(
+                *self.large.lock().unwrap(),
+                std::collections::HashSet::from([std::thread::current().id()])
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn whole_walk_hashing_uses_workers_and_keeps_large_files_outside_the_pool() {
+        let work = TempDir::new().unwrap();
+        let count = FILE_HASH_MISSES_PER_THREAD * available_threads().max(2);
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let dir = work.path().join(format!("d{i}"));
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("file");
+            fs::write(&path, b"small").unwrap();
+            paths.push(path);
+        }
+        let large = work.path().join("large");
+        fs::write(&large, vec![17; 2 * 1024 * 1024]).unwrap();
+        paths.push(large);
+        let sink = HashThreads::default();
+        build_tree(&sink, work.path()).unwrap();
+        sink.assert_small(available_threads() > 1);
+        sink.assert_large_outside_pool();
+
+        let misses: Vec<_> = paths
+            .into_iter()
+            .enumerate()
+            .map(|(slot, abs_path)| PendingFileHash {
+                slot,
+                size: fs::metadata(&abs_path).unwrap().len(),
+                abs_path,
+                rel_path: slot.to_string(),
+                indexed: None,
+            })
+            .collect();
+        let mut entries = vec![
+            TreeEntry {
+                name: Vec::new(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::ZERO
+            };
+            misses.len()
+        ];
+        for (length, threads, pool) in [
+            (1, 2, false),
+            (misses.len(), 1, false),
+            (misses.len(), 2, true),
+        ] {
+            sink.clear();
+            hash_pending_files(
+                &sink,
+                None,
+                &misses[..length],
+                &mut entries,
+                &mut Vec::new(),
+                threads,
+            )
+            .unwrap();
+            sink.assert_small(pool);
+            if length == misses.len() {
+                sink.assert_large_outside_pool();
+            }
+        }
     }
 
     #[test]
