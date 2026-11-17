@@ -1258,6 +1258,58 @@ mod tests {
         assert!(!store.contains(&orphan) && !store.contains(&orphan_blob));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn collect_roots_reports_an_attestations_path_that_is_a_file() {
+        let (d, _store) = repo();
+        let md = layout(&d);
+        fs::write(md.attestations_dir(), b"not a directory").unwrap();
+
+        let result = collect_roots(&md);
+        assert!(matches!(
+            result,
+            Err(GcRootsError::Io(error)) if error.kind() == io::ErrorKind::NotADirectory
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_attestation_cleanup_reports_metadata_errors_other_than_not_found() {
+        let d = TempDir::new().unwrap();
+        let parent = d.path().join("file");
+        fs::write(&parent, b"not a directory").unwrap();
+
+        let error = remove_old_empty_attestation(&parent.join("subject"), u64::MAX, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
+    fn gc_tolerates_empty_attestation_directories_that_vanish_or_gain_entries() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let gone = md.attestations_dir().join("11".repeat(32));
+        let populated = md.attestations_dir().join("22".repeat(32));
+        let newcomer = populated.join("notes.txt");
+        fs::create_dir_all(&gone).unwrap();
+        fs::create_dir(&populated).unwrap();
+
+        // Mark progress starts after GC has listed the empty directories
+        // and before it attempts to remove them.
+        let mut changed = false;
+        run_gc_observed(&store, &md, u64::MAX, 0, false, &mut |phase, _, _| {
+            if phase == "gc_mark" && !changed {
+                fs::remove_dir(&gone).unwrap();
+                fs::write(&newcomer, b"keep").unwrap();
+                changed = true;
+            }
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert!(!gone.exists());
+        assert_eq!(fs::read(newcomer).unwrap(), b"keep");
+    }
+
     fn write_attestation_fixture(dir: &Path) {
         fs::create_dir_all(dir).unwrap();
         fs::write(
