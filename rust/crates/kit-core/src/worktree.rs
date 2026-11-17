@@ -227,7 +227,8 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     // and the walk consults it once per regular file.
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
-    build_tree_inner(
+    let mut misses = Vec::new();
+    let pending = build_tree_inner(
         sink,
         source,
         dir,
@@ -236,8 +237,11 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         index,
         &by_path,
         false,
-        observations,
-    )
+        &mut misses,
+    )?;
+    let mut hashed = vec![TreeEntry { name: Vec::new(), mode: EntryMode::Blob, object_hash: crate::hash::ZERO }; misses.len()];
+    hash_pending_files(sink, source, &misses, &mut hashed, observations)?;
+    pending.write(sink, &hashed)
 }
 
 fn retained_content_hash(
@@ -275,24 +279,22 @@ fn directory_ignores<'a>(
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
 #[allow(clippy::too_many_arguments)]
-fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
+fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
     index: &Index,
-    by_path: &std::collections::HashMap<&str, &crate::index::IndexEntry>,
+    by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
     parent_ignored: bool,
-    observations: &mut Vec<StatObservation>,
-) -> WorktreeResult<Hash> {
+    misses: &mut Vec<PendingFileHash<'e>>,
+) -> WorktreeResult<PendingTree> {
     let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
     let ignores = scoped.as_ref();
     let mut entries: Vec<TreeEntry> = Vec::new();
-    // Cache-miss regular files collected during the walk below, hashed
-    // together (sequentially or fanned out) once the walk finishes —
-    // see `hash_pending_files`.
-    let mut misses: Vec<PendingFileHash<'_>> = Vec::new();
+    let mut files = Vec::new();
+    let mut children = Vec::new();
 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -350,11 +352,13 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
                     mode: EntryMode::Blob,
                     object_hash: crate::hash::ZERO,
                 });
+                files.push((slot, misses.len()));
                 misses.push(PendingFileHash {
-                    slot,
+                    slot: misses.len(),
                     abs_path: entry.path(),
                     rel_path,
                     indexed,
+                    size: meta.len(),
                 });
             }
         } else if meta.file_type().is_dir() {
@@ -375,12 +379,13 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
                 index,
                 by_path,
                 entry_ignored,
-                observations,
+                misses,
             )?;
+            children.push((entries.len(), h));
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: EntryMode::Tree,
-                object_hash: h,
+                object_hash: crate::hash::ZERO,
             });
         } else if meta.file_type().is_symlink() {
             let target = fs::read_link(entry.path())?;
@@ -404,14 +409,29 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
         }
     }
 
-    if !misses.is_empty() {
-        hash_pending_files(sink, source, &misses, &mut entries, observations)?;
-    }
+    Ok(PendingTree { entries, files, children })
+}
 
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let tree = Object::Tree(Tree { entries });
-    let bytes = serialize::serialize(&tree)?;
-    Ok(sink.put(&bytes)?)
+/// Directory entries retain their walk slots until every file has been hashed.
+struct PendingTree {
+    entries: Vec<TreeEntry>,
+    files: Vec<(usize, usize)>,
+    children: Vec<(usize, PendingTree)>,
+}
+
+impl PendingTree {
+    fn write<S: ObjectSink + ?Sized>(mut self, sink: &S, hashed: &[TreeEntry]) -> WorktreeResult<Hash> {
+        for (slot, file) in self.files {
+            self.entries[slot].object_hash = hashed[file].object_hash;
+            self.entries[slot].mode = hashed[file].mode;
+        }
+        for (slot, child) in self.children {
+            self.entries[slot].object_hash = child.write(sink, hashed)?;
+        }
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let bytes = serialize::serialize(&Object::Tree(Tree { entries: self.entries }))?;
+        Ok(sink.put(&bytes)?)
+    }
 }
 
 /// One cache-miss regular file discovered by [`build_tree_inner`]'s walk
@@ -427,6 +447,7 @@ struct PendingFileHash<'e> {
     abs_path: PathBuf,
     rel_path: String,
     indexed: Option<&'e crate::index::IndexEntry>,
+    size: u64,
 }
 
 /// Below this many cache-miss files per available thread, hashing them
@@ -450,9 +471,9 @@ const FILE_HASH_MISSES_PER_THREAD: usize = 8;
 /// hash result is written back to `entries`/`observations` in `misses`'
 /// original directory-walk order regardless of which thread computed
 /// it, so the output is byte-identical to the old fully-sequential
-/// loop; only which of several simultaneous I/O errors is reported can
-/// vary between runs — the same accepted nondeterminism
-/// `probe_staged_objects_parallel` already has.
+/// loop; the first error in slot order wins, independent of worker completion.
+/// Batches with large files stay sequential so input-level hashing can
+/// use the available cores without another file-level fan-out.
 fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
@@ -463,7 +484,9 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     #[cfg(not(target_arch = "wasm32"))]
     {
         let threads = available_threads();
-        if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
+        if threads > 1
+            && misses.iter().all(|m| m.size < 1024 * 1024)
+            && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
             let results = hash_pending_files_parallel(sink, source, misses, threads)?;
             apply_hash_results(misses, results, entries, observations);
             return Ok(());
@@ -3860,6 +3883,30 @@ mod tests {
         fs::write(f2_dir.path().join("locked.txt"), b"cached content").unwrap();
         let plain = build_tree(&store2, f2_dir.path()).unwrap();
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
+    }
+
+    #[test]
+    fn file_slots_survive_hashing_across_many_directories() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        for d in 0..32 {
+            let dir = work.path().join(format!("d{d:02}"));
+            fs::create_dir(&dir).unwrap();
+            for f in 0..32 {
+                fs::write(dir.join(format!("f{f:02}")), format!("{d}/{f}")).unwrap();
+            }
+        }
+        let hash = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(root) = store.read_object(&hash).unwrap() else { panic!("tree") };
+        assert_eq!(root.entries.len(), 32);
+        for (d, entry) in root.entries.iter().enumerate() {
+            let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else { panic!("tree") };
+            assert_eq!(tree.entries.len(), 32);
+            for (f, entry) in tree.entries.iter().enumerate() {
+                let bytes = serialize::serialize(&Object::Blob(crate::object::Blob { data: format!("{d}/{f}").into_bytes() })).unwrap();
+                assert_eq!(entry.object_hash, crate::hash::hash(&bytes));
+            }
+        }
     }
 
     /// `hash_pending_files_parallel`'s fan-out branch only fires once a

@@ -172,6 +172,13 @@ pub struct Entry {
 /// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
+    if !query.all
+        && let Selection::Range { exclude, include } = parse_selection(query.start.as_deref())
+        && let (Some(base), Some(tip)) = (resolve_tip(repo, Some(&exclude))?, resolve_tip(repo, Some(&include))?)
+        && range_is_closed(store, tip, base, MAX_LOG_COMMITS)?
+    {
+        return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
+    }
     let resolved = if query.all {
         all_tips(repo)?
     } else {
@@ -182,6 +189,29 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
         return Ok(None);
     };
     select(store, &tips, &excluded, query, MAX_LOG_COMMITS).map(Some)
+}
+
+/// A cut at `base` is enough when every path from `tip` ends there.
+/// No ancestor of `base` can occur above the cut in an acyclic graph.
+/// An independent root needs the general exclusion walk instead. Timestamps
+/// are deliberately unused: imported commits may have arbitrarily skewed clocks.
+fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Result<bool, Error> {
+    let mut seen = HashSet::new();
+    let mut pending = vec![tip];
+    while let Some(hash) = pending.pop() {
+        if hash == base || !seen.insert(hash) {
+            continue;
+        }
+        if seen.len() >= cap {
+            return Err(Error::TooManyCommits { limit: cap });
+        }
+        let commit = read_commit(store, hash)?;
+        if commit.parents.is_empty() {
+            return Ok(false);
+        }
+        pending.extend(commit.parents);
+    }
+    Ok(true)
 }
 
 /// The kind of a ref in a [`RefTip`].
@@ -555,7 +585,7 @@ fn walked_parents<'a>(
 /// tip, the walk starts as a chain: while each commit has at most one walked
 /// parent, no later commit can be a child of an earlier one, because commit
 /// ids form no cycle. So the chain streams in order, and a limit stops it
-/// early. The first commit with two walked parents hands the rest to
+/// early. After emitting a commit with two walked parents, the walk hands its parents to
 /// [`emit_sorted`], which needs every remaining commit first, because a child
 /// can lie at any depth and timestamps do not bound it.
 ///
@@ -595,17 +625,17 @@ fn walk_ordered(
             let mut parents = walked_parents(&commit, excluded, first_parent);
             (parents.next(), parents.next().is_some())
         };
-        if merge {
-            let cap = (streamed, max_commits);
-            return emit_sorted(store, &[hash], excluded, first_parent, cap, emit);
-        }
         if streamed >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
+        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
         next = parent;
         if !emit(Entry { hash, commit }) {
             return Ok(());
+        }
+        if merge {
+            return emit_sorted(store, &parents, excluded, first_parent, (streamed, max_commits), emit);
         }
     }
     Ok(())
@@ -834,6 +864,39 @@ mod tests {
 
     fn ids(entries: &[Entry]) -> Vec<Hash> {
         entries.iter().map(|entry| entry.hash).collect()
+    }
+
+    #[test]
+    fn a_merge_tip_limit_does_not_read_its_parents() {
+        let (_dir, store) = temp_store();
+        let tip = put(&store, vec![[1; 32], [2; 32]], 0, 0);
+        let got = select(&store, &[tip], &HashSet::new(), &query_with(Some(1), false), 1).unwrap();
+        assert_eq!(ids(&got), [tip]);
+    }
+
+    #[test]
+    fn a_closed_range_does_not_read_below_its_cut() {
+        let (_dir, store) = temp_store();
+        let base = put(&store, vec![[1; 32]], 100, 0);
+        let a = put(&store, vec![base], 5, 1);
+        let b = put(&store, vec![base], 4, 2);
+        let x = put(&store, vec![a, b], 3, 3);
+        let y = put(&store, vec![b, a], 2, 4);
+        let tip = put(&store, vec![x, y], 1, 5);
+        for tip in [a, x, tip] {
+            assert!(range_is_closed(&store, tip, base, 10).unwrap());
+            for first_parent in [false, true] {
+                for limit in [None, Some(0), Some(1), Some(3)] {
+                    let q = query_with(limit, first_parent);
+                    let cut = HashSet::from([base]);
+                    let got = select(&store, &[tip], &cut, &q, 10).unwrap();
+                    assert_eq!(ids(&got), reference(&store, &[tip], &cut, &q));
+                }
+            }
+        }
+        let root = put(&store, vec![], 0, 6);
+        let open = put(&store, vec![a, root], 0, 7);
+        assert!(!range_is_closed(&store, open, base, 10).unwrap());
     }
 
     #[test]
