@@ -120,10 +120,18 @@ fn attestation_config_supports_set_show_scopes_and_unset_without_invalid_writes(
     let run = |args: &[&str]| config_run(root.path(), args);
     assert!(run(&["init"]).status.success());
     let set = run(&["config", "--global", "fetch.attestations", "false"]);
-    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
     assert_eq!(run(&["config", "fetch.attestations"]).stdout, b"false\n");
     let set = run(&["config", "--local", "fetch.attestations", "true"]);
-    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
     assert_eq!(run(&["config", "fetch.attestations"]).stdout, b"true\n");
     let show = run(&["config", "--format", "json"]);
     let values: serde_json::Value = serde_json::from_slice(&show.stdout).unwrap();
@@ -134,9 +142,17 @@ fn attestation_config_supports_set_show_scopes_and_unset_without_invalid_writes(
         assert!(String::from_utf8_lossy(&bad.stderr).contains("fetch.attestations"));
         assert_eq!(run(&["config", "fetch.attestations"]).stdout, b"true\n");
     }
-    assert!(run(&["config", "--local", "--unset", "fetch.attestations"]).status.success());
+    assert!(
+        run(&["config", "--local", "--unset", "fetch.attestations"])
+            .status
+            .success()
+    );
     assert_eq!(run(&["config", "fetch.attestations"]).stdout, b"false\n");
-    assert!(run(&["config", "--global", "--unset", "fetch.attestations"]).status.success());
+    assert!(
+        run(&["config", "--global", "--unset", "fetch.attestations"])
+            .status
+            .success()
+    );
     assert_eq!(run(&["config", "fetch.attestations"]).stdout, b"\n");
 }
 
@@ -144,10 +160,18 @@ fn attestation_config_supports_set_show_scopes_and_unset_without_invalid_writes(
 fn rewriting_remote_config_preserves_the_attestation_opt_out() {
     let root = tempfile::tempdir().unwrap();
     assert!(config_run(root.path(), &["init"]).status.success());
-    std::fs::write(root.path().join(".kit/config"), "fetch.attestations = false\n").unwrap();
+    std::fs::write(
+        root.path().join(".kit/config"),
+        "fetch.attestations = false\n",
+    )
+    .unwrap();
     let url = format!("kit+file://{}", root.path().join("bare").display());
     let add = config_run(root.path(), &["remote", "add", "origin", &url]);
-    assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let text = std::fs::read_to_string(root.path().join(".kit/config")).unwrap();
     assert!(text.contains("fetch.attestations = false"), "{text}");
 }
