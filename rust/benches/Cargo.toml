@@ -54,6 +54,10 @@ name = "restore_chunk_fanout"
 harness = false
 
 [[bench]]
+name = "blob_read"
+harness = false
+
+[[bench]]
 name = "delta_encode_scan"
 harness = false
 
