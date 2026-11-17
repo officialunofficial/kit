@@ -541,6 +541,16 @@ fn mark_live(
     mark_live_observed(store, roots, limits, &mut |_, _, _| {})
 }
 
+/// Take a bounded FIFO window without probing ids the serial walk skips.
+fn take_probe_window(queue: &mut VecDeque<Hash>, objects: &BTreeSet<Hash>) -> Vec<Hash> {
+    let mut seen = BTreeSet::new();
+    let count = queue.len().min(16 * 1024);
+    queue
+        .drain(..count)
+        .filter(|h| !objects.contains(h) && seen.insert(*h))
+        .collect()
+}
+
 fn mark_live_observed(
     store: &ObjectStore,
     roots: &BTreeSet<Hash>,
@@ -552,30 +562,48 @@ fn mark_live_observed(
     let mut objects: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
     let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
-    while let Some(h) = queue.pop_front() {
-        if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
-            progress("gc_mark", objects.len(), 0);
-            last_progress = std::time::Instant::now();
-        }
-        if objects.contains(&h) {
-            continue;
-        }
-        if objects.len() >= limits.cap {
-            return Err(GcRootsError::Truncated);
-        }
-        objects.insert(h);
-        // A blob or delta is a leaf. Its type is all gc needs, so its
-        // content is not read or verified (see `live_objects_with`).
-        if matches!(store.object_type(&h)?, ObjectType::Blob | ObjectType::Delta) {
-            continue;
-        }
-        let object = store.read_object(&h)?;
-        let edges = children(&object, ClosureMode::History);
-        if matches!(object, Object::ChunkedBlob(_)) {
-            drop(object);
-            ids.extend(&edges)?;
-        } else {
-            queue.extend(edges);
+    while !queue.is_empty() {
+        let queued = queue.len();
+        // Probe a bounded breadth-first window. Apply all results on this
+        // thread so traversal, caps and errors keep their sequential order.
+        let window: Vec<_> = take_probe_window(&mut queue, &objects)
+            .into_iter()
+            .map(|h| (h, std::sync::OnceLock::new()))
+            .collect();
+        // Skipped ids must still leave the queue so every window progresses.
+        debug_assert!(queue.len() < queued, "each probe window drains the queue");
+        super::chunk_heads::try_each_in_order(&window, |(h, slot)| {
+            let _ = slot.set(store.object_type(h));
+            Ok::<(), GcRootsError>(())
+        })?;
+        for (h, slot) in window {
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                progress("gc_mark", objects.len(), 0);
+                last_progress = std::time::Instant::now();
+            }
+            if objects.contains(&h) {
+                continue;
+            }
+            if objects.len() >= limits.cap {
+                return Err(GcRootsError::Truncated);
+            }
+            objects.insert(h);
+            // A blob or delta is a leaf. Its type is all gc needs, so its
+            // content is not read or verified (see `live_objects_with`).
+            if matches!(
+                slot.into_inner().expect("each probe ran")?,
+                ObjectType::Blob | ObjectType::Delta
+            ) {
+                continue;
+            }
+            let object = store.read_object(&h)?;
+            let edges = children(&object, ClosureMode::History);
+            if matches!(object, Object::ChunkedBlob(_)) {
+                drop(object);
+                ids.extend(&edges)?;
+            } else {
+                queue.extend(edges);
+            }
         }
     }
     drop(queue);
@@ -1113,6 +1141,39 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn probe_windows_skip_marked_and_duplicate_ids_in_first_occurrence_order() {
+        let (a, b, c) = ([1; 32], [2; 32], [3; 32]);
+        let marked = BTreeSet::from([a]);
+        let mut queue = VecDeque::from([a, b, a, c, b]);
+        assert_eq!(take_probe_window(&mut queue, &marked), vec![b, c]);
+        assert!(queue.is_empty());
+        queue.extend(std::iter::repeat_n(a, 16 * 1024));
+        queue.push_back(b);
+        assert!(take_probe_window(&mut queue, &marked).is_empty());
+        assert_eq!(take_probe_window(&mut queue, &marked), vec![b]);
+    }
+
+    #[test]
+    fn parallel_type_probes_keep_every_leaf_and_first_error_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let roots: BTreeSet<_> = (0u32..128)
+            .map(|i| write_blob(&store, &i.to_le_bytes()))
+            .collect();
+        let live = mark_live(&store, &roots, MarkLimits::DEFAULT).unwrap();
+        assert_eq!(live.objects, roots);
+        assert!(live.chunks.is_empty());
+        let missing = [[0x88; 32], [0xee; 32]];
+        let mut broken = roots;
+        broken.extend(missing);
+        let err = mark_live(&store, &broken, MarkLimits::DEFAULT).unwrap_err();
+        assert!(
+            err.to_string().contains(&hash::to_hex(&missing[0])),
+            "{err}"
+        );
     }
 
     /// Commit a single-file tree; returns `(commit, blob)` hashes.
