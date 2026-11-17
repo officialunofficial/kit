@@ -2360,12 +2360,19 @@ include!("../../kit-sync/tests/support/attestation_fetch.rs");
 
 #[test]
 fn connect_push_publishes_ticketed_attestations_when_code_is_up_to_date() {
+    check_attestation_push(true);
+}
+#[test]
+fn connect_push_without_capability_warns_once_and_keeps_code_success() {
+    check_attestation_push(false);
+}
+fn check_attestation_push(advertised: bool) {
     let backend = Arc::new(MemoryTransport::new());
     let (tip, _) = attestation_fetch::code(&*backend);
     let baseline = kit_core::transfer::encode_packlist(None, &[]).unwrap();
     let id = kit_core::hash::hash(&baseline);
     backend.upload_blob(&baseline, &PackKey::new(id), None).unwrap();
-    backend.update_ref(kit_core::refs::ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap();
+    if advertised { backend.update_ref(kit_core::refs::ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap(); }
     let (port, shutdown, handle, calls) =
         spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
     let url = format!("kit+http://127.0.0.1:{port}/myproj");
@@ -2381,11 +2388,12 @@ fn connect_push_publishes_ticketed_attestations_when_code_is_up_to_date() {
     options.target = kit_sync::PushTarget::Branch { local: "main".into(), remote: "main".into(), lease: kit_sync::PushLease::FastForward };
     let report = kit_sync::push(local.path(), &kit_sync::TransportSource::new(&*transport), &options).unwrap();
     assert_eq!(report.steps, 0);
-    assert_eq!(report.attestations_pushed, 1);
-    assert_eq!(calls.lock().unwrap().iter().filter(|c| c.procedure == "BeginUpload").count(), 2);
+    assert_eq!(report.attestations_pushed, usize::from(advertised));
+    assert_eq!(report.attestation_warnings.len(), 1);
+    assert_eq!(calls.lock().unwrap().iter().filter(|c| c.procedure == "BeginUpload").count(), if advertised { 2 } else { 0 });
     let second = tempfile::tempdir().unwrap();
     let cloned = kit_sync::clone(second.path(), &kit_sync::TransportSource::new(&*transport), &descriptor, &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
-    assert_eq!(cloned.pull.fetch.attestations_stored, 1);
+    assert_eq!(cloned.pull.fetch.attestations_stored, usize::from(advertised));
     let _ = shutdown.send(());
     handle.join().unwrap();
 }
