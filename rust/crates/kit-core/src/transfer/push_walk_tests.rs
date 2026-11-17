@@ -888,6 +888,60 @@ fn a_linear_push_counts_only_the_remote_head_and_new_objects() {
 }
 
 #[test]
+fn a_tip_at_the_remote_head_still_requires_one_slot_in_the_cap() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let remote = commit(&s, tree, &[], "remote");
+
+    let held = HeldCommits::for_tips(&s, &[remote], Some(remote), 1).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+    assert!(matches!(
+        HeldCommits::for_tips(&s, &[remote], Some(remote), 0),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn the_probe_shares_its_read_budget_across_tips() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let left = commit(&s, tree, &[remote], "left");
+    let right = commit(&s, tree, &[remote], "right");
+
+    let held = HeldCommits::for_tips(&s, &[remote, left], Some(remote), 1).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+    assert!(matches!(
+        HeldCommits::for_tips(&s, &[left, right], Some(remote), 1),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
+}
+
+#[test]
+fn the_probe_uses_the_full_walk_after_sixty_four_local_reads() {
+    let (_d, s) = store();
+    let tree = tree_of(&s, &[]);
+    let root = commit(&s, tree, &[], "root");
+    let remote = commit(&s, tree, &[root], "remote");
+    let mut tip = remote;
+    for index in 0..64 {
+        tip = commit(&s, tree, &[tip], &format!("advance-{index}"));
+    }
+
+    let held = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    assert_eq!(held.len(), 1);
+    assert!(held.contains(&remote));
+
+    let tip = commit(&s, tree, &[tip], "advance past probe budget");
+    let held = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    assert_eq!(held.len(), 2);
+    assert!(held.contains(&root));
+}
+
+#[test]
 fn a_diverged_push_counts_every_held_commit_against_the_cap() {
     let (_d, s) = store();
     let tree = tree_of(&s, &[]);
@@ -924,16 +978,37 @@ fn force_push_remote_ahead_and_unrelated_tips_match_the_full_walk() {
 }
 
 #[test]
-fn a_linear_push_with_a_tree_edge_to_held_history_uses_the_full_walk() {
+fn a_linear_push_with_tree_edges_to_held_history_loads_it_once() {
     let (_d, s) = store();
     let tree = tree_of(&s, &[]);
     let root = commit(&s, tree, &[], "root");
-    let remote = commit(&s, tree, &[root], "remote");
-    let changed = tree_of(&s, &[("points to root", root)]);
+    let middle = commit(&s, tree, &[root], "middle");
+    let remote = commit(&s, tree, &[middle], "remote");
+    let changed = tree_of(&s, &[("root", root), ("middle", middle)]);
     let tip = commit(&s, changed, &[remote], "new");
 
-    let plan = assert_matches_full_walk(&s, &[tip], Some(remote));
-    assert_eq!(ids(&plan), BTreeSet::from([tip, changed]));
+    let full = HeldCommits::collect(&s, Some(remote), MAX_PUSH_WALK).unwrap();
+    let boundary = HeldCommits::for_tips(&s, &[tip], Some(remote), MAX_PUSH_WALK).unwrap();
+    let reads = |tip, held: &HeldCommits| {
+        let before = s.read_call_count();
+        let walk = PushWalk::run(&s, tip, held, limits(5), None).unwrap();
+        assert_eq!(walk.objects(), &BTreeSet::from([tip, changed]));
+        s.read_call_count() - before
+    };
+    let full_reads = reads(tip, &full);
+    assert_eq!(reads(tip, &boundary), full_reads + 3);
+
+    // With the held set already complete, the extra ancestor adds no reads.
+    let shorter_tip = commit(&s, changed, &[middle], "new on a shorter history");
+    let shorter_full = HeldCommits::collect(&s, Some(middle), MAX_PUSH_WALK).unwrap();
+    assert_eq!(reads(shorter_tip, &shorter_full), full_reads);
+    assert_matches_full_walk(&s, &[tip], Some(remote));
+
+    // The three held commits and both new objects must fit together.
+    assert!(matches!(
+        PushWalk::run(&s, tip, &boundary, limits(4), None),
+        Err(StoreError::OperationLimitExceeded(PUSH_WALK_LIMIT))
+    ));
 }
 
 #[test]
