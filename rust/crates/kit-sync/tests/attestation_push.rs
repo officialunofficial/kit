@@ -235,3 +235,37 @@ fn depth_64_rebaseline_preserves_oldest_first_pack_order_under_update_permission
     assert_eq!(&node.packs[..64], &vec![key;64]);
     assert_eq!(node.packs.len(), 65);
 }
+
+#[test]
+fn git_bridge_warns_for_userinfo_and_local_mirrors_without_printing_them() {
+    for (mirror, expected) in [("https://user:secret@example.org/repo", true), ("/local/private/path", true), ("https://example.org/repo", false)] {
+        let tx = kit_transport_memory::MemoryTransport::new();
+        attestation_fetch::code(&tx);
+        let (dir, tip) = local(&tx, "example.com/local/v1");
+        let layout = RepoLayout::single(dir.path());
+        let mut env = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
+        let mut statement: serde_json::Value = serde_json::from_slice(&env.payload).unwrap();
+        statement["predicateType"] = "https://kit.dev/git-bridge/v1".into();
+        statement["predicate"] = serde_json::json!({"mirror": mirror});
+        env.payload = serde_json::to_vec(&statement).unwrap();
+        kit_attest::store::save(&layout, &tip, env.encode().unwrap().as_bytes()).unwrap();
+        let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+        assert_eq!(report.attestations_pushed, 2);
+        assert_eq!(report.attestation_warnings.iter().any(|warning| warning.contains("git-bridge")), expected);
+        assert!(report.attestation_warnings.iter().all(|warning| !warning.contains(mirror)));
+    }
+}
+#[test]
+fn cached_push_never_walks_an_incomplete_tree() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (_, tree) = attestation_fetch::code(&tx);
+    let (dir, _) = local(&tx, "example.com/local/v1");
+    let source = TransportSource::new(&tx);
+    assert_eq!(kit_sync::push(dir.path(), &source, &options()).unwrap().attestations_pushed, 1);
+    let layout = RepoLayout::single(dir.path());
+    let hex = hash::to_hex(&tree);
+    std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let report = kit_sync::push(dir.path(), &source, &options()).unwrap();
+    assert_eq!(report.attestations_pushed, 0);
+    assert!(report.attestation_warnings.is_empty());
+}
