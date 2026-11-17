@@ -19,6 +19,8 @@ use std::collections::BTreeSet;
 
 type Failure = Box<dyn std::error::Error>;
 
+pub(super) const PERMANENCE_WARNING: &str = "publishing attestations is permanent; removal requires resetting the log with force permission";
+
 pub(super) fn run(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -251,7 +253,8 @@ fn publish(
             pack.upload(tx)?;
         }
         if !record.warned {
-            report.attestation_warnings.push("publishing attestations is permanent; removal requires resetting the log with force permission".into());
+            report.attestation_warnings.push(PERMANENCE_WARNING.into());
+            tx.observer.event(&crate::SyncEvent::AttestationWarning { message: PERMANENCE_WARNING.into() });
             record.warned = true;
             persist(&path, &record)?;
         }

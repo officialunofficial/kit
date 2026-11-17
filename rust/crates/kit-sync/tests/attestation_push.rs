@@ -514,3 +514,29 @@ fn stale_subjects_never_block_commit_attestations_on_an_incomplete_tree() {
         );
     }
 }
+
+#[test]
+fn permanence_warning_is_observed_once_before_the_first_publication() {
+    use kit_sync::Observer;
+    struct Warning<'a> {
+        transport: &'a kit_transport_memory::MemoryTransport,
+        count: std::sync::atomic::AtomicUsize,
+    }
+    impl Observer<kit_sync::SyncEvent> for Warning<'_> {
+        fn event(&self, event: &kit_sync::SyncEvent) {
+            if matches!(event, kit_sync::SyncEvent::AttestationWarning { message } if message.contains("permanent")) {
+                assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_none());
+                self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    let transport = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&transport);
+    let (dir, _) = local(&transport, "example.com/local/v1");
+    let warning = Warning { transport: &transport, count: std::sync::atomic::AtomicUsize::new(0) };
+    let mut opts = options();
+    opts.control.observer = &warning;
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&transport), &opts).unwrap();
+    assert_eq!(report.attestations_pushed, 1);
+    assert_eq!(warning.count.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

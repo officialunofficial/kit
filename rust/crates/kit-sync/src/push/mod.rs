@@ -231,7 +231,8 @@ pub fn push(
         tx.observer.event(&SyncEvent::AttestationsPushed {
             count: report.attestations_pushed,
         });
-        for message in &report.attestation_warnings {
+        // The permanence warning is delivered before the first ref publication.
+        for message in report.attestation_warnings.iter().filter(|message| message.as_str() != attestations::PERMANENCE_WARNING) {
             tx.observer.event(&SyncEvent::AttestationWarning {
                 message: message.clone(),
             });
