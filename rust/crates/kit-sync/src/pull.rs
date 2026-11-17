@@ -20,7 +20,7 @@ use crate::observer::{Observer, SyncEvent};
 use crate::source::RemoteSource;
 use crate::verify::verify_history_signatures;
 use crate::worktree::{
-    Expected, Refusals, check_restore_safe, current_head_tree, ensure_restore_safe,
+    Expected, Refusals, check_restore_safe, current_head_tree, ensure_restore_safe_from,
     list_remote_refs_parallel, write_ref_recording_history,
 };
 use kit_core::ops::restore::RestoreOptions;
@@ -190,10 +190,10 @@ pub fn pull(
     };
 
     let tree = load_tree_hash(&store, remote_tip)?;
-    ensure_restore_safe(&layout, &store, tree).map_err(SyncError::RestoreSafety)?;
-    // The check above proved that the worktree and the index equal the tree
-    // of HEAD, so the restore only writes what the new tip changed.
+    // Recovery may have changed the worktree and index. Read HEAD afterwards.
     let base_tree = current_head_tree(&layout, &store).map_err(SyncError::RestoreSafety)?;
+    ensure_restore_safe_from(&layout, &store, tree, &RestoreOptions::default(), base_tree)
+        .map_err(SyncError::RestoreSafety)?;
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
@@ -410,8 +410,9 @@ fn write_pull_head(
 ) -> Result<(), SyncError> {
     let index = crate::worktree::read_or_seed_index_from_head(layout, store)
         .map_err(SyncError::RestoreSafety)?;
-    // The restore-safety check already opened every indexed object. Reuse
-    // HEAD here to avoid opening unchanged objects again for the recovery tree.
+    // The check proved that the index equals HEAD. Unchanged leaves need not
+    // exist for the differential restore. Recovery does a full restore and
+    // checks all its objects before writing, including these reused leaves.
     let base = current_head_tree(layout, store).map_err(SyncError::RestoreSafety)?;
     let before_tree =
         kit_core::worktree::build_tree_from_index_against(store, store, &index, false, base)

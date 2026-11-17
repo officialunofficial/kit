@@ -30,8 +30,8 @@ use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
 use kit_sync::worktree::{
-    ensure_restore_safe, read_or_seed_index_from_head, restore_worktree_and_index,
-    sync_index_to_tree,
+    ensure_restore_safe, ensure_restore_safe_from, read_or_seed_index_from_head,
+    restore_worktree_and_index, restore_worktree_and_index_from, sync_index_to_tree,
 };
 
 use crate::signing::{self, Author, Signing, WriteError, write_signed};
@@ -228,8 +228,17 @@ pub fn start(
 
     if base == Some(ours) && !request.no_ff {
         let theirs_tree = commit_tree(store, theirs)?;
-        ensure_restore_safe(layout, store, theirs_tree).map_err(Error::Worktree)?;
-        restore_worktree_and_index(layout, store, theirs_tree).map_err(Error::Worktree)?;
+        let ours_tree = commit_tree(store, ours)?;
+        ensure_restore_safe_from(
+            layout,
+            store,
+            theirs_tree,
+            &kit_core::ops::restore::RestoreOptions::default(),
+            Some(ours_tree),
+        )
+        .map_err(Error::Worktree)?;
+        restore_worktree_and_index_from(layout, store, theirs_tree, Some(ours_tree))
+            .map_err(Error::Worktree)?;
         head::advance(layout, &theirs, RefWriteCondition::Any).map_err(Error::AdvanceHead)?;
         return Ok(Outcome::FastForward {
             old: ours,
@@ -274,10 +283,18 @@ pub fn start(
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
-    ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+    ensure_restore_safe_from(
+        layout,
+        store,
+        result.tree_hash,
+        &kit_core::ops::restore::RestoreOptions::default(),
+        Some(ours_tree),
+    )
+    .map_err(Error::Worktree)?;
 
     if request.no_commit {
-        restore_worktree_and_index(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+        restore_worktree_and_index_from(layout, store, result.tree_hash, Some(ours_tree))
+            .map_err(Error::Worktree)?;
         // A tree cannot hold a deletion. Without a removal entry, a merge
         // that only deletes files would leave an empty index, and a continue
         // or an abort would seed it from the old tree of `HEAD`.
@@ -301,7 +318,8 @@ pub fn start(
         theirs,
         message.as_bytes(),
     )?;
-    restore_worktree_and_index(layout, store, result.tree_hash).map_err(Error::Worktree)?;
+    restore_worktree_and_index_from(layout, store, result.tree_hash, Some(ours_tree))
+        .map_err(Error::Worktree)?;
     head::advance(layout, &commit, RefWriteCondition::Any).map_err(Error::AdvanceHead)?;
     Ok(Outcome::Merged(Merged {
         commit,

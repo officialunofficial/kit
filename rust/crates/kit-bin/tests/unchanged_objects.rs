@@ -1,5 +1,5 @@
-//! `status`, `commit` and `checkout` open only the objects the index changes
-//! from `HEAD`. A checkout, forced or not, still refuses to overwrite or
+//! `status`, `commit`, ordinary checkout, clean merge and revert reuse
+//! unchanged HEAD objects. A checkout, forced or not, still refuses to overwrite or
 //! remove a file whose object the store lost, or to write one from it, and a
 //! command whose restore rewrites every file refuses before it writes
 //! anything.
@@ -76,11 +76,10 @@ fn status_commit_and_checkout_do_not_open_unchanged_objects() {
 
 #[test]
 fn a_restore_of_every_file_refuses_a_lost_object_before_writing() {
-    let commands: [&[&str]; 4] = [
+    let commands: [&[&str]; 3] = [
         &["checkout", "-f", "other"],
         &["reset", "--hard", "other"],
         &["reset", "--hard", "-f", "other"],
-        &["merge", "other"],
     ];
     for args in commands {
         // The target changes `a.txt`; the lost `b.txt` comes after it, so a
@@ -105,6 +104,44 @@ fn a_restore_of_every_file_refuses_a_lost_object_before_writing() {
         let stderr = String::from_utf8(out.stderr).unwrap();
         assert!(stderr.contains("not found"), "{args:?}: {stderr}");
         assert_eq!(state(), before, "{args:?} wrote nothing");
+    }
+}
+
+#[test]
+fn differential_merges_and_reverts_do_not_open_unchanged_objects() {
+    for kind in ["fast-forward", "merge", "revert"] {
+        let td = repo(&|dir| {
+            fs::write(dir.join("a.txt"), b"other\n").unwrap();
+            ok(dir, &["add", "a.txt"]);
+        });
+        let dir = td.path();
+        if kind == "merge" {
+            fs::write(dir.join("c.txt"), b"main\n").unwrap();
+            ok(dir, &["add", "c.txt"]);
+            ok(dir, &["commit", "-m", "diverge"]);
+        } else if kind == "revert" {
+            ok(dir, &["merge", "other"]);
+        }
+        let lost = lose_object(dir, "b.txt");
+        let args: &[&str] = if kind == "revert" {
+            &["revert", "HEAD"]
+        } else {
+            &["merge", "other"]
+        };
+        ok(dir, args);
+        if kind == "merge" {
+            assert_eq!(fs::read(dir.join("c.txt")).unwrap(), b"main\n");
+        }
+        assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"bravo\n");
+        let expected: &[u8] = if kind == "revert" {
+            b"alpha\n"
+        } else {
+            b"other\n"
+        };
+        assert_eq!(fs::read(dir.join("a.txt")).unwrap(), expected);
+        // Differential restores leave unchanged corruption to verifying reads.
+        assert!(!run_in(dir, &["cat", &lost]).status.success());
+        assert!(!run_in(dir, &["closure", "verify", "HEAD"]).status.success());
     }
 }
 

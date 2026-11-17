@@ -440,10 +440,7 @@ pub(crate) fn check_restore_safe(
         return Ok(());
     }
 
-    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
-    let mut worktree_paths = Vec::new();
-    collect_worktree_paths(root, root, "", &mut worktree_paths)
-        .map_err(|e| format!("check untracked paths: {e}"))?;
+    let (ignore, worktree_paths) = restore_paths(root, &target_writes, options.clean)?;
     // A real directory that only holds a target path is no conflict: the
     // restore writes beside its contents. Its descendants are checked as
     // paths of their own.
@@ -499,6 +496,24 @@ pub(crate) fn check_restore_safe(
     }
 
     Ok(())
+}
+
+fn restore_paths(
+    root: &Path,
+    targets: &[String],
+    clean: bool,
+) -> Result<(kit_core::ignore::IgnoreList, Vec<String>), String> {
+    let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
+    let mut paths = Vec::new();
+    collect_restore_paths(
+        root,
+        root,
+        "",
+        &mut paths,
+        clean.then_some((&ignore, targets)),
+    )
+    .map_err(|e| format!("check untracked paths: {e}"))?;
+    Ok((ignore, paths))
 }
 
 fn directory_ignore<'a>(
@@ -755,6 +770,22 @@ pub fn collect_worktree_paths(
     prefix: &str,
     out: &mut Vec<String>,
 ) -> std::io::Result<()> {
+    collect_restore_paths(root, dir, prefix, out, None)
+}
+
+/// An ignored subtree matters only when a target enters it or replaces one
+/// of its ancestors. The directory itself stays in the list for the sweep.
+fn collect_restore_paths(
+    root: &Path,
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<String>,
+    filter: Option<(&kit_core::ignore::IgnoreList, &[String])>,
+) -> std::io::Result<()> {
+    let local_ignore = filter
+        .map(|(ignore, _)| ignore.load_directory(dir))
+        .transpose()
+        .map_err(std::io::Error::other)?;
     let read = match fs::read_dir(dir) {
         Ok(read) => read,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -776,9 +807,22 @@ pub fn collect_worktree_paths(
         };
         out.push(path.clone());
         let full_path = root.join(&path);
-        let meta = fs::symlink_metadata(&full_path)?;
-        if meta.is_dir() {
-            collect_worktree_paths(root, &full_path, &path, out)?;
+        if entry.file_type()?.is_dir() {
+            if let (Some(ignore), Some((_, targets))) = (&local_ignore, filter)
+                && ignore.is_ignored_with_ancestors(&path, true)
+                && !targets.iter().any(|target| paths_overlap(&path, target))
+            {
+                continue;
+            }
+            collect_restore_paths(
+                root,
+                &full_path,
+                &path,
+                out,
+                local_ignore
+                    .as_ref()
+                    .zip(filter.map(|(_, targets)| targets)),
+            )?;
         }
     }
     Ok(())
@@ -1023,5 +1067,43 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "a future mtime is not waited for"
         );
+    }
+}
+
+#[cfg(test)]
+mod path_walk_tests {
+    #[test]
+    fn ignored_subtrees_are_skipped_only_when_no_target_overlaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sub/cache/deep")).unwrap();
+        std::fs::write(root.join("sub/.gitignore"), "cache/\n").unwrap();
+        std::fs::write(root.join("sub/cache/deep/keep"), "keep").unwrap();
+        let ignore = kit_core::ignore::load(root).unwrap();
+        for (targets, enters) in [
+            (vec!["other".to_owned()], false),
+            (vec!["sub/cache/deep/new".to_owned()], true),
+            (vec!["sub/cache".to_owned()], true),
+        ] {
+            let mut paths = Vec::new();
+            super::collect_restore_paths(root, root, "", &mut paths, Some((&ignore, &targets)))
+                .unwrap();
+            assert!(paths.contains(&"sub/cache".to_owned()));
+            assert_eq!(paths.contains(&"sub/cache/deep/keep".to_owned()), enters);
+        }
+        let mut paths = Vec::new();
+        super::collect_worktree_paths(root, root, "", &mut paths).unwrap();
+        assert!(paths.contains(&"sub/cache/deep/keep".to_owned()));
+    }
+}
+
+#[cfg(test)]
+mod nonclean_walk_tests {
+    #[test]
+    fn nonclean_walk_does_not_parse_untracked_directory_ignore_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("untracked/.gitignore")).unwrap();
+        let (_, paths) = super::restore_paths(dir.path(), &["new".to_owned()], false).unwrap();
+        assert!(paths.contains(&"untracked/.gitignore".to_owned()));
     }
 }
