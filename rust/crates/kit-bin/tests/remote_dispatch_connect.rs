@@ -251,6 +251,7 @@ impl generated::TransportService for TestService {
                 part_size: Some(8 << 20),
                 max_parts: Some(512),
                 max_list_refs_page_size: Some(1000),
+                supports_attestations: Some(self.inner.read_ref(kit_core::refs::ATTESTMAP_REF).unwrap().is_some()),
                 atomic_advance: Some(true),
                 begin_upload_threshold_bytes: Some(0),
                 ..Default::default()
@@ -428,6 +429,13 @@ impl generated::TransportService for TestService {
                 .delete_ref(&name, &expected)
                 .map_err(to_connect_error)?;
             return Ok(Response::new(generated::UpdateRefResponse::default()));
+        }
+        if name == kit_core::refs::ATTESTMAP_REF {
+            assert_eq!(msg.ticket_ids.len(), 2);
+            for id in &msg.ticket_ids {
+                let key: Hash = id.as_slice().try_into().unwrap();
+                assert!(self.inner.pack_exists(&PackKey::new(key), None).unwrap());
+            }
         }
         let new_id = to_hash(msg.new_id)?;
         self.inner
@@ -2344,6 +2352,40 @@ fn cli_push_delete_removes_a_branch_and_a_tag_with_their_chain_refs() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let _ = shutdown.send(());
+    handle.join().unwrap();
+}
+
+include!("../../kit-sync/tests/support/attestation_fetch.rs");
+
+#[test]
+fn connect_push_publishes_ticketed_attestations_when_code_is_up_to_date() {
+    let backend = Arc::new(MemoryTransport::new());
+    let (tip, _) = attestation_fetch::code(&*backend);
+    let baseline = kit_core::transfer::encode_packlist(None, &[]).unwrap();
+    let id = kit_core::hash::hash(&baseline);
+    backend.upload_blob(&baseline, &PackKey::new(id), None).unwrap();
+    backend.update_ref(kit_core::refs::ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap();
+    let (port, shutdown, handle, calls) =
+        spawn_server_options(Arc::clone(&backend), Vec::new(), false, false, true, None);
+    let url = format!("kit+http://127.0.0.1:{port}/myproj");
+    let transport = signed_transport(&url);
+    let local = tempfile::tempdir().unwrap();
+    let descriptor = kit_sync::CloneRemote { name: "origin".into(), url, kind: "http".into() };
+    kit_sync::clone(local.path(), &kit_sync::TransportSource::new(&*transport), &descriptor, &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    let bytes = attestation_fetch::envelope(tip);
+    kit_attest::store::save(&RepoLayout::single(local.path()), &tip, &bytes).unwrap();
+    let mut options = kit_sync::PushOptions::default();
+    options.attestations = true;
+    options.remote_name = "origin";
+    options.target = kit_sync::PushTarget::Branch { local: "main".into(), remote: "main".into(), lease: kit_sync::PushLease::FastForward };
+    let report = kit_sync::push(local.path(), &kit_sync::TransportSource::new(&*transport), &options).unwrap();
+    assert_eq!(report.steps, 0);
+    assert_eq!(report.attestations_pushed, 1);
+    assert_eq!(calls.lock().unwrap().iter().filter(|c| c.procedure == "BeginUpload").count(), 2);
+    let second = tempfile::tempdir().unwrap();
+    let cloned = kit_sync::clone(second.path(), &kit_sync::TransportSource::new(&*transport), &descriptor, &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    assert_eq!(cloned.pull.fetch.attestations_stored, 1);
     let _ = shutdown.send(());
     handle.join().unwrap();
 }
