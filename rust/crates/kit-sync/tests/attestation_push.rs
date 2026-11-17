@@ -425,3 +425,24 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
     assert!(again.attestation_warnings.iter().any(|warning| warning.contains("requires f")));
     assert_eq!(gated.read_ref(ATTESTMAP_REF).unwrap(), after);
 }
+
+#[test]
+fn stale_subjects_never_block_commit_attestations_on_an_incomplete_tree() {
+    for missing in [false, true] {
+        let tx = kit_transport_memory::MemoryTransport::new();
+        let (_, tree) = attestation_fetch::code(&tx);
+        let (dir, _) = local(&tx, "example.com/valid/v1");
+        let layout = RepoLayout::single(dir.path());
+        let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+        let subject = if missing { [99;32] } else {
+            store.write(&kit_core::serialize::serialize(&kit_core::object::Object::Blob(
+                kit_core::object::Blob { data: b"unpublished blob".to_vec() }
+            )).unwrap()).unwrap()
+        };
+        kit_attest::store::save(&layout, &subject, &attestation_fetch::envelope(subject)).unwrap();
+        store.remove_object(&tree).unwrap();
+        let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+        assert_eq!(report.attestations_pushed, 1);
+        assert!(report.attestation_warnings.iter().any(|warning| warning.contains("subjects")));
+    }
+}

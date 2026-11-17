@@ -98,6 +98,11 @@ fn publish(
             candidates.push((subject, id, path));
         }
     }
+    let before = candidates.len();
+    candidates.retain(|(subject, _, _)| store.object_type(subject).is_ok());
+    if candidates.len() < before {
+        report.attestation_warnings.push("skipped unreadable attestation subjects; restore their objects to publish them".into());
+    }
     if candidates.is_empty() {
         return Ok(());
     }
@@ -112,25 +117,15 @@ fn publish(
     // Commit and tag subjects need no tree/blob walk. Other subjects use the
     // full object walk only when at least one pending envelope names them.
     let needs_objects = candidates.iter().any(|(subject, _, _)| {
-        !matches!(
-            store.read_object(subject),
-            Ok(kit_core::object::Object::Commit(_)
-                | kit_core::object::Object::Remix(_)
-                | kit_core::object::Object::Tag(_))
-        )
+        !matches!(store.object_type(subject), Ok(kit_core::object::ObjectType::Commit | kit_core::object::ObjectType::Remix | kit_core::object::ObjectType::Tag))
     });
     if needs_objects {
-        reachable.extend(
-            PushWalk::run_tips(
-                store,
-                &tips,
-                &HeldCommits::default(),
-                transfer::WalkLimits::default(),
-                None,
-            )?
-            .objects(),
-        );
-    } else {
+        match PushWalk::run_tips(store, &tips, &HeldCommits::default(), transfer::WalkLimits::default(), None) {
+            Ok(walk) => reachable.extend(walk.objects()),
+            Err(error) => report.attestation_warnings.push(format!("cannot enumerate non-commit attestation subjects: {error}; skipped those subjects")),
+        }
+    }
+    if reachable.is_empty() {
         let mut stack = tips;
         while let Some(id) = stack.pop() {
             if !reachable.insert(id) {
