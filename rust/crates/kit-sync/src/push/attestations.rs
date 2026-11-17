@@ -7,7 +7,7 @@ use crate::{
 use kit_core::{
     hash::{self, Hash},
     layout::RepoLayout,
-    protocol::{MemorySink, PACK_BODY_LIMIT, PackKey, SliceBody},
+    protocol::{MemorySink, PACK_BODY_LIMIT, PackKey, PackBody},
     refs::{ATTESTMAP_REF, RefWriteCondition},
     store::ObjectStore,
     transfer::{
@@ -15,7 +15,7 @@ use kit_core::{
         walk::{HeldCommits, PushWalk},
     },
 };
-use std::{collections::BTreeSet, io::Write as _};
+use std::collections::BTreeSet;
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -471,11 +471,12 @@ impl Batch {
         let inputs: Vec<_> = self.bytes.iter().map(Vec::as_slice).collect();
         let bytes = kit_attest::pack::build(&inputs, self.max)?;
         let id = hash::hash(&bytes);
-        let mut file = tempfile::NamedTempFile::new_in(&tx.spool_dir)?;
-        file.write_all(&bytes)?;
+        let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, self.max)?;
+        spool.begin(Some(bytes.len() as u64))?;
+        spool.write(&bytes)?;
         keys.push(Prepared {
             id,
-            file,
+            pack: spool.finish(&PackKey::new(id))?,
             ids: self.bytes.iter().map(|bytes| hash::hash(bytes)).collect(),
         });
         self.bytes.clear();
@@ -592,16 +593,48 @@ fn fetched(layout: &RepoLayout, id: &Hash) -> Result<bool, Failure> {
 
 struct Prepared {
     id: Hash,
-    file: tempfile::NamedTempFile,
+    pack: kit_core::pack::VerifiedPack,
     ids: Vec<Hash>,
 }
 impl Prepared {
     fn upload(&self, tx: &PushContext<'_>) -> Result<(), Failure> {
         let key = PackKey::new(self.id);
         if !tx.pack_exists(&key, ATTESTMAP_REF)? {
-            let bytes = kit_core::bounded_read::read_capped(self.file.path(), PACK_BODY_LIMIT)?;
-            tx.upload_pack(&SliceBody(&bytes), &key, ATTESTMAP_REF)?;
+            tx.upload_pack(self, &key, ATTESTMAP_REF)?;
         }
         Ok(())
+    }
+}
+
+impl PackBody for Prepared {
+    fn len(&self) -> u64 { self.pack.len() }
+    fn read_from(&self, offset: u64) -> std::io::Result<Box<dyn std::io::Read + Send + '_>> {
+        if offset > self.pack.len() {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(Box::new(Reader { pack: &self.pack, offset }))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    #[test]
+    fn another_push_sweeping_spools_preserves_prepared_attestation_packs() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(temp.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let transport = kit_transport_memory::MemoryTransport::new();
+        let source = crate::TransportSource::new(&transport);
+        let context = PushContext::new(&source, &crate::NoopObserver, &store);
+        let bytes = include_bytes!("../../../../tests/golden/attest/envelope_basic.json");
+        let mut batch = Batch::new(4096);
+        let mut packs = Vec::new();
+        batch.add(bytes.to_vec(), &context, &mut packs).unwrap();
+        batch.flush(&context, &mut packs).unwrap();
+        kit_core::pack::sweep_spool_dir(&store.spool_dir());
+        packs[0].upload(&context).unwrap();
+        assert!(source.pack_exists(&PackKey::new(packs[0].id), ATTESTMAP_REF).unwrap());
     }
 }
