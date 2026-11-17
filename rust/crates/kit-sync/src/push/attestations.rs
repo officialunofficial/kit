@@ -172,16 +172,32 @@ fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64) -> Result<Vec<H
     let mut batch = Batch::new(max);
     let mut keys = Vec::new();
     for id in packs.iter().collect::<BTreeSet<_>>() {
-        let mut sink = MemorySink::new(max.min(kit_attest::pack::MAX_PACK_DECODED_BYTES + 1024 * 1024));
-        tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut sink)?;
-        let bytes = sink.into_bytes()?;
-        let mut entries = Vec::new();
-        kit_attest::pack::read(&mut bytes.as_slice(), bytes.len() as u64, max, *id, &mut kit_attest::pack::DecodeBudget::default(), |_, id, bytes| entries.push((id, bytes.to_vec())))?;
-        for (id, bytes) in entries {
-            if seen.len() == attestation_records::PUSH_CACHE_IDS { return Err("attestation compaction envelope limit".into()); }
-            if seen.insert(id) { batch.add(bytes, tx, &mut keys)?; }
-        }
+        let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, max)?;
+        tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool)?;
+        let pack = spool.finish(&PackKey::from_hash(*id))?;
+        let mut error = None;
+        kit_attest::pack::read(&mut Reader { pack: &pack, offset: 0 }, pack.len(), max, *id,
+            &mut kit_attest::pack::DecodeBudget::default(), |_, id, bytes| {
+                if error.is_some() { return; }
+                if seen.len() == attestation_records::PUSH_CACHE_IDS {
+                    error = Some("attestation compaction envelope limit".into());
+                } else if seen.insert(id) {
+                    error = batch.add(bytes.to_vec(), tx, &mut keys).err();
+                }
+            })?;
+        if let Some(error) = error { return Err(error); }
     }
     batch.flush(tx, &mut keys)?;
     Ok(keys)
+}
+
+
+struct Reader<'a> { pack: &'a kit_core::pack::VerifiedPack, offset: u64 }
+impl std::io::Read for Reader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let len = usize::try_from(self.pack.len() - self.offset).unwrap_or(usize::MAX).min(buf.len());
+        self.pack.read_at(self.offset, &mut buf[..len])?;
+        self.offset += len as u64;
+        Ok(len)
+    }
 }
