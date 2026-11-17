@@ -59,8 +59,10 @@ fn push_100k_files_without_attestations() {
     let descriptor = kit_sync::CloneRemote {
         name: "seed".into(), url: "kit+file://seed".into(), kind: "file".into(),
     };
-    kit_sync::clone(local.path(), &kit_sync::TransportSource::new(&tx), &descriptor,
+    let layout = kit_sync::init_clone_dir(local.path(), &descriptor).unwrap();
+    kit_sync::fetch(local.path(), &kit_sync::TransportSource::new(&tx), "seed",
         &kit_sync::SyncOptions::default(), &kit_sync::NoopObserver).unwrap();
+    kit_core::refs::write_ref(&layout, "main", &tip).unwrap();
     let destination = tempfile::tempdir().unwrap();
     let remote = kit_transport_file::FileTransport::new(destination.path());
     let mut options = kit_sync::PushOptions::default();

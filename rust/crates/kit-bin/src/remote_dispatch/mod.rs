@@ -415,6 +415,7 @@ pub(crate) fn push_all_with_source(
 }
 
 /// Push local tags to the remote; see [`transfer::push_tags_with_source`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn push_tags_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
