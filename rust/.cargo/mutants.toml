@@ -22,6 +22,14 @@ exclude_re = [
   'kit-keystore/src/backend.rs:.*replace open_(macos_keychain|linux_secret_service)_backend .*with Ok\(Box::new\(Default::default\(\)\)\)',
   # This Linux-only lock guards the native credential adapter, which is not compiled on macOS.
   'kit-keystore/src/lib.rs:.*keyring_default_store_lock',
+  # Equality returns Retry first, so > and >= make the same epoch decision.
+  'grant/epoch\.rs:.*replace > with >= in epoch_transition$',
+  # :: and ::1 already map to local IPv4, so the first OR is redundant.
+  'grant/config\.rs:[0-9]+:30: replace \|\| with && in is_loopback_origin$',
+  # At the capture cap, <= only appends an empty slice and still drains.
+  'signer_external\.rs:.*replace < with <= in spawn_stderr_drainer$',
+  # Changing a test's fixed signing seed changes no production behavior.
+  'signer_k256\.rs:.*replace tests::fixed_secret ',
 ]
 
 exclude_globs = [
@@ -34,3 +42,9 @@ exclude_globs = [
   # Linux-only DEK storage needs a Secret Service daemon; macOS cannot compile it.
   "crates/kit-keystore/src/software/protectors/linux_secret_service.rs",
 ]
+
+# Exercise the native compressed-attestation decoder, not only raw fallback.
+features = ["kit-core/pack-zstd"]
+
+# Allow the per-test hang deadline to fire before the mutation deadline.
+minimum_test_timeout = 180

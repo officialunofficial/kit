@@ -480,6 +480,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn visitor_diagnostics_name_the_expected_json_shape() {
+        use serde::de::{Error as _, Unexpected};
+        let value = serde_json::Error::invalid_type(Unexpected::Unit, &super::Walk { depth: 1 });
+        let object = serde_json::Error::invalid_type(Unexpected::Unit, &super::TopLevel);
+        assert!(value.to_string().contains("expected a JSON value"));
+        assert!(object.to_string().contains("expected a JSON object"));
+    }
+
+    #[test]
     fn webauthn_relying_party_rules() {
         let rp = RelyingParty::new("example.com", ["https://example.com"]).unwrap();
         assert_eq!(rp.id(), "example.com");

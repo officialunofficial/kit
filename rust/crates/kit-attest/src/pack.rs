@@ -202,7 +202,7 @@ fn read_capped(
             return Err(PackError::Invalid("non-raw entry"));
         }
         remaining -= 5;
-        payload_total += len;
+        charge_wire_payload(&mut payload_total, len)?;
         // The compressed wire bound is ZSTD_COMPRESSBOUND of the maximum
         // canonical blob, plus its four-byte claim. Check before allocation.
         let canonical_max = MAX_ENVELOPE_SIZE as u64 + 10;
@@ -211,7 +211,7 @@ fn read_capped(
         } else {
             canonical_max + (canonical_max >> 8) + 4
         };
-        if len > remaining || len > wire_max || payload_total > 1u64 << 32 {
+        if len > remaining || len > wire_max {
             return Err(PackError::Invalid("frame cap"));
         }
         let mut claim = [0u8; 4];
@@ -280,9 +280,34 @@ fn read_capped(
     Ok(())
 }
 
+// Keep cumulative wire accounting separate so its 4 GiB boundary can be
+// exercised without decoding a multi-gigabyte pack.
+fn charge_wire_payload(total: &mut u64, len: u64) -> Result<(), PackError> {
+    *total += len;
+    if *total > 1u64 << 32 {
+        return Err(PackError::Invalid("frame cap"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wire_payload_cap_is_inclusive_and_accumulates_each_frame() {
+        let mut total = 0;
+        charge_wire_payload(&mut total, 17).unwrap();
+        charge_wire_payload(&mut total, 23).unwrap();
+        assert_eq!(total, 40);
+        total = u64::from(u32::MAX);
+        charge_wire_payload(&mut total, 1).unwrap();
+        assert_eq!(total, 1u64 << 32);
+        assert!(matches!(
+            charge_wire_payload(&mut total, 1),
+            Err(PackError::Invalid("frame cap"))
+        ));
+    }
+
     #[test]
     fn decoded_budgets_stop_before_the_next_frame_is_decoded() {
         let envelope = include_bytes!("../../../tests/golden/attest/envelope_basic.json");
