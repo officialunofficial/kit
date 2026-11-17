@@ -7,6 +7,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Stop `reflog -n` after the requested entries without reading older ancestors.
 - Stream blob content in `cat-file --batch` with bounded memory.
 - Probe reachable object types concurrently during garbage collection.
 - Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
