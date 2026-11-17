@@ -330,7 +330,8 @@ fn decoded_pack_cap_accepts_the_boundary_and_rejects_the_next_entry() {
     let envelopes = vec![bytes.as_bytes(); 64];
     let cap = 70 * 1024 * 1024;
     assert!(pack::build(&envelopes, cap).is_ok());
-    let envelopes = vec![bytes.as_bytes(); 65];
+    let mut envelopes = vec![bytes.as_bytes(); 64];
+    envelopes.push(ENVELOPE);
     assert!(matches!(
         pack::build(&envelopes, cap),
         Err(pack::PackError::Invalid("pack cap"))
