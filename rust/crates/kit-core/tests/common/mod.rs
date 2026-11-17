@@ -17,7 +17,7 @@ use kit_core::worktree::store_file_object;
 // Each test binary includes this module and uses a different subset.
 #[allow(dead_code)]
 pub(crate) struct Fixture {
-    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) dir: tempfile::TempDir,
     pub(crate) store: ObjectStore,
     pub(crate) commit_id: Hash,
     pub(crate) tree_hash: Hash,
@@ -138,7 +138,7 @@ pub(crate) fn build_fixture() -> Fixture {
     let commit_id = store.write(&commit_bytes).unwrap();
 
     Fixture {
-        _dir: dir,
+        dir,
         store,
         commit_id,
         tree_hash,

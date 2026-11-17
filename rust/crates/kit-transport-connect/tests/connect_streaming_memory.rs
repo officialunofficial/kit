@@ -193,8 +193,9 @@ fn bound(files: usize) -> usize {
 /// tell a held pack from the window.
 #[test]
 fn a_push_and_fetch_of_a_pack_over_the_bound_hold_under_it() {
-    const FILES: usize = 2560;
-    const LEN: usize = 64 << 10;
+    // Keep the 160 MiB payload while reducing durable object writes.
+    const FILES: usize = 256;
+    const LEN: usize = 640 << 10;
     let _guard = serial();
     let (pack_len, peaks) = push_and_fetch(FILES, LEN);
     let bound = bound(FILES);

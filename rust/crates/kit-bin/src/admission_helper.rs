@@ -367,15 +367,22 @@ mod tests {
                 .to_string()
                 .contains("128 KiB")
         );
-        let (_dir, timeout) = script("sleep 5 & exit 0");
+        let (dir, timeout) = script(r#"sleep 5 & printf '%s\n' "$!" > "${0%/*}/child"; exit 0"#);
         let start = Instant::now();
+        let result = timeout.run(&context(&required), Duration::from_millis(100));
+        // The fixture deliberately outlives its shell to hold stdout open.
+        // End that child after checking the deadline instead of leaving its
+        // inherited pipes open after this test exits.
+        let pid = std::fs::read_to_string(dir.path().join("child")).unwrap();
+        let pid: u32 = pid.trim().parse().unwrap();
         assert!(
-            timeout
-                .run(&context(&required), Duration::from_millis(100))
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
+            Command::new("kill")
+                .arg(pid.to_string())
+                .status()
+                .unwrap()
+                .success()
         );
+        assert!(result.unwrap_err().to_string().contains("timed out"));
         assert!(start.elapsed() < Duration::from_secs(2));
         let (_dir, no_stdin_read) = script("printf '%s' '{\"X\":\"a\"}'");
         assert!(no_stdin_read.respond(&context(&required)).is_ok());

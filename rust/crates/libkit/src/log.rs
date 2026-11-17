@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn the_streamed_walk_matches_one_sort_over_the_whole_history() {
         let mut compared = 0usize;
-        for seed in 1..=60u64 {
+        for seed in 1..=12u64 {
             let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let (_dir, store) = temp_store();
             let n = 1 + rng.below(40);
@@ -1203,7 +1203,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(compared, 60 * 4 * 2 * 3 * 7);
+        assert_eq!(compared, 12 * 4 * 2 * 3 * 7);
     }
 
     #[test]

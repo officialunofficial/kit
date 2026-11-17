@@ -205,3 +205,6 @@ pub use ops::{
     diff_trees, find_merge_base, find_merge_base_strict, is_ancestor, is_ancestor_strict,
     merge_trees, reachable_objects, reachable_snapshot, status_diff,
 };
+
+#[cfg(test)]
+mod test_support;
