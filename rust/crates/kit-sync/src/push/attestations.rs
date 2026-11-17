@@ -15,7 +15,7 @@ use kit_core::{
         walk::{HeldCommits, PushWalk},
     },
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -40,7 +40,7 @@ pub(super) fn run(
             .max_pack_bytes
             .unwrap_or(PACK_BODY_LIMIT)
             .min(PACK_BODY_LIMIT);
-        compact_log(tx, options, max, &mut report.attestation_warnings)
+        compact_log(tx, options, max, &mut report.attestation_warnings, &[])
     });
     if let Err(error) = result {
         report
@@ -197,7 +197,7 @@ fn publish(
                 && statement
                     .pointer("/predicate/mirror")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| s.contains('@') || !s.contains("://"));
+                    .is_some_and(|s| s.contains('@') || (s != "local" && !s.contains("://")));
             Ok((id, unsafe_mirror))
         })();
         match checked {
@@ -249,26 +249,26 @@ fn publish(
                 "attestation log needs compaction, which requires the f permission; skipped".into(),
             );
         }
+        if existing.len() + keys.len() > 4096 {
+            compact_log(tx, options, max, &mut report.attestation_warnings, group)?;
+        } else {
+            for pack in group {
+                pack.upload(tx)?;
+            }
+            append(tx, &keys, true)?;
+        }
         if !record.warned {
             report.attestation_warnings.push(PERMANENCE_WARNING.into());
             tx.observer.event(&crate::SyncEvent::AttestationWarning {
                 message: PERMANENCE_WARNING.into(),
             });
             record.warned = true;
-            persist(&path, &record)?;
         }
-        for pack in group {
-            pack.upload(tx)?;
-        }
-        let (_, held) = append(tx, &keys, true)?;
         for pack in group {
             report.attestations_pushed += pack.ids.len();
             record.ids.extend(&pack.ids);
         }
         persist(&path, &record)?;
-        if held.len() > 4096 {
-            compact_log(tx, options, max, &mut report.attestation_warnings)?;
-        }
     }
     Ok(())
 }
@@ -344,11 +344,22 @@ fn compact_log(
     options: &PushOptions<'_>,
     max: u64,
     warnings: &mut Vec<String>,
+    added: &[Prepared],
 ) -> Result<(), Failure> {
     for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
         let prior = tx.read_ref(ATTESTMAP_REF)?;
         let (_, original) = chain(tx, prior)?;
-        if original.len() <= 4096 {
+        if original.len() + added.len() <= 4096 {
+            if !added.is_empty() {
+                for pack in added {
+                    pack.upload(tx)?;
+                }
+                append(
+                    tx,
+                    &added.iter().map(|pack| pack.id).collect::<Vec<_>>(),
+                    true,
+                )?;
+            }
             return Ok(());
         }
         if options
@@ -358,42 +369,25 @@ fn compact_log(
         {
             return Err("attestation compaction requires f permission; skipped".into());
         }
-        let prepared = compact_packs(tx, &original, max, warnings)?;
+        let prepared = compact_packs(tx, &original, added, max, warnings)?;
         if prepared.len() > 4096 {
             return Err("compacted attestation log exceeds 4096 packs".into());
         }
-        let compacted: Vec<_> = prepared.iter().map(|pack| pack.id).collect();
-        let budget = tx
-            .upload_limits()
-            .data_packs_per_advance
-            .unwrap_or(usize::MAX)
-            .max(1);
-        let mut expected = original;
-        let mut head = prior;
-        // Publish bounded groups first so every compacted pack is a repository
-        // member before the final baseline consumes its single node ticket.
-        for group in prepared.chunks(budget) {
-            for pack in group {
-                pack.upload(tx)?;
-            }
-            let keys: Vec<_> = group.iter().map(|pack| pack.id).collect();
-            let (next, appended) = append(tx, &keys, false)?;
-            expected.extend(
-                keys.into_iter()
-                    .filter(|key| !expected.contains(key))
-                    .collect::<Vec<_>>(),
+        if prepared.len()
+            > tx.upload_limits()
+                .data_packs_per_advance
+                .unwrap_or(usize::MAX)
+        {
+            return Err(
+                "attestation compaction exceeds the atomic upload ticket limit; skipped".into(),
             );
-            head = Some(next);
-            if appended != expected {
-                break;
-            }
         }
-        let (observed, listed) = (tx.read_ref(ATTESTMAP_REF)?, chain(tx, head)?.1);
-        if observed != head || listed != expected {
-            continue;
+        for pack in &prepared {
+            pack.upload(tx)?;
         }
+        let compacted: Vec<_> = prepared.iter().map(|pack| pack.id).collect();
         let bytes = transfer::encode_packlist(None, &compacted)?;
-        match write_node(tx, head, &bytes, &[]) {
+        match write_node(tx, prior, &bytes, &compacted) {
             Ok(_) => return Ok(()),
             Err(error)
                 if error
@@ -500,6 +494,7 @@ impl Batch {
 fn compact_packs(
     tx: &PushContext<'_>,
     packs: &[Hash],
+    added: &[Prepared],
     max: u64,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Prepared>, Failure> {
@@ -507,33 +502,37 @@ fn compact_packs(
     let mut batch = Batch::new(max);
     let mut keys = Vec::new();
     let mut visited = BTreeSet::new();
-    for id in packs {
+    let local: BTreeMap<_, _> = added.iter().map(|pack| (pack.id, &pack.pack)).collect();
+    for id in packs.iter().chain(local.keys()) {
         if !visited.insert(*id) {
             continue;
         }
-        let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
-        match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
-            Ok(()) => {}
-            Err(error) if error.is_not_found() => {
-                warnings.push("discarded missing attestation pack during compaction".into());
-                continue;
+        let remote_pack;
+        let pack = if let Some(pack) = local.get(id) {
+            *pack
+        } else {
+            let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
+            match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
+                Ok(()) => {}
+                Err(error) if error.is_not_found() => {
+                    warnings.push("discarded missing attestation pack during compaction".into());
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
             }
-            Err(error) => return Err(error.into()),
-        }
-        let pack = match spool.finish(&PackKey::from_hash(*id)) {
-            Ok(pack) => pack,
-            Err(kit_core::pack::PackError::Io(error)) => return Err(error.into()),
-            Err(_) => {
-                warnings.push("discarded invalid attestation pack during compaction".into());
-                continue;
-            }
+            remote_pack = match spool.finish(&PackKey::from_hash(*id)) {
+                Ok(pack) => pack,
+                Err(kit_core::pack::PackError::Io(error)) => return Err(error.into()),
+                Err(_) => {
+                    warnings.push("discarded invalid attestation pack during compaction".into());
+                    continue;
+                }
+            };
+            &remote_pack
         };
         // Validate the entire pack before adding any of its envelopes.
         match kit_attest::pack::read(
-            &mut Reader {
-                pack: &pack,
-                offset: 0,
-            },
+            &mut Reader { pack, offset: 0 },
             pack.len(),
             PACK_BODY_LIMIT,
             *id,
@@ -542,6 +541,11 @@ fn compact_packs(
         ) {
             Ok(()) => {}
             Err(kit_attest::pack::PackError::Io(error)) => return Err(error.into()),
+            Err(
+                error @ kit_attest::pack::PackError::Pack(
+                    kit_core::pack::PackError::CompressionUnavailable,
+                ),
+            ) => return Err(error.into()),
             Err(_) => {
                 warnings.push("discarded invalid attestation pack during compaction".into());
                 continue;
@@ -549,10 +553,7 @@ fn compact_packs(
         }
         let mut error = None;
         kit_attest::pack::read(
-            &mut Reader {
-                pack: &pack,
-                offset: 0,
-            },
+            &mut Reader { pack, offset: 0 },
             pack.len(),
             PACK_BODY_LIMIT,
             *id,
