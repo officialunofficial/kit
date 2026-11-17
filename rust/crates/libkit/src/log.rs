@@ -1044,10 +1044,10 @@ mod tests {
             assert!(range_is_closed(&store, tip, base, 10, false).unwrap());
             for first_parent in [false, true] {
                 for limit in [None, Some(0), Some(1), Some(3)] {
-                    let q = query_with(limit, first_parent);
+                    let query = query_with(limit, first_parent);
                     let cut = HashSet::from([base]);
-                    let got = select(&store, &[tip], &cut, &q, 10).unwrap();
-                    assert_eq!(ids(&got), reference(&store, &[tip], &cut, &q));
+                    let got = select(&store, &[tip], &cut, &query, 10).unwrap();
+                    assert_eq!(ids(&got), reference(&store, &[tip], &cut, &query));
                 }
             }
         }
