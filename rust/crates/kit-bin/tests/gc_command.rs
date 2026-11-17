@@ -215,6 +215,11 @@ fn missing_attestation_warns_without_operation_instructions() {
     let td = init_repo();
     let directory = td.path().join(".kit/attestations").join("77".repeat(32));
     fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join(format!("{}.dsse", "88".repeat(32))),
+        b"fixture",
+    )
+    .unwrap();
     let out = run_in(td.path(), &["gc", "--dry-run"]);
     assert!(out.status.success(), "{out:?}");
     let warning = String::from_utf8(out.stderr).unwrap();

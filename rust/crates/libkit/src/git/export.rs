@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement, store as attest_store};
+use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement};
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::observer::Observer;
@@ -295,6 +295,7 @@ pub fn export(
             &attestable,
             signer,
             &prior_state,
+            observer,
         )?)
     };
 
@@ -532,7 +533,7 @@ fn collect_refs(layout: &RepoLayout, explicit: &[String]) -> Result<Vec<(String,
 /// resulting head — unchanged trees return the existing commit, so a
 /// previously failed push retries with the same refspec instead of
 /// silently dropping the attestations ref.
-#[allow(clippy::too_many_lines)] // mint loop + tree/commit assembly; splitting would scatter §11
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn publish_attestations(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -541,6 +542,7 @@ fn publish_attestations(
     exported: &[&Exported],
     signer: &mut SignerFactory<'_>,
     prior_state: &[map::RefState],
+    observer: &dyn Observer<Event>,
 ) -> Result<Sha1Id, Error> {
     // The signer of `kit attest` (SPEC-GIT-BRIDGE §11: "the
     // exporter's configured signer").
@@ -612,8 +614,7 @@ fn publish_attestations(
         let encoded = envelope
             .encode()
             .map_err(|e| step(Class::General, "encode envelope", e))?;
-        attest_store::save(layout, &e.kit_hash, encoded.as_bytes())
-            .map_err(|e| step(Class::CannotCreate, "save attestation", e))?;
+        super::save_attestation(layout, store, &e.kit_hash, encoded.as_bytes(), observer)?;
 
         let blob = GitObject {
             gtype: GitType::Blob,

@@ -82,6 +82,10 @@ fn empty_attestation_log_has_bounded_fetch_cost() {
             .unwrap();
             let elapsed = start.elapsed().as_secs_f64();
             assert_eq!(report.objects_unpacked, 100_002);
+            let layout = kit_core::layout::RepoLayout::single(temp.path());
+            assert!(!layout.attestations_dir().exists());
+            assert!(!layout.common_dir().join("attest-fetch.lock").exists());
+            assert!(report.attestation_warnings.is_empty());
             eprintln!("pair={pair} attestations={enabled} seconds={elapsed:.6}");
             // The first pair warms filesystem and executable caches.
             if pair > 0 {

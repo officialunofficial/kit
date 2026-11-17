@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
+- Stop empty attestation directories from keeping otherwise unreachable commits alive.
 - Reuse unchanged HEAD entries during pull, clean merges and reverts, and skip unrelated ignored directories during restore checks.
 - Avoid loading unrelated verified-tip records during unchanged fetches.
 - Retry skipped attestations when their subjects arrive locally.

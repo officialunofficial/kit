@@ -90,16 +90,24 @@ pub(crate) fn wait_for_worktree_lock(
     observer: &dyn Observer<SyncEvent>,
     wait: &LockWait,
 ) -> Result<RepoLock, SyncError> {
+    let lock = wait_for_lock(layout.worktree_state_dir(), WORKTREE_LOCK, observer, wait)?;
+    warn_if_served(layout, observer);
+    Ok(lock)
+}
+
+pub(crate) fn wait_for_lock(
+    dir: &std::path::Path,
+    name: &str,
+    observer: &dyn Observer<SyncEvent>,
+    wait: &LockWait,
+) -> Result<RepoLock, SyncError> {
     let mut announced = false;
     // The wait starts at the first failed attempt, so an attempt that succeeds
     // at once charges nothing.
     let mut blocked_since: Option<Instant> = None;
     let result = loop {
-        match repo_lock::acquire(layout.worktree_state_dir(), WORKTREE_LOCK, Duration::ZERO) {
-            Ok(lock) => {
-                warn_if_served(layout, observer);
-                break Ok(lock);
-            }
+        match repo_lock::acquire(dir, name, Duration::ZERO) {
+            Ok(lock) => break Ok(lock),
             Err(LockError::Busy(_)) => {}
             Err(e) => break Err(e.into()),
         }
@@ -109,7 +117,7 @@ pub(crate) fn wait_for_worktree_lock(
             break Err(SyncError::Interrupted);
         }
         if remaining.is_some_and(|left| left.is_zero()) {
-            break Err(LockError::Busy(WORKTREE_LOCK.to_owned()).into());
+            break Err(LockError::Busy(name.to_owned()).into());
         }
         if !announced {
             announced = true;

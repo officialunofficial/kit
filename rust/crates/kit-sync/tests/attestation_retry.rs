@@ -554,3 +554,243 @@ fn a_new_baseline_discards_retries_for_packs_it_replaces() {
     let record = Record::decode(&std::fs::read(path).unwrap(), RecordKind::Fetch).unwrap();
     assert_eq!(record.ids, BTreeSet::from([key]));
 }
+
+#[test]
+fn storage_limit_is_cumulative_and_skipped_pending_subjects_do_not_retry() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let main = code_on(&tx, "main", b"main");
+    let feature = code_on(&tx, "feature", b"feature");
+    let first = attestation_fetch::envelope(main);
+    let pending = attestation_fetch::envelope(feature);
+    let mut other = kit_attest::envelope::decode(&first).unwrap();
+    other.payload.push(b' ');
+    let other = other.encode().unwrap().into_bytes();
+    attestation_fetch::append(
+        &tx,
+        &kit_attest::pack::build(&[&first, &pending], 4096).unwrap(),
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+    let source = Lagging {
+        tx: &tx,
+        stale: RefCell::new(None),
+        node_downloads: Cell::new(0),
+        cursor: true,
+        fail_once: Cell::new(false),
+    };
+    seed_retention_usage(&layout, 99_998, 99_998 * first.len() as u64);
+    let mut options = kit_sync::SyncOptions::default();
+    options.target_branch = Some("main".into());
+    let fetch = |options: &kit_sync::SyncOptions| {
+        kit_sync::fetch(
+            temp.path(),
+            &source,
+            "origin",
+            options,
+            &kit_sync::NoopObserver,
+        )
+        .unwrap()
+    };
+    let main_only: Vec<_> = source
+        .list_branches()
+        .unwrap()
+        .into_iter()
+        .filter(|branch| branch.name == "main")
+        .collect();
+    *source.stale.borrow_mut() = Some(main_only.clone());
+    let before = fetch(&options);
+    assert_eq!(before.attestations_stored, 1);
+    assert_eq!(before.attestations_dropped, 1);
+    assert!(before.attestation_warnings.is_empty());
+
+    let mut third = kit_attest::envelope::decode(&first).unwrap();
+    third.payload.extend(b"  ");
+    let third = third.encode().unwrap().into_bytes();
+    let mut fourth = kit_attest::envelope::decode(&first).unwrap();
+    fourth.payload.extend(b"   ");
+    let fourth = fourth.encode().unwrap().into_bytes();
+    attestation_fetch::append(
+        &tx,
+        &kit_attest::pack::build(&[&other, &third, &fourth], 4096).unwrap(),
+    );
+    *source.stale.borrow_mut() = Some(main_only);
+    let capped = fetch(&options);
+    assert_eq!(capped.attestations_stored, 1);
+    assert_eq!(capped.attestation_warnings.len(), 1);
+    assert!(capped.attestation_warnings[0].contains("storage limit"));
+    assert_eq!(kit_attest::store::list(&layout, &main).unwrap().len(), 2);
+    assert!(kit_attest::store::envelope_path(&layout, &main, &hash(&first)).is_file());
+
+    options.target_branch = Some("feature".into());
+    source.node_downloads.set(0);
+    let arrived = fetch(&options);
+    assert_eq!(source.node_downloads.get(), 1);
+    assert_eq!(arrived.attestation_warnings.len(), 1);
+    assert_eq!(arrived.attestations_stored, 0);
+    assert!(
+        kit_core::store::ObjectStore::open(&layout)
+            .unwrap()
+            .contains(&feature)
+    );
+    assert!(
+        kit_attest::store::list(&layout, &feature)
+            .unwrap()
+            .is_empty()
+    );
+    source.node_downloads.set(0);
+    assert!(fetch(&options).attestation_warnings.is_empty());
+    assert_eq!(source.node_downloads.get(), 0);
+}
+
+#[test]
+fn storage_byte_limit_keeps_smaller_envelopes_and_is_independent_per_remote() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let subject = code_on(&tx, "main", b"main");
+    let small = attestation_fetch::envelope(subject);
+    let mut large = kit_attest::envelope::decode(&small).unwrap();
+    large.payload.extend([b' '; 100]);
+    let large = large.encode().unwrap().into_bytes();
+    attestation_fetch::append(
+        &tx,
+        &kit_attest::pack::build(&[&large, &small], 4096).unwrap(),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+    seed_retention_usage(&layout, 1024, (512 << 20) - small.len() as u64);
+    let source = TransportSource::new(&tx);
+    let options = kit_sync::SyncOptions::default();
+    let fetch = |remote| {
+        kit_sync::fetch(
+            temp.path(),
+            &source,
+            remote,
+            &options,
+            &kit_sync::NoopObserver,
+        )
+        .unwrap()
+    };
+    let capped = fetch("origin");
+    assert_eq!(capped.attestations_stored, 1);
+    assert_eq!(capped.attestation_warnings.len(), 1);
+    assert!(kit_attest::store::envelope_path(&layout, &subject, &hash(&small)).is_file());
+    assert!(!kit_sync::attestation_records::fetched_path(&layout, &hash(&large)).exists());
+    let mut refetch = options.clone();
+    refetch.refetch_attestations = true;
+    refetch.remote_url = "kit+memory://changed".into();
+    let replayed = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &refetch,
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(replayed.attestations_stored, 0);
+    assert_eq!(replayed.attestation_warnings.len(), 1);
+
+    let independent = fetch("other");
+    assert_eq!(independent.attestations_stored, 1);
+    assert!(independent.attestation_warnings.is_empty());
+    assert!(kit_attest::store::envelope_path(&layout, &subject, &hash(&large)).is_file());
+}
+
+#[test]
+fn corrupt_storage_usage_fails_closed_and_checkpoints_the_pack() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (subject, _) = attestation_fetch::code(&tx);
+    let envelope = attestation_fetch::envelope(subject);
+    attestation_fetch::append(&tx, &kit_attest::pack::build(&[&envelope], 4096).unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+    let path = retention_usage_path(&layout);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let invalid = [0u8; 64];
+    std::fs::write(&path, invalid).unwrap();
+    let source = Lagging {
+        tx: &tx,
+        stale: RefCell::new(None),
+        node_downloads: Cell::new(0),
+        cursor: true,
+        fail_once: Cell::new(false),
+    };
+    let fetch = || {
+        kit_sync::fetch(
+            temp.path(),
+            &source,
+            "origin",
+            &kit_sync::SyncOptions::default(),
+            &kit_sync::NoopObserver,
+        )
+        .unwrap()
+    };
+    let report = fetch();
+    assert_eq!(report.branches_fetched, 1);
+    assert_eq!(report.attestations_stored, 0);
+    assert_eq!(report.attestation_warnings.len(), 1);
+    assert!(report.attestation_warnings[0].contains("cannot read attestation storage usage"));
+    assert_eq!(std::fs::read(path).unwrap(), invalid);
+    source.node_downloads.set(0);
+    assert!(fetch().remote_unchanged);
+    assert_eq!(source.node_downloads.get(), 0);
+}
+
+#[test]
+fn retry_reuses_one_charge_before_and_after_the_provenance_marker() {
+    for marker_written in [false, true] {
+        let tx = kit_transport_memory::MemoryTransport::new();
+        let (subject, _) = attestation_fetch::code(&tx);
+        let envelope = attestation_fetch::envelope(subject);
+        let id = hash(&envelope);
+        attestation_fetch::append(&tx, &kit_attest::pack::build(&[&envelope], 4096).unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let layout = kit_sync::init_clone_dir(temp.path(), &remote()).unwrap();
+        let path = retention_usage_path(&layout);
+        let len = envelope.len() as u64;
+        write_retention_usage(&path, 100_000, 100_000 * len, &[(id, len)]);
+        if marker_written {
+            std::fs::write(
+                kit_sync::attestation_records::fetched_path(&layout, &id),
+                [],
+            )
+            .unwrap();
+        }
+        let report = kit_sync::fetch(
+            temp.path(),
+            &TransportSource::new(&tx),
+            "origin",
+            &kit_sync::SyncOptions::default(),
+            &kit_sync::NoopObserver,
+        )
+        .unwrap();
+        assert_eq!(report.attestations_stored, 1);
+        assert!(report.attestation_warnings.is_empty());
+        assert_eq!(
+            std::fs::read(kit_attest::store::envelope_path(&layout, &subject, &id)).unwrap(),
+            envelope
+        );
+    }
+}
+
+fn seed_retention_usage(layout: &kit_core::layout::RepoLayout, count: u64, bytes: u64) {
+    write_retention_usage(&retention_usage_path(layout), count, bytes, &[]);
+}
+
+fn write_retention_usage(
+    path: &std::path::Path,
+    count: u64,
+    bytes: u64,
+    reservations: &[(Hash, u64)],
+) {
+    let mut state = serde_json::to_vec(&([count, bytes], reservations)).unwrap();
+    state.extend(hash(&state));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, state).unwrap();
+}
+
+fn retention_usage_path(layout: &kit_core::layout::RepoLayout) -> std::path::PathBuf {
+    layout
+        .attestations_dir()
+        .join(".fetched")
+        .join(format!("{}.usage", kit_core::to_hex(&hash(b"origin"))))
+}

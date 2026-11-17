@@ -62,9 +62,15 @@ all-zero hash (an unset ref / `ORIG_HEAD`) is excluded.
 | Bisect in progress | `.kit/bisect` | `orig_head`, the bad commit, every good and skipped commit |
 | Operation result tree | `.kit/KIT_OP_RESULT` and `.kit/rebase-apply/KIT_OP_RESULT` | the tree a merge, cherry-pick, revert or rebase wrote, until the operation ends |
 | Conflict sidecar | `.kit/kit-conflicts` and `.kit/rebase-apply/kit-conflicts` | each record's `base`/`ours`/`theirs` blob (when present) |
-| Attestations | `.kit/attestations/<commit-hex>/` | each attested subject (dir name), as a soft root |
+| Attestations | `.kit/attestations/<commit-hex>/<att-id>.dsse` | each subject directory with a regular envelope file, as a soft root |
 | Pending history publication | `.kit/history-v1/branches/<ref-key>/transaction` | previous and target ref values; strict parse even without `history-mmr` |
 | Recovery log | `.kit/recovery-log` | each superseded commit (until expired) |
+
+An envelope file has a 64-hex id followed by `.dsse`. GC uses the filename
+and file type to identify it. An empty subject directory contributes no
+root. The sweep removes such a directory after the grace window under the
+same worktree locks. A dry run leaves directories in place. The sweep
+leaves a directory containing any file or subdirectory in place.
 
 A present empty, corrupt, oversized or unsupported staging index MUST abort GC
 before sweeping. An absent index alone means no staging roots. Only the current
