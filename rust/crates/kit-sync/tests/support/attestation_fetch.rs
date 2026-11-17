@@ -157,7 +157,7 @@ mod attestation_fetch {
         assert!(!store.contains(&tip));
         assert!(path.exists());
     }
-    fn push_up_to_date(tx: &dyn Transport, dir: &std::path::Path, layout: &RepoLayout, tip: Hash) {
+    pub(crate) fn push_up_to_date(tx: &dyn Transport, dir: &std::path::Path, layout: &RepoLayout, tip: Hash) {
         let source = TransportSource::new(tx);
         let mut opts = kit_sync::PushOptions::default();
         opts.remote_name = "origin";
