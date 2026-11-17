@@ -425,6 +425,15 @@ mod tests {
         let encoded = record.encode().expect("encode");
         let decoded = EncryptedKeyRecord::decode(&encoded).expect("decode");
         let decrypted = decoded.decrypt("default", &protector).expect("decrypt");
+        assert_eq!(decoded.wrapped_dek(), record.wrapped_dek.as_slice());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(EncryptedKeyRecord::decode(&trailing).is_err());
+        #[cfg(feature = "fuzzing")]
+        {
+            assert!(crate::fuzz_decode_software_key_record(&encoded).is_ok());
+            assert!(crate::fuzz_decode_software_key_record(&trailing).is_err());
+        }
         assert_eq!(decrypted.algorithm(), Algorithm::Ed25519);
         assert_eq!(decrypted.expose_secret(), &[7; 32]);
     }
@@ -619,6 +628,8 @@ mod tests {
 /// software_key_record_`), the model-checked counterpart of the
 /// `software_key_record` fuzz target (SPEC-KEYSTORE §6.1.1).
 #[cfg(kani)]
+// Proof-only code, including constants, is not executed by tests.
+#[cfg_attr(doc, mutants::skip)]
 mod kani_proofs {
     use super::*;
 
@@ -858,5 +869,30 @@ mod kani_proofs {
         assert_eq!(bytes.len(), MIN_RECORD);
         bytes.push(kani::any());
         assert!(EncryptedKeyRecord::decode(&bytes).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod attribute_contract_tests {
+    use super::*;
+
+    #[test]
+    fn each_attribute_has_an_independent_bit() {
+        for bits in 0..8 {
+            let attrs = attrs_from_bits(bits).unwrap();
+            assert_eq!(
+                attrs.extractable,
+                [false, true, false, true, false, true, false, true][usize::from(bits)]
+            );
+            assert_eq!(
+                attrs.require_user_presence,
+                [false, false, true, true, false, false, true, true][usize::from(bits)]
+            );
+            assert_eq!(
+                attrs.device_bound,
+                [false, false, false, false, true, true, true, true][usize::from(bits)]
+            );
+            assert_eq!(attrs_bits(&attrs), bits);
+        }
     }
 }
