@@ -221,7 +221,9 @@ impl kit_sync::RemoteSource for Gated<'_> {
         if self.deny_compaction {
             let bytes = self.source.download_blob(&PackKey::new(*tip), ATTESTMAP_REF)?;
             if kit_core::transfer::decode_packlist(&bytes).unwrap().prev.is_none() {
-                return Err(kit_sync::SourceError::AccessDenied);
+                return Err(kit_sync::SourceError::Remote(Box::new(kit_sync::RemoteFailure {
+                    code: "permission_denied".into(), message: "force required".into(), status: 403, details: Vec::new(), headers: Vec::new(),
+                })));
             }
         }
         self.source.write_attestmap(condition, tip, keys)

@@ -370,7 +370,7 @@ fn compact_log(
             Err(error)
                 if error
                     .downcast_ref::<SourceError>()
-                    .is_some_and(|e| matches!(e, SourceError::AccessDenied)) =>
+                    .is_some_and(|e| matches!(e, SourceError::AccessDenied) || matches!(e, SourceError::Remote(remote) if remote.code == "permission_denied")) =>
             {
                 return Err("attestation compaction requires f permission; skipped".into());
             }
