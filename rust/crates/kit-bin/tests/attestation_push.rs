@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used)]
 include!("../../kit-sync/tests/support/attestation_fetch.rs");
+use kit_core::protocol::Transport;
 
 #[test]
 fn cli_push_opt_in_and_config_publish_on_up_to_date_branches() {
@@ -20,7 +21,6 @@ fn cli_push_opt_in_and_config_publish_on_up_to_date_branches() {
     let layout = kit_core::layout::RepoLayout::single(&dir);
     let bytes = attestation_fetch::envelope(tip);
     kit_attest::store::save(&layout, &tip, &bytes).unwrap();
-    use kit_core::protocol::Transport;
     run(&dir, &["push"]);
     assert!(tx.read_ref(kit_core::refs::ATTESTMAP_REF).unwrap().is_none());
     let out = run(&dir, &["push", "--attestations"]);
