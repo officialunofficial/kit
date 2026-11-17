@@ -765,7 +765,7 @@ fn extract_signature(
 
 #[cfg(not(feature = "algo-p256"))]
 // Excluded from every mutation run: the standard all-features build omits this verifier.
-#[cfg_attr(test, mutants::skip)]
+#[cfg_attr(false, mutants::skip)]
 fn extract_signature(
     frame: SignerFrame,
     expected_algorithm: Algorithm,
@@ -872,7 +872,7 @@ fn validate_sign_response_with_policy(
 /// marker is rejected because WebAuthn verification needs P-256.
 #[cfg(not(feature = "algo-p256"))]
 // Excluded from every mutation run: the standard all-features build omits this validator.
-#[cfg_attr(test, mutants::skip)]
+#[cfg_attr(false, mutants::skip)]
 fn validate_sign_response_inner(
     sr: &SignResponse,
     expected_algorithm: Algorithm,

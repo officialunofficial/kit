@@ -137,7 +137,7 @@ fn open_terminal() -> Result<std::fs::File, Error> {
 
 #[cfg(not(unix))]
 // Excluded from every mutation run: Unix omits this terminal implementation.
-#[cfg_attr(unix, mutants::skip)]
+#[cfg_attr(false, mutants::skip)]
 fn open_terminal() -> Result<std::io::Stdin, Error> {
     Ok(std::io::stdin())
 }
@@ -166,7 +166,7 @@ fn restore_terminal_echo(tty: &std::fs::File) {
 
 #[cfg(not(unix))]
 // Excluded from every mutation run: Unix omits this echo stub.
-#[cfg_attr(unix, mutants::skip)]
+#[cfg_attr(false, mutants::skip)]
 fn disable_terminal_echo(_tty: &std::io::Stdin) -> bool {
     false
 }

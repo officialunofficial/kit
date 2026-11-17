@@ -2276,7 +2276,6 @@ dependencies = [
  "k256",
  "kit-core",
  "kit-rpc",
- "mutants",
  "p256",
  "proptest",
  "serde",
@@ -2818,12 +2817,6 @@ dependencies = [
  "similar 2.7.0",
  "tokio",
 ]
-
-[[package]]
-name = "mutants"
-version = "0.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc0287524726960e07b119cebd01678f852f147742ae0d925e6a520dca956126"
 
 [[package]]
 name = "normalize-line-endings"

@@ -105,7 +105,6 @@ sha2 = { version = "0.11.1", default-features = false }
 sha3 = { version = "0.12.0", default-features = false, optional = true }
 
 [dev-dependencies]
-mutants = "0.0.3"
 hex = "0.4.3"
 # Roundtrip property tests over generated grants (`grant` module).
 proptest = "1.12.0"
