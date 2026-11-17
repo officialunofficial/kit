@@ -309,6 +309,9 @@ pub enum PackError {
     /// prefix a `0x04` entry has in front of this.
     #[error("zstd entry payload is shorter than its length-prefix header")]
     ZstdEntryTruncated,
+    /// This build cannot decode compressed pack entries.
+    #[error("compressed entries require the pack-zstd feature")]
+    CompressionUnavailable,
     /// Claimed `uncompressed_len` exceeds [`MAX_RAW_OBJECT_SIZE`] —
     /// rejected before any decompression allocation is attempted
     /// (SPEC-PACKFILE §3.3 bomb-guarding).
@@ -1417,10 +1420,10 @@ fn check_zstd_claim(frame: &[u8], claim: usize) -> Result<(), PackError> {
 
 /// Without `pack-zstd` no frame can be decoded, so no buffer is reserved for one.
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn check_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
@@ -1522,14 +1525,14 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
 }
 
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn zstd_decompress_into(
     _frame: &[u8],
     _capacity: usize,
     _output: &mut Vec<u8>,
 ) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 /// Shared decode window cap: 8 MiB (`windowLog` 23).
