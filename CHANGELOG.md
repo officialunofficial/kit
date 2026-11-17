@@ -25,6 +25,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Hash worktree cache misses across directories in one shared thread pool.
+- Stop limited history at merge frontiers and closed ranges at their excluded endpoint.
 - Keep native path components in ignore checks and refuse filenames the index cannot represent.
 - Require an exact attestation-log grant scope and retire synchronization caches when remote configuration changes.
 
