@@ -69,63 +69,72 @@ fn publish(
     .ok()
     .and_then(|bytes| Record::decode(&bytes, RecordKind::Push))
     .unwrap_or_default();
-    // A strong listing avoids publishing subjects from stale local tracking refs.
-    let tips: Vec<_> = tx
-        .list_branches()?
-        .into_iter()
-        .chain(tx.list_refs("refs/tags/")?)
-        .filter_map(|r| r.hash)
-        .filter(|h| store.contains(h))
-        .collect();
-    let closure = PushWalk::run_tips(
-        store,
-        &tips,
-        &HeldCommits::default(),
-        transfer::WalkLimits::default(),
-        None,
-    )?;
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(layout.attestations_dir()) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let Some(subject) = entry.file_name().to_str().and_then(|name| refs_hash(name)) else { continue; };
+        for path in kit_attest::store::list(layout, &subject)? {
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).and_then(refs_hash) else { continue; };
+            if record.ids.contains(&id) || fetched(layout, &id)? { continue; }
+            candidates.push((subject, id, path));
+        }
+    }
+    if candidates.is_empty() { return Ok(()); }
+    let tips: Vec<_> = tx.list_branches()?.into_iter().chain(tx.list_refs("refs/tags/")?)
+        .filter_map(|r| r.hash).filter(|h| store.contains(h)).collect();
+    let mut reachable = BTreeSet::new();
+    // Commit and tag subjects need no tree/blob walk. Other subjects use the
+    // full object walk only when at least one pending envelope names them.
+    let needs_objects = candidates.iter().any(|(subject, _, _)| !matches!(
+        store.read_object(subject), Ok(kit_core::object::Object::Commit(_) | kit_core::object::Object::Remix(_) | kit_core::object::Object::Tag(_))));
+    if needs_objects {
+        reachable.extend(PushWalk::run_tips(store, &tips, &HeldCommits::default(), transfer::WalkLimits::default(), None)?.objects());
+    } else {
+        let mut stack = tips;
+        while let Some(id) = stack.pop() {
+            if !reachable.insert(id) { continue; }
+            if reachable.len() > transfer::MAX_PUSH_WALK { return Err("attestation subject walk limit".into()); }
+            match store.read_object(&id) {
+                Ok(kit_core::object::Object::Commit(value)) => stack.extend(value.parents),
+                Ok(kit_core::object::Object::Remix(value)) => stack.extend(value.parents),
+                Ok(kit_core::object::Object::Tag(value)) => stack.push(value.target),
+                Ok(_) | Err(_) => (),
+            }
+        }
+    }
     let mut pending = Vec::new();
-    for subject in closure.objects() {
-        for path in kit_attest::store::list(layout, subject)? {
-            let bytes = kit_core::bounded_read::read_capped(
-                &path,
-                kit_attest::store::MAX_ENVELOPE_SIZE as u64,
-            )?;
+    for (subject, expected, path) in candidates {
+        if !reachable.contains(&subject) { continue; }
+        let checked = (|| -> Result<(Hash, bool), Failure> {
+            let bytes = kit_core::bounded_read::read_capped(&path, kit_attest::store::MAX_ENVELOPE_SIZE as u64)?;
             let id = hash::hash(&bytes);
-            // symlink_metadata fails closed: unreadable provenance never becomes authorship.
-            match std::fs::symlink_metadata(attestation_records::fetched_path(layout, &id)) {
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.into()),
-            }
-            if record.ids.contains(&id) {
-                continue;
-            }
-            let env = kit_attest::envelope::decode_expecting(
-                &bytes,
-                kit_attest::envelope::PAYLOAD_TYPE_IN_TOTO,
-            )?;
-            if kit_attest::verify::extract_primary_commit_hash(&env.payload)? != *subject {
+            if id != expected { return Err("attestation filename digest mismatch".into()); }
+            if fetched(layout, &id)? { return Err("envelope was recorded as fetched".into()); }
+            // Use exactly the pack encoder's stricter in-toto validation.
+            kit_attest::pack::build(&[&bytes], PACK_BODY_LIMIT)?;
+            let env = kit_attest::envelope::decode_expecting(&bytes, kit_attest::envelope::PAYLOAD_TYPE_IN_TOTO)?;
+            if kit_attest::verify::extract_primary_commit_hash(&env.payload)? != subject {
                 return Err("attestation subject differs from its directory".into());
             }
             let statement: serde_json::Value = serde_json::from_slice(&env.payload)?;
-            if statement
-                .get("predicateType")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| s.ends_with("/git-bridge/v1"))
-                && statement
-                    .pointer("/predicate/mirror")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| s.contains('@') || !s.contains("://"))
-            {
-                report.attestation_warnings.push("git-bridge envelope publishes a mirror containing user information or a local path".into());
+            let unsafe_mirror = statement.get("predicateType").and_then(serde_json::Value::as_str).is_some_and(|s| s.ends_with("/git-bridge/v1"))
+                && statement.pointer("/predicate/mirror").and_then(serde_json::Value::as_str).is_some_and(|s| s.contains('@') || !s.contains("://"));
+            Ok((id, unsafe_mirror))
+        })();
+        match checked {
+            Ok((id, unsafe_mirror)) => {
+                if unsafe_mirror { report.attestation_warnings.push("git-bridge envelope publishes a mirror containing user information or a local path".into()); }
+                pending.push((id, path));
             }
-            pending.push((id, path));
+            Err(error) => report.attestation_warnings.push(format!("skipped invalid local attestation: {error}")),
         }
     }
-    if pending.is_empty() {
-        return Ok(());
-    }
+    if pending.is_empty() { return Ok(()); }
     let max = tx
         .upload_limits()
         .max_pack_bytes
@@ -178,7 +187,7 @@ fn publish(
             );
         }
         let (prev, listed) = if compact {
-            (None, compact_packs(tx, &packs, max)?)
+            (None, compact_packs(tx, &packs, max, &mut report.attestation_warnings)?)
         } else if depth >= 64 {
             (None, packs)
         } else {
@@ -316,9 +325,33 @@ fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64) -> Result<Vec<H
     let mut batch = Batch::new(max);
     let mut keys = Vec::new();
     for id in packs.iter().collect::<BTreeSet<_>>() {
-        let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, max)?;
-        tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool)?;
-        let pack = spool.finish(&PackKey::from_hash(*id))?;
+        let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
+        match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
+            Ok(()) => (),
+            Err(error) if error.is_not_found() => {
+                warnings.push("discarded missing attestation pack during compaction".into());
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let pack = match spool.finish(&PackKey::from_hash(*id)) {
+            Ok(pack) => pack,
+            Err(kit_core::pack::PackError::Io(error)) => return Err(error.into()),
+            Err(_) => {
+                warnings.push("discarded invalid attestation pack during compaction".into());
+                continue;
+            }
+        };
+        // Validate the entire pack before adding any of its envelopes.
+        match kit_attest::pack::read(&mut Reader { pack: &pack, offset: 0 }, pack.len(), PACK_BODY_LIMIT, *id,
+            &mut kit_attest::pack::DecodeBudget::default(), |_, _, _| {}) {
+            Ok(()) => (),
+            Err(kit_attest::pack::PackError::Io(error)) => return Err(error.into()),
+            Err(_) => {
+                warnings.push("discarded invalid attestation pack during compaction".into());
+                continue;
+            }
+        }
         let mut error = None;
         kit_attest::pack::read(
             &mut Reader {
@@ -326,7 +359,7 @@ fn compact_packs(tx: &PushContext<'_>, packs: &[Hash], max: u64) -> Result<Vec<H
                 offset: 0,
             },
             pack.len(),
-            max,
+            PACK_BODY_LIMIT,
             *id,
             &mut kit_attest::pack::DecodeBudget::default(),
             |_, id, bytes| {
@@ -360,5 +393,17 @@ impl std::io::Read for Reader<'_> {
         self.pack.read_at(self.offset, &mut buf[..len])?;
         self.offset += len as u64;
         Ok(len)
+    }
+}
+
+
+fn refs_hash(name: &str) -> Option<Hash> {
+    kit_core::refs::parse_lowercase_hash(name.as_bytes())
+}
+fn fetched(layout: &RepoLayout, id: &Hash) -> Result<bool, Failure> {
+    match std::fs::symlink_metadata(attestation_records::fetched_path(layout, id)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
     }
 }

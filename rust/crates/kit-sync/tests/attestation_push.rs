@@ -48,6 +48,7 @@ fn options() -> PushOptions<'static> {
 }
 struct UpdateOnly;
 impl kit_sync::push::StepAuthority for UpdateOnly {
+    fn can_compact_attestations(&self) -> bool { false }
     fn authorize(&self, _: &str, _: RefWriteCondition, _: bool) -> Result<(), String> {
         Ok(())
     }
