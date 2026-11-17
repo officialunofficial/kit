@@ -376,8 +376,8 @@ History / commits:
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
   The selected graph and retained exclusion set share a 1,000,000-commit
-  budget. Bounded range probes have a separate allowance. A walk that exceeds that budget fails without printing a
-  partial answer. The merge base of `A...B` uses a separate bounded walk.
+  budget. Bounded range probes have a separate allowance. A walk that
+  exceeds that budget fails without printing a partial answer. The merge base of `A...B` uses a separate bounded walk.
   Missing, corrupt or non-commit objects fail when inspected. Objects below
   a proven stopping boundary are not inspected. In a closed `A..B` range,
   where every selected path reaches `A`, ancestors of `A` stay unread.

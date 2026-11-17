@@ -268,7 +268,9 @@ fn range_cut(
             return Ok(None);
         }
         let commit = read_commit(store, hash)?;
-        if commit.parents.is_empty() { return Ok(None); }
+        if commit.parents.is_empty() {
+            return Ok(None);
+        }
         for parent in &commit.parents {
             if queued.insert(*parent) {
                 pending.push_back(*parent);

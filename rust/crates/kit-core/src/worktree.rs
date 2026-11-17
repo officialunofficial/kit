@@ -553,14 +553,19 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     use rayon::prelude::*;
     // Indexed collection preserves slot order, including the first error.
     // Nested BLAKE3 parallelism uses this same global pool.
-    let results: Vec<_> = misses.par_iter().map(|m| {
-        (m.size <= CHUNK_THRESHOLD).then(|| hash_one_pending_file(sink, source, m, true))
-    }).collect();
+    let results: Vec<_> = misses
+        .par_iter()
+        .map(|m| (m.size <= CHUNK_THRESHOLD).then(|| hash_one_pending_file(sink, source, m, true)))
+        .collect();
     // Large files use their normal cutter threads after the file pool has
     // quiesced. A small file that grows still gets one cutter in its worker.
-    results.into_iter().zip(misses).map(|(result, miss)| {
-        result.unwrap_or_else(|| hash_one_pending_file(sink, source, miss, false))
-    }).collect()
+    results
+        .into_iter()
+        .zip(misses)
+        .map(|(result, miss)| {
+            result.unwrap_or_else(|| hash_one_pending_file(sink, source, miss, false))
+        })
+        .collect()
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`
