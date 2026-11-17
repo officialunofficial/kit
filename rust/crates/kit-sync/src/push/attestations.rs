@@ -33,7 +33,11 @@ pub(super) fn run(
         return;
     }
     let result = publish(layout, store, tx, options, report).and_then(|()| {
-        let max = tx.upload_limits().max_pack_bytes.unwrap_or(PACK_BODY_LIMIT).min(PACK_BODY_LIMIT);
+        let max = tx
+            .upload_limits()
+            .max_pack_bytes
+            .unwrap_or(PACK_BODY_LIMIT)
+            .min(PACK_BODY_LIMIT);
         compact_log(tx, options, max, &mut report.attestation_warnings)
     });
     if let Err(error) = result {
@@ -101,7 +105,9 @@ fn publish(
     let before = candidates.len();
     candidates.retain(|(subject, _, _)| store.object_type(subject).is_ok());
     if candidates.len() < before {
-        report.attestation_warnings.push("skipped unreadable attestation subjects; restore their objects to publish them".into());
+        report.attestation_warnings.push(
+            "skipped unreadable attestation subjects; restore their objects to publish them".into(),
+        );
     }
     if candidates.is_empty() {
         return Ok(());
@@ -117,12 +123,25 @@ fn publish(
     // Commit and tag subjects need no tree/blob walk. Other subjects use the
     // full object walk only when at least one pending envelope names them.
     let needs_objects = candidates.iter().any(|(subject, _, _)| {
-        !matches!(store.object_type(subject), Ok(kit_core::object::ObjectType::Commit | kit_core::object::ObjectType::Remix | kit_core::object::ObjectType::Tag))
+        !matches!(
+            store.object_type(subject),
+            Ok(kit_core::object::ObjectType::Commit
+                | kit_core::object::ObjectType::Remix
+                | kit_core::object::ObjectType::Tag)
+        )
     });
     if needs_objects {
-        match PushWalk::run_tips(store, &tips, &HeldCommits::default(), transfer::WalkLimits::default(), None) {
+        match PushWalk::run_tips(
+            store,
+            &tips,
+            &HeldCommits::default(),
+            transfer::WalkLimits::default(),
+            None,
+        ) {
             Ok(walk) => reachable.extend(walk.objects()),
-            Err(error) => report.attestation_warnings.push(format!("cannot enumerate non-commit attestation subjects: {error}; skipped those subjects")),
+            Err(error) => report.attestation_warnings.push(format!(
+                "cannot enumerate non-commit attestation subjects: {error}; skipped those subjects"
+            )),
         }
     }
     if reachable.is_empty() {
@@ -318,14 +337,16 @@ fn compact_log(
     for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
         let prior = tx.read_ref(ATTESTMAP_REF)?;
         let (_, original) = chain(tx, prior)?;
-        if original.len() <= 4096 { return Ok(()); }
-    if options
-        .control
-        .authority
-        .is_some_and(|a| !a.can_compact_attestations())
-    {
-        return Err("attestation compaction requires f permission; skipped".into());
-    }
+        if original.len() <= 4096 {
+            return Ok(());
+        }
+        if options
+            .control
+            .authority
+            .is_some_and(|a| !a.can_compact_attestations())
+        {
+            return Err("attestation compaction requires f permission; skipped".into());
+        }
         let prepared = compact_packs(tx, &original, max, warnings)?;
         if prepared.len() > 4096 {
             return Err("compacted attestation log exceeds 4096 packs".into());
@@ -475,7 +496,9 @@ fn compact_packs(
     let mut keys = Vec::new();
     let mut visited = BTreeSet::new();
     for id in packs {
-        if !visited.insert(*id) { continue; }
+        if !visited.insert(*id) {
+            continue;
+        }
         let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
         match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
             Ok(()) => {}

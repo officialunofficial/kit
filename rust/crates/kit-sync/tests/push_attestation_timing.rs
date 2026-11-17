@@ -12,9 +12,11 @@ use kit_core::{
 #[ignore = "manual 100,000-file timing; run alone on an idle machine"]
 fn push_100k_files_without_attestations() {
     let temporary = tempfile::tempdir().unwrap();
-    let local = std::env::var_os("KIT_PUSH_BENCH_SOURCE").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| temporary.path().to_path_buf());
-    if !local.join(".kit").exists() { prepare(&local); }
+    let local = std::env::var_os("KIT_PUSH_BENCH_SOURCE")
+        .map_or_else(|| temporary.path().to_path_buf(), std::path::PathBuf::from);
+    if !local.join(".kit").exists() {
+        prepare(&local);
+    }
     let destination = tempfile::tempdir().unwrap();
     let remote = kit_transport_file::FileTransport::new(destination.path());
     let mut options = kit_sync::PushOptions::default();
@@ -24,12 +26,7 @@ fn push_100k_files_without_attestations() {
         lease: kit_sync::PushLease::FastForward,
     };
     let start = std::time::Instant::now();
-    kit_sync::push(
-        &local,
-        &kit_sync::TransportSource::new(&remote),
-        &options,
-    )
-    .unwrap();
+    kit_sync::push(&local, &kit_sync::TransportSource::new(&remote), &options).unwrap();
     eprintln!("push_100k_seconds={:.6}", start.elapsed().as_secs_f64());
 }
 

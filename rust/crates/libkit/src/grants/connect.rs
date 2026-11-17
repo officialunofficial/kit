@@ -1214,10 +1214,20 @@ mod tests {
         )];
         let request = request(GrantOperation::Write { refs: &refs });
         let make = |scope, epoch| {
-            let encoded = header(&format!("{NS}/photos"), "write", scope, NOW, NOW + 100_000, "https://git.example.com", KEY);
+            let encoded = header(
+                &format!("{NS}/photos"),
+                "write",
+                scope,
+                NOW,
+                NOW + 100_000,
+                "https://git.example.com",
+                KEY,
+            );
             let mut signed = SignedHeader::parse(&encoded).unwrap();
-            signed.statement = String::from_utf8(signed.statement).unwrap()
-                .replace(&format!("\n0\n{NOW}\n"), &format!("\n{epoch}\n{NOW}\n")).into_bytes();
+            signed.statement = String::from_utf8(signed.statement)
+                .unwrap()
+                .replace(&format!("\n0\n{NOW}\n"), &format!("\n{epoch}\n{NOW}\n"))
+                .into_bytes();
             signed.encode().unwrap()
         };
         let force = make("refs/kit/attestmap=uf", 1);

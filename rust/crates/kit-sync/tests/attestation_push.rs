@@ -103,7 +103,8 @@ fn simultaneous_attesters_both_survive_cas() {
         let source = &source;
         let barrier = &barrier;
         let a = scope.spawn(|| {
-            let gated = Gated { deny_compaction: false,
+            let gated = Gated {
+                deny_compaction: false,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -112,7 +113,8 @@ fn simultaneous_attesters_both_survive_cas() {
             kit_sync::push(a.path(), &gated, &options()).unwrap()
         });
         let b = scope.spawn(|| {
-            let gated = Gated { deny_compaction: false,
+            let gated = Gated {
+                deny_compaction: false,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -219,11 +221,23 @@ impl kit_sync::RemoteSource for Gated<'_> {
             assert!(keys.len() <= budget + 1);
         }
         if self.deny_compaction {
-            let bytes = self.source.download_blob(&PackKey::new(*tip), ATTESTMAP_REF)?;
-            if kit_core::transfer::decode_packlist(&bytes).unwrap().prev.is_none() {
-                return Err(kit_sync::SourceError::Remote(Box::new(kit_sync::RemoteFailure {
-                    code: "permission_denied".into(), message: "force required".into(), status: 403, details: Vec::new(), headers: Vec::new(),
-                })));
+            let bytes = self
+                .source
+                .download_blob(&PackKey::new(*tip), ATTESTMAP_REF)?;
+            if kit_core::transfer::decode_packlist(&bytes)
+                .unwrap()
+                .prev
+                .is_none()
+            {
+                return Err(kit_sync::SourceError::Remote(Box::new(
+                    kit_sync::RemoteFailure {
+                        code: "permission_denied".into(),
+                        message: "force required".into(),
+                        status: 403,
+                        details: Vec::new(),
+                        headers: Vec::new(),
+                    },
+                )));
             }
         }
         self.source.write_attestmap(condition, tip, keys)
@@ -258,7 +272,8 @@ fn compaction_splits_existing_packs_under_smaller_upload_and_ticket_caps() {
         .unwrap();
     let (dir, _) = local(&tx, "example.com/new/v1");
     let source = TransportSource::new(&tx);
-    let gated = Gated { deny_compaction: false,
+    let gated = Gated {
+        deny_compaction: false,
         source: &source,
         barrier: &std::sync::Barrier::new(1),
         first: std::cell::Cell::new(false),
@@ -341,7 +356,11 @@ fn depth_64_rebaseline_preserves_oldest_first_pack_order_under_update_permission
 
 #[test]
 fn git_bridge_warns_for_userinfo_and_local_mirrors_without_printing_them() {
-    for (mirror, expected) in [("https://user:secret@example.org/repo", true), ("/local/private/path", true), ("https://example.org/repo", false)] {
+    for (mirror, expected) in [
+        ("https://user:secret@example.org/repo", true),
+        ("/local/private/path", true),
+        ("https://example.org/repo", false),
+    ] {
         let tx = kit_transport_memory::MemoryTransport::new();
         attestation_fetch::code(&tx);
         let (dir, tip) = local(&tx, "example.com/local/v1");
@@ -354,8 +373,19 @@ fn git_bridge_warns_for_userinfo_and_local_mirrors_without_printing_them() {
         kit_attest::store::save(&layout, &tip, env.encode().unwrap().as_bytes()).unwrap();
         let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
         assert_eq!(report.attestations_pushed, 2);
-        assert_eq!(report.attestation_warnings.iter().any(|warning| warning.contains("git-bridge")), expected);
-        assert!(report.attestation_warnings.iter().all(|warning| !warning.contains(mirror)));
+        assert_eq!(
+            report
+                .attestation_warnings
+                .iter()
+                .any(|warning| warning.contains("git-bridge")),
+            expected
+        );
+        assert!(
+            report
+                .attestation_warnings
+                .iter()
+                .all(|warning| !warning.contains(mirror))
+        );
     }
 }
 #[test]
@@ -364,7 +394,12 @@ fn cached_push_never_walks_an_incomplete_tree() {
     let (_, tree) = attestation_fetch::code(&tx);
     let (dir, _) = local(&tx, "example.com/local/v1");
     let source = TransportSource::new(&tx);
-    assert_eq!(kit_sync::push(dir.path(), &source, &options()).unwrap().attestations_pushed, 1);
+    assert_eq!(
+        kit_sync::push(dir.path(), &source, &options())
+            .unwrap()
+            .attestations_pushed,
+        1
+    );
     let layout = RepoLayout::single(dir.path());
     let hex = hash::to_hex(&tree);
     std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
@@ -380,10 +415,11 @@ fn owner_with_only_fetched_envelopes_compacts_an_overfull_log() {
     let pack = kit_attest::pack::build(&[&attestation_fetch::envelope(tip)], 4096).unwrap();
     let key = hash::hash(&pack);
     tx.upload_blob(&pack, &PackKey::new(key), None).unwrap();
-    let first = kit_core::transfer::encode_packlist(None, &vec![key;4096]).unwrap();
+    let first = kit_core::transfer::encode_packlist(None, &vec![key; 4096]).unwrap();
     let id = hash::hash(&first);
     tx.upload_blob(&first, &PackKey::new(id), None).unwrap();
-    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id)
+        .unwrap();
     attestation_fetch::append(&tx, &pack);
     let (dir, _) = local(&tx, "example.com/local/v1");
     // Remove the sole authored envelope; only fetched provenance remains.
@@ -398,7 +434,7 @@ fn owner_with_only_fetched_envelopes_compacts_an_overfull_log() {
     assert_eq!(report.attestations_pushed, 0);
     assert!(report.attestation_warnings.is_empty());
     let id = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
-    let bytes = tx.download_blob(&PackKey::new(id), None, 1<<20).unwrap();
+    let bytes = tx.download_blob(&PackKey::new(id), None, 1 << 20).unwrap();
     let node = kit_core::transfer::decode_packlist(&bytes).unwrap();
     assert!(node.prev.is_none());
     assert_eq!(node.packs, vec![key]);
@@ -412,19 +448,35 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
     let pack = kit_attest::pack::build(&[&attestation_fetch::envelope(tip)], 4096).unwrap();
     let key = hash::hash(&pack);
     tx.upload_blob(&pack, &PackKey::new(key), None).unwrap();
-    let first = kit_core::transfer::encode_packlist(None, &vec![key;4096]).unwrap();
+    let first = kit_core::transfer::encode_packlist(None, &vec![key; 4096]).unwrap();
     let id = hash::hash(&first);
     tx.upload_blob(&first, &PackKey::new(id), None).unwrap();
-    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id)
+        .unwrap();
     let (dir, _) = local(&tx, "example.com/new/v1");
     let source = TransportSource::new(&tx);
-    let gated = Gated { source: &source, barrier: &std::sync::Barrier::new(1), first: std::cell::Cell::new(false),
-        limits: Default::default(), deny_compaction: true };
+    let gated = Gated {
+        source: &source,
+        barrier: &std::sync::Barrier::new(1),
+        first: std::cell::Cell::new(false),
+        limits: Default::default(),
+        deny_compaction: true,
+    };
     let result = kit_sync::push(dir.path(), &gated, &options()).unwrap();
-    assert!(result.attestation_warnings.iter().any(|warning| warning.contains("requires f")));
+    assert!(
+        result
+            .attestation_warnings
+            .iter()
+            .any(|warning| warning.contains("requires f"))
+    );
     let after = gated.read_ref(ATTESTMAP_REF).unwrap();
     let again = kit_sync::push(dir.path(), &gated, &options()).unwrap();
-    assert!(again.attestation_warnings.iter().any(|warning| warning.contains("requires f")));
+    assert!(
+        again
+            .attestation_warnings
+            .iter()
+            .any(|warning| warning.contains("requires f"))
+    );
     assert_eq!(gated.read_ref(ATTESTMAP_REF).unwrap(), after);
 }
 
@@ -436,15 +488,29 @@ fn stale_subjects_never_block_commit_attestations_on_an_incomplete_tree() {
         let (dir, _) = local(&tx, "example.com/valid/v1");
         let layout = RepoLayout::single(dir.path());
         let store = kit_core::store::ObjectStore::open(&layout).unwrap();
-        let subject = if missing { [99;32] } else {
-            store.write(&kit_core::serialize::serialize(&kit_core::object::Object::Blob(
-                kit_core::object::Blob { data: b"unpublished blob".to_vec() }
-            )).unwrap()).unwrap()
+        let subject = if missing {
+            [99; 32]
+        } else {
+            store
+                .write(
+                    &kit_core::serialize::serialize(&kit_core::object::Object::Blob(
+                        kit_core::object::Blob {
+                            data: b"unpublished blob".to_vec(),
+                        },
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
         };
         kit_attest::store::save(&layout, &subject, &attestation_fetch::envelope(subject)).unwrap();
         store.remove_object(&tree).unwrap();
         let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
         assert_eq!(report.attestations_pushed, 1);
-        assert!(report.attestation_warnings.iter().any(|warning| warning.contains("subjects")));
+        assert!(
+            report
+                .attestation_warnings
+                .iter()
+                .any(|warning| warning.contains("subjects"))
+        );
     }
 }
