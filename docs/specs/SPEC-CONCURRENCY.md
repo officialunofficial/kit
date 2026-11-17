@@ -43,6 +43,7 @@ document points here.
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | shared/exclusive `format` handle | existing immutable common-dir `format` file | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared during a bulk write or cached reuse and during format validation, and for the whole run of a fetch (the prune guard); exclusive, try-only, during gc's final age check and unlink | SPEC-GC, §3.4 (this document) |
+| `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
@@ -220,12 +221,16 @@ IDs, branch names lexicographically, and full ref paths lexicographically.
 Current rename operations publish individual refs; this order does not promise
 an atomic multi-ref transaction.
 
-The git bridge locks nest only with the ref class of this chain:
-`git-<remote>.lock` ≺ `git-import-key.lock` ≺ `refs-<ref>.lock`(s). A
-process MUST NOT acquire either bridge lock while it holds `worktrees.lock`,
-a `worktree.lock`, a `refs-history-<branch>.lock`, or a `refs-<ref>.lock`. `kit git pull`
-releases `git-<remote>.lock` when its import phase returns, before its
-fast-forward acquires `worktree.lock`.
+The git bridge lock order is
+`git-<remote>.lock` ≺ `git-import-key.lock` ≺ `refs-<ref>.lock`(s).
+The bridge also takes `worktree.lock` beneath `git-<remote>.lock` for each
+local attestation write. Take either bridge lock before any registry,
+worktree, history, or ref lock. `kit git pull` releases `git-<remote>.lock`
+after its import phase and takes `worktree.lock` for its fast-forward.
+
+An attestation fetch takes `attest-fetch.lock` after `worktree.lock` and
+releases both after it publishes the pack's envelopes. Both waits share
+the fetch's interrupt handling and total lock-wait limit.
 
 The short-lived shared/exclusive `format` lock (§3.4) is innermost in
 both chains. Holders acquire no further repository locks; gc never waits
@@ -267,10 +272,11 @@ the history lock):
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
 | `attest` | this tree's `worktree.lock`, held across the subject re-check and the attestation write, after signing (`attest.rs`); no ref lock |
 | `fetch`, and the fetch phase of `pull` | the shared `format` lock (the prune guard) for the whole fetch, taken first. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
+| Fetched attestations | after download and pack validation, this tree's `worktree.lock`, then the common directory's `attest-fetch.lock` across storage accounting and envelope publication |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`kit_sync::pull`) |
 | `push` | no `worktree.lock`; each remote-tracking ref write takes its `refs-<ref>.lock` |
-| `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; no `worktree.lock` (`git_import::import_into`) |
-| `kit git export` | `git-<remote>.lock` only; it reads local refs and writes no local ref (`git::export`) |
+| `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; this tree's `worktree.lock` around each local attestation write, after signing (`git_import::import_into`) |
+| `kit git export` | `git-<remote>.lock`, then this tree's `worktree.lock` around each local attestation write, after signing (`git::export`) |
 | `kit git pull` (fast-forward phase), after the import phase released `git-<remote>.lock` | this tree's `worktree.lock`, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`git_import::fast_forward_current`) |
 
 A process that violates this order and blocks on two locks acquired in

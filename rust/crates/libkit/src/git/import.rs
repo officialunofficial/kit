@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use kit_attest::Signer as _;
-use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement, store as attest_store};
+use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, statement};
 use kit_core::layout::{self, RepoLayout};
 use kit_core::object::{Object, ObjectType};
 use kit_core::observer::Observer;
@@ -764,6 +764,7 @@ fn translate_upstream(
         &imported,
         &prior_by_ref,
         kp,
+        observer,
     )?;
 
     map::store_import_ref_state(state, &new_state)
@@ -835,6 +836,7 @@ fn mint_attestations(
     imported: &[Imported],
     prior: &HashMap<&str, &map::RefState>,
     kp: &KeyPair,
+    observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     let identity = remote_identity(url);
     let remote_url = attestation_remote(&identity);
@@ -900,8 +902,7 @@ fn mint_attestations(
         let encoded = envelope
             .encode()
             .map_err(|e| step(Class::General, "encode envelope", e))?;
-        attest_store::save(layout, kit_hash, encoded.as_bytes())
-            .map_err(|e| step(Class::CannotCreate, "save attestation", e))?;
+        super::save_attestation(layout, &obj_store, kit_hash, encoded.as_bytes(), observer)?;
     }
     Ok(())
 }

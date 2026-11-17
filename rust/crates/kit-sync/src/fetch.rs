@@ -395,8 +395,8 @@ pub(crate) fn verify_closure_present(store: &ObjectStore, tip: &Hash) -> Result<
 ///
 /// The first statement takes the store's [`kit_core::store::PruneGuard`], and
 /// the function holds it on every return path, after its last ref publish.
-/// While it is held, gc deletes nothing, so the objects of step 2, which no
-/// ref names yet, survive any grace period. The guard comes before the
+/// While it is held, gc cannot delete objects, so the objects of step 2,
+/// which no ref names yet, survive any grace period. The guard comes before the
 /// applied-packs record is read: a gc that ran between reading the record and
 /// taking the guard could delete an object of a pack the record names.
 ///

@@ -311,6 +311,34 @@ worktree lock. Record absent subjects by pack, at most 100,000 distinct
 pack-subject pairs per record. Retry a pending pack only when at least one
 recorded subject becomes local, even when the head is unchanged. Replace
 that pack's pending subjects after retry. Never save an absent subject.
+
+A client MUST bound cumulative new saves for each configured remote name
+to 100,000 envelopes and 512 MiB of envelope bytes in the common directory.
+These match the attestation pack-walk count and per-fetch decoded-byte
+limits. When an envelope would exceed either limit, skip it and emit one
+storage-limit warning per fetch. Preserve existing envelopes and complete
+the code fetch. An envelope that already exists takes no allowance.
+Only absent subjects of envelopes with a reservation or room for one
+qualify as pending. A pack with another pending subject may be read again
+when that subject arrives. Check the same limits on retry and record the
+pack as processed
+even when the limit prevents saving any envelope. A new chain can offer
+those envelopes again, and explicit refetch can replay them, both subject
+to the same allowance.
+
+Reserve allowance durably before publishing fetched provenance. Serialize
+reservations and fetched writes across worktrees. A retry uses the
+reservation already tied to a provenance marker. If a write stops before
+publishing a marker, the client recovers that reservation. When the
+allowance cannot be read, skip new writes and checkpoint each processed
+pack with a warning.
+
+The allowance record is private implementation state. Persist it across
+cache resets, log replacement, and changes to the URL of the same
+configured remote name. Existing provenance provides no remote name,
+so only new reservations are charged. Envelope expiry is a separate
+policy.
+
 Explicit refetch clears the remote's processed record. Count stored, dropped, and rejected entries.
 A rejected pack or envelope warns and MUST NOT fail the code fetch.
 Record rejected packs as processed so they are not downloaded repeatedly.

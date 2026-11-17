@@ -2,7 +2,7 @@
 use crate::{
     FetchReport, Observer, RemoteSource, SyncEvent, SyncOptions,
     attestation_records::{self, NODE_BOUND, Record, RecordKind, WALK_BYTES, WALK_LIMIT},
-    lock::{LockWait, wait_for_worktree_lock},
+    lock::{LockWait, wait_for_lock, wait_for_worktree_lock},
 };
 use kit_core::{
     hash::Hash,
@@ -13,7 +13,7 @@ use kit_core::{
 };
 use std::{
     collections::BTreeSet,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -195,6 +195,7 @@ fn process(
             source,
             observer,
             lock_wait,
+            remote,
             key,
             max,
             &mut budget,
@@ -358,6 +359,7 @@ fn process_pack(
     source: &dyn RemoteSource,
     observer: &dyn Observer<SyncEvent>,
     lock_wait: &LockWait,
+    remote: &str,
     key: Hash,
     max: u64,
     budget: &mut kit_attest::pack::DecodeBudget,
@@ -419,7 +421,15 @@ fn process_pack(
     if let Some(error) = staging_error {
         return Err(error.into());
     }
-    save_staged(&mut staged, store, layout, observer, lock_wait, report)
+    save_staged(
+        &mut staged,
+        store,
+        layout,
+        observer,
+        lock_wait,
+        remote,
+        report,
+    )
 }
 
 struct StagedEnvelope {
@@ -447,23 +457,124 @@ fn read_staged(staged: &mut std::fs::File, total: u64) -> Result<Option<StagedEn
     Ok(Some(StagedEnvelope { subject, id, bytes }))
 }
 
+// Match the reader's pack-walk count and total decoded-byte allowances.
+const SAVED_ENVELOPES: u64 = WALK_LIMIT as u64;
+const SAVED_BYTES: u64 = kit_attest::pack::MAX_FETCH_DECODED_BYTES;
+
+// A compact JSON reservation uses at most 160 bytes for a hash and length.
+const USAGE_FILE_MAX: u64 = 128 + 160 * SAVED_ENVELOPES;
+type Reservation = (Hash, u64);
+
+#[derive(Default)]
+struct SavedUsage {
+    count: u64,
+    bytes: u64,
+}
+
+impl SavedUsage {
+    fn load(path: &Path, layout: &RepoLayout) -> Option<Self> {
+        let raw = match kit_core::bounded_read::read_capped(path, USAGE_FILE_MAX) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Some(Self::default()),
+            Err(_) => return None,
+        };
+        let (json, checksum) = raw.split_last_chunk::<32>()?;
+        if kit_core::hash::hash(json) != *checksum {
+            return None;
+        }
+        let ([count, bytes], reservations): ([u64; 2], Vec<Reservation>) =
+            serde_json::from_slice(json).ok()?;
+        if count > SAVED_ENVELOPES || bytes > SAVED_BYTES || reservations.len() as u64 > count {
+            return None;
+        }
+        let mut usage = Self { count, bytes };
+        if !reservations.is_empty() {
+            // A prior attempt stopped while creating markers. Keep only the
+            // charges with a marker, so retrying the batch spends each slot
+            // once. Sync the surviving markers before forgetting the journal.
+            for (id, len) in reservations {
+                let marker = attestation_records::fetched_path(layout, &id);
+                match std::fs::OpenOptions::new().write(true).open(marker) {
+                    Ok(file) => file.sync_all().ok()?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        usage.count = usage.count.checked_sub(1)?;
+                        usage.bytes = usage.bytes.checked_sub(len)?;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            crate::applied_packs::sync_parent_dir(path.parent()?).ok()?;
+        }
+        Some(usage)
+    }
+
+    fn persist(&self, path: &Path, reservations: &[Reservation]) -> io::Result<()> {
+        let mut raw = serde_json::to_vec(&([self.count, self.bytes], reservations))?;
+        raw.extend(kit_core::hash::hash(&raw));
+        crate::applied_packs::write_atomic(path, &raw)
+    }
+
+    fn fits(&self, bytes: u64) -> bool {
+        self.count < SAVED_ENVELOPES && bytes <= SAVED_BYTES - self.bytes
+    }
+}
+
 fn save_staged(
     staged: &mut std::fs::File,
     store: &ObjectStore,
     layout: &RepoLayout,
     observer: &dyn Observer<SyncEvent>,
     lock_wait: &LockWait,
+    remote: &str,
     report: &mut FetchReport,
 ) -> Result<BTreeSet<Hash>, Failure> {
+    let total = staged.metadata()?.len();
+    if total == 0 {
+        return Ok(BTreeSet::new());
+    }
     staged.seek(SeekFrom::Start(0))?;
     let _lock = wait_for_worktree_lock(layout, observer, lock_wait)?;
-    let total = staged.metadata()?.len();
+    // A common lock serializes accounting and fetched writes across worktrees.
+    // GC takes all the worktree locks and never takes this lock.
+    let _usage_lock = wait_for_lock(
+        layout.common_dir(),
+        "attest-fetch.lock",
+        observer,
+        lock_wait,
+    )?;
+    let usage_path = layout.attestations_dir().join(".fetched").join(format!(
+        "{}.usage",
+        kit_core::hash::to_hex(&kit_core::hash::hash(remote.as_bytes()))
+    ));
+    let Some(mut usage) = SavedUsage::load(&usage_path, layout) else {
+        let warning =
+            format!("cannot read attestation storage usage for {remote:?}. Skipped new envelopes");
+        if !report.attestation_warnings.contains(&warning) {
+            report.attestation_warnings.push(warning);
+        }
+        return Ok(BTreeSet::new());
+    };
+    let mut reservations = Vec::new();
     let mut prepared = BTreeSet::new();
     let mut missing = BTreeSet::new();
     let mut overflow = false;
+    let mut skipped_for_storage = false;
     while let Some(entry) = read_staged(staged, total)? {
         if observer.cancelled() {
             return Err("interrupted".into());
+        }
+        // Existing envelopes retain their provenance and require no writes.
+        if prepared.contains(&entry.id)
+            || kit_attest::store::envelope_path(layout, &entry.subject, &entry.id).try_exists()?
+        {
+            continue;
+        }
+        let bytes = entry.bytes.len() as u64;
+        // A durable marker already has a reservation from its first fetch.
+        let marked = attestation_records::fetched_path(layout, &entry.id).try_exists()?;
+        if !marked && !usage.fits(bytes) {
+            skipped_for_storage = true;
+            continue;
         }
         if !store.contains(&entry.subject) {
             if missing.len() < WALK_LIMIT {
@@ -487,37 +598,44 @@ fn save_staged(
             report.attestations_dropped += 1;
             continue;
         }
-        // Existing envelopes retain their provenance and require no writes.
-        if kit_attest::store::envelope_path(layout, &entry.subject, &entry.id).try_exists()? {
-            continue;
+        if !marked {
+            usage.count += 1;
+            usage.bytes += bytes;
+            reservations.push((entry.id, bytes));
         }
-        if !prepared.insert(entry.id) {
-            continue;
+        prepared.insert(entry.id);
+    }
+    if skipped_for_storage {
+        let warning =
+            format!("attestation storage limit reached for {remote:?}. Skipped excess envelopes");
+        if !report.attestation_warnings.contains(&warning) {
+            report.attestation_warnings.push(warning);
         }
-        let marker = attestation_records::fetched_path(layout, &entry.id);
-        let parent = marker.parent().ok_or("missing provenance directory")?;
-        std::fs::create_dir_all(parent)?;
-        let file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::fs::OpenOptions::new().write(true).open(&marker)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        file.sync_all()?;
     }
     if prepared.is_empty() {
         return Ok(missing);
     }
-    // Every marker and its ancestor directory is durable before any envelope
-    // becomes visible. Directory syncs are shared by this pack's markers.
-    crate::applied_packs::sync_parent_dir(&layout.attestations_dir().join(".fetched"))?;
-    crate::applied_packs::sync_parent_dir(&layout.attestations_dir())?;
-    crate::applied_packs::sync_parent_dir(layout.common_dir())?;
+    // Reserve before writing markers. An interrupted batch can reconcile
+    // against those markers before it tries to reserve again.
+    if !reservations.is_empty() {
+        usage.persist(&usage_path, &reservations)?;
+    }
+    persist_provenance(layout, &prepared)?;
+    if !reservations.is_empty() {
+        usage.persist(&usage_path, &[])?;
+    }
+    save_prepared(staged, total, layout, observer, prepared, report)?;
+    Ok(missing)
+}
+
+fn save_prepared(
+    staged: &mut std::fs::File,
+    total: u64,
+    layout: &RepoLayout,
+    observer: &dyn Observer<SyncEvent>,
+    mut prepared: BTreeSet<Hash>,
+    report: &mut FetchReport,
+) -> Result<(), Failure> {
     staged.seek(SeekFrom::Start(0))?;
     while let Some(entry) = read_staged(staged, total)? {
         if observer.cancelled() {
@@ -528,5 +646,29 @@ fn save_staged(
             report.attestations_stored += 1;
         }
     }
-    Ok(missing)
+    Ok(())
+}
+
+fn persist_provenance(layout: &RepoLayout, prepared: &BTreeSet<Hash>) -> io::Result<()> {
+    for id in prepared {
+        let marker = attestation_records::fetched_path(layout, id);
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                std::fs::OpenOptions::new().write(true).open(&marker)?
+            }
+            Err(error) => return Err(error),
+        };
+        file.sync_all()?;
+    }
+    // Every marker and its ancestor directory is durable before any envelope
+    // becomes visible. Directory syncs are shared by this pack's markers.
+    crate::applied_packs::sync_parent_dir(&layout.attestations_dir().join(".fetched"))?;
+    crate::applied_packs::sync_parent_dir(&layout.attestations_dir())?;
+    crate::applied_packs::sync_parent_dir(layout.common_dir())?;
+    Ok(())
 }

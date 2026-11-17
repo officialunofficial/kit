@@ -363,6 +363,27 @@ impl kit_core::observer::Observer<lock::Event> for LockEvents<'_> {
     }
 }
 
+/// Publish a bridge attestation under the same lock as a local attestation.
+fn save_attestation(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    subject: &kit_core::Hash,
+    bytes: &[u8],
+    observer: &dyn kit_core::observer::Observer<Event>,
+) -> Result<(), Error> {
+    let _lock =
+        lock::acquire_worktree(layout, &LockEvents(observer)).map_err(Error::WorktreeBusy)?;
+    if !store.contains(subject) {
+        return Err(plain(
+            Class::Data,
+            "attestation subject is no longer available",
+        ));
+    }
+    kit_attest::store::save(layout, subject, bytes)
+        .map_err(|e| step(Class::CannotCreate, "save attestation", e))?;
+    Ok(())
+}
+
 /// Take the lock of one bridge state directory.
 pub(crate) fn lock_state(
     layout: &RepoLayout,

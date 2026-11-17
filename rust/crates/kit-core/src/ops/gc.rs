@@ -17,8 +17,8 @@
 //!   (`CHERRY_PICK_HEAD`), rebase (`onto` + every `todo`/`done` commit),
 //!   the `ORIG_HEAD` saved by those ops and by `reset`, and the conflict
 //!   sidecar's base/ours/theirs blob hashes.
-//! - **Attestations** — every `attestations/<commit>/` directory pins
-//!   its subject only while its whole closure is available.
+//! - **Attestations** — a stored envelope pins its subject while the
+//!   whole closure is available.
 //! - **Recovery log** — every commit recorded as superseded by a
 //!   history-rewriting op (see [`super::recovery`]); retained so it stays
 //!   recoverable until `recovery::expire` drops it past the window.
@@ -48,7 +48,6 @@ use super::graph::{ClosureMode, MAX_REACHABLE, children};
 use super::rebase;
 use super::recovery;
 use super::stash;
-use crate::layout::ATTESTATIONS_DIR_NAME;
 use crate::refs::{self, HEADS_DIR, REMOTES_DIR, TAGS_DIR};
 
 /// Longest ref or root file that gc reads: one hex hash plus whitespace.
@@ -159,7 +158,7 @@ pub enum GcRootsError {
 /// [`GcRootsError`] if any source (refs, stash, op state, attestation
 /// dir) cannot be read — the caller must then abort, never prune.
 pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError> {
-    let (mut roots, soft) = collect_root_sets(layout)?;
+    let (mut roots, soft) = collect_root_sets(layout, &mut |_| {})?;
     roots.extend(soft.into_iter().map(|root| root.hash));
     Ok(roots)
 }
@@ -174,7 +173,10 @@ struct SoftRoot {
 }
 
 /// [`collect_roots`], with the [`SoftRoot`]s held apart from the rest.
-fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoot>), GcRootsError> {
+fn collect_root_sets(
+    layout: &RepoLayout,
+    empty_attestation: &mut dyn FnMut(PathBuf),
+) -> Result<(BTreeSet<Hash>, Vec<SoftRoot>), GcRootsError> {
     let mut roots: BTreeSet<Hash> = BTreeSet::new();
     let mut soft: Vec<SoftRoot> = Vec::new();
     let add = |h: Hash, set: &mut BTreeSet<Hash>| {
@@ -220,12 +222,7 @@ fn collect_root_sets(layout: &RepoLayout) -> Result<(BTreeSet<Hash>, Vec<SoftRoo
     }
 
     // An attestation retains a complete subject closure, if still available.
-    for h in attested_commits(layout.common_dir())? {
-        soft.push(SoftRoot {
-            hash: h,
-            state_file: layout.attestations_dir().join(hash::to_hex(&h)),
-        });
-    }
+    collect_attestation_roots(&layout.attestations_dir(), &mut soft, empty_attestation)?;
 
     // A crash may leave a history intent before its target ref is published.
     // Retain both sides even on builds without the history-mmr feature.
@@ -669,7 +666,7 @@ fn live_objects_with(
     layout: &RepoLayout,
     limits: MarkLimits,
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
-    live_objects_observed(store, layout, limits, &mut |_, _, _| {})
+    live_objects_observed(store, layout, limits, &mut |_, _, _| {}, &mut |_| {})
 }
 
 fn live_objects_observed(
@@ -677,8 +674,9 @@ fn live_objects_observed(
     layout: &RepoLayout,
     limits: MarkLimits,
     progress: &mut dyn FnMut(&'static str, usize, u64),
+    empty_attestation: &mut dyn FnMut(PathBuf),
 ) -> Result<(LiveSet, Vec<PathBuf>), GcRootsError> {
-    let (hard, soft) = collect_root_sets(layout)?;
+    let (hard, soft) = collect_root_sets(layout, empty_attestation)?;
     if soft.is_empty() {
         return Ok((mark_live_observed(store, &hard, limits, progress)?, vec![]));
     }
@@ -829,7 +827,16 @@ fn run_gc_with_progress_hook(
 
     // Compute the keep-set FIRST, to the end; if this fails we list and
     // delete nothing.
-    let (live, skipped_state_files) = live_objects_observed(store, layout, limits, progress)?;
+    let mut empty_attestations = Vec::new();
+    let (live, skipped_state_files) =
+        live_objects_observed(store, layout, limits, progress, &mut |path| {
+            if !dry_run {
+                empty_attestations.push(path);
+            }
+        })?;
+    for path in empty_attestations {
+        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
+    }
     progress("gc", 0, 0);
     let mut last_progress = std::time::Instant::now();
 
@@ -964,29 +971,74 @@ fn walk_ref_roots_strict(
     Ok(())
 }
 
-/// Commit hashes that have at least one attestation envelope, taken from
-/// the `attestations/<commit-hex>/` directory names. Non-hex directory
-/// names are ignored (defensive); a missing dir yields an empty set.
-fn attested_commits(common_dir: &Path) -> Result<Vec<Hash>, io::Error> {
-    let dir = common_dir.join(ATTESTATIONS_DIR_NAME);
-    let mut out = Vec::new();
-    let rd = match fs::read_dir(&dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
-        Err(e) => return Err(e),
+/// An envelope file makes its subject a soft root. Other entries in a
+/// subject directory neither pin the subject nor qualify for removal.
+fn collect_attestation_roots(
+    dir: &Path,
+    roots: &mut Vec<SoftRoot>,
+    empty_attestation: &mut dyn FnMut(PathBuf),
+) -> Result<(), GcRootsError> {
+    reject_symlink(dir)?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
     };
-    for entry in rd {
+    for entry in entries {
         let entry = entry?;
+        let Some(subject) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| hash::from_hex(n).ok())
+        else {
+            continue;
+        };
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        if let Some(name) = entry.file_name().to_str()
-            && let Ok(h) = hash::from_hex(name)
-        {
-            out.push(h);
+        let path = entry.path();
+        let mut files = fs::read_dir(&path)?.peekable();
+        if files.peek().is_none() {
+            empty_attestation(path);
+            continue;
+        }
+        for file in files {
+            let file = file?;
+            // Match the envelope store's <64-hex-id>.dsse naming rule.
+            let envelope = file
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".dsse"))
+                .is_some_and(|id| hash::from_hex(id).is_ok());
+            if envelope && file.file_type()?.is_file() {
+                roots.push(SoftRoot {
+                    hash: subject,
+                    state_file: path,
+                });
+                break;
+            }
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+fn remove_old_empty_attestation(path: &Path, now_secs: u64, grace_secs: u64) -> io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if meta.is_dir()
+        && crate::store::old_enough(&meta, now_secs, grace_secs)
+        && let Err(error) = fs::remove_dir(path)
+        && !matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::DirectoryNotEmpty
+        )
+    {
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Read a single 64-hex object id from `path`, trimming trailing
@@ -1168,13 +1220,113 @@ mod tests {
     }
 
     #[test]
+    fn gc_prunes_an_unreferenced_subject_and_its_empty_attestation_directory() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (subject, blob) = commit_one(&store, b"subject", b"payload", vec![]);
+        let dir = md.attestations_dir().join(hash::to_hex(&subject));
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(!collect_roots(&md).unwrap().contains(&subject));
+        run_gc(&store, &md, 0, 1, false).unwrap();
+        assert!(dir.is_dir() && store.contains(&subject));
+        run_gc(&store, &md, u64::MAX, 0, true).unwrap();
+        assert!(dir.is_dir() && store.contains(&subject));
+        run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        assert!(!dir.exists());
+        assert!(!store.contains(&subject) && !store.contains(&blob));
+    }
+
+    #[test]
+    fn gc_keeps_an_attested_subject_but_ignores_unrelated_directory_entries() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let (attested, attested_blob) = commit_one(&store, b"attested", b"retained", vec![]);
+        let (orphan, orphan_blob) = commit_one(&store, b"orphan", b"unreachable", vec![]);
+        let orphan_dir = md.attestations_dir().join(hash::to_hex(&orphan));
+        fs::create_dir_all(&orphan_dir).unwrap();
+        fs::write(orphan_dir.join("notes.txt"), b"keep this file").unwrap();
+        fs::create_dir(orphan_dir.join(format!("{}.dsse", "22".repeat(32)))).unwrap();
+        let attested_dir = md.attestations_dir().join(hash::to_hex(&attested));
+        fs::create_dir_all(&attested_dir).unwrap();
+        let envelope = attested_dir.join(format!("{}.dsse", "11".repeat(32)));
+        fs::write(&envelope, b"envelope fixture").unwrap();
+
+        run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        assert!(store.contains(&attested) && store.contains(&attested_blob));
+        assert!(envelope.is_file() && orphan_dir.join("notes.txt").is_file());
+        assert!(!store.contains(&orphan) && !store.contains(&orphan_blob));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_roots_reports_an_attestations_path_that_is_a_file() {
+        let (d, _store) = repo();
+        let md = layout(&d);
+        fs::write(md.attestations_dir(), b"not a directory").unwrap();
+
+        let result = collect_roots(&md);
+        assert!(matches!(
+            result,
+            Err(GcRootsError::Io(error)) if error.kind() == io::ErrorKind::NotADirectory
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_attestation_cleanup_reports_metadata_errors_other_than_not_found() {
+        let d = TempDir::new().unwrap();
+        let parent = d.path().join("file");
+        fs::write(&parent, b"not a directory").unwrap();
+
+        let error = remove_old_empty_attestation(&parent.join("subject"), u64::MAX, 0).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
+    }
+
+    #[test]
+    fn gc_tolerates_empty_attestation_directories_that_vanish_or_gain_entries() {
+        let (d, store) = repo();
+        let md = layout(&d);
+        let gone = md.attestations_dir().join("11".repeat(32));
+        let populated = md.attestations_dir().join("22".repeat(32));
+        let newcomer = populated.join("notes.txt");
+        fs::create_dir_all(&gone).unwrap();
+        fs::create_dir(&populated).unwrap();
+
+        // Mark progress starts after GC has listed the empty directories
+        // and before it attempts to remove them.
+        let mut changed = false;
+        run_gc_observed(&store, &md, u64::MAX, 0, false, &mut |phase, _, _| {
+            if phase == "gc_mark" && !changed {
+                fs::remove_dir(&gone).unwrap();
+                fs::write(&newcomer, b"keep").unwrap();
+                changed = true;
+            }
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert!(!gone.exists());
+        assert_eq!(fs::read(newcomer).unwrap(), b"keep");
+    }
+
+    fn write_attestation_fixture(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(format!("{}.dsse", "11".repeat(32))),
+            b"envelope fixture",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn collect_roots_includes_orig_head_and_attested_commit() {
         let (d, s) = repo();
         let md = layout(&d);
         let (orig, _) = commit_one(&s, b"o", b"o", vec![]);
         let (att, _) = commit_one(&s, b"x", b"x", vec![]);
         fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&orig))).unwrap();
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&att))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&att)));
 
         let roots = collect_roots(&md).unwrap();
         assert!(roots.contains(&orig), "ORIG_HEAD must be a root");
@@ -1205,7 +1357,7 @@ mod tests {
         let (previous, blob) = commit_one(&store, b"previous", b"previous", vec![]);
         refs::write_previous_head(&md, &refs::Head::Detached(previous)).unwrap();
         let missing = md.attestations_dir().join("99".repeat(32));
-        fs::create_dir_all(&missing).unwrap();
+        write_attestation_fixture(&missing);
         let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
         assert!(store.contains(&previous) && store.contains(&blob));
         assert_eq!(report.skipped_state_files, [missing]);
@@ -1223,15 +1375,20 @@ mod tests {
         let (hard, _) = commit_one(&store, b"hard", b"hard", vec![base]);
         let (soft, _) = commit_one(&store, b"soft", b"soft", vec![base]);
         write_ref(&md, "refs/heads/main", &hard);
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&soft))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&soft)));
         let mut starts = 0;
-        let (live, skipped) =
-            live_objects_observed(&store, &md, MarkLimits::DEFAULT, &mut |phase, count, _| {
+        let (live, skipped) = live_objects_observed(
+            &store,
+            &md,
+            MarkLimits::DEFAULT,
+            &mut |phase, count, _| {
                 if phase == "gc_mark" && count == 0 {
                     starts += 1;
                 }
-            })
-            .unwrap();
+            },
+            &mut |_| {},
+        )
+        .unwrap();
         assert!(live.contains(&hard) && live.contains(&soft) && live.contains(&base));
         assert!(skipped.is_empty());
         assert_eq!(starts, 1, "complete roots need one shared mark");
@@ -1262,7 +1419,7 @@ mod tests {
             let root = store
                 .write(&serialize::serialize(&object).unwrap())
                 .unwrap();
-            fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&root))).unwrap();
+            write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&root)));
             let limits = MarkLimits {
                 cap: 4,
                 chunk_cap: 1,
@@ -1293,7 +1450,7 @@ mod tests {
         let good = manifest(chunk);
         let bad = manifest([0x88; 32]);
         for root in [good, bad] {
-            fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&root))).unwrap();
+            write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&root)));
         }
         let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
         assert!(store.contains(&good) && store.contains(&chunk));
@@ -1311,7 +1468,7 @@ mod tests {
         let (hard, blob) = commit_one(&store, b"hard", b"hard", vec![]);
         write_ref(&md, "refs/heads/main", &hard);
         let orphan = write_blob(&store, b"orphan");
-        fs::create_dir_all(md.attestations_dir().join("99".repeat(32))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join("99".repeat(32)));
         fs::remove_file(store.path_for(&blob)).unwrap();
         assert!(run_gc(&store, &md, u64::MAX, 0, false).is_err());
         assert!(store.contains(&hard) && store.contains(&orphan));
@@ -1337,8 +1494,8 @@ mod tests {
         let scanned = graph.scanned();
         assert_eq!(graph.classify(bad_one).unwrap(), Some(missing));
         assert_eq!(graph.scanned(), scanned);
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&two))).unwrap();
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&bad_two))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&two)));
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&bad_two)));
         let (live, skipped) = live_objects_with(&store, &md, MarkLimits::DEFAULT).unwrap();
         assert!(live.contains(&base) && live.contains(&one) && live.contains(&two));
         assert!(!live.contains(&bad_one) && !live.contains(&bad_two));
@@ -1353,13 +1510,14 @@ mod tests {
         let (d, s) = repo();
         let md = layout(&d);
         let absent = [0xa5; 32];
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&absent))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&absent)));
         let (attested, blob) = commit_one(&s, b"attested", b"payload", vec![]);
-        fs::create_dir_all(md.attestations_dir().join(hash::to_hex(&attested))).unwrap();
+        write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&attested)));
         // Remove one object to simulate a partly swept closure.
         fs::remove_file(s.path_for(&blob)).unwrap();
         let (_, skipped) =
-            live_objects_observed(&s, &md, MarkLimits::DEFAULT, &mut |_, _, _| {}).unwrap();
+            live_objects_observed(&s, &md, MarkLimits::DEFAULT, &mut |_, _, _| {}, &mut |_| {})
+                .unwrap();
         assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&absent))));
         assert!(skipped.contains(&md.attestations_dir().join(hash::to_hex(&attested))));
     }
