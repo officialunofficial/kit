@@ -1,5 +1,7 @@
 //! A verified blob read holds the payload once. Reading an inline blob
-//! allocates one buffer of the payload's size.
+//! allocates one buffer of the payload's size, and reassembling a chunked blob
+//! allocates the output once at its final size and one chunk at a time. A
+//! prefix of a chunked blob copies only the bytes it returns.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 #![allow(unsafe_code)] // the counting allocator below wraps `System`
 
@@ -7,10 +9,12 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use kit_core::chunker;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Object};
 use kit_core::serialize::serialize;
 use kit_core::store::ObjectStore;
+use kit_core::worktree::{self, LoadedBlob};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
@@ -78,7 +82,7 @@ fn peak_of<T>(call: impl FnOnce() -> T) -> (T, usize) {
     (out, PEAK.load(Ordering::Relaxed) - before)
 }
 
-/// Pseudo-random bytes.
+/// Pseudo-random bytes, so the chunker finds real cut points.
 fn random_bytes(len: usize) -> Vec<u8> {
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     (0..len)
@@ -108,4 +112,49 @@ fn an_inline_blob_read_holds_the_payload_once() {
             "reading a {len}-byte blob held {peak} bytes"
         );
     }
+}
+
+#[test]
+fn chunked_reassembly_allocates_the_output_once() {
+    let _guard = serial();
+    let src = tempfile::tempdir().unwrap();
+    // Not a power of two, so a growing buffer would overshoot.
+    let content = random_bytes(5 * MIB + 12_345);
+    std::fs::write(src.path().join("big.bin"), &content).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+    let batch = store.batch();
+    let tree = worktree::build_tree(&batch, src.path()).unwrap();
+    batch.commit().unwrap();
+    let Object::Tree(tree) = store.read_object(&tree).unwrap() else {
+        panic!("root is not a tree");
+    };
+    let blob = LoadedBlob::load(&store, &tree.entries[0].object_hash).unwrap();
+    let LoadedBlob::Chunked(manifest) = &blob else {
+        panic!("{} bytes did not chunk", content.len());
+    };
+    let Object::Blob(first) = store.read_object(&manifest.chunks()[0]).unwrap() else {
+        panic!("first chunk is not a blob");
+    };
+
+    // A sniff prefix copies only the bytes it returns out of the one chunk
+    // it reads.
+    let sniff = 8 * KIB;
+    let (prefix, peak) = peak_of(|| blob.prefix(&store, sniff).unwrap().into_owned());
+    assert_eq!(prefix, content[..sniff]);
+    let bound = first.data.len() + sniff + SLACK;
+    assert!(
+        peak <= bound,
+        "an {sniff}-byte prefix held {peak} bytes, bound {bound}"
+    );
+
+    let (read, peak) = peak_of(|| blob.into_content(&store).unwrap());
+    assert_eq!(read.len(), content.len());
+    assert_eq!(kit_core::hash::hash(&read), kit_core::hash::hash(&content));
+    let bound = content.len() + chunker::MAX_SIZE + SLACK;
+    assert!(
+        peak <= bound,
+        "reassembling {} bytes held {peak} bytes, bound {bound}",
+        content.len()
+    );
 }

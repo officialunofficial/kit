@@ -147,9 +147,11 @@ impl LoadedBlob {
                     if data.len() >= max_len {
                         break;
                     }
-                    data.extend_from_slice(&read_chunk_at(store, manifest, index)?);
+                    let chunk = read_chunk_at(store, manifest, index)?;
+                    // Copy only the bytes the prefix needs, within `cap`.
+                    let take = chunk.len().min(max_len - data.len());
+                    data.extend_from_slice(&chunk[..take]);
                 }
-                data.truncate(max_len);
                 Ok(Cow::Owned(data))
             }
         }
@@ -181,7 +183,14 @@ impl LoadedBlob {
                         size: manifest.total_size(),
                     });
                 }
+                // `total_size` is capped above, and the output must hold it
+                // all, so a failed reservation is a blob too large to load.
+                let size = manifest.total_size();
                 let mut data = Vec::new();
+                usize::try_from(size)
+                    .ok()
+                    .and_then(|n| data.try_reserve_exact(n).ok())
+                    .ok_or(WorktreeError::ContentTooLarge { size })?;
                 Self::Chunked(manifest).write_content(store, &mut data)?;
                 Ok(data)
             }
