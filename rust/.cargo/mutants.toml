@@ -1,3 +1,36 @@
 # Cargo builds the Kani proof modules only under `cfg(kani)`, so no test can
 # catch a mutant in them. The Kani prover runs those modules by hand.
-exclude_re = ["kani_proofs::"]
+exclude_re = [
+  "kani_proofs::",
+  # Each protector arm is compiled out on the other platform; active dispatch is covered by tests.
+  'kit-keystore/src/software/mod.rs:.*delete match arm (MacosKeychainProtector|LinuxSecretServiceProtector)::ID in default_protector_by_id',
+  # Metadata decoding emits only malformed-entry errors, so its error guard is always true.
+  'kit-keystore/src/native_list.rs:.*replace match guard is_malformed_list_entry_error\(&error\) with true in list_metadata_from_account_secret',
+  # The pinned secp256k1 signer normalizes S before returning, so the parity-flip branch is unreachable.
+  'kit-keystore/src/software/crypto.rs:.*replace == with != in sign_prehash_recoverable_secp256k1',
+  # These attribute flags occupy disjoint bits, so OR and XOR are equivalent.
+  'kit-keystore/src/encrypted_record.rs:.*replace \| with \^ in attrs_bits',
+  # The high and low nibbles occupy disjoint bits, so OR and XOR are equivalent.
+  'kit-keystore/src/software/mod.rs:.*replace \| with \^ in hex_decode',
+  # Recomputing the deterministic attempt-zero path leaves the result unchanged.
+  'kit-keystore/src/software/atomic_write.rs:.*replace > with >= in create_synced_tmp_key_file',
+  # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
+  'kit-keystore/src/software/atomic_write.rs:.* in (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable)$',
+  # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
+  'kit-keystore/src/software/atomic_write.rs:.*replace (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable) ->',
+  # Each native constructor has a cfg-gated definition that this host does not compile.
+  'kit-keystore/src/backend.rs:.*replace open_(macos_keychain|linux_secret_service)_backend .*with Ok\(Box::new\(Default::default\(\)\)\)',
+  # This Linux-only lock guards the native credential adapter, which is not compiled on macOS.
+  'kit-keystore/src/lib.rs:.*keyring_default_store_lock',
+]
+
+exclude_globs = [
+  # macOS-only adapter: Linux CI cannot compile it; live credential tests require an unlocked Keychain.
+  "crates/kit-keystore/src/backend_macos_keychain.rs",
+  # Linux-only adapter: macOS cannot compile it; live credential tests require a Secret Service daemon.
+  "crates/kit-keystore/src/backend_linux_secret_service.rs",
+  # macOS-only DEK storage needs an unlocked Keychain; Linux CI cannot compile it.
+  "crates/kit-keystore/src/software/protectors/macos.rs",
+  # Linux-only DEK storage needs a Secret Service daemon; macOS cannot compile it.
+  "crates/kit-keystore/src/software/protectors/linux_secret_service.rs",
+]

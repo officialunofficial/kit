@@ -734,3 +734,50 @@ mod tests {
         assert_eq!(KeyId::new(keyid.clone()).unwrap(), keyid);
     }
 }
+
+#[cfg(test)]
+mod wrapper_contract_tests {
+    use super::*;
+
+    #[test]
+    fn text_wrappers_preserve_values_and_compare_both_outcomes() {
+        let label = KeyLabel::new("release").unwrap();
+        assert_eq!(label.to_string(), "release");
+        assert_eq!(label.as_ref(), "release");
+        assert_eq!(label, "release");
+        assert_ne!(label, "other");
+        assert_eq!("release", label);
+        assert_ne!("other", label);
+        assert_eq!(KeyRefLabel::new("release").unwrap().as_ref(), "release");
+        let id = KeyId::new("ed25519:abc").unwrap();
+        assert_eq!(id.to_string(), "ed25519:abc");
+        assert_eq!(id.as_ref(), "ed25519:abc");
+        assert_eq!(id, "ed25519:abc");
+        assert_ne!(id, "other");
+        assert_eq!(id, String::from("ed25519:abc"));
+        assert_ne!(id, String::from("other"));
+        assert_eq!(id.into_string(), "ed25519:abc");
+    }
+
+    #[test]
+    fn byte_wrappers_preserve_empty_and_nonempty_values() {
+        assert!(PublicKeyBytes::new(vec![]).is_empty());
+        let public = PublicKeyBytes::new(vec![37; 32]);
+        assert!(!public.is_empty());
+        assert_eq!(public.as_ref(), &[37; 32]);
+        assert_eq!(public, vec![37; 32]);
+        assert_ne!(public, vec![38; 32]);
+        assert_eq!(public, [37; 32]);
+        assert_ne!(public, [38; 32]);
+        assert_eq!(public.into_vec(), vec![37; 32]);
+        let secret = SecretKey::new(Algorithm::P256, [37; 32]);
+        assert_eq!(*secret.into_bytes(), [37; 32]);
+        assert_eq!(
+            KeySelector::new("key", Some(Algorithm::P256))
+                .unwrap()
+                .algorithm(),
+            Some(Algorithm::P256)
+        );
+        assert_eq!(KeySelector::new("key", None).unwrap().algorithm(), None);
+    }
+}
