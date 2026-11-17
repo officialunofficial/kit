@@ -1198,11 +1198,30 @@ mod tests {
             grants: Arc::new(LocalGrants::from_headers([])),
             signer_key: KEY.to_owned(),
         };
+        assert!(authority.can_compact_attestations());
         assert!(
             authority
                 .authorize("main", RefWriteCondition::Missing, true)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn attestmap_force_uses_the_selected_epoch_and_exact_scope() {
+        let refs = [GrantRef::new(kit_core::refs::ATTESTMAP_REF, GrantCondition::Match)];
+        let request = request(GrantOperation::Write { refs: &refs });
+        let make = |scope, epoch| header(&format!("{NS}/photos"), "write", scope, epoch, NOW + 100_000, "https://git.example.com", KEY);
+        let force = make("refs/kit/attestmap=uf", NOW);
+        let update = make("refs/kit/attestmap=u", NOW + 1);
+        for (headers, expected) in [
+            (vec![force.clone()], true),
+            (vec![update.clone()], false),
+            (vec![force, update], false),
+            (vec![make("refs/*=uf", NOW)], false),
+        ] {
+            let grants = LocalGrants::from_headers(headers);
+            assert_eq!(grants.select_at(&request, NOW + 2).is_some_and(|header| grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF)), expected);
+        }
     }
 
     mod load {

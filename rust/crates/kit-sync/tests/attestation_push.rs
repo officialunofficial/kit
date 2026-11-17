@@ -96,8 +96,9 @@ fn simultaneous_attesters_both_survive_cas() {
     let (a, _) = local(&tx, "example.com/a/v1");
     let (b, _) = local(&tx, "example.com/b/v1");
     let barrier = std::sync::Barrier::new(2);
+    let source = TransportSource::new(&tx);
     std::thread::scope(|scope| {
-        let source = &TransportSource::new(&tx);
+        let source = &source;
         let barrier = &barrier;
         let a = scope.spawn(|| {
             let gated = Gated { source, barrier, first: std::cell::Cell::new(true), limits: kit_core::protocol::UploadLimits::default() };
