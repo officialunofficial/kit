@@ -1420,6 +1420,8 @@ fn check_zstd_claim(frame: &[u8], claim: usize) -> Result<(), PackError> {
 
 /// Without `pack-zstd` no frame can be decoded, so no buffer is reserved for one.
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(any(), mutants::skip)]
 fn check_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
     Err(PackError::CompressionUnavailable)
 }
@@ -1523,6 +1525,8 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
 }
 
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(any(), mutants::skip)]
 fn zstd_decompress_into(
     _frame: &[u8],
     _capacity: usize,
