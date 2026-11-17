@@ -13,6 +13,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SyncEvent {
+    /// A nonfatal attestation publication diagnostic.
+    AttestationWarning { message: String },
     /// Bytes accepted by the download sink in this attempt. A retry resets bytes.
     DownloadProgress {
         bytes: u64,

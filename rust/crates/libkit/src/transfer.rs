@@ -43,6 +43,8 @@ pub const DEFAULT_REBASELINE_DEPTH: usize = 64;
 /// What a successful push published.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pushed {
+    /// Envelopes published.
+    pub attestations_pushed: usize,
     /// Branches pushed.
     pub refs: usize,
     /// Advances published in total. A push makes one advance for each branch
@@ -53,6 +55,10 @@ pub struct Pushed {
 /// The settings of a push that do not come from the repository.
 #[derive(Clone, Copy)]
 pub struct PushSettings<'a> {
+    /// Publish locally authored envelopes.
+    pub attestations: bool,
+    /// Resolved endpoint for the push cache key.
+    pub remote_url: &'a str,
     /// The durability schedule of the object store.
     pub sync_policy: SyncPolicy,
     /// The chain depth at which the push re-baselines the pack chain. Zero
@@ -76,6 +82,8 @@ impl std::fmt::Debug for PushSettings<'_> {
 impl Default for PushSettings<'_> {
     fn default() -> Self {
         Self {
+            attestations: false,
+            remote_url: "",
             sync_policy: SyncPolicy::Batch,
             rebaseline_threshold: DEFAULT_REBASELINE_DEPTH,
             authority: None,
@@ -86,6 +94,8 @@ impl Default for PushSettings<'_> {
 impl<'a> PushSettings<'a> {
     fn options(&self, observer: &'a dyn Observer<SyncEvent>) -> PushOptions<'a> {
         let mut options = PushOptions::default();
+        options.attestations = self.attestations;
+        options.remote_url = self.remote_url.into();
         options.sync_policy = self.sync_policy;
         options.rebaseline_threshold = self.rebaseline_threshold;
         options.control.authority = self.authority;
@@ -137,6 +147,7 @@ pub fn push_all_with_source(
     options.target = PushTarget::All { force };
     let report = kit_sync::push(cwd, source, &options)?;
     Ok(Pushed {
+        attestations_pushed: report.attestations_pushed,
         refs: report.refs,
         steps: report.steps,
     })

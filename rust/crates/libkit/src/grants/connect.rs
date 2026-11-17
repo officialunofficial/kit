@@ -338,6 +338,16 @@ impl std::fmt::Debug for ConnectAuthority {
 }
 
 impl StepAuthority for ConnectAuthority {
+    fn can_compact_attestations(&self) -> bool {
+        let Some(repository) = self.transport.repository() else { return true; };
+        if repository.namespace().is_none_or(|ns| ns.to_string() == format!("ed25519-{}", self.signer_key)) {
+            return true;
+        }
+        let refs = [GrantRef::new(kit_core::refs::ATTESTMAP_REF, GrantCondition::Match)];
+        let request = GrantRequest::new(self.transport.origin(), &repository.to_string(), &self.signer_key, GrantOperation::Write { refs: &refs });
+        self.grants.select(&request).is_some_and(|header| self.grants.header_forces(&header, kit_core::refs::ATTESTMAP_REF))
+    }
+
     fn authorize(
         &self,
         branch: &str,

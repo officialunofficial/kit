@@ -8,6 +8,7 @@ use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
 use std::path::Path;
+mod attestations;
 mod delete;
 mod deltas;
 mod error;
@@ -127,6 +128,10 @@ pub enum PushTarget {
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PushOptions<'a> {
+    /// Publish locally authored attestations after code refs succeed.
+    pub attestations: bool,
+    /// Resolved endpoint, included in the disposable push cache key.
+    pub remote_url: String,
     /// Branch mapping or mirror selection.
     pub target: PushTarget,
     /// Local tracking-ref namespace.
@@ -164,6 +169,8 @@ impl PushOptions<'_> {
 impl Default for PushOptions<'_> {
     fn default() -> Self {
         Self {
+            attestations: false,
+            remote_url: String::new(),
             target: PushTarget::All { force: false },
             remote_name: "default",
             sync_policy: kit_core::store::SyncPolicy::Batch,
@@ -178,6 +185,10 @@ impl Default for PushOptions<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PushReport {
+    /// Published envelope count.
+    pub attestations_pushed: usize,
+    /// Nonfatal attestation diagnostics.
+    pub attestation_warnings: Vec<String>,
     /// Completed branches.
     pub refs: usize,
     /// Published advances across completed branches. A branch push whose
@@ -214,7 +225,14 @@ pub fn push(
     let mut store = ObjectStore::open(&layout)?;
     store.set_sync_policy(options.sync_policy);
     let tx = PushContext::new(source, options.control.observer, &store);
-    push_refs(&layout, &store, &tx, options)
+    let mut report = push_refs(&layout, &store, &tx, options)?;
+    if options.attestations {
+        attestations::run(&layout, &store, &tx, options, &mut report);
+        for message in &report.attestation_warnings {
+            tx.observer.event(&SyncEvent::AttestationWarning { message: message.clone() });
+        }
+    }
+    Ok(report)
 }
 #[allow(clippy::too_many_lines)] // one arm per push target
 fn push_refs(
@@ -228,7 +246,9 @@ fn push_refs(
             let refs_list = refs::list_refs_with(layout, crate::worktree::fanout_read_batch)?;
             let mut tracking = refs::RemoteRefBatch::new(layout, options.remote_name)?;
             let mut report = PushReport {
-                refs: 0,
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
+        refs: 0,
                 steps: 0,
                 tip: None,
                 tags: Vec::new(),
@@ -298,7 +318,9 @@ fn push_refs(
             if head == Some(tip) {
                 refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
                 return Ok(PushReport {
-                    refs: 1,
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
+                refs: 1,
                     steps: 0,
                     tip: Some(tip),
                     tags: Vec::new(),
@@ -345,6 +367,8 @@ fn push_refs(
                 },
             )?;
             Ok(PushReport {
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
                 refs: 1,
                 steps,
                 tip: Some(tip),
@@ -356,7 +380,9 @@ fn push_refs(
             push_tag_report(layout, store, tx, options, selection, *force)
         }
         PushTarget::Delete(target) => Ok(PushReport {
-            refs: 0,
+                attestations_pushed: 0,
+                attestation_warnings: Vec::new(),
+        refs: 0,
             steps: 0,
             tip: None,
             tags: Vec::new(),
@@ -383,6 +409,8 @@ fn push_tag_report(
         options.pack_payload_cap,
     )?;
     Ok(PushReport {
+        attestations_pushed: 0,
+        attestation_warnings: Vec::new(),
         refs: 0,
         steps: 0,
         tip: None,

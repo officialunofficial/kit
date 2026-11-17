@@ -90,6 +90,9 @@ struct PushOpts {
     /// non-fast-forward (CAS) rejection.
     #[arg(long, value_enum, default_value = "default")]
     format: PushFormat,
+    /// Publish locally authored attestations permanently.
+    #[arg(long)]
+    attestations: bool,
     /// Suppress transfer progress output on stderr.
     #[arg(short = 'q', long)]
     quiet: bool,
@@ -223,6 +226,7 @@ fn push_tags(
                     selection,
                     opts.force || opts.force_with_lease,
                     remote.authority.as_deref(),
+                    (opts.attestations || cfg.push_attestations == "true", &resolved.endpoint),
                     progress.terminal(),
                 )
             })
@@ -508,6 +512,7 @@ fn push_current(
                     &remote_branch,
                     lease,
                     remote.authority.as_deref(),
+                    (opts.attestations || cfg.push_attestations == "true", &resolved.endpoint),
                     progress.terminal(),
                 )
                 .map(|(tip, steps)| (old, tip, steps))
@@ -681,6 +686,7 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                     Some(&resolved.name),
                     opts.force,
                     remote.authority.as_deref(),
+                    (opts.attestations || cfg.push_attestations == "true", &resolved.endpoint),
                     progress.terminal(),
                 )
             })
