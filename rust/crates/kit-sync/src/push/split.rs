@@ -62,7 +62,9 @@ pub const MAX_CHAIN_COMMITS: usize = 1_000_000;
 /// anything is uploaded.
 pub trait StepAuthority: Send + Sync {
     /// Whether the selected attestmap grant allows compaction (force).
-    fn can_compact_attestations(&self) -> bool { false }
+    fn can_compact_attestations(&self) -> bool {
+        false
+    }
 
     /// Refuse the push unless the caller may perform the first advance under
     /// `first` and, when `later_steps` is set, every following advance, each

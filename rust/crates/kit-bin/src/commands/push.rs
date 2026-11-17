@@ -226,7 +226,10 @@ fn push_tags(
                     selection,
                     opts.force || opts.force_with_lease,
                     remote.authority.as_deref(),
-                    (opts.attestations || cfg.merged.push_attestations == "true", &resolved.endpoint),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
             })
@@ -512,7 +515,10 @@ fn push_current(
                     &remote_branch,
                     lease,
                     remote.authority.as_deref(),
-                    (opts.attestations || cfg.merged.push_attestations == "true", &resolved.endpoint),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
                 .map(|(tip, steps)| (old, tip, steps))
@@ -686,7 +692,10 @@ fn push_all(layout: &RepoLayout, cfg: &config::LayeredConfig, opts: &PushOpts) -
                     Some(&resolved.name),
                     opts.force,
                     remote.authority.as_deref(),
-                    (opts.attestations || cfg.merged.push_attestations == "true", &resolved.endpoint),
+                    (
+                        opts.attestations || cfg.merged.push_attestations == "true",
+                        &resolved.endpoint,
+                    ),
                     progress.terminal(),
                 )
             })

@@ -229,7 +229,9 @@ pub fn push(
     if options.attestations {
         attestations::run(&layout, &store, &tx, options, &mut report);
         for message in &report.attestation_warnings {
-            tx.observer.event(&SyncEvent::AttestationWarning { message: message.clone() });
+            tx.observer.event(&SyncEvent::AttestationWarning {
+                message: message.clone(),
+            });
         }
     }
     Ok(report)
@@ -248,7 +250,7 @@ fn push_refs(
             let mut report = PushReport {
                 attestations_pushed: 0,
                 attestation_warnings: Vec::new(),
-        refs: 0,
+                refs: 0,
                 steps: 0,
                 tip: None,
                 tags: Vec::new(),
@@ -318,9 +320,9 @@ fn push_refs(
             if head == Some(tip) {
                 refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
                 return Ok(PushReport {
-                attestations_pushed: 0,
-                attestation_warnings: Vec::new(),
-                refs: 1,
+                    attestations_pushed: 0,
+                    attestation_warnings: Vec::new(),
+                    refs: 1,
                     steps: 0,
                     tip: Some(tip),
                     tags: Vec::new(),
@@ -380,9 +382,9 @@ fn push_refs(
             push_tag_report(layout, store, tx, options, selection, *force)
         }
         PushTarget::Delete(target) => Ok(PushReport {
-                attestations_pushed: 0,
-                attestation_warnings: Vec::new(),
-        refs: 0,
+            attestations_pushed: 0,
+            attestation_warnings: Vec::new(),
+            refs: 0,
             steps: 0,
             tip: None,
             tags: Vec::new(),

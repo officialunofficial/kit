@@ -126,7 +126,9 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
-    if matches!(key, "fetch.attestations" | "push.attestations") && !matches!(value, "true" | "false") {
+    if matches!(key, "fetch.attestations" | "push.attestations")
+        && !matches!(value, "true" | "false")
+    {
         return emit_err(
             "fetch.attestations must be true or false",
             exit::CONFIG_ERROR,

@@ -367,7 +367,9 @@ impl Observer<SyncEvent> for PushObserver<'_> {
         {
             eprintln!("{warning}");
         }
-        if let SyncEvent::AttestationWarning { message } = event { eprintln!("warning: {message}"); }
+        if let SyncEvent::AttestationWarning { message } = event {
+            eprintln!("warning: {message}");
+        }
         self.terminal.event(event);
     }
     fn cancelled(&self) -> bool {

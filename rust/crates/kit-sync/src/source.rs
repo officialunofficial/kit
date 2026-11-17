@@ -238,7 +238,9 @@ impl<'a> TransportSource<'a> {
 
 impl RemoteSource for TransportSource<'_> {
     fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
-        self.transport.pack_exists(key, Some(hint)).map_err(Into::into)
+        self.transport
+            .pack_exists(key, Some(hint))
+            .map_err(Into::into)
     }
     fn supports_attestations(&self) -> bool {
         self.transport.supports_attestations()
