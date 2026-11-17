@@ -986,16 +986,19 @@ impl IndexDir {
 /// native fan-out crossover check in this module (there are several,
 /// and the tree walker recurses once per directory) shares one
 /// syscall instead of paying it again at every call site/recursion.
-#[cfg(not(target_arch = "wasm32"))]
+/// Always returns at least one worker, including on Wasm.
 fn available_threads() -> usize {
-    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *THREADS
-        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn available_threads() -> usize {
-    1
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *THREADS.get_or_init(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
 }
 
 /// Shared chunk+scoped-thread+join scaffolding behind this module's two
@@ -3934,6 +3937,18 @@ mod tests {
         fs::write(f2_dir.path().join("locked.txt"), b"cached content").unwrap();
         let plain = build_tree(&store2, f2_dir.path()).unwrap();
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
+    }
+
+    #[test]
+    fn available_threads_always_has_a_worker() {
+        assert!(available_threads() > 0);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(
+            available_threads(),
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        );
+        #[cfg(target_arch = "wasm32")]
+        assert_eq!(available_threads(), 1);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
