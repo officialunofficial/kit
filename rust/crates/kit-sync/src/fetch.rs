@@ -437,12 +437,7 @@ pub(crate) fn fetch_objects(
     kit_core::pack::sweep_spool_dir(&store.spool_dir());
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
     let mut report = FetchReport::default();
-    // The tips earlier signed fetches recorded: a history walk stops at them.
-    let mut verified = if options.verify_signatures {
-        crate::anchor::load_all(layout)
-    } else {
-        VerifiedHistory::default()
-    };
+    let mut verified = VerifiedHistory::default();
     let result = fetch_objects_inner(
         store,
         layout,
@@ -492,6 +487,11 @@ fn fetch_objects_inner(
     }
     // A failed full attempt must not leave a previous no-op proof usable.
     let _ = std::fs::remove_file(&cursor_path);
+    // A cursor hit checks the tracked tips' anchors itself. Load the full
+    // set only when a history walk may need it, including other remotes.
+    if require_signed {
+        *verified = crate::anchor::load_all(layout);
+    }
     let snapshot = crate::fetch_attestations::snapshot(source, options, report);
     let mut remote_refs = source
         .list_branches()
