@@ -731,20 +731,13 @@ impl ObjectStore {
     /// payload's length goes to [`serialize::deserialize`], so every
     /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        let mut bytes = self.read_raw(h)?;
+        let bytes = self.read_raw(h)?;
         let (actual, decoded) = verified_id_and_object(&bytes);
         check_hash(h, &actual)?;
         if let Some(obj) = decoded {
             return Ok(obj);
         }
-        let head = serialize::BLOB_PROLOGUE_LEN;
-        let canonical_blob = bytes.len() >= head
-            && serialize::blob_prologue(bytes.len() - head).is_ok_and(|p| p[..] == bytes[..head]);
-        if canonical_blob {
-            bytes.drain(..head);
-            return Ok(Object::Blob(crate::object::Blob { data: bytes }));
-        }
-        Ok(serialize::deserialize(&bytes)?)
+        Ok(serialize::deserialize_owned(bytes)?)
     }
 
     /// Hash-verifying variant of [`object_type`](Self::object_type): reads

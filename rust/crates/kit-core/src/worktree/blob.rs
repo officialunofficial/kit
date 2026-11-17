@@ -169,8 +169,9 @@ impl LoadedBlob {
     ///   manifest's `total_size`. The read stops at the first chunk that
     ///   takes the running length past `total_size`.
     /// - [`WorktreeError::ContentTooLarge`] if the manifest's `total_size`
-    ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), before any
-    ///   chunk is read.
+    ///   is above [`MAX_FILE_BYTES`](super::MAX_FILE_BYTES), or the output
+    ///   buffer of `total_size` bytes cannot be reserved, before any chunk
+    ///   is read.
     pub fn into_content<S: crate::store::ObjectSource + ?Sized>(
         self,
         store: &S,

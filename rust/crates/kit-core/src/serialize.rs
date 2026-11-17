@@ -108,6 +108,26 @@ pub fn blob_prologue(len: usize) -> Result<[u8; BLOB_PROLOGUE_LEN], KitError> {
     Ok(out)
 }
 
+/// [`deserialize`] that takes ownership of `data`, so a canonical blob
+/// keeps its buffer: the prologue is drained in place and the payload is
+/// never copied. Every other input, including any blob whose prologue is
+/// not canonical, goes through [`deserialize`], so results and errors match
+/// it exactly.
+///
+/// # Errors
+///
+/// As [`deserialize`].
+pub fn deserialize_owned(mut data: Vec<u8>) -> Result<Object, KitError> {
+    let canonical_blob = data.len() >= BLOB_PROLOGUE_LEN
+        && blob_prologue(data.len() - BLOB_PROLOGUE_LEN)
+            .is_ok_and(|p| p[..] == data[..BLOB_PROLOGUE_LEN]);
+    if canonical_blob {
+        data.drain(..BLOB_PROLOGUE_LEN);
+        return Ok(Object::Blob(Blob { data }));
+    }
+    deserialize(&data)
+}
+
 /// Deserialize bytes into an owned [`Object`]. Validates the prologue
 /// and every per-type bound; rejects trailing data.
 pub fn deserialize(data: &[u8]) -> Result<Object, KitError> {
@@ -826,6 +846,46 @@ mod tests {
             via_parts.extend_from_slice(&payload);
             prop_assert_eq!(via_parts, via_serialize);
         }
+
+        /// `deserialize_owned` is `deserialize` with ownership: same object
+        /// or same error on any input, blob-shaped or not.
+        #[test]
+        fn deserialize_owned_matches_deserialize_on_any_bytes(
+            bytes in proptest::collection::vec(any::<u8>(), 0..64)
+        ) {
+            let expected = deserialize(&bytes).map_err(|e| e.to_string());
+            let got = deserialize_owned(bytes).map_err(|e| e.to_string());
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn deserialize_owned_matches_deserialize_on_blobs(
+            payload in proptest::collection::vec(any::<u8>(), 0..2048),
+            flip in any::<Option<(usize, u8)>>(),
+        ) {
+            let mut bytes = serialize(&Object::Blob(Blob { data: payload })).unwrap();
+            if let Some((at, mask)) = flip {
+                let i = at % bytes.len();
+                bytes[i] ^= mask;
+            }
+            let expected = deserialize(&bytes).map_err(|e| e.to_string());
+            let got = deserialize_owned(bytes).map_err(|e| e.to_string());
+            prop_assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn deserialize_owned_keeps_a_canonical_blob_buffer() {
+        let bytes = serialize(&Object::Blob(Blob {
+            data: vec![7; 4096],
+        }))
+        .unwrap();
+        let ptr = bytes.as_ptr();
+        let Object::Blob(blob) = deserialize_owned(bytes).unwrap() else {
+            panic!("not a blob");
+        };
+        assert_eq!(blob.data, vec![7; 4096]);
+        assert_eq!(blob.data.as_ptr(), ptr, "payload was copied");
     }
 
     #[test]
