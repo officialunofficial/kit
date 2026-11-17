@@ -2213,8 +2213,9 @@ pub fn absolute_config_home_one_iteration(input: &[u8]) {
 
 /// A small repository that the revision and history fuzz targets use. It has
 /// a three-commit chain, the branch `main` at the tip and the tag `v1` at
-/// the root. Each commit has a tree with the blob `d/f`. The fixture is built once per process, because creating a store
-/// costs more than the per-iteration budget.
+/// the root. Each commit has a tree with the blob `d/f`. The fixture is built
+/// once per thread, because creating a store costs more than the per-iteration
+/// budget.
 struct RevspecFixture {
     _dir: tempfile::TempDir,
     layout: kit_core::layout::RepoLayout,
@@ -2225,71 +2226,73 @@ struct RevspecFixture {
     blob: kit_core::hash::Hash,
 }
 
-fn revspec_fixture() -> &'static RevspecFixture {
+fn build_revspec_fixture() -> RevspecFixture {
     use kit_core::layout::RepoLayout;
     use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use kit_core::store::ObjectStore;
-    use std::sync::OnceLock;
 
-    static FIXTURE: OnceLock<RevspecFixture> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("create the fixture directory");
-        let layout = RepoLayout::single(dir.path());
-        let store = ObjectStore::init(&layout).expect("init the fixture store");
-        kit_core::refs::init(&layout).expect("init the fixture refs");
-        let write = |object: Object| {
-            let bytes =
-                kit_core::serialize::serialize(&object).expect("serialize a fixture object");
-            store.write(&bytes).expect("write a fixture object")
-        };
-        let blob = write(Object::Blob(Blob { data: vec![7] }));
-        let dir_tree = write(Object::Tree(Tree {
-            entries: vec![TreeEntry {
-                name: b"f".to_vec(),
-                mode: EntryMode::Blob,
-                object_hash: blob,
-            }],
-        }));
-        let tree = write(Object::Tree(Tree {
-            entries: vec![TreeEntry {
-                name: b"d".to_vec(),
-                mode: EntryMode::Tree,
-                object_hash: dir_tree,
-            }],
-        }));
-        let mut parents = Vec::new();
-        let mut hashes = Vec::new();
-        for seed in 1u8..=3 {
-            let commit = Commit::new_unannotated(
-                tree,
-                parents.clone(),
-                Identity::ed25519([seed; 32]),
-                [seed; 32],
-                vec![seed],
-                u64::from(seed),
-                [0u8; 64],
-            );
-            let bytes = kit_core::serialize::serialize(&Object::Commit(commit))
-                .expect("serialize a fixture commit");
-            let hash = store.write(&bytes).expect("write a fixture commit");
-            parents = vec![hash];
-            hashes.push(hash);
-        }
-        let (root, tip) = (hashes[0], hashes[2]);
-        kit_core::refs::write_ref(&layout, "main", &tip).expect("write the branch");
-        kit_core::refs::write_tag(&layout, "v1", &root).expect("write the tag");
-        let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
-            .expect("open the fixture repository");
-        RevspecFixture {
-            _dir: dir,
-            layout,
-            store,
-            repo,
-            tip,
-            root,
-            blob,
-        }
-    })
+    let dir = tempfile::tempdir().expect("create the fixture directory");
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).expect("init the fixture store");
+    kit_core::refs::init(&layout).expect("init the fixture refs");
+    let write = |object: Object| {
+        let bytes = kit_core::serialize::serialize(&object).expect("serialize a fixture object");
+        store.write(&bytes).expect("write a fixture object")
+    };
+    let blob = write(Object::Blob(Blob { data: vec![7] }));
+    let dir_tree = write(Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"f".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: blob,
+        }],
+    }));
+    let tree = write(Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"d".to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: dir_tree,
+        }],
+    }));
+    let mut parents = Vec::new();
+    let mut hashes = Vec::new();
+    for seed in 1u8..=3 {
+        let commit = Commit::new_unannotated(
+            tree,
+            parents.clone(),
+            Identity::ed25519([seed; 32]),
+            [seed; 32],
+            vec![seed],
+            u64::from(seed),
+            [0u8; 64],
+        );
+        let bytes = kit_core::serialize::serialize(&Object::Commit(commit))
+            .expect("serialize a fixture commit");
+        let hash = store.write(&bytes).expect("write a fixture commit");
+        parents = vec![hash];
+        hashes.push(hash);
+    }
+    let (root, tip) = (hashes[0], hashes[2]);
+    kit_core::refs::write_ref(&layout, "main", &tip).expect("write the branch");
+    kit_core::refs::write_tag(&layout, "v1", &root).expect("write the tag");
+    let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
+        .expect("open the fixture repository");
+    RevspecFixture {
+        _dir: dir,
+        layout,
+        store,
+        repo,
+        tip,
+        root,
+        blob,
+    }
+}
+
+fn with_revspec_fixture<R>(use_fixture: impl FnOnce(&RevspecFixture) -> R) -> R {
+    thread_local! {
+        static FIXTURE: RevspecFixture = build_revspec_fixture();
+    }
+    FIXTURE.with(use_fixture)
 }
 
 /// Revision specs (`revspec_parse`): `resolve_revision` and `resolve_object`
@@ -2302,26 +2305,27 @@ pub fn revspec_parse_one_iteration(input: &[u8]) {
     let Ok(text) = core::str::from_utf8(input) else {
         return;
     };
-    let fixture = revspec_fixture();
-    if let Ok(hash) = resolve_revision(&fixture.store, &fixture.layout, text) {
-        assert!(
-            fixture.store.contains(&hash),
-            "a resolved revision must name a stored object"
-        );
-    }
-    if let Ok(hash) = resolve_object(&fixture.store, &fixture.layout, text) {
-        assert!(
-            fixture.store.contains(&hash),
-            "a resolved object must be stored"
-        );
-    }
-    let resolve = |spec: &str| resolve_revision(&fixture.store, &fixture.layout, spec).ok();
-    assert_eq!(resolve("HEAD"), Some(fixture.tip));
-    assert_eq!(resolve("main~2"), Some(fixture.root));
-    assert_eq!(resolve("v1^0"), Some(fixture.root));
-    let object = |spec: &str| resolve_object(&fixture.store, &fixture.layout, spec).ok();
-    assert_eq!(object("main:d/f"), Some(fixture.blob));
-    assert_eq!(object("v1:d/../d/f"), None);
+    with_revspec_fixture(|fixture| {
+        if let Ok(hash) = resolve_revision(&fixture.store, &fixture.layout, text) {
+            assert!(
+                fixture.store.contains(&hash),
+                "a resolved revision must name a stored object"
+            );
+        }
+        if let Ok(hash) = resolve_object(&fixture.store, &fixture.layout, text) {
+            assert!(
+                fixture.store.contains(&hash),
+                "a resolved object must be stored"
+            );
+        }
+        let resolve = |spec: &str| resolve_revision(&fixture.store, &fixture.layout, spec).ok();
+        assert_eq!(resolve("HEAD"), Some(fixture.tip));
+        assert_eq!(resolve("main~2"), Some(fixture.root));
+        assert_eq!(resolve("v1^0"), Some(fixture.root));
+        let object = |spec: &str| resolve_object(&fixture.store, &fixture.layout, spec).ok();
+        assert_eq!(object("main:d/f"), Some(fixture.blob));
+        assert_eq!(object("v1:d/../d/f"), None);
+    });
 }
 
 /// History selections and dates (`log_parse`): `log::date::parse` never
@@ -2346,92 +2350,96 @@ pub fn log_parse_one_iteration(input: &[u8]) {
         assert_eq!(Ok(*seconds), digits.parse::<u64>(), "`@<n>` reads as n");
     }
 
-    let fixture = revspec_fixture();
-    let query = Query {
-        start: Some(text.to_owned()),
-        ..Query::default()
-    };
-    if let Ok(Some(entries)) = log::history(&fixture.repo, &query) {
-        let mut seen = std::collections::HashSet::new();
-        for (index, entry) in entries.iter().enumerate() {
-            assert!(seen.insert(entry.hash), "a commit appears once");
-            assert!(fixture.store.contains(&entry.hash), "a commit is stored");
-            for parent in &entry.commit.parents {
-                let parent_index = entries.iter().position(|e| &e.hash == parent);
-                assert!(
-                    parent_index.is_none_or(|i| i > index),
-                    "a parent never comes before a child"
-                );
+    with_revspec_fixture(|fixture| {
+        let query = Query {
+            start: Some(text.to_owned()),
+            ..Query::default()
+        };
+        if let Ok(Some(entries)) = log::history(&fixture.repo, &query) {
+            let mut seen = std::collections::HashSet::new();
+            for (index, entry) in entries.iter().enumerate() {
+                assert!(seen.insert(entry.hash), "a commit appears once");
+                assert!(fixture.store.contains(&entry.hash), "a commit is stored");
+                for parent in &entry.commit.parents {
+                    let parent_index = entries.iter().position(|e| &e.hash == parent);
+                    assert!(
+                        parent_index.is_none_or(|i| i > index),
+                        "a parent never comes before a child"
+                    );
+                }
             }
         }
-    }
-    let default = log::history(&fixture.repo, &Query::default())
-        .expect("the default walk succeeds")
-        .expect("the fixture has a HEAD");
-    assert_eq!(default.first().map(|e| e.hash), Some(fixture.tip));
-    assert_eq!(default.last().map(|e| e.hash), Some(fixture.root));
+        let default = log::history(&fixture.repo, &Query::default())
+            .expect("the default walk succeeds")
+            .expect("the fixture has a HEAD");
+        assert_eq!(default.first().map(|e| e.hash), Some(fixture.tip));
+        assert_eq!(default.last().map(|e| e.hash), Some(fixture.root));
+    });
 }
 
 /// A repository for the diff fuzz target. It has two commits: `a.txt` holds
 /// two lines at `HEAD~1` and a changed second line at `HEAD`, and `HEAD` adds
 /// `b.txt`. The worktree holds the files of `HEAD`.
-fn diff_fixture() -> &'static (tempfile::TempDir, libkit::Repo) {
+fn build_diff_fixture() -> (tempfile::TempDir, libkit::Repo) {
     use kit_core::layout::RepoLayout;
     use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
     use kit_core::store::ObjectStore;
-    use std::sync::OnceLock;
 
-    static FIXTURE: OnceLock<(tempfile::TempDir, libkit::Repo)> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("create the fixture directory");
-        let layout = RepoLayout::single(dir.path());
-        let store = ObjectStore::init(&layout).expect("init the fixture store");
-        kit_core::refs::init(&layout).expect("init the fixture refs");
-        let write = |object: &Object| {
-            store
-                .write(&kit_core::serialize::serialize(object).expect("serialize a fixture object"))
-                .expect("write a fixture object")
-        };
-        let blob = |text: &str| {
-            write(&Object::Blob(Blob {
-                data: text.as_bytes().to_vec(),
-            }))
-        };
-        let tree = |files: &[(&str, kit_core::hash::Hash)]| {
-            write(&Object::Tree(Tree {
-                entries: files
-                    .iter()
-                    .map(|(name, object_hash)| TreeEntry {
-                        name: name.as_bytes().to_vec(),
-                        mode: EntryMode::Blob,
-                        object_hash: *object_hash,
-                    })
-                    .collect(),
-            }))
-        };
-        let commit = |tree, parents: Vec<kit_core::hash::Hash>, time| {
-            write(&Object::Commit(Commit::new_unannotated(
-                tree,
-                parents,
-                Identity::ed25519([1; 32]),
-                [1; 32],
-                b"m".to_vec(),
-                time,
-                [0u8; 64],
-            )))
-        };
-        let first_a = blob("one\ntwo\n");
-        let second_a = blob("one\nthree\n");
-        let b = blob("b\n");
-        let first = commit(tree(&[("a.txt", first_a)]), vec![], 1);
-        let second = commit(tree(&[("a.txt", second_a), ("b.txt", b)]), vec![first], 2);
-        kit_core::refs::write_ref(&layout, "main", &second).expect("write the branch");
-        std::fs::write(dir.path().join("a.txt"), "one\nthree\n").expect("write a.txt");
-        std::fs::write(dir.path().join("b.txt"), "b\n").expect("write b.txt");
-        let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
-            .expect("open the fixture repository");
-        (dir, repo)
-    })
+    let dir = tempfile::tempdir().expect("create the fixture directory");
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).expect("init the fixture store");
+    kit_core::refs::init(&layout).expect("init the fixture refs");
+    let write = |object: &Object| {
+        store
+            .write(&kit_core::serialize::serialize(object).expect("serialize a fixture object"))
+            .expect("write a fixture object")
+    };
+    let blob = |text: &str| {
+        write(&Object::Blob(Blob {
+            data: text.as_bytes().to_vec(),
+        }))
+    };
+    let tree = |files: &[(&str, kit_core::hash::Hash)]| {
+        write(&Object::Tree(Tree {
+            entries: files
+                .iter()
+                .map(|(name, object_hash)| TreeEntry {
+                    name: name.as_bytes().to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: *object_hash,
+                })
+                .collect(),
+        }))
+    };
+    let commit = |tree, parents: Vec<kit_core::hash::Hash>, time| {
+        write(&Object::Commit(Commit::new_unannotated(
+            tree,
+            parents,
+            Identity::ed25519([1; 32]),
+            [1; 32],
+            b"m".to_vec(),
+            time,
+            [0u8; 64],
+        )))
+    };
+    let first_a = blob("one\ntwo\n");
+    let second_a = blob("one\nthree\n");
+    let b = blob("b\n");
+    let first = commit(tree(&[("a.txt", first_a)]), vec![], 1);
+    let second = commit(tree(&[("a.txt", second_a), ("b.txt", b)]), vec![first], 2);
+    kit_core::refs::write_ref(&layout, "main", &second).expect("write the branch");
+    std::fs::write(dir.path().join("a.txt"), "one\nthree\n").expect("write a.txt");
+    std::fs::write(dir.path().join("b.txt"), "b\n").expect("write b.txt");
+    let repo = libkit::Repo::open(dir.path(), &libkit::Environment::new(dir.path()))
+        .expect("open the fixture repository");
+    (dir, repo)
+}
+
+fn with_diff_fixture<R>(use_fixture: impl FnOnce(&(tempfile::TempDir, libkit::Repo)) -> R) -> R {
+    thread_local! {
+        static FIXTURE: (tempfile::TempDir, libkit::Repo) = build_diff_fixture();
+    }
+    FIXTURE.with(use_fixture)
 }
 
 /// Diff arguments (`diff_args`): `diff::compute` never panics on any
@@ -2450,34 +2458,36 @@ pub fn diff_args_one_iteration(input: &[u8]) {
     };
     // At most four arguments, one per line. The bound keeps an iteration cheap.
     let args: Vec<String> = text.lines().take(4).map(str::to_owned).collect();
-    let repo = &diff_fixture().1;
-    let request = Request {
-        staged: flags & 1 != 0,
-        merge_base: flags & 2 != 0,
-        renames: flags & 4 != 0,
-        args: &args,
-    };
-    if let Ok(result) = diff::compute(repo, &request) {
-        for entry in result.entries() {
-            assert!(!entry.path.is_empty(), "an entry has a path");
-            let _ = result.patch_body(entry, diff::DEFAULT_CONTEXT_LINES, Default::default());
+    with_diff_fixture(|fixture| {
+        let repo = &fixture.1;
+        let request = Request {
+            staged: flags & 1 != 0,
+            merge_base: flags & 2 != 0,
+            renames: flags & 4 != 0,
+            args: &args,
+        };
+        if let Ok(result) = diff::compute(repo, &request) {
+            for entry in result.entries() {
+                assert!(!entry.path.is_empty(), "an entry has a path");
+                let _ = result.patch_body(entry, diff::DEFAULT_CONTEXT_LINES, Default::default());
+            }
+            let _ = result.stats();
         }
-        let _ = result.stats();
-    }
 
-    let pinned = [String::from("HEAD~1"), String::from("HEAD")];
-    let result = diff::compute(
-        repo,
-        &Request {
-            staged: false,
-            merge_base: false,
-            renames: true,
-            args: &pinned,
-        },
-    )
-    .expect("the pinned diff succeeds");
-    let paths: Vec<&str> = result.entries().iter().map(|e| e.path.as_str()).collect();
-    assert_eq!(paths, ["a.txt", "b.txt"]);
+        let pinned = [String::from("HEAD~1"), String::from("HEAD")];
+        let result = diff::compute(
+            repo,
+            &Request {
+                staged: false,
+                merge_base: false,
+                renames: true,
+                args: &pinned,
+            },
+        )
+        .expect("the pinned diff succeeds");
+        let paths: Vec<&str> = result.entries().iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+    });
 }
 
 /// Blame ranges and revisions (`blame_line_range`): `blame::line_range::parse`
@@ -2524,51 +2534,53 @@ pub fn blame_line_range_one_iteration(input: &[u8]) {
         }
     }
 
-    let repo = &diff_fixture().1;
-    let request = Request {
-        file: "a.txt",
-        revision,
-        reverse: flags & 1 != 0,
-        ignore_whitespace: flags & 2 != 0,
-        moves: Default::default(),
-        copies: Default::default(),
-        ignore_revs: &skipped,
-        ignore_revs_files: &[],
-        ignore_rev_precise: flags & 4 != 0,
-        first_parent: flags & 8 != 0,
-        lines,
-    };
-    if let Ok(result) = blame::blame(repo, &request) {
-        let numbers: Vec<usize> = result.lines.iter().map(|l| l.line_num).collect();
-        assert!(
-            numbers.windows(2).all(|w| w[1] == w[0] + 1),
-            "line numbers are consecutive"
-        );
-        assert!(
-            numbers.first().is_none_or(|&n| n >= 1),
-            "numbers start at 1"
-        );
-    }
-
-    let pinned = blame::blame(
-        repo,
-        &Request {
+    with_diff_fixture(|fixture| {
+        let repo = &fixture.1;
+        let request = Request {
             file: "a.txt",
-            revision: None,
-            reverse: false,
-            ignore_whitespace: false,
+            revision,
+            reverse: flags & 1 != 0,
+            ignore_whitespace: flags & 2 != 0,
             moves: Default::default(),
             copies: Default::default(),
-            ignore_revs: &[],
+            ignore_revs: &skipped,
             ignore_revs_files: &[],
-            ignore_rev_precise: false,
-            first_parent: false,
-            lines: Some("2"),
-        },
-    )
-    .expect("the pinned blame succeeds");
-    assert_eq!(pinned.lines.len(), 1);
-    assert_eq!(pinned.lines[0].line_num, 2);
+            ignore_rev_precise: flags & 4 != 0,
+            first_parent: flags & 8 != 0,
+            lines,
+        };
+        if let Ok(result) = blame::blame(repo, &request) {
+            let numbers: Vec<usize> = result.lines.iter().map(|l| l.line_num).collect();
+            assert!(
+                numbers.windows(2).all(|w| w[1] == w[0] + 1),
+                "line numbers are consecutive"
+            );
+            assert!(
+                numbers.first().is_none_or(|&n| n >= 1),
+                "numbers start at 1"
+            );
+        }
+
+        let pinned = blame::blame(
+            repo,
+            &Request {
+                file: "a.txt",
+                revision: None,
+                reverse: false,
+                ignore_whitespace: false,
+                moves: Default::default(),
+                copies: Default::default(),
+                ignore_revs: &[],
+                ignore_revs_files: &[],
+                ignore_rev_precise: false,
+                first_parent: false,
+                lines: Some("2"),
+            },
+        )
+        .expect("the pinned blame succeeds");
+        assert_eq!(pinned.lines.len(), 1);
+        assert_eq!(pinned.lines[0].line_num, 2);
+    });
 }
 
 /// Branch name patterns (`branch_glob`): `branch::glob_match` never panics on
@@ -3954,6 +3966,21 @@ mod tests {
             b"\xff\xfe",
         ] {
             run_one(case, absolute_config_home_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn cached_repositories_are_removed_when_the_thread_ends() {
+        let paths = std::thread::spawn(|| {
+            [
+                with_revspec_fixture(|fixture| fixture.layout.worktree_root().to_path_buf()),
+                with_diff_fixture(|fixture| fixture.0.path().to_path_buf()),
+            ]
+        })
+        .join()
+        .unwrap();
+        for path in paths {
+            assert!(!path.exists(), "cached fixture left at {}", path.display());
         }
     }
 

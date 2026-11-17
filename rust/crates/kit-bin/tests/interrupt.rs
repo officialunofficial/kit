@@ -12,7 +12,7 @@ mod common;
 
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,7 @@ fn spawn(repo: &Repo, args: &[&str], extra_env: &[(&str, &str)]) -> Child {
         .current_dir(repo.path())
         .env("XDG_CONFIG_HOME", repo.xdg())
         .env("HOME", repo.xdg())
+        .env("TMPDIR", repo.xdg())
         .env("EDITOR", "true")
         .env("VISUAL", "true")
         .env("GIT_EDITOR", "true")
@@ -347,7 +348,16 @@ fn sigterm_while_the_editor_runs_ends_kit() {
     repo.commit_file("a.txt", b"one\n", "one");
     repo.commit_file("a.txt", b"two\n", "two");
     let script = repo.xdg().join("hung-editor.sh");
-    fs::write(&script, "#!/bin/sh\nkill -TERM $PPID\nexec sleep 10\n").unwrap();
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+printf '%s' "$1" > "${0%/*}/message-path"
+printf '%s' "$$" > "${0%/*}/editor-pid"
+kill -TERM $PPID
+exec sleep 10
+"#,
+    )
+    .unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -359,7 +369,24 @@ fn sigterm_while_the_editor_runs_ends_kit() {
         &[("GIT_EDITOR", editor)],
     );
     let status = wait_within(&mut child, Duration::from_secs(5), "rebase -i");
+    let editor_pid: u32 = fs::read_to_string(repo.xdg().join("editor-pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        Command::new("kill")
+            .arg(editor_pid.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
     assert_eq!(status.signal(), Some(SIGTERM), "{status:?}");
+    let message = PathBuf::from(fs::read_to_string(repo.xdg().join("message-path")).unwrap());
+    assert!(
+        message.starts_with(repo.xdg()),
+        "unowned editor scratch: {}",
+        message.display()
+    );
     assert_eq!(common::in_progress(&repo.kit_dir()), None);
     check_invariants(repo.path(), "after SIGTERM in the editor").unwrap();
 }

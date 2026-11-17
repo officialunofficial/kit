@@ -45,8 +45,8 @@ jobs:
         working-directory: rust
         env:
           KIT_TEST_STRICT: "1"
-        run: cargo nextest run --locked --workspace --all-features --no-fail-fast --profile ci
+        run: ../scripts/with-test-tmpdir.sh cargo nextest run --locked --workspace --all-features --no-fail-fast --profile ci
       # nextest does not run doctests.
       - name: Doctests
         working-directory: rust
-        run: cargo test --locked --doc --workspace --no-fail-fast
+        run: ../scripts/with-test-tmpdir.sh cargo test --locked --doc --workspace --no-fail-fast

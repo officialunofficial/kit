@@ -731,11 +731,11 @@ fn remote_with_a_delta_across_packs() -> Remote {
 
 /// Kill a fetch in its `die_at`-th download, then gc away what it wrote, then
 /// fetch again. Returns the second fetch's report and how often it healed.
-fn heal_after_gc(remote: &Remote, die_at: usize) -> (FetchReport, usize, RepoLayout) {
+fn heal_after_gc(
+    remote: &Remote,
+    die_at: usize,
+) -> (FetchReport, usize, RepoLayout, tempfile::TempDir) {
     let (dir, target, layout) = fresh_target();
-    // Keep the directory for the rest of the process; the caller's layout
-    // points into it.
-    std::mem::forget(dir);
     let dying = HookSource::new(remote, die_at, Action::Panic);
     let died = catch_unwind(AssertUnwindSafe(|| {
         run_fetch(&target, &dying, &NoopObserver)
@@ -747,14 +747,23 @@ fn heal_after_gc(remote: &Remote, die_at: usize) -> (FetchReport, usize, RepoLay
     let probe = Probe::default();
     let report = run_fetch(&target, &remote.source(), &probe).unwrap();
     let stale = probe.stale.load(Ordering::SeqCst);
-    (report, stale, layout)
+    (report, stale, layout, dir)
+}
+
+#[test]
+fn healed_fetch_fixture_is_removed_when_dropped() {
+    let remote = remote_with_a_delta_across_packs();
+    let healed = heal_after_gc(&remote, 3);
+    let path = healed.2.worktree_root().to_path_buf();
+    drop(healed);
+    assert!(!path.exists(), "healed fixture left at {}", path.display());
 }
 
 #[test]
 fn a_fetch_after_gc_pruned_a_killed_fetchs_objects_heals() {
     let remote = remote_with_a_delta_across_packs();
     // The first two packs are recorded and nothing references their objects.
-    let (report, stale, layout) = heal_after_gc(&remote, 3);
+    let (report, stale, layout, _dir) = heal_after_gc(&remote, 3);
 
     assert_eq!(stale, 1, "the fetch heals once");
     assert_eq!(report.packs_downloaded, 3);
@@ -768,7 +777,7 @@ fn a_heal_reports_only_the_attempt_that_published() {
     let remote = remote_with_a_delta_across_packs();
     // Only the first pack is recorded. The retry's first attempt skips it,
     // applies the second pack, and fails on the third pack's delta.
-    let (report, stale, layout) = heal_after_gc(&remote, 2);
+    let (report, stale, layout, _dir) = heal_after_gc(&remote, 2);
 
     assert_eq!(stale, 1);
     assert_eq!(report.packs_downloaded, 3);

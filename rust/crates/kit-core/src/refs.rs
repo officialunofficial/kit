@@ -2061,12 +2061,16 @@ mod tests {
         // adversarial nesting; anything deeper is silently skipped (not an
         // error, not a stack overflow). A directory tree that bypassed the
         // writer is the only way to build one.
-        let (_dir, kit) = fresh_repo();
+        let (dir, kit) = fresh_repo();
         write_ref(&kit, "main", &h("shallow")).unwrap();
         let mut deep = kit.common_dir().join(HEADS_DIR);
         for _ in 0..MAX_REF_WALK_DEPTH + 5 {
             deep.push("d");
         }
+        let cleanup = crate::test_support::DeepRefCleanup::new(
+            deep.join("leaf"),
+            kit.common_dir().join(HEADS_DIR),
+        );
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("leaf"), encode_ref_wire(&h("deep"))).unwrap();
 
@@ -2074,6 +2078,8 @@ mod tests {
         let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"main"), "shallow ref must still be listed");
         assert_eq!(names.len(), 1, "deep entry must be skipped: {names:?}");
+        drop(cleanup);
+        dir.close().unwrap();
     }
 
     /// A local ref stored before names had a segment bound stays listed,

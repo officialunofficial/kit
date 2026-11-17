@@ -670,8 +670,9 @@ mod tests {
         let store = ObjectStore::init(&layout).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
 
+        let batch = store.batch();
         let blob = |seed: usize| -> Hash {
-            store
+            batch
                 .write(
                     &kit_core::serialize::serialize(&Object::Blob(kit_core::object::Blob {
                         data: format!("unsigned blob fixture #{seed}").into_bytes(),
@@ -687,8 +688,9 @@ mod tests {
         let mut stored: Vec<Hash> = Vec::with_capacity(2 * LARGE_BATCH);
         for i in 0..LARGE_BATCH {
             stored.push(blob(i));
-            stored.push(store.write(&signed_commit_bytes(&kp, i)).unwrap());
+            stored.push(batch.write(&signed_commit_bytes(&kp, i)).unwrap());
         }
+        batch.commit().unwrap();
         assert!(stored.len() >= verify_fanout_threshold());
 
         verify_new_object_signatures(&store, &sized(&store, &stored), true)
@@ -782,7 +784,7 @@ mod tests {
     /// A commit over the tree `seed` names, parented on `parents`, signed
     /// with `kp` when `signed`.
     fn history_commit(
-        store: &ObjectStore,
+        store: &impl kit_core::store::ObjectSink,
         kp: &kit_core::sign::KeyPair,
         seed: usize,
         parents: Vec<Hash>,
@@ -802,7 +804,7 @@ mod tests {
             c.signature = kit_core::sign::sign_commit(&c, kp).unwrap().0;
         }
         store
-            .write(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
+            .put(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
             .unwrap()
     }
 
@@ -815,11 +817,13 @@ mod tests {
         let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
         let line = |root_signed: bool, offset: usize| {
-            let root = history_commit(&store, &kp, offset, Vec::new(), root_signed);
+            let batch = store.batch();
+            let root = history_commit(&batch, &kp, offset, Vec::new(), root_signed);
             let mut tip = root;
             for seed in 1..verify_chunk_size() + 8 {
-                tip = history_commit(&store, &kp, offset + seed, vec![tip], true);
+                tip = history_commit(&batch, &kp, offset + seed, vec![tip], true);
             }
+            batch.commit().unwrap();
             (root, tip)
         };
         let (_, clean) = line(true, 0);

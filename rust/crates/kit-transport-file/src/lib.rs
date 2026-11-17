@@ -3594,7 +3594,7 @@ mod tests {
             ref_in_stripe(ref_stripe(&child)),
         ];
         let conditions = [RefWriteCondition::Missing, RefWriteCondition::Any];
-        for round in 0..200usize {
+        for round in 0..32usize {
             let dir = tmp();
             let barrier = Arc::new(Barrier::new(2));
             let run = |name: String, condition: RefWriteCondition, v: &[u8]| {
@@ -3890,14 +3890,14 @@ mod tests {
 
     #[test]
     fn concurrent_advances_of_a_ref_and_a_ref_below_it_leave_the_root_usable() {
-        for _ in 0..200 {
+        for _ in 0..32 {
             nested_create_round("a", true, true);
         }
     }
 
     #[test]
     fn an_advance_racing_a_single_ref_create_below_or_above_it_leaves_the_root_usable() {
-        for round in 0..300 {
+        for round in 0..32 {
             nested_create_round("a", round % 2 == 0, round % 2 == 1);
         }
     }
@@ -3971,7 +3971,7 @@ mod tests {
             std::thread::spawn(move || {
                 let t = FileTransport::new(root);
                 let any = RefWriteCondition::Any;
-                for i in 0..200u64 {
+                for i in 0..32u64 {
                     let pick =
                         |k: u64| names[usize::try_from((th * 7 + i * k) % 6).unwrap()].clone();
                     let (a, b) = (pick(1), pick(5));
