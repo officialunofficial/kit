@@ -277,3 +277,43 @@ fn all_without_any_commit_has_nothing_to_walk() {
     };
     assert!(log::history(&repo, &q).unwrap().is_none());
 }
+
+#[test]
+fn range_shortcuts_preserve_criss_cross_order_and_first_parent() {
+    let f = fixture();
+    let store = f.repo.store();
+    let layout = f.repo.layout();
+    let x = commit(store, vec![f.a, f.side], 10, 0, "x");
+    let y = commit(store, vec![f.side, f.a], 11, 1000, "y");
+    let tip = commit(store, vec![x, y], 12, 0, "tip");
+    refs::write_ref(layout, "cross", &tip).unwrap();
+    refs::write_ref(layout, "cut", &f.root).unwrap();
+    for first_parent in [false, true] {
+        let full = hashes(
+            log::history(
+                &f.repo,
+                &Query {
+                    first_parent,
+                    ..query(Some("cross"))
+                },
+            )
+            .unwrap(),
+        );
+        for limit in [None, Some(0), Some(1), Some(2), Some(10)] {
+            let mut expected: Vec<_> = full.iter().copied().filter(|h| *h != f.root).collect();
+            expected.truncate(limit.unwrap_or(usize::MAX));
+            let got = hashes(
+                log::history(
+                    &f.repo,
+                    &Query {
+                        first_parent,
+                        limit,
+                        ..query(Some("cut..cross"))
+                    },
+                )
+                .unwrap(),
+            );
+            assert_eq!(got, expected);
+        }
+    }
+}

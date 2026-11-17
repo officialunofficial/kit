@@ -24,7 +24,7 @@
 //! refs.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, Object};
@@ -167,11 +167,34 @@ pub struct Entry {
 /// [`Error::BadRevision`] when a named revision does not resolve.
 /// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of the walk
 /// cannot be read or is another kind of object. [`Error::TooManyCommits`]
-/// when the walk, both sides of a range together, would read more than
+/// when the selected walk and its exclusion proof would read more than
 /// 1,000,000 commits, and [`Error::MergeBase`] when the merge base walk of
 /// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
+    if !query.all
+        && let Selection::Range { exclude, include } = parse_selection(query.start.as_deref())
+    {
+        let Some(tip) = resolve_tip(repo, Some(&include))? else {
+            return Ok(None);
+        };
+        if let Some(base) = resolve_tip(repo, Some(&exclude))? {
+            read_commit(store, base)?;
+            if range_is_closed(store, tip, base, 64, query.first_parent)? {
+                return select(
+                    store,
+                    &[tip],
+                    &HashSet::from([base]),
+                    query,
+                    MAX_LOG_COMMITS,
+                )
+                .map(Some);
+            }
+            if let Some(excluded) = range_cut(store, tip, base, 4096)? {
+                return select(store, &[tip], &excluded, query, MAX_LOG_COMMITS).map(Some);
+            }
+        }
+    }
     let resolved = if query.all {
         all_tips(repo)?
     } else {
@@ -182,6 +205,87 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
         return Ok(None);
     };
     select(store, &tips, &excluded, query, MAX_LOG_COMMITS).map(Some)
+}
+
+/// A cut at `base` is enough when every path from `tip` ends there.
+/// No ancestor of `base` can occur above the cut in an acyclic graph.
+/// An independent root needs the general exclusion walk instead. Timestamps
+/// are deliberately unused: imported commits may have arbitrarily skewed clocks.
+fn range_is_closed(
+    store: &ObjectStore,
+    tip: Hash,
+    base: Hash,
+    cap: usize,
+    first_parent: bool,
+) -> Result<bool, Error> {
+    let mut seen = HashSet::new();
+    let mut pending = vec![tip];
+    while let Some(hash) = pending.pop() {
+        if hash == base || !seen.insert(hash) {
+            continue;
+        }
+        if seen.len() >= cap {
+            return Ok(false);
+        }
+        let commit = read_commit(store, hash)?;
+        if commit.parents.is_empty() {
+            return Ok(false);
+        }
+        pending.extend(
+            commit
+                .parents
+                .iter()
+                .take(if first_parent { 1 } else { usize::MAX })
+                .copied(),
+        );
+    }
+    Ok(true)
+}
+
+/// Search both endpoints for a shared unread frontier. Everything below
+/// that frontier is excluded because it is reachable from the excluded tip.
+/// Keep every merge-base path rather than choosing one merge base.
+fn range_cut(
+    store: &ObjectStore,
+    tip: Hash,
+    base: Hash,
+    cap: usize,
+) -> Result<Option<HashSet<Hash>>, Error> {
+    let mut commits = HashMap::new();
+    let mut queued = HashSet::from([tip, base]);
+    let mut pending = VecDeque::from([tip]);
+    if base != tip {
+        pending.push_back(base);
+    }
+    let boundary = loop {
+        if pending.len() == 1 && !commits.is_empty() {
+            break pending.pop_front().expect("one frontier");
+        }
+        let Some(hash) = pending.pop_front() else {
+            return Ok(None);
+        };
+        if commits.len() >= cap {
+            return Ok(None);
+        }
+        let commit = read_commit(store, hash)?;
+        if commit.parents.is_empty() {
+            return Ok(None);
+        }
+        for parent in &commit.parents {
+            if queued.insert(*parent) {
+                pending.push_back(*parent);
+            }
+        }
+        commits.insert(hash, commit);
+    };
+    let mut excluded = HashSet::from([boundary]);
+    let mut pending = vec![base];
+    while let Some(hash) = pending.pop() {
+        if excluded.insert(hash) {
+            pending.extend(&commits[&hash].parents);
+        }
+    }
+    Ok(Some(excluded))
 }
 
 /// The kind of a ref in a [`RefTip`].
@@ -555,9 +659,10 @@ fn walked_parents<'a>(
 /// tip, the walk starts as a chain: while each commit has at most one walked
 /// parent, no later commit can be a child of an earlier one, because commit
 /// ids form no cycle. So the chain streams in order, and a limit stops it
-/// early. The first commit with two walked parents hands the rest to
-/// [`emit_sorted`], which needs every remaining commit first, because a child
-/// can lie at any depth and timestamps do not bound it.
+/// early. After emitting a merge, [`emit_sorted`] gathers a region down to
+/// a sole shared frontier, sorts that region, and leaves the frontier unread.
+/// A region with paths ending at separate roots or exclusions needs the full
+/// remaining graph: timestamps alone cannot prove a topological boundary.
 ///
 /// `budget` holds the commits that were read before the walk, such as the
 /// excluded side of a range, and the most commits that the whole walk may
@@ -571,9 +676,37 @@ fn walk_ordered(
     tips: &[Hash],
     excluded: &HashSet<Hash>,
     first_parent: bool,
-    (spent, max_commits): (usize, usize),
+    (mut spent, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
 ) -> Result<(), Error> {
+    let mut tips = tips.to_vec();
+    loop {
+        match walk_segment(
+            store,
+            &tips,
+            excluded,
+            first_parent,
+            (spent, max_commits),
+            &mut emit,
+        )? {
+            Some((tail, read)) => {
+                tips = vec![tail];
+                spent = read;
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+/// Stream a chain, then return the next proven frontier after a merge region.
+fn walk_segment(
+    store: &ObjectStore,
+    tips: &[Hash],
+    excluded: &HashSet<Hash>,
+    first_parent: bool,
+    (spent, max_commits): (usize, usize),
+    mut emit: impl FnMut(Entry) -> bool,
+) -> Result<Option<(Hash, usize)>, Error> {
     let [tip] = *tips else {
         return emit_sorted(
             store,
@@ -588,32 +721,43 @@ fn walk_ordered(
     let mut next = Some(tip);
     while let Some(hash) = next {
         if excluded.contains(&hash) {
-            return Ok(());
+            return Ok(None);
         }
         let commit = read_commit(store, hash)?;
         let (parent, merge) = {
             let mut parents = walked_parents(&commit, excluded, first_parent);
             (parents.next(), parents.next().is_some())
         };
-        if merge {
-            let cap = (streamed, max_commits);
-            return emit_sorted(store, &[hash], excluded, first_parent, cap, emit);
-        }
         if streamed >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
+        let parents: Vec<_> = if merge {
+            walked_parents(&commit, excluded, first_parent).collect()
+        } else {
+            Vec::new()
+        };
         next = parent;
         if !emit(Entry { hash, commit }) {
-            return Ok(());
+            return Ok(None);
+        }
+        if merge {
+            return emit_sorted(
+                store,
+                &parents,
+                excluded,
+                first_parent,
+                (streamed, max_commits),
+                emit,
+            );
         }
     }
-    Ok(())
+    Ok(None)
 }
 
-/// Collect every commit reachable from `tips` and not in `excluded`, then
-/// pass them to `emit` in the order of [`walk_ordered`] until `emit` returns
-/// `false`. `cap` holds the commits that the walk has read already and the
+/// Collect a region above a shared frontier, then pass it to `emit` in
+/// the order of [`walk_ordered`]. Return the unread frontier and spent budget
+/// unless `emit` stops the walk. `cap` holds the commits read already and the
 /// most commits that the whole walk may read.
 ///
 /// # Errors
@@ -626,22 +770,41 @@ fn emit_sorted(
     first_parent: bool,
     (streamed, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
-) -> Result<(), Error> {
-    // Collect the candidates. A depth-first walk over the parents skips the
-    // excluded commits.
+) -> Result<Option<(Hash, usize)>, Error> {
+    // Discover the region in parent order, deduplicating queued candidates.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
-    let mut stack: Vec<Hash> = tips.to_vec();
-    while let Some(hash) = stack.pop() {
-        if excluded.contains(&hash) || commits.contains_key(&hash) {
-            continue;
+    let mut queued = HashSet::new();
+    let mut pending = VecDeque::new();
+    for hash in tips {
+        if !excluded.contains(hash) && queued.insert(*hash) {
+            pending.push_back(*hash);
         }
+    }
+    // FIFO discovery lets branches converge before following their shared
+    // tail. A sole frontier is a cut: every unread ancestor lies below it,
+    // so all collected commits must precede it, regardless of timestamps.
+    let mut tail = None;
+    let mut closed = true;
+    while !pending.is_empty() {
+        if closed && pending.len() == 1 && !commits.is_empty() {
+            tail = pending.pop_front();
+            break;
+        }
+        let hash = pending.pop_front().expect("nonempty frontier");
         if streamed.saturating_add(commits.len()) >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         let commit = read_commit(store, hash)?;
-        stack.extend(walked_parents(&commit, excluded, first_parent));
+        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
+        closed &= !parents.is_empty();
+        for parent in parents {
+            if queued.insert(parent) {
+                pending.push_back(parent);
+            }
+        }
         commits.insert(hash, commit);
     }
+    let spent = streamed + commits.len();
 
     // The in-degree of a commit is its number of children in the candidate
     // set.
@@ -685,10 +848,10 @@ fn emit_sorted(
             hash: item.hash,
             commit,
         }) {
-            return Ok(());
+            return Ok(None);
         }
     }
-    Ok(())
+    Ok(tail.map(|hash| (hash, spent)))
 }
 
 #[cfg(test)]
@@ -834,6 +997,64 @@ mod tests {
 
     fn ids(entries: &[Entry]) -> Vec<Hash> {
         entries.iter().map(|entry| entry.hash).collect()
+    }
+
+    #[test]
+    fn a_merge_tip_limit_does_not_read_its_parents() {
+        let (_dir, store) = temp_store();
+        let tip = put(&store, vec![[1; 32], [2; 32]], 0, 0);
+        let got = select(
+            &store,
+            &[tip],
+            &HashSet::new(),
+            &query_with(Some(1), false),
+            1,
+        )
+        .unwrap();
+        assert_eq!(ids(&got), [tip]);
+    }
+
+    #[test]
+    fn a_merge_prefix_stops_at_a_shared_frontier() {
+        let (_dir, store) = temp_store();
+        let missing = [7; 32];
+        let a = put(&store, vec![missing], 1, 0);
+        let b = put(&store, vec![missing], 2, 1);
+        let tip = put(&store, vec![a, b], 0, 2);
+        let got = select(
+            &store,
+            &[tip],
+            &HashSet::new(),
+            &query_with(Some(3), false),
+            3,
+        )
+        .unwrap();
+        assert_eq!(ids(&got), [tip, b, a]);
+    }
+
+    #[test]
+    fn a_closed_range_does_not_read_below_its_cut() {
+        let (_dir, store) = temp_store();
+        let base = put(&store, vec![[1; 32]], 100, 0);
+        let a = put(&store, vec![base], 5, 1);
+        let b = put(&store, vec![base], 4, 2);
+        let x = put(&store, vec![a, b], 3, 3);
+        let y = put(&store, vec![b, a], 2, 4);
+        let tip = put(&store, vec![x, y], 1, 5);
+        for tip in [a, x, tip] {
+            assert!(range_is_closed(&store, tip, base, 10, false).unwrap());
+            for first_parent in [false, true] {
+                for limit in [None, Some(0), Some(1), Some(3)] {
+                    let query = query_with(limit, first_parent);
+                    let cut = HashSet::from([base]);
+                    let got = select(&store, &[tip], &cut, &query, 10).unwrap();
+                    assert_eq!(ids(&got), reference(&store, &[tip], &cut, &query));
+                }
+            }
+        }
+        let root = put(&store, vec![], 0, 6);
+        let open = put(&store, vec![a, root], 0, 7);
+        assert!(!range_is_closed(&store, open, base, 10, false).unwrap());
     }
 
     #[test]
@@ -1143,6 +1364,29 @@ mod tests {
             let mut base = HashSet::new();
             collect_excluded(&store, other, &mut base, usize::MAX).unwrap();
             assert_eq!(base, lenient_excluded(&store, other), "seed {seed}");
+            if let Some(cut) = range_cut(&store, tip, other, 100).unwrap() {
+                for first_parent in [false, true] {
+                    let q = query_with(None, first_parent);
+                    let got = select(&store, &[tip], &cut, &q, usize::MAX).unwrap();
+                    assert_eq!(
+                        ids(&got),
+                        reference(&store, &[tip], &base, &q),
+                        "bidirectional range seed {seed}"
+                    );
+                }
+            }
+            for first_parent in [false, true] {
+                if range_is_closed(&store, tip, other, usize::MAX, first_parent).unwrap() {
+                    let q = query_with(None, first_parent);
+                    let cut =
+                        select(&store, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
+                    assert_eq!(
+                        ids(&cut),
+                        reference(&store, &[tip], &base, &q),
+                        "range seed {seed}"
+                    );
+                }
+            }
             let none = HashSet::new();
             let selections: [(Vec<Hash>, &HashSet<Hash>); 4] = [
                 (vec![tip], &none),
