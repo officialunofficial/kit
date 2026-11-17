@@ -88,6 +88,10 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 zstd = { version = "0.14.4", optional = true }
 # POSIX uid + O_NOFOLLOW for the key file open path. Unix-only; the
 # Windows path uses default ACLs as documented in `docs/specs/SPEC-SIGNING.md`.
+# Share the pool with BLAKE3's input-level parallel hashing.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1.12.0"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 

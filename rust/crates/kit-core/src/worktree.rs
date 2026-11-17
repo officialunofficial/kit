@@ -57,8 +57,7 @@ pub enum WorktreeError {
     #[error("stored content of {size} bytes exceeds the {MAX_FILE_BYTES} byte in-memory limit")]
     ContentTooLarge {
         /// The content's size from its manifest.
-        size: u64,
-    },
+        },
     /// Path component had non-UTF-8 bytes; tree entry names must be UTF-8.
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
@@ -239,7 +238,14 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
         false,
         &mut misses,
     )?;
-    let mut hashed = vec![TreeEntry { name: Vec::new(), mode: EntryMode::Blob, object_hash: crate::hash::ZERO }; misses.len()];
+    let mut hashed = vec![
+        TreeEntry {
+            name: Vec::new(),
+            mode: EntryMode::Blob,
+            object_hash: crate::hash::ZERO
+        };
+        misses.len()
+    ];
     hash_pending_files(sink, source, &misses, &mut hashed, observations)?;
     pending.write(sink, &hashed)
 }
@@ -358,7 +364,6 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                     abs_path: entry.path(),
                     rel_path,
                     indexed,
-                    size: meta.len(),
                 });
             }
         } else if meta.file_type().is_dir() {
@@ -409,7 +414,11 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         }
     }
 
-    Ok(PendingTree { entries, files, children })
+    Ok(PendingTree {
+        entries,
+        files,
+        children,
+    })
 }
 
 /// Directory entries retain their walk slots until every file has been hashed.
@@ -420,7 +429,11 @@ struct PendingTree {
 }
 
 impl PendingTree {
-    fn write<S: ObjectSink + ?Sized>(mut self, sink: &S, hashed: &[TreeEntry]) -> WorktreeResult<Hash> {
+    fn write<S: ObjectSink + ?Sized>(
+        mut self,
+        sink: &S,
+        hashed: &[TreeEntry],
+    ) -> WorktreeResult<Hash> {
         for (slot, file) in self.files {
             self.entries[slot].object_hash = hashed[file].object_hash;
             self.entries[slot].mode = hashed[file].mode;
@@ -429,7 +442,9 @@ impl PendingTree {
             self.entries[slot].object_hash = child.write(sink, hashed)?;
         }
         self.entries.sort_by(|a, b| a.name.cmp(&b.name));
-        let bytes = serialize::serialize(&Object::Tree(Tree { entries: self.entries }))?;
+        let bytes = serialize::serialize(&Object::Tree(Tree {
+            entries: self.entries,
+        }))?;
         Ok(sink.put(&bytes)?)
     }
 }
@@ -437,17 +452,16 @@ impl PendingTree {
 /// One cache-miss regular file discovered by [`build_tree_inner`]'s walk
 /// (its stat cache was absent or racy-smudged): still needs
 /// [`hash_file_with_metadata`], off the main walk thread once there's
-/// enough of them in one directory to amortize the dispatch. `'e`
+/// enough of them across the walk to amortize the dispatch. `'e`
 /// borrows from the same [`Index`] `by_path` does.
 struct PendingFileHash<'e> {
-    /// This miss's fixed position in `build_tree_inner`'s `entries` —
+    /// This miss's fixed position in the global hashed-file slots —
     /// stable regardless of how the batch below is chunked or ordered,
     /// so results always land back on the right entry.
     slot: usize,
     abs_path: PathBuf,
     rel_path: String,
     indexed: Option<&'e crate::index::IndexEntry>,
-    size: u64,
 }
 
 /// Below this many cache-miss files per available thread, hashing them
@@ -465,15 +479,14 @@ const FILE_HASH_MISSES_PER_THREAD: usize = 8;
 /// filling in `entries[slot]` and pushing a [`StatObservation`] for each
 /// one whose fresh hash proves the stat cache healable. Sequential
 /// below a thread-count-scaled threshold, fanned out across scoped
-/// worker threads at or above it — [`probe_staged_objects_parallel`]'s
-/// shape (`kit-core` stays dependency-neutral and wasm-clean, so this
-/// uses `std::thread::scope` directly rather than rayon). Every file's
+/// workers at or above it. Native workers share Rayon's global pool
+/// with input-level BLAKE3 hashing; wasm uses the sequential path. Every file's
 /// hash result is written back to `entries`/`observations` in `misses`'
 /// original directory-walk order regardless of which thread computed
 /// it, so the output is byte-identical to the old fully-sequential
 /// loop; the first error in slot order wins, independent of worker completion.
-/// Batches with large files stay sequential so input-level hashing can
-/// use the available cores without another file-level fan-out.
+/// Input-level hashing shares the same pool, including files that grow
+/// after their stat was read.
 fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
@@ -485,9 +498,9 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     {
         let threads = available_threads();
         if threads > 1
-            && misses.iter().all(|m| m.size < 1024 * 1024)
-            && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
-            let results = hash_pending_files_parallel(sink, source, misses, threads)?;
+            && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads)
+        {
+            let results = hash_pending_files_parallel(sink, source, misses)?;
             apply_hash_results(misses, results, entries, observations);
             return Ok(());
         }
@@ -539,9 +552,12 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     misses: &[PendingFileHash<'_>],
-    threads: usize,
 ) -> WorktreeResult<Vec<(Hash, EntryMode, Option<StatObservation>)>> {
-    chunked_scoped_map(misses, threads, |m| hash_one_pending_file(sink, source, m))
+    use rayon::prelude::*;
+    // Indexed collection preserves slot order, including the first error.
+    // Nested BLAKE3 parallelism uses this same global pool.
+    misses.par_iter().map(|m| hash_one_pending_file(sink, source, m))
+        .collect::<Vec<_>>().into_iter().collect()
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`
@@ -3896,21 +3912,29 @@ mod tests {
                 fs::write(dir.join(format!("f{f:02}")), format!("{d}/{f}")).unwrap();
             }
         }
+        fs::write(work.path().join("root-file"), b"root").unwrap();
         let hash = build_tree(&store, work.path()).unwrap();
-        let Object::Tree(root) = store.read_object(&hash).unwrap() else { panic!("tree") };
-        assert_eq!(root.entries.len(), 32);
-        for (d, entry) in root.entries.iter().enumerate() {
-            let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else { panic!("tree") };
+        let Object::Tree(root) = store.read_object(&hash).unwrap() else {
+            panic!("tree")
+        };
+        assert_eq!(root.entries.len(), 33);
+        for (d, entry) in root.entries.iter().take(32).enumerate() {
+            let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else {
+                panic!("tree")
+            };
             assert_eq!(tree.entries.len(), 32);
             for (f, entry) in tree.entries.iter().enumerate() {
-                let bytes = serialize::serialize(&Object::Blob(crate::object::Blob { data: format!("{d}/{f}").into_bytes() })).unwrap();
+                let bytes = serialize::serialize(&Object::Blob(crate::object::Blob {
+                    data: format!("{d}/{f}").into_bytes(),
+                }))
+                .unwrap();
                 assert_eq!(entry.object_hash, crate::hash::hash(&bytes));
             }
         }
     }
 
     /// `hash_pending_files_parallel`'s fan-out branch only fires once a
-    /// single directory has at least `FILE_HASH_MISSES_PER_THREAD *`
+    /// whole walk has at least `FILE_HASH_MISSES_PER_THREAD *`
     /// the machine's thread count worth of cache-miss files — every
     /// other `build_tree` test in this module stays well under that, so
     /// none of them ever exercise it. 4096 distinct-content files is

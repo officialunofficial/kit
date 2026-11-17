@@ -24,7 +24,7 @@
 //! refs.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Commit, Object};
@@ -167,17 +167,21 @@ pub struct Entry {
 /// [`Error::BadRevision`] when a named revision does not resolve.
 /// [`Error::ReadCommit`] or [`Error::NotACommit`] when a commit of the walk
 /// cannot be read or is another kind of object. [`Error::TooManyCommits`]
-/// when the walk, both sides of a range together, would read more than
+/// when the selected walk and its exclusion proof would read more than
 /// 1,000,000 commits, and [`Error::MergeBase`] when the merge base walk of
 /// `A...B` reaches its limit.
 pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> {
     let store = repo.store();
     if !query.all
         && let Selection::Range { exclude, include } = parse_selection(query.start.as_deref())
-        && let (Some(base), Some(tip)) = (resolve_tip(repo, Some(&exclude))?, resolve_tip(repo, Some(&include))?)
-        && range_is_closed(store, tip, base, MAX_LOG_COMMITS)?
     {
-        return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
+        let Some(tip) = resolve_tip(repo, Some(&include))? else { return Ok(None); };
+        if let Some(base) = resolve_tip(repo, Some(&exclude))? {
+            read_commit(store, base)?;
+            if range_is_closed(store, tip, base, MAX_LOG_COMMITS.min(4096))? {
+                return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
+            }
+        }
     }
     let resolved = if query.all {
         all_tips(repo)?
@@ -203,7 +207,7 @@ fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Re
             continue;
         }
         if seen.len() >= cap {
-            return Err(Error::TooManyCommits { limit: cap });
+            return Ok(false);
         }
         let commit = read_commit(store, hash)?;
         if commit.parents.is_empty() {
@@ -601,9 +605,26 @@ fn walk_ordered(
     tips: &[Hash],
     excluded: &HashSet<Hash>,
     first_parent: bool,
-    (spent, max_commits): (usize, usize),
+    (mut spent, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
 ) -> Result<(), Error> {
+    let mut tips = tips.to_vec();
+    loop {
+        match walk_segment(store, &tips, excluded, first_parent, (spent, max_commits), &mut emit)? {
+            Some((tail, read)) => { tips = vec![tail]; spent = read; }
+            None => return Ok(()),
+        }
+    }
+}
+
+fn walk_segment(
+    store: &ObjectStore,
+    tips: &[Hash],
+    excluded: &HashSet<Hash>,
+    first_parent: bool,
+    (spent, max_commits): (usize, usize),
+    mut emit: impl FnMut(Entry) -> bool,
+) -> Result<Option<(Hash, usize)>, Error> {
     let [tip] = *tips else {
         return emit_sorted(
             store,
@@ -618,7 +639,7 @@ fn walk_ordered(
     let mut next = Some(tip);
     while let Some(hash) = next {
         if excluded.contains(&hash) {
-            return Ok(());
+            return Ok(None);
         }
         let commit = read_commit(store, hash)?;
         let (parent, merge) = {
@@ -632,13 +653,20 @@ fn walk_ordered(
         let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
         next = parent;
         if !emit(Entry { hash, commit }) {
-            return Ok(());
+            return Ok(None);
         }
         if merge {
-            return emit_sorted(store, &parents, excluded, first_parent, (streamed, max_commits), emit);
+            return emit_sorted(
+                store,
+                &parents,
+                excluded,
+                first_parent,
+                (streamed, max_commits),
+                emit,
+            );
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Collect every commit reachable from `tips` and not in `excluded`, then
@@ -656,22 +684,39 @@ fn emit_sorted(
     first_parent: bool,
     (streamed, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
-) -> Result<(), Error> {
+) -> Result<Option<(Hash, usize)>, Error> {
     // Collect the candidates. A depth-first walk over the parents skips the
     // excluded commits.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
-    let mut stack: Vec<Hash> = tips.to_vec();
-    while let Some(hash) = stack.pop() {
-        if excluded.contains(&hash) || commits.contains_key(&hash) {
-            continue;
+    let mut queued: HashSet<Hash> = tips.iter().copied().filter(|h| !excluded.contains(h)).collect();
+    let mut pending: VecDeque<Hash> = tips.iter().copied().filter(|h| !excluded.contains(h)).collect();
+    let mut unique = HashSet::new();
+    pending.retain(|h| unique.insert(*h));
+    // FIFO discovery lets branches converge before following their shared
+    // tail. A sole frontier is a cut: every unread ancestor lies below it,
+    // so all collected commits must precede it, regardless of timestamps.
+    let mut tail = None;
+    let mut closed = true;
+    while !pending.is_empty() {
+        if closed && pending.len() == 1 && !commits.is_empty() {
+            tail = pending.pop_front();
+            break;
         }
+        let hash = pending.pop_front().expect("nonempty frontier");
         if streamed.saturating_add(commits.len()) >= max_commits {
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         let commit = read_commit(store, hash)?;
-        stack.extend(walked_parents(&commit, excluded, first_parent));
+        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
+        closed &= !parents.is_empty();
+        for parent in parents {
+            if queued.insert(parent) {
+                pending.push_back(parent);
+            }
+        }
         commits.insert(hash, commit);
     }
+    let spent = streamed + commits.len();
 
     // The in-degree of a commit is its number of children in the candidate
     // set.
@@ -715,10 +760,10 @@ fn emit_sorted(
             hash: item.hash,
             commit,
         }) {
-            return Ok(());
+            return Ok(None);
         }
     }
-    Ok(())
+    Ok(tail.map(|hash| (hash, spent)))
 }
 
 #[cfg(test)]
@@ -870,8 +915,26 @@ mod tests {
     fn a_merge_tip_limit_does_not_read_its_parents() {
         let (_dir, store) = temp_store();
         let tip = put(&store, vec![[1; 32], [2; 32]], 0, 0);
-        let got = select(&store, &[tip], &HashSet::new(), &query_with(Some(1), false), 1).unwrap();
+        let got = select(
+            &store,
+            &[tip],
+            &HashSet::new(),
+            &query_with(Some(1), false),
+            1,
+        )
+        .unwrap();
         assert_eq!(ids(&got), [tip]);
+    }
+
+    #[test]
+    fn a_merge_prefix_stops_at_a_shared_frontier() {
+        let (_dir, store) = temp_store();
+        let missing = [7; 32];
+        let a = put(&store, vec![missing], 1, 0);
+        let b = put(&store, vec![missing], 2, 1);
+        let tip = put(&store, vec![a, b], 0, 2);
+        let got = select(&store, &[tip], &HashSet::new(), &query_with(Some(3), false), 3).unwrap();
+        assert_eq!(ids(&got), [tip, b, a]);
     }
 
     #[test]
