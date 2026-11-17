@@ -977,6 +977,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     for (k, v) in [
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
+        ("fetch.attestations", cfg.fetch_attestations.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
         ("remote_type", cfg.remote_type.as_str()),
