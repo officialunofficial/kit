@@ -286,6 +286,9 @@ fn append(
         if new.is_empty() {
             return Ok((prior.ok_or("missing attestation head")?, packs));
         }
+        if packs.len() + new.len() > WALK_LIMIT {
+            return Err("attestation append exceeds the reader walk limit; reset or compact the log first".into());
+        }
         packs.extend_from_slice(&new);
         let baseline = rebaseline && depth >= 64 && packs.len() <= 4096;
         let bytes = transfer::encode_packlist(
@@ -638,4 +641,28 @@ mod tests {
         packs[0].upload(&context).unwrap();
         assert!(source.pack_exists(&PackKey::new(packs[0].id), ATTESTMAP_REF).unwrap());
     }
+    #[test]
+    fn append_never_publishes_a_chain_beyond_the_reader_walk_limit() {
+        use kit_core::protocol::Transport as _;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(temp.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let transport = kit_transport_memory::MemoryTransport::new();
+        let source = crate::TransportSource::new(&transport);
+        let context = PushContext::new(&source, &crate::NoopObserver, &store);
+        let mut prior = None;
+        let mut left = WALK_LIMIT;
+        while left > 0 {
+            let count = left.min(4096);
+            let node = transfer::encode_packlist(prior, &vec![[1;32];count]).unwrap();
+            let id = hash::hash(&node);
+            transport.upload_blob(&node, &PackKey::new(id), None).unwrap();
+            prior = Some(id);
+            left -= count;
+        }
+        transport.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &prior.unwrap()).unwrap();
+        assert!(append(&context, &[[2;32]], true).is_err());
+        assert_eq!(transport.read_ref(ATTESTMAP_REF).unwrap(), prior);
+    }
+
 }
