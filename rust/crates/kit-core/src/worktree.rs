@@ -229,7 +229,6 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     let mut misses = Vec::new();
     let pending = build_tree_inner(
         sink,
-        source,
         dir,
         "",
         &ignores,
@@ -287,7 +286,6 @@ fn directory_ignores<'a>(
 #[allow(clippy::too_many_arguments)]
 fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     sink: &S,
-    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
@@ -377,7 +375,6 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
             }
             let h = build_tree_inner(
                 sink,
-                source,
                 &entry.path(),
                 &rel_path,
                 ignores,
@@ -478,7 +475,7 @@ const FILE_HASH_MISSES_PER_THREAD: usize = 8;
 /// Hash every cache-miss file in `misses` (see [`PendingFileHash`]),
 /// filling in `entries[slot]` and pushing a [`StatObservation`] for each
 /// one whose fresh hash proves the stat cache healable. Sequential
-/// below a thread-count-scaled threshold, fanned out across scoped
+/// below a thread-count-scaled threshold, fanned out across shared
 /// workers at or above it. Native workers share Rayon's global pool
 /// with input-level BLAKE3 hashing; wasm uses the sequential path. Every file's
 /// hash result is written back to `entries`/`observations` in `misses`'
@@ -545,7 +542,7 @@ fn hash_one_pending_file<S: ObjectSink + ?Sized>(
     Ok((h, entry_mode_from_file_metadata(&opened_meta), observation))
 }
 
-/// Parallel branch of [`hash_pending_files`]: [`chunked_scoped_map`]
+/// Parallel branch of [`hash_pending_files`]: an indexed parallel map
 /// over `misses`, hashing each one via [`hash_one_pending_file`].
 #[cfg(not(target_arch = "wasm32"))]
 fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
@@ -961,7 +958,7 @@ impl IndexDir {
 /// `std::thread::available_parallelism()`, cached process-wide — the
 /// core count never changes during a process's lifetime, so every
 /// native fan-out crossover check in this module (there are several,
-/// and [`build_tree_inner`]'s recurses once per directory) shares one
+/// and the tree walker recurses once per directory) shares one
 /// syscall instead of paying it again at every call site/recursion.
 #[cfg(not(target_arch = "wasm32"))]
 fn available_threads() -> usize {

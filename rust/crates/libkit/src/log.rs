@@ -178,7 +178,7 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
         let Some(tip) = resolve_tip(repo, Some(&include))? else { return Ok(None); };
         if let Some(base) = resolve_tip(repo, Some(&exclude))? {
             read_commit(store, base)?;
-            if range_is_closed(store, tip, base, MAX_LOG_COMMITS.min(4096))? {
+            if range_is_closed(store, tip, base, MAX_LOG_COMMITS.min(4096), query.first_parent)? {
                 return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
             }
         }
@@ -199,7 +199,7 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
 /// No ancestor of `base` can occur above the cut in an acyclic graph.
 /// An independent root needs the general exclusion walk instead. Timestamps
 /// are deliberately unused: imported commits may have arbitrarily skewed clocks.
-fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Result<bool, Error> {
+fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize, first_parent: bool) -> Result<bool, Error> {
     let mut seen = HashSet::new();
     let mut pending = vec![tip];
     while let Some(hash) = pending.pop() {
@@ -213,7 +213,7 @@ fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Re
         if commit.parents.is_empty() {
             return Ok(false);
         }
-        pending.extend(commit.parents);
+        pending.extend(commit.parents.iter().take(if first_parent { 1 } else { usize::MAX }).copied());
     }
     Ok(true)
 }
@@ -589,9 +589,10 @@ fn walked_parents<'a>(
 /// tip, the walk starts as a chain: while each commit has at most one walked
 /// parent, no later commit can be a child of an earlier one, because commit
 /// ids form no cycle. So the chain streams in order, and a limit stops it
-/// early. After emitting a commit with two walked parents, the walk hands its parents to
-/// [`emit_sorted`], which needs every remaining commit first, because a child
-/// can lie at any depth and timestamps do not bound it.
+/// early. After emitting a merge, [`emit_sorted`] gathers a region down to
+/// a sole shared frontier, sorts that region, and leaves the frontier unread.
+/// A region with paths ending at separate roots or exclusions needs the full
+/// remaining graph: timestamps alone cannot prove a topological boundary.
 ///
 /// `budget` holds the commits that were read before the walk, such as the
 /// excluded side of a range, and the most commits that the whole walk may
@@ -669,9 +670,9 @@ fn walk_segment(
     Ok(None)
 }
 
-/// Collect every commit reachable from `tips` and not in `excluded`, then
-/// pass them to `emit` in the order of [`walk_ordered`] until `emit` returns
-/// `false`. `cap` holds the commits that the walk has read already and the
+/// Collect a region above a shared frontier, then pass it to `emit` in
+/// the order of [`walk_ordered`]. Return the unread frontier and spent budget
+/// unless `emit` stops the walk. `cap` holds the commits read already and the
 /// most commits that the whole walk may read.
 ///
 /// # Errors
@@ -685,13 +686,15 @@ fn emit_sorted(
     (streamed, max_commits): (usize, usize),
     mut emit: impl FnMut(Entry) -> bool,
 ) -> Result<Option<(Hash, usize)>, Error> {
-    // Collect the candidates. A depth-first walk over the parents skips the
-    // excluded commits.
+    // Discover the region in parent order, deduplicating queued candidates.
     let mut commits: HashMap<Hash, Commit> = HashMap::new();
-    let mut queued: HashSet<Hash> = tips.iter().copied().filter(|h| !excluded.contains(h)).collect();
-    let mut pending: VecDeque<Hash> = tips.iter().copied().filter(|h| !excluded.contains(h)).collect();
-    let mut unique = HashSet::new();
-    pending.retain(|h| unique.insert(*h));
+    let mut queued = HashSet::new();
+    let mut pending = VecDeque::new();
+    for hash in tips {
+        if !excluded.contains(hash) && queued.insert(*hash) {
+            pending.push_back(*hash);
+        }
+    }
     // FIFO discovery lets branches converge before following their shared
     // tail. A sole frontier is a cut: every unread ancestor lies below it,
     // so all collected commits must precede it, regardless of timestamps.
@@ -947,7 +950,7 @@ mod tests {
         let y = put(&store, vec![b, a], 2, 4);
         let tip = put(&store, vec![x, y], 1, 5);
         for tip in [a, x, tip] {
-            assert!(range_is_closed(&store, tip, base, 10).unwrap());
+            assert!(range_is_closed(&store, tip, base, 10, false).unwrap());
             for first_parent in [false, true] {
                 for limit in [None, Some(0), Some(1), Some(3)] {
                     let q = query_with(limit, first_parent);
@@ -959,7 +962,7 @@ mod tests {
         }
         let root = put(&store, vec![], 0, 6);
         let open = put(&store, vec![a, root], 0, 7);
-        assert!(!range_is_closed(&store, open, base, 10).unwrap());
+        assert!(!range_is_closed(&store, open, base, 10, false).unwrap());
     }
 
     #[test]
