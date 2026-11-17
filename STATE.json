@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-16: main Rust CI red since 12a9d670: per-crate clippy rejects dead s3-only test helpers in kit-bin; fix is PR 182, open because cargo semver-checks fails on main-wide libkit breaking changes (needs a version or API decision). macOS flake: kit-transport-s3 transient_upload_statuses_are_retried. Dependabot 171/173 (rust-cache) and PR 152 (mutants fail) not handled; wait on main. Audit and Commonware not run.",
+  "last_findings": "2026-11-17: main Rust, macOS, proto, docs CI green (PR 182 fix landed or superseded). Scheduled mutants run on main failed (kit-attest, kit-keystore missed mutants); a person has draft PRs 196/197 active for these. Open PRs 193/195 fail only cargo semver-checks (main-wide libkit breaking change, needs decision). Dependabot 171/173 and PR 152 left for Monday. Audit and Commonware not run (not Monday).",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
