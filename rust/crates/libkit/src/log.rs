@@ -178,8 +178,11 @@ pub fn history(repo: &Repo, query: &Query) -> Result<Option<Vec<Entry>>, Error> 
         let Some(tip) = resolve_tip(repo, Some(&include))? else { return Ok(None); };
         if let Some(base) = resolve_tip(repo, Some(&exclude))? {
             read_commit(store, base)?;
-            if range_is_closed(store, tip, base, MAX_LOG_COMMITS.min(4096), query.first_parent)? {
+            if range_is_closed(store, tip, base, 64, query.first_parent)? {
                 return select(store, &[tip], &HashSet::from([base]), query, MAX_LOG_COMMITS).map(Some);
+            }
+            if let Some(excluded) = range_cut(store, tip, base, 4096)? {
+                return select(store, &[tip], &excluded, query, MAX_LOG_COMMITS).map(Some);
             }
         }
     }
@@ -216,6 +219,38 @@ fn range_is_closed(store: &ObjectStore, tip: Hash, base: Hash, cap: usize, first
         pending.extend(commit.parents.iter().take(if first_parent { 1 } else { usize::MAX }).copied());
     }
     Ok(true)
+}
+
+/// Search both endpoints for a shared unread frontier. Everything below
+/// that frontier is excluded because it is reachable from the excluded tip.
+/// Keep every merge-base path rather than choosing one merge base.
+fn range_cut(store: &ObjectStore, tip: Hash, base: Hash, cap: usize) -> Result<Option<HashSet<Hash>>, Error> {
+    let mut commits = HashMap::new();
+    let mut queued = HashSet::from([tip, base]);
+    let mut pending = VecDeque::from([tip]);
+    if base != tip { pending.push_back(base); }
+    let mut closed = true;
+    let boundary = loop {
+        if closed && pending.len() == 1 && !commits.is_empty() {
+            break pending.pop_front().expect("one frontier");
+        }
+        let Some(hash) = pending.pop_front() else { return Ok(None); };
+        if commits.len() >= cap { return Ok(None); }
+        let commit = read_commit(store, hash)?;
+        closed &= !commit.parents.is_empty();
+        for parent in &commit.parents {
+            if queued.insert(*parent) { pending.push_back(*parent); }
+        }
+        commits.insert(hash, commit);
+    };
+    let mut excluded = HashSet::from([boundary]);
+    let mut pending = vec![base];
+    while let Some(hash) = pending.pop() {
+        if excluded.insert(hash) {
+            pending.extend(&commits[&hash].parents);
+        }
+    }
+    Ok(Some(excluded))
 }
 
 /// The kind of a ref in a [`RefTip`].
@@ -618,6 +653,7 @@ fn walk_ordered(
     }
 }
 
+/// Stream a chain, then return the next proven frontier after a merge region.
 fn walk_segment(
     store: &ObjectStore,
     tips: &[Hash],
@@ -651,7 +687,7 @@ fn walk_segment(
             return Err(Error::TooManyCommits { limit: max_commits });
         }
         streamed += 1;
-        let parents: Vec<_> = walked_parents(&commit, excluded, first_parent).collect();
+        let parents: Vec<_> = if merge { walked_parents(&commit, excluded, first_parent).collect() } else { Vec::new() };
         next = parent;
         if !emit(Entry { hash, commit }) {
             return Ok(None);
@@ -1272,6 +1308,20 @@ mod tests {
             let mut base = HashSet::new();
             collect_excluded(&store, other, &mut base, usize::MAX).unwrap();
             assert_eq!(base, lenient_excluded(&store, other), "seed {seed}");
+            if let Some(cut) = range_cut(&store, tip, other, 100).unwrap() {
+                for first_parent in [false, true] {
+                    let q = query_with(None, first_parent);
+                    let got = select(&store, &[tip], &cut, &q, usize::MAX).unwrap();
+                    assert_eq!(ids(&got), reference(&store, &[tip], &base, &q), "bidirectional range seed {seed}");
+                }
+            }
+            for first_parent in [false, true] {
+                if range_is_closed(&store, tip, other, usize::MAX, first_parent).unwrap() {
+                    let q = query_with(None, first_parent);
+                    let cut = select(&store, &[tip], &HashSet::from([other]), &q, usize::MAX).unwrap();
+                    assert_eq!(ids(&cut), reference(&store, &[tip], &base, &q), "range seed {seed}");
+                }
+            }
             let none = HashSet::new();
             let selections: [(Vec<Hash>, &HashSet<Hash>); 4] = [
                 (vec![tip], &none),

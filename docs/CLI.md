@@ -375,19 +375,20 @@ History / commits:
   commit's first parent, so a merged side branch never enters the walk at
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
-  One walk reads at most 1,000,000 commits, counting the excluded side of
-  a range: both sides of a range share that budget. A walk that would read
-  more fails with an error that names the limit; `kit log` never prints
-  part of a history as if it were all of it. The merge base of `A...B`
-  comes from a separate walk with the same limit on each side.
-  A commit of the walk, or of the excluded side of a range, that is
-  missing, corrupt or not a commit fails the walk with an error that names
-  it; it never drops out of the history.
-  With `-n`, a walk from one revision reads only the commits it needs while
-  each commit has at most one followed parent, so `-n 20` on a linear
-  history or with `--first-parent` reads about 20 commits. From the first
-  merge on, it reads the rest of the reachable history before it prints,
-  because a later commit can still be a child of any commit seen so far.
+  One walk admits at most 1,000,000 commits across its selected history and
+  exclusion proof. A walk that exceeds that budget fails without printing a
+  partial answer. The merge base of `A...B` uses a separate bounded walk.
+  Missing, corrupt or non-commit objects fail when inspected. Objects below
+  a proven stopping boundary are not inspected. In a closed `A..B` range,
+  where every selected path reaches `A`, ancestors of `A` stay unread.
+  Range discovery may inspect commits beyond the output limit to prove a
+  cut. It first probes up to 63 selected commits for the excluded endpoint,
+  then up to 4,096 commits from both endpoints for a shared frontier. If
+  neither proof succeeds, it uses the full exclusion walk.
+  With `-n`, a linear or first-parent walk stops at the filtered limit.
+  At a merge, it sorts the region above a shared unread frontier before
+  continuing below that frontier. Separate roots or exclusion boundaries
+  can require the full remaining graph to preserve the topological order.
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each

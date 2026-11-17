@@ -57,7 +57,8 @@ pub enum WorktreeError {
     #[error("stored content of {size} bytes exceeds the {MAX_FILE_BYTES} byte in-memory limit")]
     ContentTooLarge {
         /// The content's size from its manifest.
-        },
+        size: u64,
+    },
     /// Path component had non-UTF-8 bytes; tree entry names must be UTF-8.
     #[error("path component is not valid UTF-8")]
     InvalidUtf8,
@@ -504,7 +505,7 @@ fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     }
     let results = misses
         .iter()
-        .map(|m| hash_one_pending_file(sink, source, m))
+        .map(|m| hash_one_pending_file(sink, source, m, false))
         .collect::<WorktreeResult<Vec<_>>>()?;
     apply_hash_results(misses, results, entries, observations);
     Ok(())
@@ -518,8 +519,16 @@ fn hash_one_pending_file<S: ObjectSink + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     m: &PendingFileHash<'_>,
+    parallel_files: bool,
 ) -> WorktreeResult<(Hash, EntryMode, Option<StatObservation>)> {
-    let (mut h, opened_meta) = hash_file_with_metadata(sink, &m.abs_path)?;
+    let (mut h, opened_meta) = if parallel_files {
+        hash_file_with_metadata_using(sink, &m.abs_path, |sink, reader, path| {
+            let chunker = ChunkReader::with_threads(FastCdc::v1(), reader, 1);
+            store_large_file_chunks(sink, chunker, path, CHECKPOINT_CHUNKS)
+        })?
+    } else {
+        hash_file_with_metadata(sink, &m.abs_path)?
+    };
     h = retained_content_hash(source, m.indexed, h)?;
     // Cache miss that re-hashed back to the staged hash: report the
     // observation (stat captured from the opened fd BEFORE the content
@@ -553,7 +562,7 @@ fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     use rayon::prelude::*;
     // Indexed collection preserves slot order, including the first error.
     // Nested BLAKE3 parallelism uses this same global pool.
-    misses.par_iter().map(|m| hash_one_pending_file(sink, source, m))
+    misses.par_iter().map(|m| hash_one_pending_file(sink, source, m, true))
         .collect::<Vec<_>>().into_iter().collect()
 }
 
@@ -969,11 +978,11 @@ fn available_threads() -> usize {
 
 /// Shared chunk+scoped-thread+join scaffolding behind this module's two
 /// order-preserving, short-circuit-on-first-error native fan-outs
-/// ([`probe_staged_objects_parallel`], [`hash_pending_files_parallel`]):
+/// ([`probe_staged_objects_parallel`]):
 /// split `items` into `threads` contiguous chunks, run each chunk's
 /// items through `f` sequentially on its own scoped thread, and join.
 /// `std::thread::scope` (not a persistent pool) keeps `kit-core`
-/// dependency-neutral and wasm-clean.
+/// wasm-clean.
 ///
 /// (`pack::stage_raw_entries_parallel` looks similar but isn't folded
 /// in here: it *defers* rather than short-circuits on an item error, via
@@ -1402,7 +1411,15 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     path: &Path,
     window: usize,
 ) -> WorktreeResult<Hash> {
-    let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+    store_large_file_chunks(sink, ChunkReader::new(FastCdc::v1(), reader), path, window)
+}
+
+fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    mut chunker: ChunkReader<R>,
+    path: &Path,
+    window: usize,
+) -> WorktreeResult<Hash> {
     let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
     while let Some(chunk) = chunker.next_chunk_ref()? {
@@ -3910,11 +3927,14 @@ mod tests {
             }
         }
         fs::write(work.path().join("root-file"), b"root").unwrap();
+        fs::write(work.path().join("zz-big"), vec![17; 2 * 1024 * 1024]).unwrap();
         let hash = build_tree(&store, work.path()).unwrap();
         let Object::Tree(root) = store.read_object(&hash).unwrap() else {
             panic!("tree")
         };
-        assert_eq!(root.entries.len(), 33);
+        assert_eq!(root.entries.len(), 34);
+        let expected = hash_file_with_metadata(&store, &work.path().join("zz-big")).unwrap().0;
+        assert_eq!(root.entries.last().unwrap().object_hash, expected);
         for (d, entry) in root.entries.iter().take(32).enumerate() {
             let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else {
                 panic!("tree")
