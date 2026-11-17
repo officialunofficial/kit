@@ -474,7 +474,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         return Err(IndexError::Corrupt);
     }
     let mut entries = Vec::with_capacity(count.min(1024)); // bound initial alloc
-    let mut seen_paths = std::collections::HashSet::with_capacity(count.min(1024));
+    let mut by_path = BTreeMap::new();
     let mut offset = 9usize;
     for _ in 0..count {
         if offset + min_entry_len > data.len() {
@@ -508,7 +508,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
         if !validate_index_path(&path) {
             return Err(IndexError::InvalidPath(path));
         }
-        if !seen_paths.insert(path.clone()) {
+        if by_path.insert(path.clone(), entries.len()).is_some() {
             return Err(IndexError::DuplicatePath(path));
         }
         if status == EntryStatus::Removed && object_hash != hash::ZERO {
@@ -527,7 +527,7 @@ pub fn deserialize(data: &[u8]) -> IndexResult<Index> {
     if offset != data.len() {
         return Err(IndexError::Corrupt);
     }
-    Ok(Index::from_entries(entries))
+    Ok(Index { entries, by_path })
 }
 
 /// Read this worktree's staging index. Returns an empty index if the

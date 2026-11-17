@@ -58,6 +58,10 @@ name = "delta_encode_scan"
 harness = false
 
 [[bench]]
+name = "index_deserialize"
+harness = false
+
+[[bench]]
 name = "chunker"
 harness = false
 
