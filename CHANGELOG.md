@@ -26,7 +26,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Reject unescaped control characters in attestation envelope strings.
-
 - Keep native path components in ignore checks and refuse filenames the index cannot represent.
 - Require an exact attestation-log grant scope and retire synchronization caches when remote configuration changes.
 
