@@ -94,11 +94,18 @@ fn simultaneous_attesters_both_survive_cas() {
     attestation_fetch::code(&tx);
     let (a, _) = local(&tx, "example.com/a/v1");
     let (b, _) = local(&tx, "example.com/b/v1");
+    let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
-        let a = scope
-            .spawn(|| kit_sync::push(a.path(), &TransportSource::new(&tx), &options()).unwrap());
-        let b = scope
-            .spawn(|| kit_sync::push(b.path(), &TransportSource::new(&tx), &options()).unwrap());
+        let source = &TransportSource::new(&tx);
+        let barrier = &barrier;
+        let a = scope.spawn(|| {
+            let gated = Gated { source, barrier, first: std::cell::Cell::new(true) };
+            kit_sync::push(a.path(), &gated, &options()).unwrap()
+        });
+        let b = scope.spawn(|| {
+            let gated = Gated { source, barrier, first: std::cell::Cell::new(true) };
+            kit_sync::push(b.path(), &gated, &options()).unwrap()
+        });
         assert_eq!(a.join().unwrap().attestations_pushed, 1);
         assert_eq!(b.join().unwrap().attestations_pushed, 1);
     });
@@ -128,4 +135,27 @@ fn failed_attestation_log_does_not_fail_the_code_push() {
     let result = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
     assert_eq!(result.attestations_pushed, 0);
     assert!(!result.attestation_warnings.is_empty());
+}
+
+// Both writers observe the same head before either can publish.
+struct Gated<'a> {
+    source: &'a TransportSource<'a>,
+    barrier: &'a std::sync::Barrier,
+    first: std::cell::Cell<bool>,
+}
+impl kit_sync::RemoteSource for Gated<'_> {
+    fn supports_push(&self) -> bool { true }
+    fn supports_attestations(&self) -> bool { true }
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, kit_sync::SourceError> { self.source.list_branches() }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, kit_sync::SourceError> { self.source.list_refs(prefix) }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        let result = self.source.read_ref(name);
+        if name == ATTESTMAP_REF && self.first.replace(false) { self.barrier.wait(); }
+        result
+    }
+    fn download_blob(&self, key: &PackKey, hint: &str) -> Result<Vec<u8>, kit_sync::SourceError> { self.source.download_blob(key, hint) }
+    fn download_pack(&self, key: &PackKey, hint: &str, sink: &mut dyn kit_core::protocol::PackSink) -> Result<(), kit_sync::SourceError> { self.source.download_pack(key, hint, sink) }
+    fn upload_pack(&self, body: &dyn kit_core::protocol::PackBody, key: &PackKey, hint: &str) -> Result<(), kit_sync::SourceError> { self.source.upload_pack(body, key, hint) }
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, hint: &str) -> Result<(), kit_sync::SourceError> { self.source.upload_blob(bytes, key, hint) }
+    fn write_attestmap(&self, condition: RefWriteCondition, tip: &Hash, keys: &[PackKey]) -> Result<(), kit_sync::SourceError> { self.source.write_attestmap(condition, tip, keys) }
 }
