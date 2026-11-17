@@ -249,14 +249,14 @@ fn publish(
                 "attestation log needs compaction, which requires the f permission; skipped".into(),
             );
         }
-        for pack in group {
-            pack.upload(tx)?;
-        }
         if !record.warned {
             report.attestation_warnings.push(PERMANENCE_WARNING.into());
             tx.observer.event(&crate::SyncEvent::AttestationWarning { message: PERMANENCE_WARNING.into() });
             record.warned = true;
             persist(&path, &record)?;
+        }
+        for pack in group {
+            pack.upload(tx)?;
         }
         let (_, held) = append(tx, &keys, true)?;
         for pack in group {
