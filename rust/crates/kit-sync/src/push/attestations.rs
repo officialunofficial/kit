@@ -32,7 +32,11 @@ pub(super) fn run(
             .push("remote does not support attestations; skipped".into());
         return;
     }
-    if let Err(error) = publish(layout, store, tx, options, report) {
+    let result = publish(layout, store, tx, options, report).and_then(|()| {
+        let max = tx.upload_limits().max_pack_bytes.unwrap_or(PACK_BODY_LIMIT).min(PACK_BODY_LIMIT);
+        compact_log(tx, options, max, &mut report.attestation_warnings)
+    });
+    if let Err(error) = result {
         report
             .attestation_warnings
             .push(format!("attestation push stopped: {error}"));
@@ -316,6 +320,10 @@ fn compact_log(
     max: u64,
     warnings: &mut Vec<String>,
 ) -> Result<(), Failure> {
+    for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
+        let prior = tx.read_ref(ATTESTMAP_REF)?;
+        let (_, original) = chain(tx, prior)?;
+        if original.len() <= 4096 { return Ok(()); }
     if options
         .control
         .authority
@@ -323,9 +331,6 @@ fn compact_log(
     {
         return Err("attestation compaction requires f permission; skipped".into());
     }
-    for _ in 0..super::packmap::PACKMAP_CAS_ATTEMPTS {
-        let prior = tx.read_ref(ATTESTMAP_REF)?;
-        let (_, original) = chain(tx, prior)?;
         let prepared = compact_packs(tx, &original, max, warnings)?;
         if prepared.len() > 4096 {
             return Err("compacted attestation log exceeds 4096 packs".into());
@@ -473,7 +478,9 @@ fn compact_packs(
     let mut seen = BTreeSet::new();
     let mut batch = Batch::new(max);
     let mut keys = Vec::new();
-    for id in packs.iter().collect::<BTreeSet<_>>() {
+    let mut visited = BTreeSet::new();
+    for id in packs {
+        if !visited.insert(*id) { continue; }
         let mut spool = kit_core::pack::PackSpool::create(&tx.spool_dir, PACK_BODY_LIMIT)?;
         match tx.download_pack(&PackKey::from_hash(*id), ATTESTMAP_REF, &mut spool) {
             Ok(()) => {}
