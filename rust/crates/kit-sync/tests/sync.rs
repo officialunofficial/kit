@@ -4209,3 +4209,102 @@ fn a_pull_refuses_a_repository_directory_that_aliases_a_target_directory() {
     );
     assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"one\n");
 }
+
+#[test]
+fn interrupted_pull_with_a_missing_unchanged_blob_refuses_recovery() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"keep"), ("b", b"old")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let layout = RepoLayout::single(dir.path());
+    let blob = Object::Blob(Blob {
+        data: b"keep".to_vec(),
+    })
+    .id()
+    .unwrap();
+    let hex = hash::to_hex(&blob);
+    std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
+    let second = remote.publish(Some(first), &[("a", b"keep"), ("b", b"new")], true);
+    // Fetch first, then remove the blob again: fetch may heal skipped packs.
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..]));
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip: second,
+        },
+    );
+    assert!(matches!(result, Err(SyncError::Interrupted)), "{result:?}");
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(second));
+    let result = pull(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    );
+    assert!(
+        matches!(result, Err(SyncError::RestoreSafety(_))),
+        "{result:?}"
+    );
+    assert!(layout.pull_head_file().exists());
+    assert_eq!(std::fs::read(dir.path().join("b")).unwrap(), b"old");
+}
+
+#[test]
+fn a_pull_checks_target_collisions_inside_ignored_directories() {
+    for nested in [false, true] {
+        let remote = Remote::new();
+        let first = remote.publish_paths(None, &[("a", EntryMode::Blob, b"base")]);
+        let dir = tempfile::tempdir().unwrap();
+        clone_into(&remote, dir.path());
+        std::fs::write(dir.path().join(".gitignore"), "cache/\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("cache")).unwrap();
+        if nested {
+            std::fs::create_dir_all(dir.path().join("cache/new/.git")).unwrap();
+        } else {
+            std::fs::write(dir.path().join("cache/new"), "mine").unwrap();
+        }
+        remote.publish_paths(
+            Some(first),
+            &[
+                ("a", EntryMode::Blob, b"base"),
+                ("cache/new", EntryMode::Blob, b"new"),
+            ],
+        );
+        let result = pull(
+            dir.path(),
+            &remote.source(),
+            "default",
+            &SyncOptions::default(),
+            &NoopObserver,
+        );
+        assert!(
+            matches!(result, Err(SyncError::RestoreSafety(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            refs::resolve_head(&RepoLayout::single(dir.path())).unwrap(),
+            Some(first)
+        );
+        if nested {
+            assert!(dir.path().join("cache/new/.git").is_dir());
+        } else {
+            assert_eq!(
+                std::fs::read(dir.path().join("cache/new")).unwrap(),
+                b"mine"
+            );
+        }
+    }
+}

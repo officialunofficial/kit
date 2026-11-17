@@ -205,14 +205,25 @@ fn start(
         return exit::GENERAL_ERROR;
     }
 
-    if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
+    if let Err(e) = kit_sync::worktree::ensure_restore_safe_from(
+        layout,
+        store,
+        result.tree_hash,
+        &kit_core::ops::restore::RestoreOptions::default(),
+        Some(ours_tree),
+    ) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
 
     // --no-commit: apply the reverted tree to the index + worktree but do
     // not create a commit or move HEAD. The user commits when ready.
     if no_commit {
-        if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
+        if let Err(e) = kit_sync::worktree::restore_worktree_and_index_from(
+            layout,
+            store,
+            result.tree_hash,
+            Some(ours_tree),
+        ) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
         // Restoring from a tree drops staged DELETIONS; re-stage them as
@@ -246,7 +257,12 @@ fn start(
         Ok(h) => h,
         Err(code) => return code,
     };
-    if let Err(e) = super::restore_worktree_and_index(layout, store, result.tree_hash) {
+    if let Err(e) = kit_sync::worktree::restore_worktree_and_index_from(
+        layout,
+        store,
+        result.tree_hash,
+        Some(ours_tree),
+    ) {
         return emit_err(&e, exit::GENERAL_ERROR);
     }
     if let Err(e) = advance_head(layout, &commit_hash) {
