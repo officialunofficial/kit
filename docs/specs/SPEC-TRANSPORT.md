@@ -739,15 +739,10 @@ misbehaving or malicious client (see
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on estimated request bytes.
 
-The byte count starts after `Hello`. An upload header costs its declared
-pack length and covers the chunks that follow. Each other request costs
-64 bytes. A request that takes the count exactly to 1 GiB fits.
-
-When a request trips either cap, the server sends
-`Error{ ERROR_CODE_INVALID_REQUEST }` and closes the connection with
-`exit::PROTOCOL_ERROR`. The frame cap's reply is
-`per-connection frame budget exceeded: at most 10000 frames per session
-(SPEC-TRANSPORT 4.4)`.
+Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
+closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
+names it: `per-connection frame budget exceeded: at most 10000 frames per
+session (SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
 frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
@@ -767,16 +762,20 @@ cursor it recorded after its last complete fetch costs one frame, the
 fetch that finds another cursor, or none, works as above. A server that
 predates the request makes every fetch work as above, plus one frame.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole packmap chain. It re-baselines the chain (§7.2), so the
-walk stays within the re-baseline depth while one node can list the
-chain's packs. Past that, a push's frames grow with the number of pushes
-the branch has had. The cap is not raised: it is what bounds
+the branch's whole packmap chain over its session. A push re-baselines the
+chain (§7.2), so the walk stays within the re-baseline depth while one node
+can list the chain's packs. Past that, a push's frames grow with the number
+of pushes the branch has had. The cap is not raised: it is what bounds
 a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
 frames at `MAX_FRAMES_PER_CONN`, so a client cannot bypass the outer
 frame loop by streaming unbounded chunks inside one upload request.
+
+The byte count starts after `Hello`. An upload header costs its declared
+pack length and covers the chunks that follow. Each other request costs
+64 bytes. A request that takes the count exactly to 1 GiB fits.
 
 The budgets bound how much a client can make the server do; an idle
 timeout bounds a client that goes silent. `kit serve` ends a session after `--idle-timeout-secs`
@@ -799,10 +798,11 @@ For a pack over the 1 GiB upload limit, the SSH client returns
 `TransportError::Unsupported` with the limit in the message. It refuses
 before opening the pack body or sending its header.
 
-The SSH client applies the `PACK_BODY_LIMIT = 4 GiB` cap on
-`download_pack`. If `DownloadPackHeader.total_bytes` exceeds 4 GiB,
-the client returns `TransportError::RemoteError` with the cap in the
-message before calling the sink's `begin`. The header's length goes to
+Client side, the SSH transport applies the
+`PACK_BODY_LIMIT = 4 GiB` cap on `download_pack`. A server-advertised
+`DownloadPackHeader.total_bytes` greater than 4 GiB is rejected
+before the sink's `begin`, as `TransportError::RemoteError` with a
+message mentioning the client cap. The header's length goes to
 `begin`, so a sink with a smaller limit refuses the pack before any
 chunk is read; chunks past the declared length or the sink's limit
 stop at the sink as `TransportError::PayloadTooLarge`.
