@@ -355,16 +355,11 @@ pub fn content_fingerprint<S: crate::store::ObjectSource + ?Sized>(
 }
 
 /// Compare file content independently of inline/chunked storage layout.
-/// Equal object IDs are a fast path; different IDs require verified content.
-///
-/// A `ChunkedBlob`-vs-`ChunkedBlob` pair (the large-file case) takes a
-/// further internal fast path (`chunked_content_eq`, private to this
-/// module), which skips reading any chunk both sides reference by the
-/// same hash instead of reassembling and byte-comparing every chunk of
-/// both blobs — see that function's doc for what it trusts and what it
-/// still fully verifies. Any other pairing
-/// (inline vs inline, or a mixed inline/chunked pair) keeps the exact
-/// byte-cursor walk this function has always used.
+/// Equal object IDs compare equal. If the source already verified one
+/// canonical blob, a different canonical blob ID proves the content differs.
+/// The comparison reads the other object if its type is unknown.
+/// Two chunked objects skip shared chunks by ID. Mixed representations
+/// compare bytes with a cursor over each object.
 ///
 /// The chunked fast path's "same hash means same bytes, skip the read"
 /// trust holds only as far as `store: &S`'s reads are actually
@@ -385,7 +380,19 @@ pub fn content_eq<S: crate::store::ObjectSource + ?Sized>(
     if a == b {
         return Ok(true);
     }
+    let a_known = store.knows_blob(a);
+    let b_known = store.knows_blob(b);
+    if a_known && b_known {
+        return Ok(false);
+    }
+    // Read the side whose type is unknown first. Different canonical blob
+    // ids already prove the contents differ, even if a worktree path changed
+    // after hashing. A chunked representation still needs byte comparison.
+    let (a, b) = if a_known { (b, a) } else { (a, b) };
     let obj_a = store.read_object(a)?;
+    if (a_known || b_known) && matches!(obj_a, Object::Blob(_)) {
+        return Ok(false);
+    }
     let obj_b = store.read_object(b)?;
     if let (Object::ChunkedBlob(ma), Object::ChunkedBlob(mb)) = (&obj_a, &obj_b) {
         return chunked_content_eq(store, ma, mb);
