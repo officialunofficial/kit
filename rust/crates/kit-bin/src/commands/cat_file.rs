@@ -139,23 +139,42 @@ fn run_batch(store: &ObjectStore, layout: &kit_core::layout::RepoLayout) -> u8 {
             let _ = writeln!(stdout, "{name} missing");
             continue;
         };
-        // Render content to a buffer so the advertised size is exactly the
-        // byte length we emit (self-consistent for every object type).
-        let mut buf: Vec<u8> = Vec::new();
-        if let Err(msg) = pretty_print(store, &h, &obj, &mut buf) {
+        if let Err(msg) = write_batch_record(store, &h, &obj, &mut stdout) {
             return emit_err(&msg, exit::GENERAL_ERROR);
         }
-        let _ = writeln!(
-            stdout,
-            "{} {} {}",
-            format::hex_hash(&h),
-            git_type(&obj),
-            buf.len()
-        );
-        let _ = stdout.write_all(&buf);
-        let _ = stdout.write_all(b"\n");
     }
     exit::OK
+}
+
+/// Blob sizes are known before streaming. Other pretty-printed objects
+/// have a different size from their serialized form, so count their output.
+fn write_batch_record(
+    store: &ObjectStore,
+    h: &kit_core::hash::Hash,
+    obj: &Object,
+    out: &mut impl Write,
+) -> Result<(), String> {
+    struct Count(u64);
+    impl Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let size = if matches!(obj, Object::Blob(_) | Object::ChunkedBlob(_)) {
+        object_size(store, h, obj)?
+    } else {
+        let mut count = Count(0);
+        pretty_print(store, h, obj, &mut count)?;
+        count.0
+    };
+    let _ = writeln!(out, "{} {} {size}", format::hex_hash(h), git_type(obj));
+    pretty_print(store, h, obj, out)?;
+    let _ = out.write_all(b"\n");
+    Ok(())
 }
 
 /// git-compatible type token. kit's `remix` has no git equivalent.
@@ -244,3 +263,28 @@ pub(super) fn git_mode_and_type(mode: EntryMode) -> (&'static str, &'static str)
 }
 
 use super::error as emit_err;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_batch_output_keeps_the_existing_exit_behavior() {
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).expect("store");
+        let obj = Object::Blob(kit_core::object::Blob {
+            data: b"bytes".to_vec(),
+        });
+        assert!(write_batch_record(&store, &[0; 32], &obj, &mut Closed).is_ok());
+    }
+}
