@@ -318,7 +318,7 @@ The tag object is content-addressed like every other object; its hash is
 ```
 [prologue 6]                              schema_version 0x02 for this type
 [u64 LE total_size]
-[u32 LE chunk_size]                       0 or 0x8000_0002 == content-defined (FastCDC)
+[u32 LE chunk_size]                       default marker, fixed size, or chunker profile ID
 [u32 LE chunk_count]                      0..=8_388_608
 repeat chunk_count:
     [32 bytes chunk_hash]                 each chunk stored as its own blob
@@ -335,12 +335,17 @@ The **span** of chunk `i` is `[start_i, end_i)`, with `start_0 = 0` and
 file. The manifest commits it: a chunk's blob MUST hold exactly `end_i -
 start_i` bytes of content.
 
-`chunk_size = 0` indicates the manifest was produced by FastCDC v1. See
-SPEC-FASTCDC. `chunk_size = 0x8000_0002` indicates the manifest was produced
-by FastCDC v2 (SPEC-FASTCDC §11). Every other `chunk_size` indicates
-fixed-size chunking with the stated size: every chunk but the last is exactly
-that size, and the final chunk holds between 1 and that many bytes. The two
-content-defined values are the layouts the rules below call content-defined.
+The `chunk_size` field identifies the layout:
+
+| Value | Meaning |
+|---|---|
+| `0` | FastCDC v1, the default (SPEC-FASTCDC) |
+| `1..=0x7FFF_FFFF` | Fixed size in bytes |
+| `0x8000_0000..=0xFFFF_FFFF` | Chunker profile ID. `0x8000_0002` names FastCDC v2 (SPEC-FASTCDC §11). Readers MUST refuse all other IDs in this range. |
+
+FastCDC v1 and v2 are content-defined layouts. In a fixed-size layout, each
+chunk except the last is exactly the stated size. The last holds between
+1 and that many bytes.
 
 **Header check.** The header alone (`total_size`, `chunk_size`, `chunk_count`)
 MUST satisfy all of these. This is the check a disclosure verifier runs
@@ -348,6 +353,8 @@ without the entries (SPEC-DISCLOSURE §4). Each rule has its own label:
 
 - `total_size` is at most 128 GiB (137,438,953,472), else `total_size above
   the file limit`.
+- `chunk_size` names a supported layout, else `UnknownChunkerProfile`
+  (`unknown chunker profile`).
 - `chunk_count` is `0` only when `total_size` is `0`, else `total_size
   without chunks`.
 - when the layout is content-defined and `chunk_count` is above `0`,
@@ -357,11 +364,10 @@ without the entries (SPEC-DISCLOSURE §4). Each rule has its own label:
   is above `(chunk_count - 1) * chunk_size` and at most
   `chunk_count * chunk_size`, else `total_size outside the fixed-size layout`.
 
-The decoder and the id fold do not run the whole header check. Their header
-step is decoding checks 1 and 3 below (the count cap and the 128 GiB cap).
-The entries then carry the rest: a manifest that passes every decoding check
-satisfies every rule above. The whole header check runs only in the disclosure
-verifier, on `leaf_count - 1`.
+The decoder and the id fold check the chunk count cap, the 128 GiB cap and
+the chunker profile before processing entries. The entry checks enforce the
+remaining layout rules. The disclosure verifier runs the whole header check
+on `leaf_count - 1`.
 
 **Entry check.** One function checks each entry. The decoder and the id fold
 (SPEC-MERKLE-OBJECTS §1.2) both run it, so both refuse at the same entry with
@@ -386,6 +392,8 @@ step it occurs in.
    length`. This check comes before any allocation, so a short body under a
    large `chunk_count` allocates nothing.
 3. `total_size` is at most 128 GiB, else `total_size above the file limit`.
+   Then `chunk_size` names a supported layout, else `UnknownChunkerProfile`
+   (`unknown chunker profile`). This check also applies to empty manifests.
 4. Each entry passes the entry check.
 5. The last end equals `total_size`. With no entries, `total_size` is `0`.
    Check 4 already refuses an end above `total_size`, so this check refuses a
@@ -641,23 +649,22 @@ multi-version readers.
 13. **ChunkedBlob manifests**: the manifest bytes and id for 0, 1, 2, 3 and
     5 chunks, content-defined and fixed-size, and the leaf digest of §3.1 of
     SPEC-MERKLE-OBJECTS with asymmetric maximum values, so a big-endian or
-    swapped implementation fails. Refused manifests, each breaking one rule
-    and naming the label of the first failing check: an end that does not
+    swapped implementation fails. A one-chunk fixed layout with
+    `chunk_size = 0x7FFF_FFFF` is accepted. Refused manifests name the first
+    failing check. They include unknown profiles `0x8000_0000`,
+    `0x8000_0001`, `0x8000_0003` and `0xFFFF_FFFF`, an end that does not
     increase, `end_0 = 0`, a last end that is not `total_size`, a chunk longer
     than `MAX_RAW_OBJECT_SIZE - 10`, a fixed-size end off by one, `22 + 40n ±
     1` bytes, a count above the cap with a short body, type `0x05` with
     `schema_version` `0x01`, and another type with `schema_version` `0x02`.
 
-Vectors 1–7 are committed under `rust/tests/golden/objects/`; vectors 12
-and 13 are the layout and manifest tables of
-`rust/crates/kit-core/tests/golden.rs` and `scripts/golden/objects_ref.py`,
-with `scripts/golden/chunk_offsets_expected.json`; the tag
-vectors 8–9 under `rust/tests/golden/tags/`; the proof vectors 10–11
-(alongside range/multi-leaf and negative proof vectors not individually
-enumerated above) under `rust/tests/golden/proofs/`, per
-SPEC-MERKLE-OBJECTS §5.6. Each set ships a `MANIFEST.txt` and per-vector
-`.json` sidecar carrying the BLAKE3 digest, so external implementations
-can cross-verify byte-for-byte.
+Vectors 1–7 are under `rust/tests/golden/objects/`, tag vectors 8–9
+under `rust/tests/golden/tags/`, and proof vectors 10–11 under
+`rust/tests/golden/proofs/` (SPEC-MERKLE-OBJECTS §5.6). Each set ships a
+`MANIFEST.txt` and per-vector `.json` sidecar carrying the BLAKE3 digest.
+Vectors 12 and 13 are checked by `scripts/golden/objects_ref.py`, the unit
+tests in `rust/crates/kit-core/src/serialize.rs` and the Rust tests that read
+`scripts/golden/chunk_offsets_expected.json`.
 
 ---
 
@@ -679,6 +686,7 @@ mechanism that enforces or detects each:
 | Identity payloads are non-empty, bounded, and of known kind | `InvalidIdentity`/`IdentityTooLarge`/`UnknownIdentityKind` (§9) |
 | A tag targets only a storable object, with an unambiguous name | `target_type` whitelist → `TagTargetTypeInvalid`; name floor → `TagNameInvalid` (§6a) |
 | Delta objects never appear in the object store | pack-only rule (§1, §8) |
+| A `ChunkedBlob` names a supported layout | `0` names FastCDC v1, positive values below `0x8000_0000` are fixed sizes, and `0x8000_0002` is the only recognized profile ID in the reserved range (§7) |
 | A `ChunkedBlob`'s spans are increasing, end at `total_size`, and follow the fixed layout | the decode checks (§7) |
 | Every chunk of a `ChunkedBlob` holds exactly the length of its span, and the content is exactly `total_size` bytes | per-chunk length check at reassembly (§7) |
 | A merkle-addressing reader never mis-reads a store without the marker | mandatory `.kit/format` = `bmt-v2` marker → `IncompatibleRepoFormat` (§10, §12) |

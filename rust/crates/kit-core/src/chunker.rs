@@ -24,6 +24,8 @@
 //! [`CHUNK_SIZE_FASTCDC_V2`]. No writer uses it by default; see
 //! [`Chunker`].
 
+use crate::object::KitError;
+
 /// Frozen splitmix64 seed for v1 — ASCII `"KITFCDC"` as big-endian u64.
 ///
 /// The seed sets the chunk boundaries, so every chunked blob id depends on
@@ -88,14 +90,27 @@ impl Chunker {
         }
     }
 
-    /// The chunker a manifest's `chunk_size` names, or `None` for a
-    /// fixed-size manifest.
+    /// Look up a supported chunker by its manifest marker. Returns `None`
+    /// for fixed sizes and unknown profile IDs.
     #[must_use]
     pub const fn from_chunk_size(chunk_size: u32) -> Option<Self> {
+        match Self::parse_chunk_size(chunk_size) {
+            Ok(chunker) => chunker,
+            Err(_) => None,
+        }
+    }
+
+    /// Interpret a manifest marker, with `Ok(None)` for a fixed size.
+    pub(crate) fn classify_chunk_size(chunk_size: u32) -> Result<Option<Self>, KitError> {
+        Self::parse_chunk_size(chunk_size).map_err(KitError::UnknownChunkerProfile)
+    }
+
+    const fn parse_chunk_size(chunk_size: u32) -> Result<Option<Self>, u32> {
         match chunk_size {
-            0 => Some(Self::FastCdcV1),
-            CHUNK_SIZE_FASTCDC_V2 => Some(Self::FastCdcV2),
-            _ => None,
+            0 => Ok(Some(Self::FastCdcV1)),
+            CHUNK_SIZE_FASTCDC_V2 => Ok(Some(Self::FastCdcV2)),
+            0x8000_0000..=u32::MAX => Err(chunk_size),
+            _ => Ok(None),
         }
     }
 }
@@ -1229,6 +1244,7 @@ mod tests {
         assert_eq!(Chunker::FastCdcV1.chunk_size(), 0);
         assert_eq!(Chunker::FastCdcV2.chunk_size(), CHUNK_SIZE_FASTCDC_V2);
         assert_eq!(Chunker::from_chunk_size(65_536), None);
+        assert_eq!(Chunker::from_chunk_size(0x8000_0000), None);
         let mut data = vec![0u8; 2 * 1024 * 1024];
         Prng::new(0x0002_C0DE).fill(&mut data);
         assert_ne!(

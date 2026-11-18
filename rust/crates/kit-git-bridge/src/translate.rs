@@ -87,19 +87,24 @@ pub fn translate_chunked<S: ObjectSource>(
     manifest: &ChunkedBlob,
     source: &S,
 ) -> Result<GitObject, BridgeError> {
-    if manifest.chunk_size() == kit_core::chunker::CHUNK_SIZE_FASTCDC_V2 {
-        return Err(Refusal::NonCanonicalChunking {
-            object: *hash,
-            detail: "FastCDC v2 manifests do not translate; reconstruction re-chunks with FastCDC v1",
+    use kit_core::chunker::Chunker;
+
+    match Chunker::from_chunk_size(manifest.chunk_size()) {
+        Some(Chunker::FastCdcV1) => {}
+        Some(_) => {
+            return Err(Refusal::NonCanonicalChunking {
+                object: *hash,
+                detail: "FastCDC v2 manifests do not translate; reconstruction re-chunks with FastCDC v1",
+            }
+            .into());
         }
-        .into());
-    }
-    if manifest.chunk_size() != 0 {
-        return Err(Refusal::FixedSizeChunking {
-            object: *hash,
-            chunk_size: manifest.chunk_size(),
+        None => {
+            return Err(Refusal::FixedSizeChunking {
+                object: *hash,
+                chunk_size: manifest.chunk_size(),
+            }
+            .into());
         }
-        .into());
     }
     // The git blob holds the whole file in memory.
     if manifest.total_size() > kit_core::worktree::MAX_FILE_BYTES {

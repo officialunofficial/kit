@@ -352,7 +352,7 @@ ACCEPTED_CHUNKED = [
     (0, 0x8000_0002, 0),
     (3, 0x8000_0002, 3),
     (128 << 30, 0x8000_0002, 2),
-    (1, 0x8000_0001, 1),
+    (1, 0x7FFF_FFFF, 1),
 ]
 REFUSED_CHUNKED = [
     (1, 0, 0),
@@ -366,7 +366,12 @@ REFUSED_CHUNKED = [
     (1, 0x8000_0002, 0),
     (2, 0x8000_0002, 3),
     ((128 << 30) + 1, 0x8000_0002, 2),
-    (3, 0x8000_0001, 3),
+]
+UNKNOWN_PROFILE_LAYOUTS = [
+    (0, 0x8000_0000, 0),
+    (1, 0x8000_0001, 1),
+    (1, 0x8000_0003, 1),
+    (1, 0xFFFF_FFFF, 1),
 ]
 
 # SPEC-OBJECTS section 7 and plan 4.4: the bounds of a manifest. The largest
@@ -387,9 +392,13 @@ def manifest_len(count):
     return CHUNKED_HEADER_LEN + CHUNK_ENTRY_LEN * count
 
 
-# SPEC-OBJECTS section 7: chunk_size values that name a content-defined
-# chunker rather than a fixed size. 0 is FastCDC v1, 0x8000_0002 FastCDC v2.
-CONTENT_DEFINED = (0, 0x8000_0002)
+def is_fixed_chunk_size(size):
+    """Classify the chunk_size field under SPEC-OBJECTS section 7."""
+    if size in (0, 0x8000_0002):
+        return False
+    if size >= 0x8000_0000:
+        raise ValueError("unknown chunker profile")
+    return True
 
 
 def check_chunked_layout(total, size, count):
@@ -397,10 +406,11 @@ def check_chunked_layout(total, size, count):
     disclosure verifier runs it on (total_size, chunk_size, leaf_count - 1)."""
     if total > MAX_TOTAL_SIZE:
         raise ValueError("total_size above the file limit")
+    fixed = is_fixed_chunk_size(size)
     if count == 0:
         if total != 0:
             raise ValueError("total_size without chunks")
-    elif size in CONTENT_DEFINED:
+    elif not fixed:
         if total < count:
             raise ValueError("total_size below chunk_count")
     elif not ((count - 1) * size < total <= count * size):
@@ -419,7 +429,7 @@ def check_chunk_end(index, size, total, prev_end, end):
         raise ValueError("chunk length above the object limit")
     if end > total:
         raise ValueError("end above total_size")
-    if size not in CONTENT_DEFINED and end != min((index + 1) * size, total):
+    if is_fixed_chunk_size(size) and end != min((index + 1) * size, total):
         raise ValueError("fixed layout end")
 
 
@@ -464,6 +474,14 @@ def check_chunked_rules():
         except ValueError:
             continue
         fail(f"chunked layout {layout} must be refused")
+    for layout in UNKNOWN_PROFILE_LAYOUTS:
+        try:
+            check_chunked_layout(*layout)
+        except ValueError as err:
+            if str(err) == "unknown chunker profile":
+                continue
+            fail(f"chunked layout {layout}: refused with {err}")
+        fail(f"chunked layout {layout}: unknown profile ID must be refused")
     # Plan 4.6: schema 0x02 is for type 0x05 only; every other type stays 0x01.
     for t in (BLOB, TREE, COMMIT, REMIX, TAG):
         for version in (0, 2):
@@ -508,7 +526,7 @@ def build_manifest(total, chunk_size, entries):
 
 
 def parse_chunked(data):
-    """Plan 4.4: the five decode checks, in order, each with its own label."""
+    """Decode a manifest in the order set by SPEC-OBJECTS section 7."""
     r = Reader(data)
     prologue(r, CHUNKED)
     total = r.u64()
@@ -520,6 +538,7 @@ def parse_chunked(data):
         raise ValueError("manifest length")
     if total > MAX_TOTAL_SIZE:  # check 3
         raise ValueError("total_size above the file limit")
+    is_fixed_chunk_size(chunk_size)
     chunks, ends, prev = [], [], 0
     for i in range(count):  # check 4
         chunks.append(r.take(32))
@@ -554,6 +573,11 @@ MANIFEST_CASES = [
     ("three chunks", 30, 0, [(_h(1), 10), (_h(2), 25), (_h(3), 30)], None, None),
     ("fixed layout, short last", 2500, 1000, [(_h(1), 1000), (_h(2), 2000), (_h(3), 2500)], None, None),
     ("fixed layout, exact", 2000, 1000, [(_h(1), 1000), (_h(2), 2000)], None, None),
+    ("largest fixed chunk size", 5, 0x7FFF_FFFF, [(_h(1), 5)], None, None),
+    ("first reserved profile in empty manifest", 0, 0x8000_0000, [], None, "unknown chunker profile"),
+    ("profile before FastCDC v2", 5, 0x8000_0001, [(_h(1), 5)], None, "unknown chunker profile"),
+    ("profile after FastCDC v2", 5, 0x8000_0003, [(_h(1), 5)], None, "unknown chunker profile"),
+    ("last reserved profile", 5, 0xFFFF_FFFF, [(_h(1), 5)], None, "unknown chunker profile"),
     ("fastcdc v2 layout", 9, 0x8000_0002, [(_h(1), 4), (_h(2), 9)], None, None),
     ("same chunk hash twice", 20, 0, [(_h(1), 10), (_h(1), 20)], None, None),
     ("chunk at the length cap", MAX_CHUNK_LEN, 0, [(_h(1), MAX_CHUNK_LEN)], None, None),

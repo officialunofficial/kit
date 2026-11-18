@@ -2490,6 +2490,17 @@ mod tests {
         verify_chunk_claim(&id, &claim)
     }
 
+    #[test]
+    fn chunk_claim_refuses_an_unknown_profile_even_with_a_valid_proof() {
+        let profile = 0x8000_0003;
+        assert!(matches!(
+            claim_on_forged_manifest(5, profile, &[5], 0),
+            Err(VerifyError::Decode(KitError::UnknownChunkerProfile(id))) if id == profile
+        ));
+        claim_on_forged_manifest(5, 0x7FFF_FFFF, &[5], 0).unwrap();
+        claim_on_forged_manifest(5, 0x8000_0002, &[2, 5], 0).unwrap();
+    }
+
     /// Each span rule of the chunked-leaf checks has its own error, so a
     /// reader can tell which rule a bundle broke.
     #[test]

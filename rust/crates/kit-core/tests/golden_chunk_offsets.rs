@@ -47,6 +47,7 @@ fn manifest_label(error: &KitError) -> &'static str {
         KitError::TooManyChunks => "too many chunks",
         KitError::ChunkedBlobTotalSizeInvalid => "total_size above the file limit",
         KitError::ChunkedBlobNoChunks => "total_size without chunks",
+        KitError::UnknownChunkerProfile(_) => "unknown chunker profile",
         KitError::UnsupportedObjectVersion => "unsupported object version",
         _ => "other",
     }

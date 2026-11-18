@@ -77,9 +77,9 @@ list finalizes `BLAKE3("")` with `N = 0`.
 The result equals §1.1 for every `N`. kit computes every object id this
 way (`kit_core::merkle::ChunkedIdFold` for a `ChunkedBlob`, which takes
 the header fields and then each chunk's id and end offset, one at a time or
-as the whole 40-byte entries of a manifest). The fold builds each chunk leaf
-of §3.1 and checks each entry with the entry check of SPEC-OBJECTS §7, so it
-refuses the entries that a manifest decoder refuses and at the same entry.
+as the whole 40-byte entries of a manifest). The fold refuses unknown
+chunker profile IDs at the header check (SPEC-OBJECTS §7). It builds each
+chunk leaf of §3.1 and applies the same entry check as the manifest decoder.
 Tests compare the
 fold with the level build for every `N` up to 1,024, around each power of
 two up to 2^14, and at 1,000,001 and 8,388,608 chunks; the two large
