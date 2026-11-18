@@ -615,7 +615,7 @@ fn prepare(
             mark_missing_paths_removed(root, idx, &seen);
         } else {
             ensure_within_repo(root, &abs)?;
-            if let Routed::NeedsHash(p) = route_path(root, p, idx, &ignores, request.force)? {
+            if let Routed::NeedsHash(p) = route_path(root, p, None, idx, &ignores, request.force)? {
                 stage_hashed(
                     idx,
                     p.rel_str.clone(),
@@ -821,6 +821,7 @@ enum Routed {
 fn route_path(
     root: &Path,
     rel: &Path,
+    walked_meta: Option<std::fs::Metadata>,
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
@@ -830,10 +831,13 @@ fn route_path(
     } else {
         root.join(rel)
     };
-    let meta = abs.symlink_metadata().map_err(|source| Error::Metadata {
-        path: abs.clone(),
-        source,
-    })?;
+    let meta = match walked_meta {
+        Some(meta) if rel.is_absolute() => meta,
+        _ => abs.symlink_metadata().map_err(|source| Error::Metadata {
+            path: abs.clone(),
+            source,
+        })?,
+    };
     let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
     if !index::validate_index_path(&rel_str) {
         return Err(Error::InvalidPath(rel_str));
@@ -1040,7 +1044,7 @@ fn add_tree(
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The decision to include is made, so `force` skips the second
             // look at the ignore rules in `route_path`.
-            match route_path(root, &p, idx, ignores, true)? {
+            match route_path(root, &p, Some(meta), idx, ignores, true)? {
                 Routed::Done(rel) => {
                     seen.insert(rel);
                 }
@@ -1417,6 +1421,107 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn routing_an_absolute_walk_path_reuses_its_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("file");
+        std::fs::write(&path, "content").unwrap();
+        let metadata = path.symlink_metadata().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let routed = route_path(
+            root,
+            &path,
+            Some(metadata),
+            &mut Index::new(),
+            &IgnoreList::new(),
+            true,
+        )
+        .unwrap();
+
+        // The walker already observed this path. The hash step opens it later.
+        assert!(matches!(routed, Routed::NeedsHash(pending) if pending.abs == path));
+    }
+
+    #[test]
+    fn routing_a_relative_path_reads_metadata_at_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let observed = root.join("observed");
+        std::fs::write(&observed, "content").unwrap();
+        let metadata = observed.symlink_metadata().unwrap();
+        let relative = Path::new("missing");
+
+        let routed = route_path(
+            root,
+            relative,
+            Some(metadata),
+            &mut Index::new(),
+            &IgnoreList::new(),
+            true,
+        );
+
+        assert!(matches!(
+            routed,
+            Err(Error::Metadata { path, source })
+                if path == root.join(relative) && source.kind() == io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dot_add_refuses_a_file_replaced_by_a_symlink_before_hashing() {
+        use std::os::unix::fs::symlink;
+
+        struct ReplaceBeforeHash(PathBuf);
+        impl Observer<Event> for ReplaceBeforeHash {
+            fn event(&self, event: &Event) {
+                if matches!(event, Event::HashProgress { bytes: 0 }) && !self.0.is_symlink() {
+                    std::fs::remove_file(&self.0).unwrap();
+                    symlink("target", &self.0).unwrap();
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let layout = RepoLayout::single(root);
+        ObjectStore::init(&layout).unwrap();
+        kit_core::refs::init(&layout).unwrap();
+        kit_core::refs::write_head_branch(&layout, "main").unwrap();
+        std::fs::write(root.join(".kitignore"), "target\n").unwrap();
+        std::fs::write(root.join("target"), "ignored").unwrap();
+        std::fs::write(root.join("file"), "regular").unwrap();
+        drop(lock::acquire_worktree(&layout, &crate::NoopObserver).unwrap());
+        let before = snapshot(&root.join(".kit"));
+
+        let err = stage(
+            &layout,
+            &StoreConfig {
+                environment: &crate::Environment::new(root),
+                observer: &crate::NoopObserver,
+            },
+            root,
+            &Request {
+                all: false,
+                update: false,
+                patch: false,
+                force: false,
+                dry_run: false,
+                paths: &[".".to_owned()],
+            },
+            &mut NoChooser,
+            &crate::NoopObserver,
+            &ReplaceBeforeHash(root.join("file")),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Hash { path, .. } if path == root.join("file")));
+        assert_eq!(snapshot(&root.join(".kit")), before);
+    }
+
     #[test]
     fn repeated_paths_only_hash_once() {
         let dir = tempfile::tempdir().unwrap();
