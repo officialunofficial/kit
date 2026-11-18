@@ -305,7 +305,7 @@ impl PushWalk {
             held,
             closure_held: None,
             limits,
-            objects: BTreeSet::new(),
+            objects: HashSet::new(),
             manifests: Vec::new(),
             non_commit: 0,
             roots: commits
@@ -335,7 +335,7 @@ impl PushWalk {
             }
         }
         Ok(Self {
-            objects: walk.objects,
+            objects: walk.objects.into_iter().collect(),
             manifests: walk.manifests,
         })
     }
@@ -362,7 +362,7 @@ impl PushWalk {
             held,
             closure_held: None,
             limits,
-            objects: BTreeSet::new(),
+            objects: HashSet::new(),
             manifests: Vec::new(),
             non_commit: 0,
             roots: vec![id],
@@ -373,7 +373,7 @@ impl PushWalk {
             None => walk.add_closure(0, id)?,
         }
         Ok(Self {
-            objects: walk.objects,
+            objects: walk.objects.into_iter().collect(),
             manifests: walk.manifests,
         })
     }
@@ -582,7 +582,7 @@ struct Builder<'a> {
     held: &'a HeldCommits,
     closure_held: Option<HeldCommits>,
     limits: WalkLimits,
-    objects: BTreeSet<Hash>,
+    objects: HashSet<Hash>,
     manifests: Vec<ChunkList>,
     /// Kept objects that are not commits.
     non_commit: usize,
@@ -772,7 +772,6 @@ impl Builder<'_> {
             Ok(Object::Remix(remix)) => remix.tree_hash,
             Ok(_) | Err(_) => return,
         };
-        let mut dropped: HashSet<Hash> = HashSet::new();
         let mut visited: HashSet<Hash> = HashSet::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -782,23 +781,19 @@ impl Builder<'_> {
             if !visited.insert(id) {
                 continue;
             }
-            if self.objects.remove(&id) {
-                dropped.insert(id);
-            }
+            self.objects.remove(&id);
             let Ok(Object::Tree(tree)) = self.store.read_object(&id) else {
                 continue;
             };
             for held in tree.entries {
-                if self.objects.remove(&held.object_hash) {
-                    dropped.insert(held.object_hash);
-                }
+                self.objects.remove(&held.object_hash);
                 if held.mode == EntryMode::Tree {
                     stack.push(held.object_hash);
                 }
             }
         }
         self.manifests
-            .retain(|manifest| !dropped.contains(&manifest.id));
+            .retain(|manifest| self.objects.contains(&manifest.id));
     }
 }
 

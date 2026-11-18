@@ -1377,6 +1377,33 @@ fn a_tree_tip_drops_what_the_remote_snapshot_holds_at_another_path() {
 }
 
 #[test]
+fn snapshot_probes_keep_only_fresh_objects_in_the_sorted_plan() {
+    let (_d, s) = store();
+    let old = put_blob(&s, b"already present".to_vec());
+    let fresh = put_blob(&s, b"fresh".to_vec());
+    let nested = tree_of(&s, &[("old", old)]);
+    let remote = commit(&s, tree_of(&s, &[("dir", nested)]), &[], "remote");
+    let tip = tree_of(&s, &[("dir-moved", nested), ("fresh", fresh), ("old", old)]);
+    let held = HeldCommits::collect(&s, Some(remote), 100).unwrap();
+    let mut reported = Vec::new();
+    let walk = PushWalk::run(
+        &s,
+        tip,
+        &held,
+        WalkLimits::default(),
+        Some(&mut |owner, object| {
+            assert_eq!(*owner, tip);
+            reported.push(*object);
+            Ok(())
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(walk.objects(), &BTreeSet::from([tip, fresh]));
+    assert_eq!(reported, vec![tip, fresh]);
+}
+
+#[test]
 fn a_tree_equal_to_a_parents_tree_keeps_only_the_commit() {
     let (_d, s) = store();
     let a = put_blob(&s, b"a".to_vec());
