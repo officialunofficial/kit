@@ -73,6 +73,11 @@ use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
 /// automatically.
 const CLIENT_ID: &str = concat!("kit ", env!("CARGO_PKG_VERSION"));
 
+// Match the reference server's fixed byte budget (SPEC-TRANSPORT §4.4).
+// Uploads cost their declared length. Other requests cost 64 bytes.
+const SESSION_BYTES: u64 = 1 << 30;
+const CONTROL_REQUEST_BYTES: u64 = 64;
+
 /// Default timeout for SSH handshake replies, verb responses, and child shutdown.
 pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -128,7 +133,8 @@ pub enum SshInitError {
 /// pipe that already desynced would corrupt every subsequent frame, so
 /// the only safe retry is a full reconnect. `upload_pack` is
 /// content-addressed and safe to resend in full on the new connection
-/// (SPEC-TRANSPORT §7); a retried `update_ref` CAS write is not
+/// (SPEC-TRANSPORT §7). A request that would exceed the session byte
+/// budget starts on a fresh connection. A retried `update_ref` CAS write is not
 /// idempotent and callers MUST disambiguate a `RefConflict` with
 /// `read_ref` as usual.
 #[derive(Debug)]
@@ -156,6 +162,7 @@ struct ChildIo {
     child: Child,
     stdin_tx: Option<mpsc::SyncSender<WriteJob>>,
     stdout_rx: mpsc::Receiver<Result<SshFrame, FrameError>>,
+    remaining_bytes: u64,
     /// `true` once we've shut down the child pipe. Guards double-close
     /// from `Drop` + explicit `close`.
     closed: bool,
@@ -222,45 +229,30 @@ impl SshTransport {
         }
     }
 
-    /// Ensure the child connection is live, respawning it from
-    /// `self.target` / `self.options` if a prior failure marked it
-    /// `closed`. Called at the top of every retry attempt so a
-    /// `ConnectionFailed` from the previous attempt heals before the
-    /// verb is re-issued.
-    fn ensure_connected(&self) -> TransportResult<()> {
-        let needs_reconnect = {
-            let io = self
-                .io
-                .lock()
-                .map_err(|_| TransportError::ConnectionFailed)?;
-            io.closed
+    /// Send one top-level request, reconnecting before the request if
+    /// the old session ended or lacks room. The I/O lock covers the
+    /// reconnect, accounting and the full request and response.
+    fn write_request(&self, io: &mut ChildIo, request: SshFrame) -> TransportResult<()> {
+        let bytes = match &request.body {
+            Some(ssh_frame::Body::UploadPack(header)) => header.total_bytes.unwrap_or_default(),
+            _ => CONTROL_REQUEST_BYTES,
         };
-        if !needs_reconnect {
-            return Ok(());
+        if io.closed || bytes > io.remaining_bytes {
+            let _ = shut_child(io);
+            *io = spawn_and_handshake(&self.target, &self.options)
+                .map_err(|_| TransportError::ConnectionFailed)?;
         }
-        let fresh = spawn_and_handshake(&self.target, &self.options)
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        // Defensive: tear down whatever's left of the old child (already
-        // marked closed, but a fresh `shut_child` call is a no-op if so).
-        let _ = shut_child(&mut io);
-        *io = fresh;
-        Ok(())
+        io.remaining_bytes -= bytes;
+        write_child_frame_or_err(io, request)
     }
 
-    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder,
-    /// reconnecting before every attempt after the first if the prior
-    /// one left the connection `closed`.
+    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder.
     fn with_retry<T>(
         &self,
         mut attempt: impl FnMut(&mut ChildIo) -> TransportResult<T>,
     ) -> TransportResult<T> {
         kit_core::protocol::retrying(
             || {
-                self.ensure_connected()?;
                 let mut io = self
                     .io
                     .lock()
@@ -275,7 +267,7 @@ impl SshTransport {
 
 /// Spawn the `ssh` child, wire up its stdio pumps, and drive the
 /// mandatory `Hello` handshake. Shared by [`SshTransport::connect_with_options`]
-/// and [`SshTransport::ensure_connected`]'s reconnect path so the two
+/// and [`SshTransport::write_request`]'s reconnect path so the two
 /// never drift.
 fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<ChildIo, SshInitError> {
     validate_ssh_path(&target.path)?;
@@ -299,6 +291,7 @@ fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<Child
         child,
         stdin_tx: Some(stdin_tx),
         stdout_rx,
+        remaining_bytes: SESSION_BYTES,
         closed: false,
     };
     if let Err(e) = perform_client_handshake(&mut io) {
@@ -351,7 +344,7 @@ impl Transport for SshTransport {
                 )),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             cursor_from_reply(read_child_frame_or_err(io)?.body)
         })
     }
@@ -360,8 +353,8 @@ impl Transport for SshTransport {
     /// `PackChunk` carries up to `CHUNK_DATA_MAX` bytes read from `pack`.
     /// Every attempt, after a reconnect too, reads `pack` again from offset
     /// 0, so the server receives the same bytes and checks them against the
-    /// key. A body over [`PACK_BODY_LIMIT`] is refused before any read and
-    /// any frame.
+    /// key. A body over the SSH session budget is refused before any
+    /// read or frame.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
@@ -369,8 +362,10 @@ impl Transport for SshTransport {
         _head_ref: Option<&str>,
     ) -> TransportResult<()> {
         let total = pack.len();
-        if total > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
+        if total > SESSION_BYTES {
+            return Err(TransportError::Unsupported(
+                "SSH pack exceeds the 1 GiB upload limit",
+            ));
         }
         self.with_retry(|io| {
             // Opened before the header, so a body that cannot be opened
@@ -386,7 +381,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, header)?;
+            self.write_request(io, header)?;
             send_pack_chunks(&mut body, total, key, |chunk| {
                 write_child_frame_or_err(io, chunk)
             })
@@ -425,7 +420,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             read_download_pack(|| read_child_frame_or_err(io), sink).map_err(|e| match e {
                 ReplyError::Answered(e) => e,
                 ReplyError::Cut(e) => {
@@ -444,7 +439,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
@@ -482,7 +477,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
 
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
@@ -521,7 +516,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(None),
@@ -556,7 +551,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::ReadRefResponse(r)) => {
@@ -596,7 +591,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::ListRefsResponse(r)) => list_response_refs(prefix, r.refs),
