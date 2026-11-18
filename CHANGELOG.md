@@ -8,6 +8,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 - Reduce memory use in status and diff on worktrees with many modified files. Rereads fail if a file no longer contains the captured bytes.
+- Use one metadata lookup per file during the `add .` scan.
 - Stop `reflog -n` after the requested entries without reading older ancestors.
 - **Breaking, CLI:** `cat-file --batch` streams blob content with bounded memory. An
   unreadable chunk can leave a partial record on stdout.
