@@ -277,9 +277,8 @@ pub(crate) fn apply_and_verify_chain(
     })
 }
 
-/// Rewrite the applied-packs record atomically. The record is a cache, so a
-/// failure is reported, unless the fetch reported one already, and never fails
-/// the fetch.
+/// Flush the applied-pack record or publish its pending rewrite. A write
+/// failure warns at most once per fetch.
 pub(crate) fn persist_record(
     applied: &mut AppliedPacks,
     observer: &dyn Observer<SyncEvent>,
