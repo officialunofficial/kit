@@ -43,8 +43,8 @@ use crate::store::{ObjectStore, StoreError};
 
 use self::walk::{ChunkMemory, HeldCommits, MAX_CHUNK_MEMORY, MAX_HELD_SCAN, PushWalk};
 
-/// Most objects a push walk holds: the commits the remote holds, the commits
-/// it lacks, and the objects the walk keeps. A chunk of a large file counts
+/// Most objects a push walk holds: the held commits it visits, the commits
+/// the remote lacks, and the objects the walk keeps. A chunk of a large file counts
 /// toward nothing.
 pub const MAX_PUSH_WALK: usize = 10_000_000;
 
@@ -56,7 +56,7 @@ pub const PUSH_WALK_LIMIT: &str = "10,000,000-object push walk";
 /// lowers them to cut a walk without building ten million objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkLimits {
-    /// Most held commits, new commits and kept objects together.
+    /// Most visited held commits, new commits and kept objects together.
     pub objects: usize,
     /// Most trees the held filter reads from the remote head's snapshot.
     pub held_scan: usize,
@@ -773,7 +773,7 @@ pub fn encode_delta_candidate_with_base(
 /// [`StoreError::ObjectNotFound`] names a new commit, or an object of one,
 /// that this store lacks: a plan never omits what the remote lacks.
 /// [`StoreError::OperationLimitExceeded`] names [`PUSH_WALK_LIMIT`] when the
-/// held commits, the new commits and the kept objects together pass
+/// visited held commits, the new commits and the kept objects together pass
 /// [`MAX_PUSH_WALK`]. A chunk of a large file counts toward nothing.
 ///
 /// Also returns [`StoreError::DeltaBatchLengthMismatch`] if `encode_deltas`
@@ -875,10 +875,21 @@ fn plan_tips_capped(
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
     limits: WalkLimits,
 ) -> Result<PackPlan, StoreError> {
-    // What the remote holds is decided from its head alone. A head this store
-    // lacks leaves nothing held, and the plan is the whole closure.
-    let held = HeldCommits::collect(store, old_tip, limits.objects)?;
-    let walk = PushWalk::run_tips(store, new_tips, &held, limits, None)?;
+    let held = HeldCommits::for_tips(store, new_tips, old_tip, limits.objects)?;
+    plan_with_held(store, new_tips, &held, encode_deltas, limits)
+}
+
+fn plan_with_held(
+    store: &ObjectStore,
+    new_tips: &[Hash],
+    held: &HeldCommits,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+    limits: WalkLimits,
+) -> Result<PackPlan, StoreError> {
+    let walk = PushWalk::run_tips(store, new_tips, held, limits, None)?;
     let mut base_map = HashMap::new();
     if let Some(old) = held.tip() {
         for &tip in new_tips {

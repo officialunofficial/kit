@@ -898,6 +898,42 @@ fn a_push_over_the_ticket_budget_splits_into_advances_within_it() {
     }
 }
 
+#[test]
+fn a_linear_push_rebuilds_from_an_earlier_tip_across_several_packs() {
+    let (_dir, store) = store();
+    let remote = Remote {
+        atomic: true,
+        ..Remote::new()
+    };
+    let line = bulky_line(&store, 14);
+    let base = line[7];
+    push_bulky(
+        &remote,
+        &store,
+        base,
+        RefWriteCondition::Missing,
+        &PushControl::default(),
+    )
+    .unwrap();
+    let before = remote.uploads.load(Ordering::SeqCst);
+    remote.uploads_at_advance.lock().unwrap().clear();
+    let tip = line[13];
+
+    let steps = push_bulky(
+        &remote,
+        &store,
+        tip,
+        RefWriteCondition::Match(base),
+        &PushControl::default(),
+    )
+    .unwrap();
+
+    assert_eq!(steps, 1);
+    assert!(packs_per_advance(&remote, before)[0] > 2);
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+    assert!(rebuilds(&remote, tip));
+}
+
 /// A push within the ticket budget stays one advance.
 #[test]
 fn a_push_within_the_ticket_budget_is_one_advance() {
