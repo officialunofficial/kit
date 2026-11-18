@@ -4,8 +4,8 @@
 //! closure of its head, so the walk decides what it holds from the head alone:
 //! no negotiation, and no walk of two whole closures.
 //!
-//! * [`HeldCommits`] is the exact set of commits that are ancestors of the
-//!   remote head.
+//! * [`HeldCommits`] marks where the walk can stop. A short linear history
+//!   stops at the remote head itself. Other histories use its ancestors.
 //! * [`PushWalk`] walks the commits the remote lacks, oldest first. For each
 //!   one it compares the tree with the trees of the commit's parents, by path,
 //!   and keeps the entries that differ from every parent. A chunk of a large
@@ -35,6 +35,9 @@ use crate::store::{ObjectStore, StoreError};
 /// it the filter stops, which only makes the plan send more.
 pub const MAX_HELD_SCAN: usize = 2_097_152;
 
+/// The most local commits to probe before collecting the remote history.
+const MAX_BOUNDARY_PROBE: usize = 64;
+
 /// Most chunk ids the plan remembers, with their lengths and whether it
 /// listed them. Past it a chunk that several files share may be listed twice,
 /// and a pack reader accepts that. A length that is not remembered is read
@@ -52,18 +55,42 @@ std::thread_local! {
     static COUNTED: std::cell::RefCell<Vec<Hash>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// The commits that are ancestors of the remote head, the head included.
+/// The held commits a push walk can use as stopping points.
 ///
-/// The set counts toward the push walk's cap. A commit this store cannot read
-/// ends its path and prunes nothing: the walk only loses the ancestors behind
-/// it, and the plan then sends more.
+/// [`Self::collect`] collects the remote head and its ancestors. A commit
+/// this store cannot read ends its path, so the plan may send more. The
+/// set counts toward the push walk's cap.
 #[derive(Debug, Default)]
 pub struct HeldCommits {
     ids: HashSet<Hash>,
     tip: Option<Hash>,
+    boundary_only: bool,
 }
 
 impl HeldCommits {
+    /// When every tip reaches the remote head through a single-parent path,
+    /// the head is all the commit walk needs to know. No commit before that
+    /// boundary can also be its ancestor.
+    pub(super) fn for_tips(
+        store: &ObjectStore,
+        tips: &[Hash],
+        remote: Option<Hash>,
+        cap: usize,
+    ) -> Result<Self, StoreError> {
+        if let Some(tip) = remote
+            && cap > 0
+            && store.contains(&tip)
+            && reaches_boundary(store, tips, tip, cap.min(MAX_BOUNDARY_PROBE))
+        {
+            return Ok(Self {
+                ids: HashSet::from([tip]),
+                tip: Some(tip),
+                boundary_only: true,
+            });
+        }
+        Self::collect(store, remote, cap)
+    }
+
     /// The ancestors of `tip`, or nothing when there is no remote head or this
     /// store lacks it.
     ///
@@ -99,6 +126,7 @@ impl HeldCommits {
         Ok(Self {
             ids,
             tip: Some(tip),
+            boundary_only: false,
         })
     }
 
@@ -125,6 +153,27 @@ impl HeldCommits {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }
+}
+
+/// A merge, a root, or a commit we cannot read leaves the boundary unproved.
+fn reaches_boundary(store: &ObjectStore, tips: &[Hash], tip: Hash, mut budget: usize) -> bool {
+    for &start in tips {
+        let mut cursor = start;
+        while cursor != tip {
+            if budget == 0 {
+                return false;
+            }
+            budget -= 1;
+            let Ok(Some((_, parents))) = read_commit(store, &cursor) else {
+                return false;
+            };
+            let [parent] = parents.as_slice() else {
+                return false;
+            };
+            cursor = *parent;
+        }
+    }
+    true
 }
 
 /// A chunked file the walk keeps: its manifest, the commit that brought it,
@@ -215,8 +264,8 @@ impl PushWalk {
     ///
     /// [`StoreError::ObjectNotFound`] for a new commit or one of its objects
     /// that this store lacks, and [`StoreError::OperationLimitExceeded`] when
-    /// held commits, new commits and kept objects together pass the cap. A
-    /// chunk counts toward nothing.
+    /// visited held commits, new commits and kept objects together pass the
+    /// cap. A chunk counts toward nothing.
     pub fn run(
         store: &ObjectStore,
         tip: Hash,
@@ -254,6 +303,7 @@ impl PushWalk {
         let mut walk = Builder {
             store,
             held,
+            closure_held: None,
             limits,
             objects: BTreeSet::new(),
             manifests: Vec::new(),
@@ -310,6 +360,7 @@ impl PushWalk {
         let mut walk = Builder {
             store,
             held,
+            closure_held: None,
             limits,
             objects: BTreeSet::new(),
             manifests: Vec::new(),
@@ -529,6 +580,7 @@ fn entry<'a>(tree: &'a Tree, name: &[u8]) -> Option<&'a TreeEntry> {
 struct Builder<'a> {
     store: &'a ObjectStore,
     held: &'a HeldCommits,
+    closure_held: Option<HeldCommits>,
     limits: WalkLimits,
     objects: BTreeSet<Hash>,
     manifests: Vec<ChunkList>,
@@ -542,6 +594,10 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn held(&self) -> &HeldCommits {
+        self.closure_held.as_ref().unwrap_or(self.held)
+    }
+
     /// Keep `id`, brought by root `owner`. `false` when the walk kept it before.
     fn keep(&mut self, owner: usize, id: Hash, is_commit: bool) -> Result<bool, StoreError> {
         if !self.objects.insert(id) {
@@ -549,7 +605,7 @@ impl Builder<'_> {
         }
         #[cfg(test)]
         COUNTED.with(|counted| counted.borrow_mut().push(id));
-        if self.held.len() + self.objects.len() > self.limits.objects {
+        if self.held().len() + self.objects.len() > self.limits.objects {
             return Err(limit_error());
         }
         if !is_commit {
@@ -663,9 +719,18 @@ impl Builder<'_> {
     /// hold. Serves a tip that is not a commit and the odd entry that names an
     /// object of another kind.
     fn add_closure(&mut self, owner: usize, root: Hash) -> Result<(), StoreError> {
+        // A tree or tag can point into the remote's history without
+        // passing through its head. Use the full set for those edges.
+        if self.held.boundary_only && self.closure_held.is_none() {
+            let held = HeldCommits::collect(self.store, self.held.tip(), self.limits.objects)?;
+            if held.len() + self.objects.len() > self.limits.objects {
+                return Err(limit_error());
+            }
+            self.closure_held = Some(held);
+        }
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
-            if self.held.contains(&id) {
+            if self.held().contains(&id) {
                 continue;
             }
             let ty = self.store.object_type(&id)?;
