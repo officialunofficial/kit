@@ -449,7 +449,8 @@ TransportError::ConnectionFailed    // DNS / TCP / TLS / SSH spawn / mutex poiso
 TransportError::ServerError{status} // unexpected status code (transports without a status integer use 0)
 TransportError::InvalidResponse     // truncated frame, unknown opcode, bad JSON, mismatched server-returned digest
 TransportError::ProtocolError       // malformed frame, failed handshake
-TransportError::PayloadTooLarge(n)  // payload exceeded a transport-specific cap (see §4.4)
+TransportError::PayloadTooLarge(n)  // payload exceeded a size cap
+TransportError::Unsupported(reason) // local refusal before sending the request (see §4.4)
 TransportError::InsecureScheme      // plain http:// supplied for a non-loopback host
 ```
 
@@ -736,12 +737,17 @@ misbehaving or malicious client (see
 [`kit-serve/src/budget.rs`](../../rust/crates/kit-serve/src/budget.rs)):
 
 - `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
-- `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on cumulative request payload bytes.
+- `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on estimated request bytes.
 
-Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
-closes the connection with `exit::PROTOCOL_ERROR`. The frame cap's reply
-names it: `per-connection frame budget exceeded: at most 10000 frames per
-session (SPEC-TRANSPORT 4.4)`.
+The byte count starts after `Hello`. An upload header costs its declared
+pack length and covers the chunks that follow. Each other request costs
+64 bytes. A request that takes the count exactly to 1 GiB fits.
+
+When a request trips either cap, the server sends
+`Error{ ERROR_CODE_INVALID_REQUEST }` and closes the connection with
+`exit::PROTOCOL_ERROR`. The frame cap's reply is
+`per-connection frame budget exceeded: at most 10000 frames per session
+(SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
 frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
@@ -761,10 +767,10 @@ cursor it recorded after its last complete fetch costs one frame, the
 fetch that finds another cursor, or none, works as above. A server that
 predates the request makes every fetch work as above, plus one frame.
 `kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole packmap chain over its session. A push re-baselines the
-chain (§7.2), so the walk stays within the re-baseline depth while one node
-can list the chain's packs. Past that, a push's frames grow with the number
-of pushes the branch has had. The cap is not raised: it is what bounds
+the branch's whole packmap chain. It re-baselines the chain (§7.2), so the
+walk stays within the re-baseline depth while one node can list the
+chain's packs. Past that, a push's frames grow with the number of pushes
+the branch has had. The cap is not raised: it is what bounds
 a client that sends requests without end.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
@@ -789,16 +795,25 @@ The framing layer's per-frame `MAX_FRAME_BYTES = 1 MiB` cap (per
 [SPEC-RPC §1](SPEC-RPC.md#1-wire-framing)) bounds individual frames;
 pack data flows through `PackChunk` streams to stay under that limit.
 
-Client side, the SSH transport applies the
-`PACK_BODY_LIMIT = 4 GiB` cap on `download_pack`. A server-advertised
-`DownloadPackHeader.total_bytes` greater than 4 GiB is rejected
-before the sink's `begin`, as `TransportError::RemoteError` with a
-message mentioning the client cap. The header's length goes to
+For a pack over the 1 GiB upload limit, the SSH client returns
+`TransportError::Unsupported` with the limit in the message. It refuses
+before opening the pack body or sending its header.
+
+The SSH client applies the `PACK_BODY_LIMIT = 4 GiB` cap on
+`download_pack`. If `DownloadPackHeader.total_bytes` exceeds 4 GiB,
+the client returns `TransportError::RemoteError` with the cap in the
+message before calling the sink's `begin`. The header's length goes to
 `begin`, so a sink with a smaller limit refuses the pack before any
 chunk is read; chunks past the declared length or the sink's limit
 stop at the sink as `TransportError::PayloadTooLarge`.
 
 ### 4.5 Retry / reconnect
+
+When the next request would exceed the byte budget in §4.4, the client
+closes the current session and starts a new one with `Hello` before
+sending that request. During a push, the client starts the next pack
+upload at its header on the new session. The push publishes its refs
+after uploading all required data packs and the packlist.
 
 `SshTransport` is connection-oriented (a single long-lived `ssh(1)`
 child), so honoring the §7 retry ladder for `ConnectionFailed` takes
