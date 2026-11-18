@@ -1,0 +1,41 @@
+name: "Bench: local pack segments"
+
+# Prototype benchmark: add and clone with loose objects against local pack
+# segments, on Linux and macOS runners.
+
+on:
+  push:
+    branches:
+      - claude/project-thread-pwtq6s
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-prefix: bench-local-packs-${{ matrix.os }}
+          protoc: "false"
+      - name: Build branch
+        working-directory: rust
+        run: cargo build --release --locked -p kit-bin --bin kit && cp target/release/kit "$RUNNER_TEMP/kit-branch"
+      - name: Build main
+        run: |
+          git worktree add "$RUNNER_TEMP/main" origin/main
+          cd "$RUNNER_TEMP/main/rust"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/rust/target" cargo build --release --locked -p kit-bin --bin kit
+          cp "$GITHUB_WORKSPACE/rust/target/release/kit" "$RUNNER_TEMP/kit-main"
+      - name: Bench
+        run: scripts/bench-local-packs.sh "$RUNNER_TEMP/kit-branch" "$RUNNER_TEMP/kit-main" 5 | tee -a "$GITHUB_STEP_SUMMARY"
