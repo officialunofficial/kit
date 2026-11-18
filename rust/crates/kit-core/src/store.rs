@@ -61,13 +61,13 @@ pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
 
-/// Where a chunk's bytes sit in a worktree file, so a sink that keeps no
-/// copy of them can read them back.
+/// Where a blob's bytes sit in a worktree file. An inline blob starts at
+/// offset zero.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkOrigin<'a> {
-    /// The file the chunk was cut from.
+    /// The worktree file.
     pub path: &'a Path,
-    /// The offset of the chunk's first byte in that file.
+    /// The offset of the blob's first byte in that file.
     pub offset: u64,
 }
 
@@ -1124,9 +1124,10 @@ pub trait ObjectSink {
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash>;
     /// True when the object is already present (or staged) in this sink.
     fn has(&self, h: &Hash) -> bool;
-    /// Store one chunk blob, the concatenation of `parts`, that was cut from
-    /// `origin`. A sink may keep the origin in place of the bytes and read the
-    /// chunk back from the file. The default stores the bytes.
+    /// Store the canonical blob at `origin`, with its prologue and payload
+    /// in `parts`. This covers an inline file or a chunk of a file. A sink may
+    /// keep the origin and read the payload back from the file. The default
+    /// stores the bytes.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
     }

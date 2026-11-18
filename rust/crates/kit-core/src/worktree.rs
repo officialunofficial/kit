@@ -1366,7 +1366,7 @@ fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
         .take(CHUNK_THRESHOLD + 1)
         .read_to_end(&mut head)?;
     if u64::try_from(head.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
-        return store_file_object(sink, &head);
+        return store_chunk_blob_at(sink, &head, ChunkOrigin { path, offset: 0 });
     }
     // Hand the bytes already read, then the rest of the file, to the chunked
     // path.
@@ -1408,8 +1408,8 @@ pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> Workt
     Ok(sink.put_parts(&[&prologue, chunk])?)
 }
 
-/// [`store_chunk_blob`] for a chunk cut from `origin`, which lets a sink keep
-/// the origin in place of the bytes.
+/// Store a blob with its worktree location. An inline file is one blob at
+/// offset zero.
 fn store_chunk_blob_at<S: ObjectSink + ?Sized>(
     sink: &S,
     chunk: &[u8],
@@ -1983,7 +1983,9 @@ pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 
     fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // A path can become a FIFO before open. Reach the type check
+        // without waiting for a writer.
+        .custom_flags(std::ops::BitOr::bitor(libc::O_NOFOLLOW, libc::O_NONBLOCK))
         .open(path)
 }
 
