@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-17: main Rust, macOS, proto, docs CI green (PR 182 fix landed or superseded). Scheduled mutants run on main failed (kit-attest, kit-keystore missed mutants); a person has draft PRs 196/197 active for these. Open PRs 193/195 fail only cargo semver-checks (main-wide libkit breaking change, needs decision). Dependabot 171/173 and PR 152 left for Monday. Audit and Commonware not run (not Monday).",
+  "last_findings": "2026-11-18: macOS CI failed on every main push since 2026-11-17 (26 ssh/path tests): with-test-tmpdir.sh built T//k.X from a TMPDIR with a trailing slash. Fix PR 211 open, macOS leg dispatched on its branch; merge when green. Rust/proto/docs green. PRs 195/152 only fail semver-checks or are person-owned; 171/173 left for Monday.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -11,6 +11,7 @@
     "A mutants miss on a perf index that keeps output identical needs tests that assert the index internals; rebasing a PR branch locally makes the push non-fast-forward, so cherry-pick the fix onto the PR head and call update_pull_request_branch.",
     "A setup-step failure from a download 503 is an infra flake; rerun_failed_jobs via actions_run_trigger instead of changing code.",
     "Run cargo fmt from rust/, not the repo root; the root has no workspace and fails silently in a chained command. Per-crate clippy without features finds dead code that --all-features hides.",
-    "cargo semver-checks fails every PR when main carries breaking libkit changes against the released baseline; do not try to fix it per PR, report it."
+    "cargo semver-checks fails every PR when main carries breaking libkit changes against the released baseline; do not try to fix it per PR, report it.",
+    "A CI leg that passes on Linux and fails on macOS: search the saved full job log (tail_lines 20000 is saved to a file) for 'panicked at' instead of reading the tail; the macOS leg runs only on push or dispatch, so dispatch it on the PR branch via actions_run_trigger."
   ]
 }
