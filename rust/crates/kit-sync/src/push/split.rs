@@ -202,8 +202,7 @@ struct Weights {
 /// The serialized weight of one object: its raw size plus one pack frame.
 fn weight_of(store: &ObjectStore, hash: &Hash) -> Result<u64, StoreError> {
     Ok(store
-        .object_metadata(hash)?
-        .len()
+        .object_len(hash)?
         .saturating_add(pack::ENTRY_FRAME_LEN as u64))
 }
 

@@ -56,6 +56,7 @@ use crate::serialize;
 
 mod memory;
 mod memory_overlay;
+pub(crate) mod packs;
 mod source;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
@@ -295,6 +296,8 @@ pub struct ObjectStore {
     /// `durability.objects = per-object` onto it for deployments that
     /// want the strict historical schedule.
     default_policy: SyncPolicy,
+    /// Local pack segments under `objects/packs/`, loaded lazily.
+    packs: Arc<packs::PackSet>,
     /// Test-only counter of physical reads (`read_raw` calls) this store
     /// has performed. There is no read-side equivalent of `syncer` to
     /// inject a recording double against, so this is a plain counter
@@ -345,6 +348,7 @@ impl ObjectStore {
             Err(e) => return Err(StoreError::Io(e)),
         }
         Ok(Self {
+            packs: Arc::new(packs::PackSet::new(&objects_root)),
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
@@ -366,6 +370,7 @@ impl ObjectStore {
         // different kit fails loudly (SPEC-MERKLE-OBJECTS §7).
         fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
         Ok(Self {
+            packs: Arc::new(packs::PackSet::new(&objects_root)),
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
@@ -462,7 +467,26 @@ impl ObjectStore {
     /// **not** verify integrity — use [`Self::read`] for that.
     #[must_use]
     pub fn contains(&self, h: &Hash) -> bool {
-        self.path_for(h).is_file()
+        self.path_for(h).is_file() || self.packs.contains(h)
+    }
+
+    /// The store's local pack segments.
+    pub(crate) fn packs(&self) -> &packs::PackSet {
+        &self.packs
+    }
+
+    /// Open `h`'s loose file, or read it from a pack segment when no loose
+    /// file exists. `Err(bytes)` carries the packed object's unverified
+    /// bytes.
+    fn open_or_packed(&self, h: &Hash) -> StoreResult<Result<File, Vec<u8>>> {
+        match File::open(self.path_for(h)) {
+            Ok(f) => Ok(Ok(f)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match self.packs.read(h) {
+                Some(r) => r.map(Err),
+                None => Err(StoreError::ObjectNotFound(to_hex(h))),
+            },
+            Err(e) => Err(StoreError::Io(e)),
+        }
     }
 
     /// Write `bytes` to the store, returning their BLAKE3 hash. Atomic:
@@ -544,11 +568,10 @@ impl ObjectStore {
     fn read_raw(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        let path = self.path_for(h);
-        let file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
+        let file = match self.open_or_packed(h)? {
+            Ok(f) => f,
+            Err(bytes) => return Ok(bytes),
+        };
         let meta = file.metadata()?;
         let size = meta.len();
         if u128::from(size) > MAX_RAW_OBJECT_SIZE as u128 {
@@ -594,12 +617,15 @@ impl ObjectStore {
     ) -> Result<Vec<u8>, E> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        let mut file = File::open(self.path_for(h)).map_err(|e| {
-            E::from(match e.kind() {
-                io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-                _ => StoreError::Io(e),
-            })
-        })?;
+        let mut file = match self.open_or_packed(h)? {
+            Ok(f) => f,
+            Err(bytes) => {
+                let mut out = allocate(bytes.len())?;
+                out.extend_from_slice(&bytes);
+                check_hash(h, &object_id_from_bytes(&out))?;
+                return Ok(out);
+            }
+        };
         let size = file.metadata().map_err(StoreError::Io)?.len();
         if size > MAX_RAW_OBJECT_SIZE as u64 {
             return Err(StoreError::ObjectTooLarge.into());
@@ -658,11 +684,10 @@ impl ObjectStore {
     /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
     /// for a short file, bad magic/version, or unknown tag.
     pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        let path = self.path_for(h);
-        let mut file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
+        let mut file: Box<dyn Read> = match self.open_or_packed(h)? {
+            Ok(f) => Box::new(f),
+            Err(bytes) => Box::new(io::Cursor::new(bytes)),
+        };
         let mut prologue = [0u8; 6];
         file.read_exact(&mut prologue)
             .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
@@ -686,11 +711,10 @@ impl ObjectStore {
     /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        let path = self.path_for(h);
-        let file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
+        let file: Box<dyn Read> = match self.open_or_packed(h)? {
+            Ok(f) => Box::new(f),
+            Err(bytes) => Box::new(io::Cursor::new(bytes)),
+        };
         let mut head = Vec::with_capacity(10);
         file.take(10).read_to_end(&mut head)?;
         if head.len() < 6 {
@@ -823,6 +847,21 @@ impl ObjectStore {
         let mut out = Vec::new();
         read_shard_dir(&path, &dir, &mut out)?;
         Ok(out)
+    }
+
+    /// The length of object `h`'s stored bytes, loose or packed.
+    ///
+    /// # Errors
+    /// [`StoreError::ObjectNotFound`] if absent, else [`StoreError::Io`].
+    pub fn object_len(&self, h: &Hash) -> StoreResult<u64> {
+        match fs::metadata(self.path_for(h)) {
+            Ok(m) => Ok(m.len()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self
+                .packs
+                .len(h)
+                .ok_or_else(|| StoreError::ObjectNotFound(to_hex(h))),
+            Err(e) => Err(StoreError::Io(e)),
+        }
     }
 
     /// Filesystem metadata for object `h` (size + mtime), for gc's

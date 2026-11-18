@@ -285,6 +285,45 @@ pub struct WriteBatch<'s> {
     // can no longer promise that a hash it returned is durable. Every later
     // write, checkpoint and commit fails.
     failed: AtomicBool,
+    // The pack segment this window writes into, once it has staged
+    // `pack_min()` loose objects. Taken by the next checkpoint.
+    pack: Mutex<Option<Arc<PackStage>>>,
+    // Set when a dedup hit landed on a packed object, so the checkpoint
+    // flushes the `packs/` directory before anything references it.
+    pack_hit: AtomicBool,
+    // Loose objects a window stages before it switches to a segment.
+    pack_min: usize,
+}
+
+/// A pack segment being written by one batch window: object bytes appended
+/// at reserved offsets, invisible until the checkpoint renames its index.
+#[derive(Debug)]
+struct PackStage {
+    tmp: TempPath,
+    file: File,
+    next: std::sync::atomic::AtomicU64,
+    entries: Mutex<HashMap<Hash, (u64, u32)>>,
+}
+
+/// How often a segment being written gets an early writeback barrier.
+const PACK_WRITEBACK_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Whether batches write pack segments. On unless `KIT_PROTO_PACKS=0`.
+fn packs_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KIT_PROTO_PACKS").map_or(true, |v| v != "0"))
+}
+
+/// How many loose objects a window stages before it switches to a pack
+/// segment. `KIT_PROTO_PACK_MIN`, default 64.
+fn pack_min() -> usize {
+    static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("KIT_PROTO_PACK_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64)
+    })
 }
 
 impl<'s> WriteBatch<'s> {
@@ -296,6 +335,13 @@ impl<'s> WriteBatch<'s> {
             inner: Mutex::new(BatchState::default()),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
+            pack: Mutex::new(None),
+            pack_hit: AtomicBool::new(false),
+            pack_min: if packs_enabled() {
+                pack_min()
+            } else {
+                usize::MAX
+            },
         }
     }
 
@@ -349,14 +395,33 @@ impl<'s> WriteBatch<'s> {
         // The file I/O below runs OUTSIDE the lock so concurrent
         // writers sharing one batch don't convoy on each other's
         // write_all calls.
-        let need_mkdir = {
+        let (need_mkdir, staged_loose) = {
             let st = self.inner.lock().expect("batch state mutex poisoned");
             if st.staged.contains_key(&h) {
                 return Ok(h);
             }
-            !st.created_shards.contains(&shard_dir)
+            (!st.created_shards.contains(&shard_dir), st.staged.len())
         };
         let total_len: u64 = parts.iter().map(|p| p.len() as u64).sum();
+        if self.policy == SyncPolicy::Batch && self.pack_min != usize::MAX {
+            let open = self.pack.lock().expect("pack stage poisoned").clone();
+            if let Some(stage) = &open
+                && stage
+                    .entries
+                    .lock()
+                    .expect("pack entries poisoned")
+                    .contains_key(&h)
+            {
+                return Ok(h);
+            }
+            if fs::metadata(&final_path).is_err() && self.store.packs().contains(&h) {
+                self.pack_hit.store(true, Ordering::Relaxed);
+                return Ok(h);
+            }
+            if open.is_some() || staged_loose >= self.pack_min {
+                return self.write_packed(h, parts, total_len);
+            }
+        }
         if fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
@@ -432,6 +497,58 @@ impl<'s> WriteBatch<'s> {
         Ok(h)
     }
 
+    /// Keep every object of this batch loose, for tests of the loose
+    /// schedule.
+    #[cfg(test)]
+    pub(crate) fn without_packs(mut self) -> Self {
+        self.pack_min = usize::MAX;
+        self
+    }
+
+    /// Append `parts` to this window's pack segment, opening it if needed.
+    fn write_packed(&self, h: Hash, parts: &[&[u8]], total_len: u64) -> StoreResult<Hash> {
+        let stage = {
+            let mut slot = self.pack.lock().expect("pack stage poisoned");
+            if slot.is_none() {
+                let dir = self.store.packs().dir().to_path_buf();
+                fs::create_dir_all(&dir)?;
+                let tmp = temp_file_in(&dir, "segment")?;
+                let (file, tmp) = tmp.into_parts();
+                *slot = Some(Arc::new(PackStage {
+                    tmp,
+                    file,
+                    next: std::sync::atomic::AtomicU64::new(0),
+                    entries: Mutex::new(HashMap::new()),
+                }));
+            }
+            Arc::clone(slot.as_ref().expect("just set"))
+        };
+        let len = u32::try_from(total_len).map_err(|_| StoreError::ObjectTooLarge)?;
+        let offset = stage.next.fetch_add(total_len, Ordering::Relaxed);
+        let mut pos = offset;
+        for p in parts {
+            #[cfg(feature = "fault-injection")]
+            crate::fault::check(crate::fault::Site::Store)?;
+            write_all_at(&stage.file, p, pos)?;
+            pos += p.len() as u64;
+        }
+        // Start writeback of the segment every `PACK_WRITEBACK_BYTES` on the
+        // background pool, so the barrier at the checkpoint only waits for
+        // the tail instead of the whole segment.
+        if offset / PACK_WRITEBACK_BYTES != pos / PACK_WRITEBACK_BYTES {
+            self.early.submit(stage.tmp.to_path_buf(), false);
+        }
+        // A concurrent writer of the same object may have won; its entry
+        // stays and these bytes are dead space in the segment.
+        stage
+            .entries
+            .lock()
+            .expect("pack entries poisoned")
+            .entry(h)
+            .or_insert((offset, len));
+        Ok(h)
+    }
+
     /// True when `h` is staged in this batch or already in the store.
     ///
     /// # Panics
@@ -445,6 +562,17 @@ impl<'s> WriteBatch<'s> {
             .expect("batch state mutex poisoned")
             .staged
             .contains_key(h)
+            || self
+                .pack
+                .lock()
+                .expect("pack stage poisoned")
+                .as_ref()
+                .is_some_and(|st| {
+                    st.entries
+                        .lock()
+                        .expect("pack entries poisoned")
+                        .contains_key(h)
+                })
             || self.store.contains(h)
     }
 
@@ -517,6 +645,8 @@ impl<'s> WriteBatch<'s> {
                 std::mem::take(&mut st.touched_shards),
             )
         };
+        let pack = self.pack.lock().expect("pack stage poisoned").take();
+        let pack_hit = self.pack_hit.swap(false, Ordering::Relaxed);
         let store = self.store;
         let syncer = store.syncer();
         match self.policy {
@@ -524,6 +654,7 @@ impl<'s> WriteBatch<'s> {
             SyncPolicy::PerObject => Ok(()),
             SyncPolicy::Batch => {
                 let staged: Vec<(Hash, TempPath)> = staged.into_iter().collect();
+                let segment = pack.map(|stage| finish_segment(store, stage)).transpose()?;
                 // 1. Barrier every staged file. Each barrier initiates
                 //    writeback for its file and orders it ahead of the
                 //    full flush below. Most were issued in the
@@ -534,6 +665,10 @@ impl<'s> WriteBatch<'s> {
                 parallel_io(leftover.len(), |i| {
                     barrier_path(syncer.as_ref(), &leftover[i])
                 })?;
+                if let Some(seg) = &segment {
+                    syncer.barrier(&seg.pack_file, &seg.pack_tmp)?;
+                    syncer.barrier(&seg.idx_file, &seg.idx_tmp)?;
+                }
                 // 2. One full flush — any staged file serves as the
                 //    anchor; the barriers ordered every staged write
                 //    ahead of it (see module docs). Pure-dedup batches
@@ -544,6 +679,8 @@ impl<'s> WriteBatch<'s> {
                     // the barrier above (`sync_all` → `FlushFileBuffers`).
                     let f = OpenOptions::new().write(true).open(tmp)?;
                     syncer.full(&f, tmp)?;
+                } else if let Some(seg) = &segment {
+                    syncer.full(&seg.pack_file, &seg.pack_tmp)?;
                 }
                 // 3. Renames: objects become visible only now, after
                 //    their bytes are durable — another process's dedup
@@ -563,6 +700,16 @@ impl<'s> WriteBatch<'s> {
                 //    concurrently (sorted first so the work list is
                 //    deterministic).
                 let mut shards: Vec<PathBuf> = touched_shards.into_iter().collect();
+                // The segment becomes visible when its index is renamed,
+                // after the pack itself and after the flush above.
+                let packs_dir = store.packs().dir().to_path_buf();
+                if let Some(seg) = segment {
+                    syncer.rename(seg.pack_tmp, &packs_dir.join(format!("{}.pack", seg.name)))?;
+                    syncer.rename(seg.idx_tmp, &packs_dir.join(format!("{}.idx", seg.name)))?;
+                    shards.push(packs_dir);
+                } else if pack_hit {
+                    shards.push(packs_dir);
+                }
                 shards.sort();
                 if !shards.is_empty() {
                     parallel_io(shards.len(), |i| syncer.dir_barrier(&shards[i]))?;
@@ -575,6 +722,64 @@ impl<'s> WriteBatch<'s> {
             }
         }
     }
+}
+
+/// A finished pack segment, durable once barriered and flushed, visible
+/// once both files are renamed to `name`.
+struct Segment {
+    pack_tmp: TempPath,
+    pack_file: File,
+    idx_tmp: TempPath,
+    idx_file: File,
+    name: String,
+}
+
+/// Write the index of `stage` beside its pack and name the segment after
+/// the index's hash.
+fn finish_segment(store: &ObjectStore, stage: Arc<PackStage>) -> io::Result<Segment> {
+    let stage = Arc::try_unwrap(stage).expect("no write holds the pack stage during a checkpoint");
+    let pack_len = stage.next.into_inner();
+    let mut entries: Vec<crate::store::packs::Entry> = stage
+        .entries
+        .into_inner()
+        .expect("pack entries poisoned")
+        .into_iter()
+        .map(|(id, (offset, len))| crate::store::packs::Entry { id, offset, len })
+        .collect();
+    let idx = crate::store::packs::encode_index(&mut entries, pack_len);
+    let name = crate::hash::to_hex(blake3::hash(&idx).as_bytes());
+    let mut tmp = temp_file_in(store.packs().dir(), "segment-index")?;
+    tmp.as_file_mut().write_all(&idx)?;
+    let (idx_file, idx_tmp) = tmp.into_parts();
+    Ok(Segment {
+        pack_tmp: stage.tmp,
+        pack_file: stage.file,
+        idx_tmp,
+        idx_file,
+        name,
+    })
+}
+
+#[cfg(unix)]
+fn write_all_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        let n = file.seek_write(buf, offset)?;
+        buf = &buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_all_at(_file: &File, _buf: &[u8], _offset: u64) -> io::Result<()> {
+    Err(io::Error::other("pack segments need positioned writes"))
 }
 
 /// Whether a checkpoint that took `small_staged` small objects renames
@@ -1345,7 +1550,7 @@ mod tests {
 
     fn assert_dir_syncs_follow_renames(count: u32) {
         let (_dir, store, rec) = recording_store();
-        let batch = store.batch();
+        let batch = store.batch().without_packs();
         let mut shards = HashSet::new();
         for bytes in distinct_objects(count) {
             let h = batch.write(&bytes).unwrap();
@@ -1744,7 +1949,7 @@ mod tests {
         // worker renamed are unlinked.
         let (_dir, store, rec) = recording_store();
         rec.fail_renames_after(100);
-        let batch = store.batch();
+        let batch = store.batch().without_packs();
         let objects = distinct_objects(300);
         let hashes: Vec<Hash> = objects.iter().map(|b| batch.write(b).unwrap()).collect();
         assert!(batch.commit().is_err(), "a failed rename fails the commit");
@@ -1961,6 +2166,140 @@ mod tests {
         batch.write(&bytes).unwrap();
         batch.commit().unwrap();
         assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+
+    /// Objects past `pack_min()` in one window land in a pack segment, and
+    /// read back verified after commit.
+    #[test]
+    fn large_batch_writes_a_pack_segment_that_reads_back() {
+        let (_dir, store) = fresh_store();
+        let n = pack_min() + 40;
+        let batch = store.batch();
+        let objs: Vec<Vec<u8>> = (0..n).map(|i| format!("object {i}").into_bytes()).collect();
+        let hashes: Vec<Hash> = objs.iter().map(|o| batch.write(o).unwrap()).collect();
+        assert!(
+            batch.contains(&hashes[n - 1]),
+            "a staged packed object is visible to its batch"
+        );
+        assert!(
+            !store.contains(&hashes[n - 1]),
+            "and to nobody else before commit"
+        );
+        batch.commit().unwrap();
+        for (h, o) in hashes.iter().zip(&objs) {
+            assert!(store.contains(h));
+            assert_eq!(&store.read(h).unwrap(), o);
+        }
+        assert_eq!(
+            object_file_count(&store),
+            pack_min(),
+            "the rest went into the segment"
+        );
+        let idx = fs::read_dir(store.packs().dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".idx"))
+            .count();
+        assert_eq!(idx, 1);
+    }
+
+    /// The segment's index is renamed last: after the segment's barriers,
+    /// after the full flush and after its pack, and the `packs/` directory
+    /// is flushed before the batch returns.
+    #[test]
+    fn pack_segment_is_durable_before_its_index_is_visible() {
+        let (_dir, store, rec) = recording_store();
+        let batch = store.batch();
+        for i in 0..pack_min() + 5 {
+            batch.write(format!("o{i}").as_bytes()).unwrap();
+        }
+        batch.commit().unwrap();
+        let ev = rec.events();
+        let idx_rename = ev
+            .iter()
+            .position(|e| matches!(e, Ev::Rename { dst, .. } if dst.extension().is_some_and(|x| x == "idx")))
+            .expect("index renamed");
+        let pack_rename = ev
+            .iter()
+            .position(|e| matches!(e, Ev::Rename { dst, .. } if dst.extension().is_some_and(|x| x == "pack")))
+            .expect("pack renamed");
+        let first_full = ev.iter().position(|e| matches!(e, Ev::Full(_))).unwrap();
+        let last_barrier = ev
+            .iter()
+            .rposition(|e| matches!(e, Ev::Barrier(_)))
+            .unwrap();
+        assert!(last_barrier < first_full && first_full < pack_rename && pack_rename < idx_rename);
+        let packs_dir = store.packs().dir().to_path_buf();
+        let dir_barrier = ev
+            .iter()
+            .position(|e| *e == Ev::DirBarrier(packs_dir.clone()))
+            .expect("packs dir flushed");
+        assert!(idx_rename < dir_barrier);
+        assert!(matches!(ev.last(), Some(Ev::Full(_))));
+    }
+
+    /// A dropped batch leaves no segment behind.
+    #[test]
+    fn dropped_batch_leaves_no_pack_segment() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        for i in 0..pack_min() + 5 {
+            batch.write(format!("d{i}").as_bytes()).unwrap();
+        }
+        drop(batch);
+        let left = fs::read_dir(store.packs().dir()).map_or(0, Iterator::count);
+        assert_eq!(left, 0);
+    }
+
+    /// A second batch dedups against objects in an earlier segment.
+    #[test]
+    fn later_batch_dedups_against_a_segment() {
+        let (_dir, store) = fresh_store();
+        let objs: Vec<Vec<u8>> = (0..pack_min() + 10)
+            .map(|i| format!("x{i}").into_bytes())
+            .collect();
+        let b = store.batch();
+        for o in &objs {
+            b.write(o).unwrap();
+        }
+        b.commit().unwrap();
+        let before = fs::read_dir(store.packs().dir()).unwrap().count();
+        let b = store.batch();
+        for o in &objs {
+            b.write(o).unwrap();
+        }
+        b.commit().unwrap();
+        assert_eq!(fs::read_dir(store.packs().dir()).unwrap().count(), before);
+    }
+
+    /// A flipped byte inside a segment fails the read-time hash check.
+    #[test]
+    fn damaged_segment_fails_the_hash_check() {
+        let (_dir, store) = fresh_store();
+        let b = store.batch();
+        let hs: Vec<Hash> = (0..=pack_min())
+            .map(|i| b.write(format!("y{i}").as_bytes()).unwrap())
+            .collect();
+        b.commit().unwrap();
+        let pack = fs::read_dir(store.packs().dir())
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".pack"))
+            .unwrap()
+            .path();
+        let mut bytes = fs::read(&pack).unwrap();
+        bytes[0] ^= 0xff;
+        fs::write(&pack, bytes).unwrap();
+        let fresh = ObjectStore::open(&crate::layout::RepoLayout::single(
+            store.objects_root().parent().unwrap().parent().unwrap(),
+        ))
+        .unwrap();
+        let packed = hs.last().unwrap();
+        let any_bad = hs[pack_min()..]
+            .iter()
+            .chain(std::iter::once(packed))
+            .any(|h| matches!(fresh.read(h), Err(StoreError::HashMismatch { .. })));
+        assert!(any_bad);
     }
 
     proptest! {

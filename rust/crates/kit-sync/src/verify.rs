@@ -605,7 +605,7 @@ mod tests {
         hashes
             .iter()
             .map(|h| {
-                let len = store.object_metadata(h).unwrap().len();
+                let len = store.object_len(h).unwrap();
                 (*h, u32::try_from(len).unwrap())
             })
             .collect()

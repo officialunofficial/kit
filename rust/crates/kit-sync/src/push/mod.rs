@@ -912,11 +912,7 @@ fn estimate_pack_sizes_with(
     let raw = plan
         .raw
         .iter()
-        .map(|hash| {
-            store
-                .object_metadata(hash)
-                .map(|meta| Incoming::raw(meta.len(), meta.len()))
-        })
+        .map(|hash| store.object_len(hash).map(|len| Incoming::raw(len, len)))
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
     // length as decoded. The estimate counts every raw object and every delta
@@ -1123,7 +1119,7 @@ fn build_packs<W: std::io::Write>(
     // *before* any object's content is actually read into memory.
     let raw_sizes: Vec<u64> = raw
         .iter()
-        .map(|h| Ok(store.object_metadata(h)?.len()))
+        .map(|h| Ok(store.object_len(h)?))
         .collect::<Result<_, PushError>>()?;
     let mut start = 0;
     for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {

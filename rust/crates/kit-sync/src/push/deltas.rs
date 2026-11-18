@@ -153,8 +153,8 @@ fn encode_in_runs(
             .iter()
             .map(|c| {
                 Ok(encoder_peak(
-                    store.object_metadata(&c.target)?.len(),
-                    store.object_metadata(&c.base)?.len(),
+                    store.object_len(&c.target)?,
+                    store.object_len(&c.base)?,
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -234,7 +234,7 @@ pub(crate) fn cache_delta_bases(
         if count < 2 || remaining == 0 {
             continue;
         }
-        if store.object_metadata(&base)?.len() > remaining as u64 {
+        if store.object_len(&base)? > remaining as u64 {
             continue;
         }
         let bytes = store.read(&base)?;
