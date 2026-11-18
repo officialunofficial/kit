@@ -416,6 +416,10 @@ def build_leaf_digests():
 
 def build_refusals():
     plan = {
+        "first reserved profile in empty manifest": "SPEC-OBJECTS section 7: unknown chunker profile",
+        "profile before FastCDC v2": "SPEC-OBJECTS section 7: unknown chunker profile",
+        "profile after FastCDC v2": "SPEC-OBJECTS section 7: unknown chunker profile",
+        "last reserved profile": "SPEC-OBJECTS section 7: unknown chunker profile",
         "end does not increase": "plan 4.4 check 4: end_i > end_(i-1)",
         "end_0 is 0": "plan 4.4 check 4: end_0 > 0 (end_(-1) = 0); also a chunk of length 0 at the start",
         "zero-length chunk in the middle": "plan 4.4 check 4: a chunk of length 0 (end_i == end_(i-1)) is refused",

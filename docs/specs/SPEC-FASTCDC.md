@@ -216,9 +216,10 @@ kit-core does this, so runs of zero bytes cut at memory speed.
 See SPEC-OBJECTS §7 for the container. Key points for chunking:
 
 - `total_size` = sum of all chunk byte lengths = file size.
-- `chunk_size` names the chunker, not a size: **0** for FastCDC v1,
-  **`0x8000_0002`** for FastCDC v2 (§11.2). Any other value is a
-  fixed-size manifest (SPEC-OBJECTS §7).
+- `chunk_size` is **0** for FastCDC v1 and **`0x8000_0002`** for
+  FastCDC v2 (§11.2). Positive values below `0x8000_0000` give a fixed
+  size. Values at or above `0x8000_0000` are profile IDs. Readers refuse
+  unknown profile IDs (SPEC-OBJECTS §7).
 - `chunks` = ordered list of entries, each a chunk BLAKE3 hash and the
   end offset of the chunk's span (SPEC-OBJECTS §7). Each end is the sum
   of the lengths of the chunks up to and including that chunk.
@@ -334,7 +335,7 @@ and the manifest id from this document and SPEC-OBJECTS alone.
 | Input of ≤ `min_size` bytes is a single chunk, never a `chunked_blob` | `cut` returns the full input length (§4, §5) |
 | No chunk exceeds `max_size` | forced cut at `max_size` (§5) |
 | Chunk lengths sum to the input length; `total_size` equals the file size | iterative consumption until all bytes are cut (§5); reassembly length check against `total_size` (§6); pinned by §8 vector 8 |
-| Content-defined manifests are distinguishable from fixed-size ones | `chunk_size` is `0` or `0x8000_0002` (§6; SPEC-OBJECTS §7) |
+| Content-defined manifests are distinguishable from fixed-size ones | `chunk_size` is `0` or a recognized profile ID (§6; SPEC-OBJECTS §7) |
 | Any two conformant chunkers agree on chunk count, byte offsets, chunk hashes, and manifest hash | cross-implementation contract (§7); boundary goldens (§8 vectors 4–5) |
 | A build with the wrong seed or parameters cannot ship silently | gear-table-hash pin and boundary goldens fail loudly at test time (§8 vectors 9–10) |
 | A manifest says which chunker cut it | `chunk_size` is `0` for v1 and `0x8000_0002` for v2 (§6, §11.2) |
@@ -383,11 +384,8 @@ about runs of one byte value applies unchanged.
 ### 11.2 Chunker id
 
 A v2 manifest is a `chunked_blob` (SPEC-OBJECTS §7) with
-`chunk_size = 0x8000_0002`. A reader of an earlier revision reads the
-value as a fixed chunk size of about 2 GiB, above its 1 GiB file limit.
-It accepts such a manifest only with at most one chunk, and that
-manifest keeps its bytes and id under this revision. It refuses a v2
-manifest of two or more chunks at decode time.
+`chunk_size = 0x8000_0002`, the profile ID assigned to FastCDC v2 in
+the range reserved by SPEC-OBJECTS §7.
 
 ### 11.3 Selecting a chunker
 

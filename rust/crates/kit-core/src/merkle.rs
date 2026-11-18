@@ -390,8 +390,8 @@ impl BmtFold {
 /// 40-byte entries of a manifest with [`Self::push_entries`], and
 /// [`Self::finish`].
 ///
-/// The fold runs the decode checks of SPEC-OBJECTS §7 that the entries
-/// carry: [`Self::new`] checks the count cap and the size cap, [`Self::push`]
+/// The fold runs the decode checks of SPEC-OBJECTS §7. [`Self::new`] checks
+/// the count cap, the size cap and the chunker profile. [`Self::push`]
 /// runs [`crate::serialize::check_chunk_entry`], the decoder's own per-entry
 /// function, and [`Self::finish`] checks the entry count and the last end. So
 /// the fold refuses the manifests a decoder refuses, at the same entry. The
@@ -420,11 +420,13 @@ impl ChunkedIdFold {
     /// [`KitError::TooManyChunks`] for a `chunk_count` above
     /// [`crate::serialize::MAX_CHUNKS`], and
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
-    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
+    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`], or
+    /// [`KitError::UnknownChunkerProfile`] for an unknown profile ID.
     // The expect cannot fire: the metadata leaf is one leaf.
     #[allow(clippy::missing_panics_doc)]
     pub fn new(total_size: u64, chunk_size: u32, chunk_count: u32) -> Result<Self, KitError> {
         crate::serialize::check_chunked_header(total_size, chunk_count)?;
+        crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
         let mut fold = BmtFold::new();
         for leaf in ChunkedBlob::leaf_sequence(total_size, chunk_size, core::iter::empty()) {
             fold.push(&leaf)

@@ -278,11 +278,10 @@ fn write_tag(buf: &mut Vec<u8>, t: &Tag) -> Result<(), KitError> {
 }
 
 /// Check the count and the size of a `ChunkedBlob` manifest header against
-/// decode checks 1 and 3 of SPEC-OBJECTS §7. This is the header step of the
-/// manifest decoder and of [`crate::merkle::ChunkedIdFold`]; the entries
-/// carry the rest of the checks. The whole header check, which needs the
-/// chunk size too, is `check_chunked_total_size`, run by a disclosure
-/// verifier that holds no entries.
+/// decode checks 1 and 3 of SPEC-OBJECTS §7. The manifest decoder and
+/// [`crate::merkle::ChunkedIdFold`] also check the profile before processing
+/// entries. The whole header check is `check_chunked_total_size`, run by a
+/// disclosure verifier that holds no entries.
 ///
 /// # Errors
 /// [`KitError::TooManyChunks`] above [`MAX_CHUNKS`], and
@@ -329,9 +328,10 @@ pub(crate) fn check_total_size_cap(total_size: u64) -> Result<(), KitError> {
 /// refuses at the same entry with the same error.
 ///
 /// # Errors
-/// [`KitError::ChunkEndNotIncreasing`], [`KitError::ChunkLengthAboveLimit`],
-/// [`KitError::ChunkEndAboveTotalSize`] and [`KitError::FixedChunkEnd`], in
-/// that order.
+/// [`KitError::UnknownChunkerProfile`] for an unknown profile ID. For a
+/// supported layout, [`KitError::ChunkEndNotIncreasing`],
+/// [`KitError::ChunkLengthAboveLimit`], [`KitError::ChunkEndAboveTotalSize`]
+/// and [`KitError::FixedChunkEnd`], in that order.
 pub fn check_chunk_entry(
     index: u32,
     chunk_size: u32,
@@ -339,6 +339,7 @@ pub fn check_chunk_entry(
     prev_end: u64,
     end: u64,
 ) -> Result<(), KitError> {
+    let chunker = crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
     if end <= prev_end {
         return Err(KitError::ChunkEndNotIncreasing { index });
     }
@@ -348,7 +349,7 @@ pub fn check_chunk_entry(
     if end > total_size {
         return Err(KitError::ChunkEndAboveTotalSize { index });
     }
-    if crate::chunker::Chunker::from_chunk_size(chunk_size).is_none() {
+    if chunker.is_none() {
         let fixed_end = u64::from(index)
             .checked_add(1)
             .and_then(|n| n.checked_mul(u64::from(chunk_size)))
@@ -386,6 +387,7 @@ pub fn check_last_end(total_size: u64, chunk_count: usize, last_end: u64) -> Res
 fn write_chunked_blob(buf: &mut Vec<u8>, cb: &ChunkedBlob) -> Result<(), KitError> {
     let chunk_count = u32::try_from(cb.chunks().len()).map_err(|_| KitError::TooManyChunks)?;
     check_chunked_header(cb.total_size(), chunk_count)?;
+    crate::chunker::Chunker::classify_chunk_size(cb.chunk_size())?;
     let mut prev_end = 0;
     for (index, &end) in (0..chunk_count).zip(cb.ends()) {
         check_chunk_entry(index, cb.chunk_size(), cb.total_size(), prev_end, end)?;
@@ -782,6 +784,7 @@ pub(crate) fn check_chunked_total_size(
     chunk_count: u32,
 ) -> Result<(), KitError> {
     check_total_size_cap(total_size)?;
+    let chunker = crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
     let count = u64::from(chunk_count);
     let size = u64::from(chunk_size);
     let valid = if count == 0 {
@@ -791,7 +794,7 @@ pub(crate) fn check_chunked_total_size(
         // chunk but the last holds exactly `chunk_size` bytes and the
         // last holds between one and `chunk_size` bytes. A value that
         // names a content-defined chunker is not a size.
-        if crate::chunker::Chunker::from_chunk_size(chunk_size).is_some() {
+        if chunker.is_some() {
             total_size >= count
         } else {
             total_size > (count - 1) * size && total_size <= count * size
@@ -1357,6 +1360,99 @@ mod tests {
     }
 
     #[test]
+    fn reserved_chunker_profiles_are_refused_even_without_entries() {
+        use crate::merkle::ChunkedIdFold;
+
+        for profile in [0x8000_0000, 0x8000_0001, 0x8000_0003, u32::MAX] {
+            let error = KitError::UnknownChunkerProfile(profile);
+            for (total, ends) in [(0, vec![]), (5, vec![5])] {
+                let chunks = vec![[1; 32]; ends.len()];
+                let bytes = chunked_bytes(total, profile, &ends);
+                let count = u32::try_from(ends.len()).unwrap();
+                assert_eq!(deserialize(&bytes), Err(error.clone()));
+                assert_eq!(deserialize_owned(bytes), Err(error.clone()));
+                assert_eq!(
+                    ChunkedIdFold::new(total, profile, count).unwrap_err(),
+                    error
+                );
+                assert_eq!(
+                    ChunkedBlob::new(
+                        total,
+                        profile,
+                        chunks.iter().copied().zip(ends.iter().copied())
+                    ),
+                    Err(error.clone())
+                );
+                assert_eq!(
+                    ChunkedBlob::from_parts(total, profile, chunks.clone(), ends.clone()),
+                    Err(error.clone())
+                );
+                let unchecked = ChunkedBlob::new_unchecked(total, profile, chunks, ends);
+                assert_eq!(
+                    serialize(&Object::ChunkedBlob(unchecked)),
+                    Err(error.clone())
+                );
+            }
+            assert_eq!(check_chunk_entry(0, profile, 5, 0, 5), Err(error));
+        }
+    }
+
+    #[test]
+    fn manifest_bounds_are_checked_before_the_chunker_profile() {
+        use crate::merkle::ChunkedIdFold;
+
+        let profile = 0x8000_0000;
+        let oversize = MAX_CHUNKED_TOTAL_SIZE + 1;
+        assert_eq!(
+            deserialize(&chunked_header(oversize, profile, MAX_CHUNKS + 1)),
+            Err(KitError::TooManyChunks)
+        );
+        assert_eq!(
+            deserialize(&chunked_header(oversize, profile, 1)),
+            Err(KitError::ChunkedBlobLength)
+        );
+        assert_eq!(
+            deserialize(&chunked_header(oversize, profile, 0)),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+        assert_eq!(
+            ChunkedIdFold::new(oversize, profile, MAX_CHUNKS + 1).unwrap_err(),
+            KitError::TooManyChunks
+        );
+        assert_eq!(
+            ChunkedIdFold::new(oversize, profile, 0).unwrap_err(),
+            KitError::ChunkedBlobTotalSizeInvalid
+        );
+        assert_eq!(
+            check_chunked_total_size(oversize, profile, 1),
+            Err(KitError::ChunkedBlobTotalSizeInvalid)
+        );
+    }
+
+    #[test]
+    fn known_profiles_and_largest_fixed_size_round_trip() {
+        use crate::merkle;
+
+        for (size, ends) in [
+            (0, &[2, 5][..]),
+            (0x8000_0002, &[2, 5]),
+            (0x7FFF_FFFF, &[5]),
+        ] {
+            let bytes = chunked_bytes(5, size, ends);
+            let Object::ChunkedBlob(decoded) = deserialize(&bytes).unwrap() else {
+                panic!("expected chunked blob");
+            };
+            assert_eq!(decoded.chunk_size(), size);
+            assert_eq!(decoded.ends(), ends);
+            let count = u32::try_from(ends.len()).unwrap();
+            let mut fold = merkle::ChunkedIdFold::new(5, size, count).unwrap();
+            fold.push_entries(&bytes[CHUNKED_HEADER_LEN..]).unwrap();
+            assert_eq!(fold.finish().unwrap(), merkle::compute_chunked_id(&decoded));
+            assert_eq!(serialize(&Object::ChunkedBlob(decoded)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn rejects_too_many_chunks() {
         assert_eq!(
             deserialize(&chunked_header(1024, 0, MAX_CHUNKS + 1)),
@@ -1591,8 +1687,7 @@ mod tests {
             check_chunked_header(MAX_CHUNKED_TOTAL_SIZE + 1, 2),
             Err(KitError::ChunkedBlobTotalSizeInvalid)
         );
-        // The header run by the decoder and the fold is checks 1 and 3: it
-        // does not see the layout.
+        // Count and size caps alone do not constrain the layout.
         assert_eq!(check_chunked_header(1, 2), Ok(()));
     }
 
@@ -1615,7 +1710,7 @@ mod tests {
             (0, 0x8000_0002, 0),
             (3, 0x8000_0002, 3),
             (128 << 30, 0x8000_0002, 2),
-            (1, 0x8000_0001, 1),
+            (1, 0x7FFF_FFFF, 1),
         ];
         const REFUSED: &[(u64, u32, u32)] = &[
             (1, 0, 0),
@@ -1629,7 +1724,12 @@ mod tests {
             (1, 0x8000_0002, 0),
             (2, 0x8000_0002, 3),
             ((128 << 30) + 1, 0x8000_0002, 2),
-            (3, 0x8000_0001, 3),
+        ];
+        const UNKNOWN_PROFILES: &[(u64, u32, u32)] = &[
+            (0, 0x8000_0000, 0),
+            (1, 0x8000_0001, 1),
+            (1, 0x8000_0003, 1),
+            (1, 0xFFFF_FFFF, 1),
         ];
         for &(total, size, count) in ACCEPTED {
             assert_eq!(
@@ -1643,6 +1743,12 @@ mod tests {
                 check_chunked_total_size(total, size, count),
                 Err(KitError::ChunkedBlobTotalSizeInvalid),
                 "({total}, {size}, {count}) must be refused"
+            );
+        }
+        for &(total, size, count) in UNKNOWN_PROFILES {
+            assert_eq!(
+                check_chunked_total_size(total, size, count),
+                Err(KitError::UnknownChunkerProfile(size))
             );
         }
     }
