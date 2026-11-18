@@ -1,7 +1,0 @@
-
-```
-$ kit add foo.txt
-? 1
-error: not a kit repo: path is not a kit repository (missing .kit/objects)
-
-```
