@@ -8,7 +8,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 - Stop `reflog -n` after the requested entries without reading older ancestors.
-- Stream blob content in `cat-file --batch` with bounded memory.
+- **Breaking, CLI:** `cat-file --batch` streams blob content with bounded memory. An
+  unreadable chunk can leave a partial record on stdout.
 - Probe reachable object types concurrently during garbage collection.
 - Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
 - Stop empty attestation directories from keeping otherwise unreachable commits alive.
@@ -19,10 +20,131 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Compact attestation logs atomically while preserving concurrent appends and refused writes.
 - Skip the mirror warning for the sanitized `local` placeholder.
 - Defer compressed attestations when decoding support is unavailable.
-- Reset disposable attestation caches once for pending-subject records.
+- Reset disposable attestation caches once for the v2 records. The hidden public
+  `kit_sync::attestation_records::Record` adds `pending` for missing subjects.
 - Clear obsolete pending attestation packs after log removal or compaction.
 
-- Publish locally authored attestations with `kit push --attestations` or `push.attestations = true`; publication is permanent.
+- Publish locally authored attestations with `kit push --attestations` or
+  `push.attestations = true`. Publication is permanent. If the batch preflight finds that
+  an append would exceed the 4,096-pack compaction threshold, an append-only (`u`) grant stops
+  publication at that batch and warns. Compaction requires `f`. The warning leaves earlier
+  batches and successful code publication intact.
+
+- **Breaking:** `kit-core` lowers `MAX_TAG_NAME_BYTES` from 502 to 496. New and transferred tags
+  allow up to 29 segments so their tag map refs fit. Fetch warns and skips tags past either
+  limit. Existing local tags past the limits remain readable, writable, and deletable.
+- **Breaking:** `kit-sync` requires `RemoteSource::list_refs(prefix)`. Return prefix-stripped
+  names sorted by name.
+- **Breaking:** `kit-sync` adds `tags`, `tag_digest`, `attestations`, and `attestmap_head` to
+  the hidden public `CursorRecord`. Update complete struct literals and patterns. Fetch uses
+  `kit-fetch-cursor-v3` and discards older cursor records, so the next fetch lists the remote
+  again.
+- **Breaking:** `libkit` adds a `tags: bool` argument to `fetch_with_source` and
+  `pull_with_source`. They return `FetchReport` and `PullReport`, respectively. `fetch_all`,
+  `pull_all`, and `pull_all_with` fetch tags and return reports. Read
+  `FetchReport::branches_fetched` for the branch count. Check `tags_incomplete()` even on
+  success, using `PullReport::fetch` for pulls.
+- **Breaking:** `kit-core` adds `UnpackReport::signed` for stored commits, remixes, and tags.
+  Update complete literals and patterns. File-backed reads leave `stored` empty.
+- **Breaking:** `kit-core` changes `PlannedDelta::stream` from `Vec<u8>` to `DeltaBytes`. Use
+  `bytes()` or `into_vec()` and handle I/O errors.
+- **Breaking:** `kit-core` consolidates `Transport` pack and blob transfers, removing the
+  `*_via_ref` and `*_streaming` methods. Use `upload_pack` and `download_pack` with optional ref
+  hints and a `PackBody` or `PackSink`, respectively. The caller verifies the downloaded bytes
+  against the requested key. `upload_blob` and `download_blob` take optional ref hints. Blob
+  downloads return `Vec<u8>` and take a `u64` byte limit. `pack_exists` takes an `Option<&str>` hint.
+- **Breaking:** `kit-core` removes `protocol::PackChunk`. Use a `PackBody` or `PackSink` for
+  pack transfers.
+- **Breaking:** `kit-core` removes `protocol::PACK_BODY_LIMIT_USIZE`. Convert `PACK_BODY_LIMIT`
+  explicitly if you need a `usize`.
+- **Breaking:** `kit-sync` drops the `_via_ref` suffix from `RemoteSource::download_blob`,
+  `download_pack`, `upload_pack`, and `upload_blob`. Keep the full ref hint. Use a `PackSink`
+  for pack downloads and a `PackBody` for pack uploads. Blob downloads still return `Vec<u8>`.
+- **Breaking:** `kit-client` takes `&dyn PackBody` in `Client::upload_pack` and `upload_part`.
+  `Client::download_pack` takes a `PackSink` and returns `Reply<u64>`. For streamed RPC
+  downloads, the caller or its sink must verify the bytes against the requested pack key before
+  using them.
+- **Breaking:** `kit-client` changes `HttpTransport::fetch_pack_location` to write to a
+  `PackSink` with a `u64` byte limit and return `Result<(), _>`.
+- **Breaking:** `kit-sync` changes `ClientSource::download_pack_unhinted` to write to a
+  `PackSink`. Verify the pack key before using those bytes. `upload_pack_unhinted` takes a
+  `PackBody`.
+- **Breaking:** `kit-transport-s3` removes multipart upload, its `test-small-multipart-caps`
+  feature, and the associated `S3_SINGLE_PUT_MAX` and `MULTIPART_PART_SIZE` constants. Pack
+  uploads use a single PUT.
+- **Breaking:** `kit-core` requires `Transport::delete_ref(name, expected)`. Implement a
+  conditional delete or return `TransportError::Unsupported`.
+- **Breaking:** `kit-sync` removes `Copy` from `PushReport` because it holds per-tag results.
+  Borrow or clone the report.
+- **Breaking:** `kit-core` removes `merkle::build_chunks_range_proof`. Use
+  `build_chunks_multi_proof` over the same chunk positions.
+- **Breaking:** `kit-core` moves `pack::serialized_limit` to `protocol::max_pack_bytes`.
+- **Breaking:** `kit-core` changes `PackFill::seals_before` to take a resolved `u64` limit.
+  Resolve the advertised `Option<u64>` with `protocol::max_pack_bytes`.
+- **Breaking:** `kit-core` adds a fifth argument to `pack::rewrite_excluding`. Pass the largest
+  pack it may write, or `protocol::PACK_BODY_LIMIT` for the previous limit.
+- **Breaking:** `kit-core` changes `ReadLimit::BodyLimit` to `BodyLimit(u64)`. Pass the byte
+  limit at construction and update patterns.
+- **Breaking:** `kit-core` removes the shallow argument from `PushWalk::run` and `run_one`. The
+  new `run_tips` also takes no shallow argument.
+- **Breaking:** `kit-sync` removes `PushControl::shallow`. Push skips **.kit/shallow**.
+- **Breaking:** `libkit` adds `fetch_attestations` and `push_attestations` strings to `Config`.
+  Update complete literals and patterns.
+- **Breaking:** `libkit` adds `attestations` and `remote_url` to `PushSettings`. Fill both
+  fields or use `Default` for the unset values.
+- **Breaking:** `libkit` adds `attestations_pushed` to `Pushed`. Update complete literals and
+  patterns.
+- **Breaking:** `kit-rpc` adds `ticket_ids` (protobuf field 6) to `UpdateRefRequest` and
+  `UpdateRefRequestView`. Update complete Rust literals.
+- **Breaking:** `kit-rpc` adds `supports_attestations` (protobuf field 23) to
+  `GetServerInfoResponse` and `GetServerInfoResponseView`. Update complete Rust literals.
+- **Breaking:** `kit-core` raises `MAX_INDEX_BYTES` from 64 MiB to 256 MiB. Older versions
+  refuse indexes above 64 MiB.
+- **Breaking:** `kit-sync` changes `DEFAULT_TRANSFER_TIMEOUT` from five minutes to one minute of
+  inactivity.
+- **Breaking:** `kit-transport-connect` changes `PACK_TRANSFER_TIMEOUT` from 300 seconds to 60
+  seconds of inactivity, using the `kit-sync` default.
+- **Breaking, CLI:** Stash snapshots now require a scope marker. `stash apply` and `stash pop`
+  refuse snapshots saved before the upgrade.
+- **Breaking, CLI:** `verify-attest` succeeds when at least one bound envelope has a trusted
+  signature. Use `--predicate-type` to limit the match to one predicate type. Untrusted
+  envelopes still appear in the report.
+- **Breaking, CLI:** On Unix, `add` refuses filenames with literal backslashes. Nested and
+  global ignore rules can also change which files `add` stages.
+- **Breaking, CLI:** Full disk errors from `add` and `checkout` report the disk problem and exit
+  with status 74. Status 73 still reports an existing branch.
+- **Breaking:** On case-insensitive filesystems, restore refuses aliases and case-only renames
+  before writing tracked files.
+- **Breaking:** `kit_bin::signal::install()` requires `kit_bin::signal::enable()`. The binary
+  opts in before dispatch. Embedded dispatch preserves the host's handlers unless the host opts
+  in. Embedders own cancellation.
+- **Breaking:** Fetch stops checking object closure at verified tips. Use `kit closure verify`
+  to find missing objects below those tips. Fetch can repair them once no recorded tracking tip
+  for the remote reaches them.
+- **Breaking:** Status, commit, plain checkout, cached diff, and pull recovery-tree construction
+  skip reading objects for unchanged HEAD entries. Use `kit closure verify` to check for missing
+  objects in those entries.
+- **Breaking:** Write grants reject patterns under `refs/kit/tagmap/` and require an exact
+  `refs/kit/attestmap` scope for attestation writes. In that scope, `u` permits appends and `f`
+  permits rewrites and compaction.
+- **Breaking:** Even an up-to-date branch push reads the remote head. An ordinary push recreates
+  a deleted remote branch. `--force-with-lease` checks the tracking lease when a single-branch
+  push updates the ref. `push --all` uses its ordinary rules even with that flag.
+- **Breaking, CLI:** Clone, fetch, and pull take tags by default. Use `--tags` to request them
+  explicitly or `--no-tags` to opt out. A tag refusal or listing failure exits with status 1 and
+  can leave branches and other tags published. JSON output can report `ok: false` alongside ref
+  updates.
+- **Breaking:** `kit-sync` requires a full branch or tag ref in `packmap::walk_pack_chain` and
+  `resolve_pack_chain`. Pass `refs/heads/<branch>` or `refs/tags/<tag>`.
+- **Breaking:** Update exhaustive matches for `kit-core`'s `PackError` variants `Io`,
+  `KeyMismatch`, and `CompressionUnavailable`. Without `pack-zstd`, compressed entries return
+  `CompressionUnavailable` where they returned `ZstdDecompress`.
+- **Breaking:** Update exhaustive matches for `kit-core`'s `ChainState::Graft` and
+  `StashError::PathspecNoMatch`.
+- **Breaking:** Update exhaustive matches for `kit-sync`'s `PushError::NoSuchTag`,
+  `PushError::Delete`, and `SourceError::Unsupported`.
+- **Breaking, CLI:** `kit push <remote> <name>` refuses a bare name shared by a branch and a
+  tag. Use `refs/heads/<name>` or `refs/tags/<name>` to select one.
 
 ### Security
 
@@ -33,14 +155,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reject unescaped control characters in attestation envelope strings.
 - Hash worktree cache misses across directories in one shared thread pool.
 - Stop limited history at merge frontiers and closed ranges at their excluded endpoint.
-- Keep native path components in ignore checks and refuse filenames the index cannot represent.
-- Require an exact attestation-log grant scope and retire synchronization caches when remote configuration changes.
+- Keep native path components in ignore checks.
+- Retire synchronization caches when remote configuration changes.
 
 - Stop automated bisect when another command changes the session, preserving its state and worktree.
-- Refuse restore paths that alias another tree entry or an existing spelling on the destination filesystem before changing tracked files.
-- Report full disks during add and checkout with an actionable message and exit 74, distinct from a branch that already exists.
 
-- Choose `VISUAL` before `EDITOR`, after `GIT_EDITOR`.
+- **Breaking, CLI:** Editor selection checks `VISUAL` before `EDITOR`. `GIT_EDITOR` still takes
+  precedence.
 - Include the received size and limit in oversized Connect frame errors.
 - Preserve early S3 upload refusals and report their error codes without retrying; keep retrying timeouts and throttling.
 - Resume unfinished clones that already fetched tags, validating those tags again.
@@ -48,6 +169,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Fetch publishes a remote tag once its closure is present and its name and signatures pass the
+  configured checks. It uses the tag map when local objects are insufficient. Fetch refuses
+  conflicting local tags, leaves existing tags in place, and retries refused tags next time.
+  `FetchReport` adds `tags_fetched`, `tags_rejected`, `tag_warnings`, and `tag_listing_failed`.
+  `SyncOptions` adds `tags`.
+- `kit_core::ops::check_closure_present_above` takes a stop poll and a `Known` answer per
+  object. `Known::Present` asserts that the whole closure is present, so the walker skips that
+  object and its descendants. `Presence::Missing` reports a missing object or one marked
+  `Known::Missing` because its closure is incomplete. Its path runs from that object to the root.
+- Stable releases update the Homebrew formula after publishing, using the published release
+  checksums.
 - Support capability-gated Connect attestation reads and atomic writes with upload reservations.
 - Fetch, clone and pull portable attestations by default, with opt-out and explicit refetch controls.
 - Add `libkit::transfer::fetch_with_options` and `pull_with_options` for explicit attestation controls.
@@ -57,9 +189,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Return to the previous branch or detached HEAD with `switch -`, `checkout -`, or `@{-1}`.
 - Accept `stash push -u` and `--include-untracked`; refuse existing untracked destinations before restoring files.
 - Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
-- Save selected file or directory paths with `stash push [--] <path>...`, preserving other worktree and staged changes. The local stash record carries scope; earlier entries cannot be applied.
+- Save selected file or directory paths with `stash push [--] <path>...`, preserving other
+  worktree and staged changes.
 - Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 512 MiB per fetch.
-- `verify-attest --predicate-type` succeeds when any bound envelope has a trusted signature for the requested predicate; unrelated untrusted envelopes remain in the report.
 - Gc skips and reports attested subjects with missing objects or incomplete closures, sharing history scans across roots.
 
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
@@ -71,9 +203,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks its length, key and trailer in one pass. Only it makes the
   `VerifiedPack` that `PackReader::read_verified` unpacks one window at a
   time, with memory bounded by constants rather than by the pack's length
-  (SPEC-PACKFILE §11.1). `UnpackReport::signed` lists the commits, remixes
-  and tags a read stored; a file-backed read leaves `stored` empty. The new
-  constants `PACK_ENTRY_READ_COST`, `RESIDENT_ENTRY_MAX`, `UNPACK_MEMORY_CAP`,
+  (SPEC-PACKFILE §11.1). The constants `PACK_ENTRY_READ_COST`, `RESIDENT_ENTRY_MAX`, `UNPACK_MEMORY_CAP`,
   `STAGE_WINDOW_BYTES`, `MAX_FRAME_PAYLOAD`, `MAX_RAW_FRAME_PAYLOAD` and
   `SPOOL_BUFFER` name its bounds. `transfer::DeltaSpool` keeps a push's
   delta streams in a file and encodes each pair of target and base once
@@ -88,8 +218,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit push --tags` and `kit push <remote> <tag>` push tags, each with its
   tag map `refs/kit/tagmap/<t>` (SPEC-TRANSPORT §7.2). A tag map grafts on
   the nearest branch the remote holds, and the tags that share it upload
-  once. A remote tag with another value is refused unless `--force`, which
-  keeps the old value fetchable. An unsigned annotated tag is refused. In
+  once. `--force` and `--force-with-lease` both allow replacing a remote tag and
+  compare against the value read from the remote. The old value stays fetchable.
+  An unsigned annotated tag is refused. In
   kit-sync, `PushTarget::Tags` and `PushReport::tags`; in kit-core,
   `transfer::plan_pack_tips`, `packmap::ChainState::Graft` and
   `protocol::RefListing`; in libkit, `transfer::push_tags_with_source` and
@@ -117,14 +248,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- `kit diff --cached` and the pull recovery-tree write open only
-  staged objects that differ from `HEAD`. Reads and full restores still check
-  the objects they need.
-
-- The local index limit is 256 MiB, enough for 2 million files with 64-byte
-  average paths. Older kits refuse indexes above 64 MiB with
-  `index file too large (>67108864 bytes)`; the on-disk format is unchanged.
-
+- Outside a cursor hit, a fetch that takes tags lists `refs/tags/`. It also lists
+  `refs/kit/tagmap/` when it needs a tag's pack chain.
+- Verified blob reads reuse the read buffer for the payload. Reassembling a chunked blob
+  reserves its full output size once.
 - `add` refuses an index above its byte limit before hashing files or writing
   objects; the error names the limit and file count.
 - A pack transfer over Connect or S3 fails after 60 s with no data moving,
@@ -135,39 +262,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeping the packs it already has and checking everything again; any other
   existing destination is still refused. `kit_sync::init_clone_dir` returns
   such a clone where it returned `AlreadyInitialized`.
-- A fetch checks the closure of a new tip only down to the tracking tips an
-  earlier fetch that verified signatures checked, the tips it published
-  itself, and their history, so a fetch of one commit reads what that commit
-  added, not every object of the repository. It no longer finds or repairs
-  an object lost from the store below such a tip; `kit closure verify` finds
-  it, and a fetch repairs it once no recorded tracking tip of that remote
-  reaches it.
-- `Transport::delete_ref` is a required verb: an implementation outside kit
-  adds it, refusing with `TransportError::Unsupported` when it cannot delete
-  under a condition. `kit serve` answers an `UpdateRef` with an empty
-  `new_id` as a delete, or with "a delete (empty new_id) requires a MATCH
-  expectation", where it used to refuse it as a malformed id.
-- `kit_sync::PushReport` is no longer `Copy`: it carries the per-tag results
-  in `tags`. `RemoteSource` gains `inspection_max_objects` and `ref_listing`.
-  A ticketed Connect advance may pair `refs/tags/<t>` with
-  `refs/kit/tagmap/<t>` (SPEC-TRANSPORT-CONNECT §4, §7.6), and a scope on
-  `refs/tags/<t>` covers its tag map (SPEC-WRITE-GRANTS §8.3). A grant
-  pattern under `refs/kit/tagmap/` is refused (`GrantError::TagmapPattern`),
-  and a tag map ref gets no flags of its own; kit-attest adds `tagmap_tag`
-  and `tag_tagmap`. `GrantCondition::Unchanged` names a `MATCH` write that
-  changes nothing, so a tag's repair is chosen a grant with `c`.
+- `kit serve` treats an `UpdateRef` with an empty `new_id` under `MATCH` as a delete.
+- `RemoteSource` adds `inspection_max_objects` and `ref_listing`. A ticketed Connect advance can
+  pair a tag with its tag map. A grant on the tag covers its map, and a repair that leaves the
+  tag unchanged needs `c` permission.
 
-- Fetch and push stream packs through files. `Transport::upload_pack`
-  reads a `PackBody` and `download_pack` writes a `PackSink`; both take the
-  ref hint, so the `*_via_ref` verbs, `upload_pack_streaming`,
-  `download_pack_streaming`, `protocol::PackChunk` and
-  `PACK_BODY_LIMIT_USIZE` are gone. `download_blob` takes the largest
-  length it accepts. A fetch spools each pack into an unnamed file in
-  `.kit/tmp/` and unpacks it by window; a push seals each pack into one and
-  uploads it from there, with its delta streams in the push's delta spool.
-  The memory and file transports copy in 1 MiB chunks (SPEC-TRANSPORT
-  §1.1). Over the file transport, a push and a fetch of one 1 GiB pack each
-  hold under 96 MiB of heap and a few hundred bytes per entry.
+- Fetch and push stream object packs through unnamed files in **.kit/tmp/**. Fetch unpacks one
+  window at a time. Push keeps delta streams in a file. Memory and file transports copy in 1 MiB
+  chunks (SPEC-TRANSPORT §1.1).
 - The ssh and S3 transports stream packs both ways. ssh reads each 800 KiB
   chunk of an upload from the pack's body as it sends it (SPEC-TRANSPORT
   §4.2). S3 hashes the body once for the SigV4 payload hash, then sends it
@@ -176,23 +278,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PACK_BODY_LIMIT` is refused with `PayloadTooLarge` before it is read;
   S3 used to answer `ServerError { status: 413 }`. A push and a fetch of a pack of about 1 GiB each hold
   under 96 MiB of heap over ssh and S3 as well.
-- Connect streams packs both ways. In `kit-client`, `upload_pack` and
-  `upload_part` take a `&dyn PackBody` and read it as they send: a part
-  twice, once for its commitment and once to send it, and a resumed upload
-  only the parts without a stored receipt. `download_pack` writes into a
-  `PackSink` and returns the length; its caller checks the key.
-  `HttpTransport::fetch_pack_location` writes into a `PackSink` under a
-  `u64` limit. A location whose length or key is wrong, or whose fetch or
-  offering call fails, falls back to the RPC. A streamed pack with the wrong
-  key fails at the fetch's spool, with no fallback. A sink's own failure, a
-  full disk say, ends the download with no fallback and no retry. On a
-  streaming channel, an error answer to a streamed call is held only up to
-  1 MiB. The client refuses a `DownloadPack` frame over
-  `DOWNLOAD_FRAME_MAX` (4 MiB) from its envelope.
-  `ClientSource` and `ConnectTransport` pass bodies and sinks through. Over
-  a loopback Connect server, a multipart push and a fetch of one 1 GiB
-  pack, streamed or from a location, each hold under 96 MiB of heap and a
-  few hundred bytes per entry. The wire is unchanged.
+- Connect streams packs both ways. An upload resumes with the parts that lack receipts. A failed
+  or invalid download location falls back to the RPC. A sink failure ends the download without
+  fallback or retry.
+- Connect bounds streamed error responses to 1 MiB and streamed download frames to 4 MiB.
 - A full disk ends a fetch or push as `SyncError::Io`, which is not retried;
   a sink that failed refuses every later attempt (`PackSink::failed`).
   `SyncError` maps `PackError::Io` and `PackError::Store(StoreError::Io)`
@@ -208,25 +297,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A pack writer refuses a frame over `MAX_FRAME_PAYLOAD` (SPEC-PACKFILE §5).
   No kit writer made one.
-- `PackWriter` takes its output as a type parameter, `Vec<u8>` by default.
-  `PlannedDelta::stream` is a `DeltaBytes`. `PackError` has the new variants
-  `Io` and `KeyMismatch`. A push seals each pack with one BLAKE3 pass instead
-  of two (`PackWriter::finish_with_key`).
+- `PackWriter` takes its output as a type parameter, `Vec<u8>` by default. A push seals each
+  pack with one BLAKE3 pass using `PackWriter::finish_with_key`.
 - On Linux, a clone or an add of many small files flushes them faster: objects
   of at most 16 KiB, header included, are flushed by up to 256 threads instead
   of 64, and a batch of them is renamed into place on a pool. Each file still
   gets its own `fdatasync` before its rename. A large object never grows the
   pool past 64 threads, a batch of only large objects renames them on one
   thread, and other platforms are unchanged.
-- The pack module no longer knows the transports' body limit; its callers
-  pass the limit. `kit_core::pack::serialized_limit` is now
-  `kit_core::protocol::max_pack_bytes`. `PackFill::seals_before` takes the
-  resolved limit as a `u64` where it took the advertised `Option<u64>`: pass
-  `protocol::max_pack_bytes(advertised)`. `pack::rewrite_excluding` takes a
-  fifth argument, the longest pack it may write (`protocol::PACK_BODY_LIMIT`
-  for the old behaviour), and `pack::ReadLimit::BodyLimit` carries that
-  limit as `BodyLimit(u64)`. Its text names the limit it carries, so it
-  reads as before for `PACK_BODY_LIMIT`.
 - A restore and a pull recovery run one safety check in kit-sync, where
   each had its own. Recovery keeps its refusal texts and its stricter
   rules: the index, never seeded from HEAD, must equal the tree from before
@@ -248,34 +326,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that writes into a directory removes the temp files it left there.
 - `kit gc` checks the chunks of large files 32 at a time, so its mark no
   longer waits on a cold disk for one chunk after another.
-- `kit commit` without `-m`, `kit tag -a` without `-m` and `kit rebase -i`
-  fail at once when no editor is set and stdin is not a terminal, where
-  they started `vi`, which waited for a terminal. An editor set in
-  `GIT_EDITOR`, `EDITOR` or `VISUAL` still runs, terminal or not.
-- `kit status`, `kit commit` and `kit checkout` open only the staged objects
-  that differ from `HEAD`, not every tracked object. `commit` no longer
-  checks an object that `HEAD` names at the same path and mode, and `status`
-  and `checkout` no longer notice that it is missing. `closure verify`, a
-  push that sends the object and any read of it still check it.
-  A checkout still refuses to overwrite or remove a file whose object is
-  missing, or to write one from a missing object, and a command whose
-  restore rewrites every file (`checkout -f`, `reset --hard`, `merge` and the
-  others) still opens every object first.
-
-### Removed
-
-- S3 multipart upload, with `S3_SINGLE_PUT_MAX` and the
-  `test-small-multipart-caps` feature of `kit-transport-s3`. It never ran:
-  a pack is at most 4 GiB, and one S3 `PUT` takes up to 5 GiB.
-- `kit_core::merkle::build_chunks_range_proof`. kit-core has no verifier for
-  it. `build_chunks_multi_proof` over the same run of positions writes the
-  same bytes.
-- `kit_sync::push::PushControl::shallow` and the `shallow` argument of
-  `kit_core::transfer::walk::PushWalk::run`, `run_tips` and `run_one`.
-  Nothing writes a shallow boundary (`kit clone` has no `--depth`), so the
-  set was always empty, and a push no longer reads `.kit/shallow`.
-  `refs::load_shallow_boundaries`, `write_shallow_boundaries` and the file's
-  format (SPEC-REFS) stay.
+- **Breaking, CLI:** `kit commit` and `kit tag -a` exit with status 64 when they need an editor,
+  stdin is not a terminal, and no editor is configured. `kit rebase -i` applies that terminal
+  check before looking for commits to edit. Set `GIT_EDITOR`, `VISUAL`, or `EDITOR` to use an
+  editor without a terminal.
+- Plain checkout still checks objects for files it writes, overwrites, or removes. Full restores
+  such as `checkout -f` and `reset --hard` still open every object they restore.
 
 ### Fixed
 
@@ -307,11 +363,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `404` from a store that names the key, request and host in its error
   document (MinIO does, in about 350 bytes) failed `read_ref` with
   `PayloadTooLarge`, so a push to a new S3 remote failed.
-- `kit push` reads the remote's head before it says "Everything up-to-date",
-  so a push with nothing to send now contacts the remote. A remote that
-  lost the branch, for example one deleted and made again under the same
-  name, got nothing while its tracking ref matched the local tip; `kit push`
-  and `kit push --all` now send it the branch.
 
 ## [0.8.1] - 2026-11-15
 
@@ -345,26 +396,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `kit fetch`, `kit pull` and `kit clone` take the remote's tags after the
-  branches (SPEC-TRANSPORT §1.4). `--tags` says so explicitly and `--no-tags`
-  skips them. A tag publishes to `refs/tags/<t>` only once its closure is in
-  the store, its tag object carries its name and, with signature checks on,
-  its history verifies with the same walk and the same verified tips as a
-  branch. A tag whose closure is local costs no download. Otherwise the fetch
-  applies the chain that `refs/kit/tagmap/<t>` names and stops at the nodes it
-  already applied. A local tag with another value is refused and never moved,
-  and no fetch deletes a tag. Each refused tag prints
-  ` ! [rejected]        <t> -> <t> (<reason>)`. The command exits 1 after the
-  branches and the other tags are published, and the next fetch tries the tag
-  again. `FetchReport` gains `tags_fetched`, `tags_rejected`, `tag_warnings`
-  and `tag_listing_failed`, and `SyncOptions` gains `tags`.
-- `RemoteSource::list_refs(prefix)` is a required method. Every source of
-  this repository implements it.
-- `kit_core::ops::check_closure_present_above` checks a closure as
-  `check_closure_present` does, but takes a `Known` answer for each object
-  (present, missing, or to read) and a stop poll, and returns a `Presence`
-  that names the missing object and the path to it.
-- `CursorRecord` gains `tags` and `tag_digest`.
 - `kit push <remote> <branch>` pushes the local branch `<branch>` under its
   own name, as `kit push <remote> <branch>:<branch>` does. The branch need not
   be the current one. Like any refspec push, it records an upstream only with
@@ -373,23 +404,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- A tag name is pushable only when `refs/kit/tagmap/<name>` is a valid ref
-  name: at most 496 bytes and 29 segments (SPEC-REFS §3).
-  `kit_core::refs::check_pushable_tag` checks it, and `kit tag` refuses a new
-  name past it. A tag stored before stays readable, writable and deletable. A
-  fetch skips a remote tag past it with a warning.
-- The fetch cursor record is `kit-fetch-cursor-v2`. It also records whether
-  the fetch took tags and a digest of the local tags. A v1 record is invalid,
-  so the first fetch after an upgrade lists the remote once.
-- `libkit::transfer::pull_with_source` and `fetch_with_source` take a `tags`
-  switch and return the `PullReport` and `FetchReport`. `pull_all`,
-  `pull_all_with` and `fetch_all` fetch tags and return the reports too, not a
-  branch count.
-- `walk_pack_chain` and `resolve_pack_chain` take the full head ref, such as
-  `refs/heads/<b>` or `refs/tags/<t>`, not a branch name.
-- A fetch sends one more request, the `ListRefs` of `refs/tags/`, and one
-  `ListRefs` of `refs/kit/tagmap/` when some tag is not yet local. An
-  unchanged `kit serve` fetch still fits 4,999 branches in one session.
 - The error for a repository in the `bmt-v1` format, and for any other
   unreadable `.kit/format`, now says how to move a 0.7.3 repository: run
   `kit git export` with kit 0.7.3, then `kit git import` with this kit, or
