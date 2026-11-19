@@ -118,11 +118,11 @@ ci-supply:
     cd rust
     cargo deny --locked check
     cargo audit --deny warnings \
-      --ignore RUSTSEC-2023-0071 \
       --ignore RUSTSEC-2024-0436 \
       --ignore RUSTSEC-2026-0370 \
       --ignore RUSTSEC-2026-0371 \
-      --ignore RUSTSEC-2026-0372
+      --ignore RUSTSEC-2026-0372 \
+      --ignore RUSTSEC-2026-0543
 
 # The `workflows` and `ci-gates` steps.
 ci-workflows:

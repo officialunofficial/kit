@@ -1,24 +1,7 @@
-// Regression guard for RUSTSEC-2023-0071.
-//
-// The yubikey 0.9.0-pre.0 crate transitively pulls in an RSA crate
-// version vulnerable to a Marvin-attack timing leak on the private-key
-// decrypt path. kit ignores this advisory in `rust/deny.toml` because
-// no kit-* crate calls the affected entrypoint — we only ever invoke
-// the *signing* paths (`yubikey::piv::sign_data`) on yubikey devices,
-// never `yubikey::piv::decrypt_data` (or any other PIV-RSA-decrypt
-// surface).
-//
-// This test scans every Rust source file in the workspace and fails
-// if a future patch reintroduces a reference to the affected
-// entrypoint. If it ever needs to legitimately fire, the deny.toml
-// ignore MUST be dropped at the same time (or, at minimum, this test
-// removed together with an updated advisory).
-//
-// Implementation note: we do not use compile_fail or trybuild-style
-// negative tests here because the symbol lives in a transitive crate
-// and a missing reference IS the success state — we have nothing to
-// compile-fail against. A textual scan is the simplest possible
-// regression check that keeps working as the workspace grows.
+// Guard against introducing calls to the YubiKey PIV RSA private-key
+// decrypt path. This path has exposed private-key timing information in
+// vulnerable RSA releases. The guard also applies if a YubiKey dependency
+// is introduced again.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -91,8 +74,6 @@ fn workspace_does_not_call_yubikey_rsa_decrypt() {
 
     assert!(
         offenders.is_empty(),
-        "RUSTSEC-2023-0071 regression: kit-* crate(s) now reference the yubikey RSA decrypt path. \
-         If this is intentional, drop the deny.toml ignore for RUSTSEC-2023-0071 at the same time. \
-         Offenders: {offenders:?}"
+        "Workspace references the YubiKey RSA decrypt path. Offenders: {offenders:?}"
     );
 }
