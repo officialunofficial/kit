@@ -3,9 +3,13 @@ use crate::packmap::{branch_head_ref, flatten_oldest_first, packmap_ref, walk_pa
 use crate::{SourceError, SyncError};
 use kit_core::{
     hash::Hash,
+    pack::pack_key,
     protocol::{AdvanceOutcome, CommitOutcome, PackKey},
     refs,
-    transfer::packmap::{ChainState, PlanError, plan_advance},
+    transfer::{
+        encode_packlist,
+        packmap::{ChainState, Node, PlanError, plan_advance},
+    },
 };
 pub(super) const PACKMAP_CAS_ATTEMPTS: u32 = 8;
 /// Walk a branch's packlist chain from `head_key` once. Return its depth in
@@ -39,7 +43,9 @@ pub(crate) fn probe_chain(
 /// packs downloads only the new ones. Each attempt decides again from the
 /// chain it read. A threshold of zero never rolls over.
 ///
-/// An idempotent retry only writes the head. Force pushes on an atomic or
+/// An idempotent retry can write just an existing head. A recreated branch
+/// must move its packmap so a delete that observed the old map loses its CAS.
+/// Force pushes on an atomic or
 /// serialized advance use the separate guarded driver, including this
 /// idempotent case. Lost-response conflicts are disambiguated by reading the head.
 pub(crate) fn advance_packmap(
@@ -64,6 +70,14 @@ pub(crate) fn advance_packmap(
         }
         let prior = tx.read_ref(&packmap_name)?;
         let state = match prior {
+            // A delete may remove the base chain between CAS attempts.
+            // Dependent packs cannot serve as a new root, even if the
+            // head CAS would refuse the push after writing that root.
+            None if !self_contained => {
+                return Err(PushError::NonFastForwardPush {
+                    branch: branch.to_owned(),
+                });
+            }
             None => ChainState::Missing,
             Some(head) => match probe_chain(tx, branch, head) {
                 Ok((depth, packs)) => {
@@ -78,10 +92,12 @@ pub(crate) fn advance_packmap(
                 Err(e) => return Err(e),
             },
         };
-        let node = plan_advance(state, pack_keys, None).map_err(|error| match error {
-            PlanError::Packlist(error) => PushError::from(error),
-            PlanError::NodeTooLarge => unreachable!("no node-size limit configured"),
-        })?;
+        let creating = matches!(head_condition, refs::RefWriteCondition::Missing);
+        let node =
+            plan_branch_node(state, pack_keys, prior, creating).map_err(|error| match error {
+                PlanError::Packlist(error) => PushError::from(error),
+                PlanError::NodeTooLarge => unreachable!("no node-size limit configured"),
+            })?;
         let Some(node) = node else {
             return commit_head(tx, &head_name, head_condition, &tip, branch);
         };
@@ -118,13 +134,13 @@ pub(crate) fn advance_packmap(
                 return head_conflict(tx, &head_name, &tip, branch);
             }
             CommitOutcome::TicketRejected => {
-                if tx.read_ref(&head_name)? == Some(tip) {
+                if tip_has_packmap(tx, &head_name, &packmap_name, &tip)? {
                     return Ok(());
                 }
                 return Err(PushError::TicketRejected);
             }
             CommitOutcome::PacklistNotInRepository => {
-                if tx.read_ref(&head_name)? == Some(tip) {
+                if tip_has_packmap(tx, &head_name, &packmap_name, &tip)? {
                     return Ok(());
                 }
                 return Err(PushError::PacklistNotInRepository);
@@ -136,6 +152,26 @@ pub(crate) fn advance_packmap(
     Err(PushError::PackmapContended {
         branch: branch.to_owned(),
     })
+}
+
+/// A recreating push must publish a different packmap even when it adds
+/// no packs to the existing chain. Link to that chain under its ref CAS.
+pub(super) fn plan_branch_node(
+    state: ChainState,
+    packs: &[Hash],
+    prior: Option<Hash>,
+    creating: bool,
+) -> Result<Option<Node>, PlanError> {
+    let node = plan_advance(state, packs, None)?;
+    if let (None, Some(prior), true) = (&node, prior, creating) {
+        let bytes = encode_packlist(Some(prior), &[])?;
+        return Ok(Some(Node {
+            key: pack_key(&bytes),
+            bytes,
+            condition: refs::RefWriteCondition::Match(prior),
+        }));
+    }
+    Ok(node)
 }
 
 /// Move just the branch head under its CAS condition, mapping a conflict to
@@ -161,23 +197,29 @@ pub(crate) fn commit_head(
 /// conflict can be our own write. Re-read the head; if it already holds
 /// `tip` the push landed, otherwise it is a genuine non-fast-forward.
 ///
-/// Only the head is checked. Whoever moved the head to `tip` also advanced
-/// the packmap to reconstruct it first (packmap-then-head, or both at once),
-/// so a head at `tip` already satisfies the push's invariant even if a later
-/// pusher has since moved the packmap past our node.
+/// The tip must still have a packmap: the head value alone also matches
+/// when a repair was trying to restore a missing packmap.
 fn head_conflict(
     tx: &PushContext<'_>,
     head_name: &str,
     tip: &Hash,
     branch: &str,
 ) -> Result<(), PushError> {
-    let current = tx
-        .read_ref(head_name)
-        .map_err(|error| super::repository_operation_error(tx, error))?;
-    if current == Some(*tip) {
+    if tip_has_packmap(tx, head_name, &packmap_ref(branch), tip)
+        .map_err(|error| super::repository_operation_error(tx, error))?
+    {
         return Ok(());
     }
     Err(PushError::NonFastForwardPush {
         branch: branch.to_owned(),
     })
+}
+
+pub(super) fn tip_has_packmap(
+    tx: &PushContext<'_>,
+    head_name: &str,
+    packmap_name: &str,
+    tip: &Hash,
+) -> Result<bool, SourceError> {
+    Ok(tx.read_ref(head_name)? == Some(*tip) && tx.read_ref(packmap_name)?.is_some())
 }

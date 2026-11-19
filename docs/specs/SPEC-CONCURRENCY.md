@@ -179,7 +179,9 @@ held, so process death requires no persistent sweep recovery.
 No process ever blocks on the exclusive format lock. Gc takes it with a
 non-blocking try, and keeps the object when the try fails. A process that
 waited for it would wait as long as the longest shared holder, and a fetch
-holds the shared lock for hours.
+holds the shared lock for hours. After finding a missing object, a command
+tries the exclusive lock before discarding fetch records. On contention,
+it reports that the user needs to repeat the diagnostic before fetching.
 
 A fetch takes the shared lock as a prune guard before it reads its record of
 applied packs, and holds it until after its last remote-tracking ref publish.
@@ -195,11 +197,10 @@ acquire another repository lock. Bulk commit does not hold it while
 publishing refs. The prune guard is the one exception. A fetch holds it and
 then takes `worktree.lock`, and the ref locks below it, to publish a ref.
 This inverts the order above and cannot deadlock. The guard is a shared lock,
-so it never waits for another shared holder. The one process that holds
-`worktree.lock` and wants the exclusive format lock is gc, and it only tries
-the exclusive lock and moves on, so a fetch that waits for gc's
-`worktree.lock` while holding the guard waits for gc to finish, not for a
-lock gc is waiting on. The existing local-filesystem locking assumptions
+so it never waits for another shared holder. A command holding `worktree.lock`
+only tries the exclusive format lock and moves on. A fetch holding the
+prune guard can therefore wait for that command to release
+`worktree.lock` without a deadlock. The existing local-filesystem locking assumptions
 apply.
 
 ## 4. Global lock order and per-command lock sets

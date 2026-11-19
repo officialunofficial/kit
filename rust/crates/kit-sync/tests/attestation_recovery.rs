@@ -51,8 +51,7 @@ fn variant(tip: Hash, predicate: &str, extra: serde_json::Value) -> Vec<u8> {
     env.encode().unwrap().into_bytes()
 }
 
-// The export now writes the sanitized placeholder "local" for local and
-// helper mirrors. Push still warns that it leaks a local path.
+// Export writes "local" for local and helper mirrors. Push publishes it.
 #[test]
 fn sanitized_local_mirror_has_no_warning() {
     let tx = kit_transport_memory::MemoryTransport::new();
