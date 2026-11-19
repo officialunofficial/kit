@@ -24,6 +24,7 @@ mod packmap;
 
 mod upload_receipts;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -359,6 +360,7 @@ struct PushObserver<'a> {
     terminal: &'a Terminal,
     warning: Option<String>,
     attestations: std::sync::atomic::AtomicUsize,
+    published_tags: Option<&'a RefCell<Vec<kit_sync::push::TagPushResult>>>,
 }
 
 impl Observer<SyncEvent> for PushObserver<'_> {
@@ -377,6 +379,11 @@ impl Observer<SyncEvent> for PushObserver<'_> {
             if *count > 0 {
                 eprintln!("Published {count} attestations");
             }
+        }
+        if let SyncEvent::TagPublished(tag) = event
+            && let Some(published) = self.published_tags
+        {
+            published.borrow_mut().push(tag.clone());
         }
         self.terminal.event(event);
     }
@@ -428,9 +435,11 @@ pub(crate) fn push_tags_with_source(
     authority: Option<&dyn StepAuthority>,
     attestations: (bool, &str),
     terminal: &Terminal,
+    published: &RefCell<Vec<kit_sync::push::TagPushResult>>,
 ) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    let (mut settings, mut observer) = push_inputs(&layout, authority, terminal);
+    observer.published_tags = Some(published);
     settings.attestations = attestations.0;
     settings.remote_url = attestations.1;
     transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
@@ -506,6 +515,7 @@ fn push_inputs<'a>(
             terminal,
             warning,
             attestations: std::sync::atomic::AtomicUsize::new(0),
+            published_tags: None,
         },
     )
 }

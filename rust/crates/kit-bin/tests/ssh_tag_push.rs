@@ -56,6 +56,7 @@ if [ -z "$path" ]; then
   echo "fake_ssh: could not locate 'kit serve <path>' in argv" >&2
   exit 64
 fi
+printf 'session\n' >> "$KIT_SSH_SESSION_LOG"
 exec "$KIT_SSH_TARGET_BIN" serve "$path"
 "#;
     fs::write(&wrapper, script).unwrap();
@@ -105,6 +106,7 @@ impl Fixture {
             .env("VISUAL", "true")
             .env("KIT_SSH_PROGRAM", &self.wrapper)
             .env("KIT_SSH_TARGET_BIN", kit_bin())
+            .env("KIT_SSH_SESSION_LOG", self.work.path().join("sessions"))
             .stdin(Stdio::null())
             .output()
             .expect("spawn kit")
@@ -209,6 +211,84 @@ fn tags_pushed_over_ssh_clone_and_verify() {
     assert_eq!(bytes(&clone), bytes(&source));
 }
 
+#[test]
+fn a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag() {
+    const TAGS: usize = 5_001;
+    let fx = Fixture::new();
+    ok(&fx.push(&["origin"]), "push main");
+    let layout = RepoLayout::single(fx.source());
+    let tip = refs::read_ref(&layout, "main").unwrap().unwrap();
+    let wire = format!("{}\n", kit_core::hash::to_hex(&tip));
+    fs::create_dir_all(layout.tags_dir()).unwrap();
+    for i in 0..TAGS {
+        fs::write(layout.tags_dir().join(format!("v{i:04}")), &wire).unwrap();
+    }
+    let sessions = fx.work.path().join("sessions");
+    fs::write(&sessions, "").unwrap();
+
+    let out = fx.push(&["origin", "--tags", "--format", "json"]);
+
+    ok(&out, "push --tags across the frame limit");
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["tags_pushed"], TAGS);
+    assert_eq!(fs::read_to_string(sessions).unwrap().lines().count(), 2);
+    let tx = fx.tx();
+    let tags = tx.list_refs("refs/tags/").unwrap();
+    let maps = tx.list_refs("refs/kit/tagmap/").unwrap();
+    assert_eq!(tags.len(), TAGS);
+    assert!(tags.iter().all(|tag| tag.hash == Some(tip)));
+    assert_eq!(
+        tags.iter().map(|tag| &tag.name).collect::<Vec<_>>(),
+        maps.iter().map(|map| &map.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_failed_tag_push_reports_the_tag_that_landed() {
+    let fx = Fixture::new();
+    ok(&fx.push(&["origin"]), "push main");
+    let source = fx.source();
+    for tag in ["v1", "v2"] {
+        ok(&fx.kit(&source, &["tag", tag]), "tag");
+    }
+    let remote = fx.remote();
+    let file_url = format!("kit+file://{}", remote.display());
+    ok(
+        &fx.kit(&source, &["remote", "add", "file", &file_url]),
+        "remote add",
+    );
+    let tagmaps = remote.join("refs/kit/tagmap");
+    fs::create_dir_all(&tagmaps).unwrap();
+    // The listing skips this symlink. Publication fails when the second
+    // tag's map would point outside the remote.
+    std::os::unix::fs::symlink(fx.work.path(), tagmaps.join("v2")).unwrap();
+
+    let out = fx.push(&["file", "--tags", "--format", "json"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        fx.tx().read_ref("refs/tags/v1").unwrap(),
+        Fixture::local_tag(&source, "v1")
+    );
+    assert_eq!(fx.tx().read_ref("refs/tags/v2").unwrap(), None);
+    assert!(
+        stderr(&out).contains(" * [new tag]         v1 -> v1"),
+        "{}",
+        stderr(&out)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["tags_pushed"], 1);
+    assert!(json.get("tags_rejected").is_none());
+    assert!(json.get("admission_required").is_none());
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("resolves outside transport root")
+    );
+}
+
 /// A tag push over ssh refuses a new tag that would take the remote's tag
 /// listing past one frame, before it writes anything, and exits 1.
 #[test]
@@ -255,6 +335,7 @@ fn a_named_tag_pushes_alone_and_an_ambiguous_name_is_refused() {
     let json = String::from_utf8_lossy(&out.stdout);
     assert!(json.contains(r#""ok":true"#), "{json}");
     assert!(json.contains(r#""tags_pushed":1"#), "{json}");
+    assert!(json.contains(r#""tags_rejected":0"#), "{json}");
     let tx = fx.tx();
     assert!(tx.read_ref("refs/tags/v1").unwrap().is_some());
     assert_eq!(tx.read_ref("refs/tags/v2").unwrap(), None);
