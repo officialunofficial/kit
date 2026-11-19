@@ -17,7 +17,7 @@ use kit_core::refs::{self, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
 use kit_core::transfer;
 use kit_sync::{
-    CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError, SyncEvent,
+    CloneError, CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError, SyncEvent,
     SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
@@ -566,6 +566,39 @@ fn pull_resumes_the_restore_after_head_was_written() {
         std::fs::read(target.join("a.txt")).unwrap(),
         b"local edit\n"
     );
+}
+
+/// A clone interrupted after it made its branch and moved HEAD, before the
+/// restore began, undoes both. It reports the interrupt, and the same clone
+/// then resumes in that directory.
+#[test]
+fn a_clone_interrupted_after_head_was_written_resumes() {
+    let remote = Remote::new();
+    let tip = remote.publish(None, &[("a.txt", b"hello\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    let layout = RepoLayout::single(&target);
+
+    let result = clone(
+        &target,
+        &remote.source(),
+        &default_remote("kit+memory://x"),
+        &SyncOptions::default(),
+        &StopAfterHead {
+            layout: layout.clone(),
+            tip,
+        },
+    );
+
+    assert!(
+        matches!(result, Err(CloneError::Sync(SyncError::Interrupted))),
+        "{result:?}"
+    );
+    assert_eq!(refs::resolve_head(&layout).unwrap(), None);
+    assert!(!layout.pull_head_file().exists());
+    let report = clone_into(&remote, &target);
+    assert!(matches!(report.pull.outcome, PullOutcome::FastForwarded { new, .. } if new == tip));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"hello\n");
 }
 
 #[test]

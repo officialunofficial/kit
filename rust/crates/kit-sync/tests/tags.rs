@@ -1014,6 +1014,73 @@ fn the_cursor_record_refetches_after_a_local_tag_delete() {
     assert!(fetch_from(&remote, &target).remote_unchanged);
 }
 
+/// A source that deletes local tag `tag` of `dir` when the fetch first lists
+/// tag maps, after the tag phase compared that tag with the remote.
+struct DeleteTagOnTagMapListing<'a> {
+    inner: &'a dyn RemoteSource,
+    dir: &'a Path,
+    tag: &'static str,
+}
+
+impl RemoteSource for DeleteTagOnTagMapListing<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        if prefix == "refs/kit/tagmap/" && local_tag(self.dir, self.tag).is_some() {
+            refs::delete_tag(&RepoLayout::single(self.dir), self.tag).unwrap();
+        }
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_blob(key, name)
+    }
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
+        self.inner.download_pack(key, name, sink)
+    }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> {
+        self.inner.repo_cursor()
+    }
+}
+
+/// A local tag the remote also holds, deleted while a fetch runs after the
+/// fetch compared it, is not recorded as matching the remote: the next fetch
+/// lists the tags again and restores it.
+#[test]
+fn the_cursor_record_refetches_after_a_local_tag_delete_during_a_fetch() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    remote.push_tag("a", &[], c1, Some(main));
+    let (_dir, target) = work();
+    clone_from(&remote, &target);
+    let (tag, b) = remote.tag_object("b", c1, true);
+    remote.push_tag("b", std::slice::from_ref(&tag), b, Some(main));
+    let source = remote.source();
+    let deleting = DeleteTagOnTagMapListing {
+        inner: &source,
+        dir: &target,
+        tag: "a",
+    };
+
+    let report = fetch_with(&deleting, &target, &SyncOptions::default());
+
+    assert_eq!(report.tags_fetched, ["b"]);
+    assert_eq!(local_tag(&target, "a"), None);
+    // The same source: this fetch lists no tag map, so it deletes nothing.
+    let report = fetch_with(&deleting, &target, &SyncOptions::default());
+    assert!(!report.remote_unchanged);
+    assert_eq!(report.tags_fetched, ["a"]);
+    assert_eq!(local_tag(&target, "a"), Some(c1));
+}
+
 /// A failed tag listing stops only the tag phase: the branches are
 /// published, the failure is reported, and no cursor is written.
 #[test]

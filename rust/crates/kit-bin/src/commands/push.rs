@@ -897,3 +897,20 @@ mod interrupted_hint_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod delete_target_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_name_too_long_for_a_branch_names_the_tag() {
+        let longest_tag = "t".repeat(kit_core::refs::MAX_REF_NAME_BYTES - "refs/tags/".len());
+        assert_eq!(
+            delete_target(&longest_tag),
+            DeleteTarget::Tag(longest_tag.clone())
+        );
+        assert_eq!(delete_target("v1"), DeleteTarget::Name("v1".to_owned()));
+        let too_long = format!("{longest_tag}t");
+        assert_eq!(delete_target(&too_long), DeleteTarget::Name(too_long.clone()));
+    }
+}
