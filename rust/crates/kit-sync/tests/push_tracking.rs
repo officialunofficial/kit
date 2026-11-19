@@ -121,12 +121,22 @@ fn pushed_main(tx: &MemoryTransport) -> (Work, Hash, Hash) {
     let work = Work::new();
     let c1 = work.commit(None);
     work.branch("main", c1);
-    work.push(&TransportSource::new(tx), "main", PushLease::FastForward, None)
-        .unwrap();
+    work.push(
+        &TransportSource::new(tx),
+        "main",
+        PushLease::FastForward,
+        None,
+    )
+    .unwrap();
     let c2 = work.commit(Some(c1));
     work.branch("main", c2);
-    work.push(&TransportSource::new(tx), "main", PushLease::FastForward, None)
-        .unwrap();
+    work.push(
+        &TransportSource::new(tx),
+        "main",
+        PushLease::FastForward,
+        None,
+    )
+    .unwrap();
     assert_eq!(tx.read_ref(MAIN).unwrap(), Some(c2));
     assert_eq!(work.tracking("main"), Some(c2));
     (work, c1, c2)
@@ -141,7 +151,12 @@ fn a_plain_push_refuses_a_divergent_tip_when_the_lease_holds() {
     let (work, c1, c2) = pushed_main(&tx);
     let sibling = work.commit(Some(c1));
     work.branch("main", sibling);
-    let result = work.push(&TransportSource::new(&tx), "main", PushLease::FastForward, None);
+    let result = work.push(
+        &TransportSource::new(&tx),
+        "main",
+        PushLease::FastForward,
+        None,
+    );
     assert!(
         matches!(result, Err(PushError::NonFastForwardPush { .. })),
         "{result:?}"
@@ -149,8 +164,13 @@ fn a_plain_push_refuses_a_divergent_tip_when_the_lease_holds() {
     assert_eq!(tx.read_ref(MAIN).unwrap(), Some(c2));
     assert_eq!(work.tracking("main"), Some(c2));
     // A lease push replaces it: the remote still holds the tracking ref.
-    work.push(&TransportSource::new(&tx), "main", PushLease::WithLease, None)
-        .unwrap();
+    work.push(
+        &TransportSource::new(&tx),
+        "main",
+        PushLease::WithLease,
+        None,
+    )
+    .unwrap();
     assert_eq!(tx.read_ref(MAIN).unwrap(), Some(sibling));
 }
 

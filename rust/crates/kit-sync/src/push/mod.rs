@@ -302,21 +302,22 @@ fn push_refs(
                     tx.observer.event(&SyncEvent::PushBranchStarted {
                         branch: r.name.clone(),
                     });
-                    report.steps += run_steps(
-                        tx,
-                        store,
-                        &r.name,
-                        tip,
-                        condition,
-                        options.rebaseline_threshold,
-                        options.pack_payload_cap,
-                        &options.control,
-                        &mut |published| {
-                            publish_tracking(layout, tx, || {
-                                Ok(tracking.write(&r.name, &published)?)
-                            })
-                        },
-                    )?;
+                    report.steps +=
+                        run_steps(
+                            tx,
+                            store,
+                            &r.name,
+                            tip,
+                            condition,
+                            options.rebaseline_threshold,
+                            options.pack_payload_cap,
+                            &options.control,
+                            &mut |published| {
+                                publish_tracking(layout, tx, || {
+                                    Ok(tracking.write(&r.name, &published)?)
+                                })
+                            },
+                        )?;
                     report.refs += 1;
                 }
                 Ok(())

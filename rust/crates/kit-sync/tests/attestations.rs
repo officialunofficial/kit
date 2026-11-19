@@ -559,14 +559,15 @@ fn an_interrupt_in_the_attestation_phase_ends_the_fetch_as_interrupted() {
         .unwrap()
         .replace("example.com/test/v1", "example.com/second/v1")
         .into_bytes();
-    let second =
-        kit_attest::pack::build(&[second.encode().unwrap().as_bytes()], 4096).unwrap();
+    let second = kit_attest::pack::build(&[second.encode().unwrap().as_bytes()], 4096).unwrap();
     attestation_fetch::append(&tx, &second);
     let temp = tempfile::tempdir().unwrap();
     kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
     let source = InterruptAfterPack {
         inner: kit_sync::TransportSource::new(&tx),
-        packs: [kit_core::hash::hash(&first), kit_core::hash::hash(&second)].into_iter().collect(),
+        packs: [kit_core::hash::hash(&first), kit_core::hash::hash(&second)]
+            .into_iter()
+            .collect(),
         cancelled: std::cell::Cell::new(false),
     };
     let result = kit_sync::fetch(
