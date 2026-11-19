@@ -7,6 +7,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Skip rename content reads in status when there are no staged deletions.
+- Evict old applied-pack digests and sparse witnesses when their cache limits are reached.
+- Reconnect between packs when a push over SSH reaches the session byte limit.
 - **Breaking:** Chunked blob manifests with unknown chunker profile IDs at or above `0x8000_0000` no longer decode.
 - Reduce memory use in status and diff on worktrees with many modified files. Rereads fail if a file no longer contains the captured bytes.
 - Use one metadata lookup per file during the `add .` scan.

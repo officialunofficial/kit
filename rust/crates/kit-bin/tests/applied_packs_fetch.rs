@@ -538,6 +538,18 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         0,
         "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );
+    // Verify that the replacement contains the packs from all three branches.
+    let text = fs::read_to_string(&record_path).unwrap();
+    let recorded: HashSet<_> = text
+        .lines()
+        .map(|line| kit_core::refs::parse_lowercase_hash(line.as_bytes()).unwrap())
+        .collect();
+    let transport = FileTransport::new(remote.path());
+    for branch in ["main", "bbb", "ccc"] {
+        let expected = packmap_chain_packs(&transport, branch);
+        assert!(!expected.is_empty());
+        assert!(expected.is_subset(&recorded));
+    }
     // All three branches were still fetched.
     for branch in ["main", "bbb", "ccc"] {
         assert!(

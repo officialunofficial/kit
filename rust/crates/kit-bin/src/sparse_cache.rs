@@ -19,9 +19,11 @@
 #![cfg(feature = "sparse-checkout")]
 
 use kit_core::layout::RepoLayout;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kit_core::hash::{Hash, to_hex};
 use kit_core::object::Tree;
@@ -29,6 +31,10 @@ use kit_core::sparse::{
     SparseError, SparseManifest, SparseProof, SparseWireError, build_sparse, decode_sparse_cache,
     encode_sparse_cache, hash_filter, tree_hash as compute_tree_hash, verify_sparse,
 };
+
+// Each witness is at most 16 MiB, so this bounds the cache to 512 MiB.
+const MAX_WITNESSES: usize = 32;
+const WITNESS_LOCK: &str = "sparse-cache.lock";
 
 /// Errors raised by the cache I/O helpers. Wrapping the `io::Error`
 /// directly keeps the call sites concise — the cache is best-effort,
@@ -64,8 +70,8 @@ pub fn cache_path(layout: &RepoLayout, tree_hash: &Hash) -> PathBuf {
 /// # Errors
 ///
 /// Returns [`CacheError::Io`] for any underlying filesystem error. The
-/// missing parent directory is created first; if that or the write
-/// fails (typically permissions / disk full) the error is propagated.
+/// cache directory is created first. A successful write prunes the oldest
+/// other witnesses to keep at most 32 in the repository.
 pub fn store(
     layout: &RepoLayout,
     tree_hash: &Hash,
@@ -73,15 +79,73 @@ pub fn store(
     proof: &SparseProof,
 ) -> Result<(), CacheError> {
     let path = cache_path(layout, tree_hash);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let dir = layout.sparse_cache_dir();
+    fs::create_dir_all(&dir)?;
     let bytes = encode_sparse_cache(manifest, proof)?;
+    let _lock = kit_core::repo_lock::acquire_default(layout.common_dir(), WITNESS_LOCK)
+        .map_err(io::Error::other)?;
     // Write-rename is overkill for a best-effort cache — a torn write
     // surfaces as a wire-decode failure on the next read, which the
     // caller treats as a cache miss. Plain `fs::write` is fine.
-    fs::write(path, bytes)?;
+    fs::write(&path, bytes)?;
+    prune(&dir, &path)?;
     Ok(())
+}
+
+fn prune(dir: &Path, current: &Path) -> io::Result<()> {
+    // Reserve one slot for the witness just written. Keep only the newest
+    // other paths in memory, even if the directory is already over the cap.
+    let mut newest = BinaryHeap::with_capacity(MAX_WITNESSES);
+    let mut needs_prune = false;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let Some(path) = older_witness(&entry, current)? else {
+            continue;
+        };
+        let modified = match entry.metadata().and_then(|meta| meta.modified()) {
+            Ok(modified) => modified,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        newest.push(Reverse((modified, path)));
+        if newest.len() == MAX_WITNESSES {
+            newest.pop();
+            needs_prune = true;
+        }
+    }
+    if needs_prune {
+        let keep: HashSet<_> = newest.into_iter().map(|Reverse((_, path))| path).collect();
+        for entry in fs::read_dir(dir)? {
+            if let Some(path) = older_witness(&entry?, current)?
+                && !keep.contains(&path)
+            {
+                match fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn older_witness(entry: &fs::DirEntry, current: &Path) -> io::Result<Option<PathBuf>> {
+    let path = entry.path();
+    let name = entry.file_name();
+    if path == current
+        || name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".witness"))
+            .is_none_or(|hex| kit_core::refs::parse_lowercase_hash(hex.as_bytes()).is_none())
+    {
+        return Ok(None);
+    }
+    match entry.file_type() {
+        Ok(kind) => Ok(kind.is_file().then_some(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// Read and authenticate a bounded v2 cache witness against the requested
@@ -182,6 +246,51 @@ pub fn load_or_build(
 mod tests {
     use super::*;
     use kit_core::object::{EntryMode, TreeEntry};
+
+    #[test]
+    fn storing_past_the_witness_limit_prunes_the_oldest_tree() {
+        let td = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(td.path());
+        let filter = [PathBuf::from("a")];
+        let dir = layout.sparse_cache_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let unrelated = dir.join("unrelated.witness");
+        fs::write(&unrelated, b"leave alone").unwrap();
+
+        let mut hashes = Vec::new();
+        for index in 0..=32 {
+            let tree = Tree {
+                entries: vec![entry(b"a"), entry(format!("b{index}").as_bytes())],
+            };
+            let hash = compute_tree_hash(&tree);
+            assert!(matches!(
+                load_or_build(&layout, &tree, &filter).unwrap(),
+                SparseOutcome::Built { store_error: None }
+            ));
+            if index < 32 {
+                fs::File::options()
+                    .write(true)
+                    .open(cache_path(&layout, &hash))
+                    .unwrap()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(index))
+                    .unwrap();
+            }
+            hashes.push(hash);
+        }
+        assert!(
+            load(&layout, &hashes[0], &hash_filter(&filter))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(&unrelated).unwrap(), b"leave alone");
+        for hash in &hashes[1..] {
+            assert!(
+                load(&layout, hash, &hash_filter(&filter))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
 
     #[test]
     fn cache_rejects_valid_witness_under_wrong_tree_filename() {
