@@ -18,9 +18,10 @@
 //! root-publishing paths take the same lock around their object-write +
 //! ref/attestation-publish window — `tag` (annotated/signed) and `attest` —
 //! so they are serialized against gc. `fetch` / `pull` write objects with no
-//! lock held, and take the lock only to publish a ref. They are protected
-//! instead by a prune guard, a shared lock on the `format` file: while any
-//! fetch holds it, gc's delete step keeps every object, at any grace period.
+//! lock held, and take the lock only to publish a ref; `push` takes it only
+//! to write a remote-tracking ref. They are protected instead by a prune
+//! guard, a shared lock on the `format` file: while any fetch or push holds
+//! it, gc's delete step keeps every object, at any grace period.
 //! The grace window remains the belt-and-suspenders net (like Git's default
 //! `gc.pruneExpire`, vs `prune --expire=now`): `--grace-secs 0` bypasses it
 //! and prints a warning, but with the publishers locked or guarded it is safe
@@ -87,9 +88,9 @@ pub fn run(args: &[String]) -> u8 {
     // deterministic (main first, then registry ids ascending, from
     // `all_state_layouts`) so concurrent multi-lock takers cannot
     // deadlock. The root publishers `tag` and `attest` take their tree's
-    // worktree.lock, and `fetch` takes it around its ref publish, so they
-    // serialize against gc. A fetch's unpublished objects are kept by its
-    // prune guard, not by this lock. The grace window protects only writers
+    // worktree.lock, and `fetch` and `push` take it around each
+    // remote-tracking ref write, so they serialize against gc. Their objects
+    // are kept by their prune guard, not by this lock. The grace window protects only writers
     // outside gc's lock set (SPEC-GC "Concurrent writers and the grace
     // window").
     // Registry lock FIRST (global lock order: worktrees.lock before

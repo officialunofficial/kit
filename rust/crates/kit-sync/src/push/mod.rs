@@ -476,9 +476,8 @@ fn publish_tracking(
     tx: &PushContext<'_>,
     write: impl FnOnce() -> Result<(), PushError>,
 ) -> Result<(), PushError> {
-    let _lock = crate::lock::wait_for_lock(
-        layout.worktree_state_dir(),
-        kit_core::repo_lock::WORKTREE_LOCK,
+    let _lock = crate::lock::wait_for_worktree_lock(
+        layout,
         tx.observer,
         &crate::lock::LockWait::new(None),
     )?;

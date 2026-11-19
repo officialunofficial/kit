@@ -1039,6 +1039,9 @@ A pack is recorded as applied only after its objects are committed and its
 signatures are checked, and the record is appended as each pack lands. When a
 run that skipped a recorded pack finds a delta base or a closure object
 missing, it clears the record and applies the whole chain again, once.
+A push holds the same guard from before it plans until after its last
+remote-tracking ref write, and writes each of those refs under
+`worktree.lock`.
 
 **Because:** one large file is many packs, so a clone can take hours. A lock
 held that long stops `add`, `commit` and `checkout`. Staging the packs first

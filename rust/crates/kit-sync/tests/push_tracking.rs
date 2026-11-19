@@ -229,9 +229,10 @@ impl Transport for BeforeRead<'_> {
 }
 
 /// A fetch that lands while a plain push runs moves the tracking ref to a
-/// remote head the pushed tip does not descend from. The push leases the
-/// tracking ref it checked, not the one the fetch wrote, so the remote keeps
-/// the other client's commit.
+/// remote head the pushed tip does not descend from. The lease is the
+/// tracking ref the fast-forward check used, so the remote keeps the other
+/// client's commit. A push that read the lease again after the remote head
+/// would fail this test.
 #[test]
 fn a_fetch_during_a_plain_push_cannot_make_it_rewind_the_remote() {
     let tx = MemoryTransport::new();
