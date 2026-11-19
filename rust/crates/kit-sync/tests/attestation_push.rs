@@ -454,9 +454,11 @@ fn push_skips_private_git_locators_and_publishes_safe_envelopes() {
         ("https://example.org/source", None),
         ("local", None),
     ];
+    let other_cases = [("file:///example/provenance/source", None)];
     for (kind, cases) in [
         ("git-bridge", bridge_cases.as_slice()),
         ("git-import", import_cases.as_slice()),
+        ("provenance", other_cases.as_slice()),
     ] {
         for &(locator, reason) in cases {
             let bytes = attestation_fetch::git_locator_envelope(tip, kind, locator);

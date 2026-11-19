@@ -48,10 +48,10 @@ mod attestation_fetch {
     pub(crate) fn git_locator_envelope(subject: Hash, kind: &str, locator: &str) -> Vec<u8> {
         use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, RepoKeySigner, Sig, Signer};
 
-        let (field, version) = if kind == "git-import" {
-            ("remoteUrl", 2)
-        } else {
+        let (field, version) = if kind == "git-bridge" {
             ("mirror", 1)
+        } else {
+            ("remoteUrl", 2)
         };
         let predicate = serde_json::json!({
             "gitCommit": "0000000000000000000000000000000000000000",
