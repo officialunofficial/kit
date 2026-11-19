@@ -136,8 +136,8 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 pub(crate) struct RealSyncer;
 
 impl RealSyncer {
-    /// Order writeback for an open file or directory ahead of the next
-    /// full device flush.
+    /// Per-file write barrier: order this file's writeback ahead of the
+    /// batch's terminal device flush, as cheaply as the platform allows.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn file_barrier(file: &File) -> io::Result<()> {
         use std::os::unix::io::AsRawFd;
@@ -216,12 +216,16 @@ impl Syncer for RealSyncer {
                         .zip(fs::metadata(root).ok())
                         .is_some_and(|(shard, root)| shard.dev() == root.dev())
                 });
+                // Complete directory writeback to the drive. The terminal
+                // full flush drains its cache after every shard finishes.
                 if same_volume {
-                    Self::file_barrier(&shard)
-                } else {
-                    shard.sync_data()
+                    match rustix::fs::fsync(&shard) {
+                        Ok(()) => return Ok(()),
+                        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => {}
+                        Err(error) => return Err(error.into()),
+                    }
                 }
-                .or_else(|_| shard.sync_all())
+                shard.sync_data().or_else(|_| shard.sync_all())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
