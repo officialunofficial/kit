@@ -103,8 +103,9 @@ ref. The effective attestation mode must match, and an enabled attestation
 checkpoint must still hold the recorded head. Explicit refetch disables this
 shortcut. `FetchReport::remote_unchanged` reports the skip. It skips the closure
 check of the tips. An object lost below a tip stays missing through such a
-fetch, and through one that does its full work too when a recorded tracking
-tip reaches the object; a fetch whose check no such tip covers heals it.
+fetch. Run `kit closure verify <ref> --history`, then fetch the affected
+remote. When verification finds a missing object, it clears the shortcuts
+so the next fetch downloads that remote's pack chain again.
 
 The disposable record lives in **.kit/applied-packs/.cursors/**. Its filename
 is lowercase BLAKE3 over the remote name, repository and origin, each with an

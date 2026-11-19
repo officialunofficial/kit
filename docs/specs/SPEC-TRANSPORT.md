@@ -156,8 +156,13 @@ A fetch that refused a tag or could not list the tags (§1.4) records nothing. I
 object below a tip that the local store lost stays missing through such a
 fetch. A fetch that does its full work, because the cursor changed or no
 record matches it, checks the closure down to its anchors (see "Pack-chain
-fetch"), so the object stays missing while an anchor reaches it; once none
-does, the check finds it and the fetch fetches the chain again.
+fetch"). If the local store loses an object below a tracking tip, run
+`kit closure verify <ref> --history`, then fetch the affected remote. A
+local closure verification, gc mark or restore that discovers a missing
+object discards the signature anchors and applied-pack records of remotes
+with incomplete tracking histories. It also discards fetch cursors and
+checkpoints, whose addresses may have changed. The next fetch downloads
+the affected pack chain again and checks the closure before publication.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file

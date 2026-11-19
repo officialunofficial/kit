@@ -217,9 +217,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `kit_bin::signal::install()` requires `kit_bin::signal::enable()`. The binary
   opts in before dispatch. Embedded dispatch preserves the host's handlers unless the host opts
   in. Embedders own cancellation.
-- **Breaking:** Fetch stops checking object closure at verified tips. Use `kit closure verify`
-  to find missing objects below those tips. Fetch can repair them once no recorded tracking tip
-  for the remote reaches them.
+- **Breaking:** Fetch stops checking object closure at verified tips. To repair missing objects,
+  run `kit closure verify <ref> --history`, then `kit fetch` for the affected remote. The next fetch
+  downloads that remote's pack chain again.
 - **Breaking:** Status, commit, plain checkout, cached diff, clean merge, revert, and pull
   recovery can skip reading objects for unchanged HEAD entries.
   Use `kit closure verify` to check for missing objects in those entries.
