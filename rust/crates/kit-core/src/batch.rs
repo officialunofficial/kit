@@ -316,7 +316,7 @@ fn packs_enabled() -> bool {
 
 /// How many loose objects a window stages before it switches to a pack
 /// segment. `KIT_PROTO_PACK_MIN`, default 64.
-fn pack_min() -> usize {
+pub(crate) fn pack_min() -> usize {
     static MIN: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *MIN.get_or_init(|| {
         std::env::var("KIT_PROTO_PACK_MIN")

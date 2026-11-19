@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Compare loose objects with local pack segments for add and clone.
+# Compare loose objects with local pack segments for add, clone and gc.
 #
 # Usage: scripts/bench-local-packs.sh <kit-branch-binary> <kit-main-binary> [rounds]
 #
@@ -90,12 +90,39 @@ run_clone() { # writer
   python3 -c "print(round($t1 - $t0, 3))"
 }
 
+run_gc() { # writer
+  # Stage the small files, overwrite half of them and stage again, so the
+  # first versions of those 10k objects are unreachable, then commit and time
+  # a gc that reclaims them.
+  local bin env
+  case "$1" in
+    main) bin="$MAIN"; env="KIT_PROTO_PACKS=0" ;;
+    loose) bin="$BRANCH"; env="KIT_PROTO_PACKS=0" ;;
+    packs) bin="$BRANCH"; env="KIT_PROTO_PACKS=1" ;;
+  esac
+  rm -rf g && mkdir g && cp -R fixtures/small/. g/
+  (cd g && "$bin" init -q && "$bin" keygen >/dev/null && env $env "$bin" add . >/dev/null \
+    && python3 -c "
+import glob, os
+for p in sorted(glob.glob('d*/f*'))[::2]:
+    open(p, 'wb').write(os.urandom(4096))
+" && env $env "$bin" add . >/dev/null && env $env "$bin" commit -q -m gc)
+  drop_caches
+  local t0 t1
+  t0=$(now)
+  (cd g && env $env "$bin" gc --grace-secs 0 2>gc.log)
+  t1=$(now)
+  echo "gc $1: $(tail -1 g/gc.log)" >&2
+  python3 -c "print(round($t1 - $t0, 3))"
+}
+
 : > results.txt
 for round in $(seq "$ROUNDS"); do
   for w in main loose packs; do
     echo "add-big $w $(run_add "$w" big)" >> results.txt
     echo "add-small $w $(run_add "$w" small)" >> results.txt
     echo "clone $w $(run_clone "$w")" >> results.txt
+    echo "gc $w $(run_gc "$w")" >> results.txt
   done
   echo "round $round done" >&2
 done

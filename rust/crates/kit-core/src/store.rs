@@ -1023,6 +1023,42 @@ impl ObjectStore {
         }
     }
 
+    /// Remove pack segment `name` if its pack is still older than the grace
+    /// window, under the exclusive lock of `format`, as
+    /// [`prune_if_old`](Self::prune_if_old) does for one object. The index
+    /// goes first, so its objects stop being visible before their bytes go;
+    /// a crash in between leaves a pack with no index, which gc removes
+    /// later. Returns the bytes freed, or `None` when the segment was kept.
+    pub(crate) fn remove_segment_if_old(
+        &self,
+        name: &str,
+        now: u64,
+        grace: u64,
+        hook: packs::StepHook<'_>,
+    ) -> StoreResult<Option<u64>> {
+        let guard = File::open(self.objects_root.with_file_name(FORMAT_FILE))?;
+        if guard.try_lock().is_err() {
+            return Ok(None);
+        }
+        let dir = self.packs.dir();
+        let pack = dir.join(format!("{name}.pack"));
+        let idx = dir.join(format!("{name}.idx"));
+        let Ok(meta) = fs::metadata(&pack) else {
+            return Ok(None);
+        };
+        if !old_enough(&meta, now, grace) {
+            return Ok(None);
+        }
+        let idx_len = fs::metadata(&idx).map_or(0, |m| m.len());
+        remove_if_present(&idx)?;
+        hook(packs::Step::OldIndexRemoved)?;
+        self.packs.forget(name);
+        remove_if_present(&pack)?;
+        hook(packs::Step::OldPackRemoved)?;
+        crate::atomic::sync_parent_dir(dir)?;
+        Ok(Some(meta.len() + idx_len))
+    }
+
     /// Delete object `h` from the store. Idempotent: a missing object is
     /// not an error (it may have been pruned already).
     ///
@@ -1064,6 +1100,42 @@ fn read_shard_dir(path: &std::path::Path, dir: &str, out: &mut Vec<Hash>) -> Sto
 /// Whether `name` is a temp file of an object write: `.<name>.tmp.*` from a
 /// single or batched write, `.kit.tmp.*` from a bulk write. No object file
 /// starts with a dot.
+fn remove_if_present(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// The leftovers in `packs/` that no live segment needs: temp files of a
+/// writer that stopped, and packs whose index is gone.
+pub(crate) fn pack_leftovers(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in rd {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        if is_temp_file_name(&name) {
+            out.push(entry.path());
+            continue;
+        }
+        if let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".pack"))
+            && !dir.join(format!("{stem}.idx")).exists()
+        {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 fn is_temp_file_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|name| name.starts_with('.') && name.contains(".tmp."))

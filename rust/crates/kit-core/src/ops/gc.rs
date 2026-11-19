@@ -40,7 +40,7 @@ use crate::hash::{self, Hash};
 use crate::index;
 use crate::layout::RepoLayout;
 use crate::object::{Object, ObjectType};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ObjectStore, StoreError, packs};
 
 use super::bisect;
 use super::conflict_state;
@@ -736,6 +736,9 @@ pub struct GcReport {
     /// Temp files of dead writers removed (or that *would* be removed in a dry
     /// run): files in the object directories that no object name matches.
     pub temp_files_pruned: usize,
+    /// Pack segments rewritten without their dead objects, or removed
+    /// because none of their objects was live.
+    pub packs_rewritten: usize,
     /// Bytes reclaimed by the pruned objects and temp files.
     pub bytes_reclaimed: u64,
     /// True if this was a dry run (nothing deleted).
@@ -911,8 +914,123 @@ fn run_gc_with_progress_hook(
         }
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
+    sweep_packs(
+        store,
+        &live,
+        now_secs,
+        grace_secs,
+        dry_run,
+        &mut report,
+        &mut |_| Ok(()),
+    )?;
     progress("gc", report.scanned, report.bytes_reclaimed);
     Ok(report)
+}
+
+/// Repack the pack segments under `objects/packs/`.
+///
+/// A segment's objects share its pack's mtime, so the grace window applies to
+/// the segment as a whole. A segment with no unreachable object, or whose pack
+/// is younger than the grace window, is kept as it is. Otherwise its live
+/// objects are copied into a new segment, which is made durable and visible
+/// first ([`packs::SegmentWriter::finish`]); only then is the old segment
+/// removed, index first, under the exclusive lock of `format`
+/// ([`ObjectStore::remove_segment_if_old`]). So at every point each live
+/// object is visible in at least one durable segment: a crash before the old
+/// index goes leaves both segments, which is only duplicate bytes, and a crash
+/// after it leaves an old pack with no index, which the leftover sweep below
+/// removes once it is past the grace window.
+///
+/// Each copied object is checked against its id first. A damaged object stops
+/// gc with an error and the old segment stays.
+///
+/// A segment whose index cannot be loaded is kept. Nothing refreshes a pack's
+/// mtime on a dedup hit: a write batch dedups only under `worktree.lock`,
+/// which gc holds, and a bulk writer that misses a loose file writes a loose
+/// copy.
+fn sweep_packs(
+    store: &ObjectStore,
+    live: &LiveSet,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    report: &mut GcReport,
+    hook: packs::StepHook<'_>,
+) -> Result<(), GcRootsError> {
+    let dir = store.packs().dir().to_path_buf();
+    for name in packs::index_names(&dir)? {
+        let Ok(seg) = packs::load_segment(&dir, &name) else {
+            continue;
+        };
+        report.scanned += seg.entries.len();
+        let (keep, dead): (Vec<packs::Entry>, Vec<packs::Entry>) =
+            seg.entries.iter().partition(|e| live.contains(&e.id));
+        report.live += keep.len();
+        report.live_chunks += keep.iter().filter(|e| live.contains_chunk(&e.id)).count();
+        if dead.is_empty() {
+            continue;
+        }
+        let old = seg
+            .pack
+            .metadata()
+            .is_ok_and(|m| crate::store::old_enough(&m, now_secs, grace_secs));
+        if !old {
+            report.kept_recent += dead.len();
+            continue;
+        }
+        let dead_bytes: u64 = dead.iter().map(|e| u64::from(e.len)).sum();
+        if dry_run {
+            report.pruned += dead.len();
+            report.packs_rewritten += 1;
+            report.bytes_reclaimed += dead_bytes;
+            continue;
+        }
+        let mut written = 0;
+        if !keep.is_empty() {
+            let mut w = packs::SegmentWriter::new(&dir)?;
+            for e in &keep {
+                let bytes = packs::read_at(&seg.pack, *e)?;
+                if crate::object::object_id_from_bytes(&bytes) != e.id {
+                    return Err(StoreError::HashMismatch {
+                        expected: hash::to_hex(&e.id),
+                        actual: hash::to_hex(&crate::object::object_id_from_bytes(&bytes)),
+                    }
+                    .into());
+                }
+                w.append(e.id, &bytes)?;
+                written += bytes.len() as u64;
+            }
+            w.finish(hook)?;
+        }
+        drop(seg);
+        let Some(freed) = store.remove_segment_if_old(&name, now_secs, grace_secs, hook)? else {
+            // Contention: a writer holds the lock. Both segments stay; the
+            // next gc finds this one again.
+            report.kept_recent += dead.len();
+            continue;
+        };
+        report.pruned += dead.len();
+        report.packs_rewritten += 1;
+        report.bytes_reclaimed += freed.saturating_sub(written);
+    }
+    for path in crate::store::pack_leftovers(&dir)? {
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !crate::store::old_enough(&meta, now_secs, grace_secs) {
+            continue;
+        }
+        let mut len = meta.len();
+        if !dry_run {
+            let Some(freed) = store.prune_temp_file_if_old(&path, now_secs, grace_secs)? else {
+                continue;
+            };
+            len = freed;
+        }
+        report.temp_files_pruned += 1;
+        report.bytes_reclaimed += len;
+    }
+    Ok(())
 }
 
 /// Delete the temp files in shard `shard` that a dead writer left and that are
@@ -1141,6 +1259,266 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    /// Blobs `keep-*` and `dead-*` written in one batch large enough that
+    /// they land in a pack segment, and a branch whose tree names only the
+    /// `keep-*` blobs.
+    fn packed_fixture(s: &ObjectStore, md: &RepoLayout) -> (Vec<Hash>, Vec<Hash>) {
+        let blob = |data: String| {
+            serialize::serialize(&Object::Blob(Blob {
+                data: data.into_bytes(),
+            }))
+            .unwrap()
+        };
+        let batch = s.batch();
+        for i in 0..crate::batch::pack_min() {
+            batch.write(&blob(format!("filler-{i}"))).unwrap();
+        }
+        let keep: Vec<Hash> = (0..20)
+            .map(|i| batch.write(&blob(format!("keep-{i}"))).unwrap())
+            .collect();
+        let dead: Vec<Hash> = (0..20)
+            .map(|i| batch.write(&blob(format!("dead-{i}"))).unwrap())
+            .collect();
+        batch.commit().unwrap();
+        assert!(keep.iter().chain(&dead).all(|h| !s.path_for(h).exists()));
+        let mut entries: Vec<TreeEntry> = keep
+            .iter()
+            .enumerate()
+            .map(|(i, h)| TreeEntry {
+                name: format!("k{i:02}").into_bytes(),
+                mode: EntryMode::Blob,
+                object_hash: *h,
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let tree = s
+            .write(&serialize::serialize(&Object::Tree(Tree { entries })).unwrap())
+            .unwrap();
+        let commit = s
+            .write(
+                &serialize::serialize(&Object::Commit(Commit {
+                    tree_hash: tree,
+                    parents: vec![],
+                    author: Identity::opaque(b"t".to_vec()),
+                    signer: [0u8; 32],
+                    message: b"packed".to_vec(),
+                    timestamp: 1,
+                    message_hash: [0u8; 32],
+                    content_digest: [0u8; 32],
+                    signature: [0u8; 64],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        write_ref(md, "refs/heads/main", &commit);
+        (keep, dead)
+    }
+
+    /// The names of the files in `objects/packs/`, sorted.
+    fn pack_dir_files(s: &ObjectStore) -> Vec<String> {
+        let mut out: Vec<String> = fs::read_dir(s.packs().dir())
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn segment_count(s: &ObjectStore) -> usize {
+        pack_dir_files(s)
+            .iter()
+            .filter(|n| Path::new(n).extension().is_some_and(|x| x == "idx"))
+            .count()
+    }
+
+    /// Every `keep` object reads back, through a store opened fresh so no
+    /// cached segment hides a missing file.
+    fn assert_all_readable(md: &RepoLayout, keep: &[Hash]) {
+        let fresh = ObjectStore::open(md).unwrap();
+        for h in keep {
+            fresh
+                .read(h)
+                .expect("gc must never lose a live packed object");
+        }
+    }
+
+    #[test]
+    fn gc_repacks_a_segment_without_its_dead_objects() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (keep, dead) = packed_fixture(&s, &md);
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_all_readable(&md, &keep);
+        let fresh = ObjectStore::open(&md).unwrap();
+        assert!(
+            dead.iter().all(|h| !fresh.contains(h)),
+            "dead packed objects reclaimed"
+        );
+        assert_eq!(report.packs_rewritten, 1);
+        assert_eq!(segment_count(&s), 1);
+        assert_eq!(
+            pack_dir_files(&s).len(),
+            2,
+            "one pack and one index: {:?}",
+            pack_dir_files(&s)
+        );
+        // A second gc finds nothing more to do in the packs.
+        let again = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_eq!(again.packs_rewritten, 0);
+        assert_all_readable(&md, &keep);
+    }
+
+    #[test]
+    fn gc_keeps_a_segment_younger_than_the_grace_window_whole() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (keep, dead) = packed_fixture(&s, &md);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let report = run_gc(&s, &md, now, 3600, false).unwrap();
+        assert_eq!(report.packs_rewritten, 0);
+        assert!(report.kept_recent >= dead.len());
+        assert_all_readable(&md, &keep);
+        assert_all_readable(&md, &dead);
+    }
+
+    #[test]
+    fn gc_removes_a_segment_with_no_live_object() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (_keep, _dead) = packed_fixture(&s, &md);
+        fs::remove_file(md.common_dir().join("refs/heads/main")).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_eq!(report.packs_rewritten, 1);
+        assert!(pack_dir_files(&s).is_empty(), "{:?}", pack_dir_files(&s));
+    }
+
+    #[test]
+    fn gc_dry_run_leaves_segments_alone() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (keep, dead) = packed_fixture(&s, &md);
+        let before = pack_dir_files(&s);
+        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        assert_eq!(report.packs_rewritten, 1);
+        assert_eq!(pack_dir_files(&s), before);
+        assert_all_readable(&md, &keep);
+        assert_all_readable(&md, &dead);
+    }
+
+    #[test]
+    fn gc_keeps_the_old_segment_while_a_writer_holds_the_prune_guard() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (keep, dead) = packed_fixture(&s, &md);
+        let guard = s.prune_guard().unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_eq!(report.packs_rewritten, 0);
+        assert_all_readable(&md, &keep);
+        assert_all_readable(&md, &dead);
+        drop(guard);
+        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert_eq!(segment_count(&s), 1);
+        assert_all_readable(&md, &keep);
+    }
+
+    #[test]
+    fn a_damaged_live_packed_object_stops_gc_and_keeps_its_segment() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let (keep, _dead) = packed_fixture(&s, &md);
+        let dir = s.packs().dir().to_path_buf();
+        let name = packs::index_names(&dir).unwrap().remove(0);
+        let seg = packs::load_segment(&dir, &name).unwrap();
+        let e = seg.entries.iter().find(|e| e.id == keep[3]).unwrap();
+        let pack = dir.join(format!("{name}.pack"));
+        let mut bytes = fs::read(&pack).unwrap();
+        bytes[usize::try_from(e.offset).unwrap() + usize::try_from(e.len).unwrap() - 1] ^= 0xff;
+        drop(seg);
+        fs::write(&pack, bytes).unwrap();
+        let err = run_gc(&s, &md, u64::MAX, 0, false).unwrap_err();
+        assert!(
+            matches!(err, GcRootsError::Store(StoreError::HashMismatch { .. })),
+            "{err:?}"
+        );
+        assert!(dir.join(format!("{name}.idx")).exists());
+        assert_eq!(segment_count(&s), 1);
+    }
+
+    /// A crash at any step of a repack loses no live object, and the next gc
+    /// finishes the job and cleans up what the crash left.
+    #[test]
+    fn a_crash_at_any_repack_step_loses_nothing_and_the_next_gc_recovers() {
+        use packs::Step;
+        for stop in [
+            Step::PackSynced,
+            Step::IndexSynced,
+            Step::PackRenamed,
+            Step::IndexRenamed,
+            Step::DirSynced,
+            Step::OldIndexRemoved,
+            Step::OldPackRemoved,
+        ] {
+            let (d, s) = repo();
+            let md = layout(&d);
+            let (keep, dead) = packed_fixture(&s, &md);
+            let live = live_objects(&s, &md).unwrap();
+            let mut report = GcReport::default();
+            let res = sweep_packs(&s, &live, u64::MAX, 0, false, &mut report, &mut |step| {
+                if step == stop {
+                    Err(io::Error::other("crash"))
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(res.is_err(), "{stop:?}: the hook stops the repack");
+            assert_all_readable(&md, &keep);
+
+            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            assert_all_readable(&md, &keep);
+            let fresh = ObjectStore::open(&md).unwrap();
+            assert!(
+                dead.iter().all(|h| !fresh.contains(h)),
+                "{stop:?}: dead objects reclaimed"
+            );
+            assert_eq!(
+                pack_dir_files(&s).len(),
+                2,
+                "{stop:?}: one segment and no leftovers: {:?}",
+                pack_dir_files(&s)
+            );
+        }
+    }
+
+    /// A segment's pack renamed in place with no index, as a crash in the
+    /// middle of a write batch's publish leaves it, is removed once old.
+    #[test]
+    fn gc_removes_a_pack_with_no_index_only_past_the_grace_window() {
+        let (d, s) = repo();
+        let md = layout(&d);
+        let dir = s.packs().dir().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let orphan = dir.join(format!("{}.pack", "ab".repeat(32)));
+        fs::write(&orphan, b"bytes").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        run_gc(&s, &md, now, 3600, false).unwrap();
+        assert!(
+            orphan.exists(),
+            "young: a writer may be between its two renames"
+        );
+        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        assert!(!orphan.exists());
+        assert_eq!(report.temp_files_pruned, 1);
     }
 
     #[test]

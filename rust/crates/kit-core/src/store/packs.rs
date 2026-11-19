@@ -128,10 +128,10 @@ pub(crate) fn decode_index(bytes: &[u8]) -> Result<(Vec<Entry>, u64), IndexError
 }
 
 #[derive(Debug)]
-struct Segment {
-    name: String,
-    pack: File,
-    entries: Vec<Entry>,
+pub(crate) struct Segment {
+    pub(crate) name: String,
+    pub(crate) pack: File,
+    pub(crate) entries: Vec<Entry>,
 }
 
 impl Segment {
@@ -217,6 +217,13 @@ impl PackSet {
         loaded.segments.iter().find_map(|s| s.find(h)).copied()
     }
 
+    /// Drop segment `name` from the loaded set, after gc removed it.
+    pub(crate) fn forget(&self, name: &str) {
+        let mut loaded = self.loaded.write().expect("pack set poisoned");
+        loaded.segments.retain(|s| s.name != name);
+        loaded.stamp = None;
+    }
+
     /// Load any index that appeared since the last load. Returns whether
     /// anything new was loaded.
     fn reload_if_changed(&self) -> bool {
@@ -251,7 +258,7 @@ impl PackSet {
     }
 }
 
-fn index_names(dir: &Path) -> io::Result<Vec<String>> {
+pub(crate) fn index_names(dir: &Path) -> io::Result<Vec<String>> {
     let mut out = Vec::new();
     let rd = match fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -273,7 +280,7 @@ fn index_names(dir: &Path) -> io::Result<Vec<String>> {
     Ok(out)
 }
 
-fn load_segment(dir: &Path, name: &str) -> StoreResult<Segment> {
+pub(crate) fn load_segment(dir: &Path, name: &str) -> StoreResult<Segment> {
     let idx = File::open(dir.join(format!("{name}.idx")))?;
     let size = idx.metadata()?.len();
     if size > MAX_INDEX_BYTES {
@@ -297,7 +304,7 @@ fn load_segment(dir: &Path, name: &str) -> StoreResult<Segment> {
 }
 
 #[cfg(unix)]
-fn read_at(pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
+pub(crate) fn read_at(pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
     let mut buf = vec![0u8; e.len as usize];
     pack.read_exact_at(&mut buf, e.offset)
         .map_err(|err| match err.kind() {
@@ -308,8 +315,100 @@ fn read_at(pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
 }
 
 #[cfg(not(unix))]
-fn read_at(_pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
+pub(crate) fn read_at(_pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
     Err(StoreError::ObjectNotFound(to_hex(&e.id)))
+}
+
+/// A step of a segment's publish or removal, reported to a test hook so a
+/// test can stop the sequence at any point, as a crash would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    PackSynced,
+    IndexSynced,
+    PackRenamed,
+    IndexRenamed,
+    DirSynced,
+    OldIndexRemoved,
+    OldPackRemoved,
+}
+
+/// A hook that sees each [`Step`]. An error stops the sequence there and
+/// leaves the files on disk as they are, as a crash would.
+pub(crate) type StepHook<'a> = &'a mut dyn FnMut(Step) -> io::Result<()>;
+
+/// Writes one segment front to back, then publishes it on the same durable
+/// schedule as a write batch: both files flushed, the pack renamed, the
+/// index renamed, the directory flushed. Used by gc's repack.
+pub(crate) struct SegmentWriter {
+    dir: PathBuf,
+    pack: tempfile::NamedTempFile,
+    len: u64,
+    entries: Vec<Entry>,
+}
+
+impl SegmentWriter {
+    pub(crate) fn new(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            pack: super::temp_file_in(dir, "segment")?,
+            len: 0,
+            entries: Vec::new(),
+        })
+    }
+
+    pub(crate) fn append(&mut self, id: Hash, bytes: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let len = u32::try_from(bytes.len()).map_err(|_| io::Error::other("object too large"))?;
+        self.pack.as_file_mut().write_all(bytes)?;
+        self.entries.push(Entry {
+            id,
+            offset: self.len,
+            len,
+        });
+        self.len += u64::from(len);
+        Ok(())
+    }
+
+    /// Make the segment durable, then visible. Returns its name.
+    pub(crate) fn finish(mut self, hook: StepHook<'_>) -> io::Result<String> {
+        use std::io::Write;
+        self.pack.as_file().sync_data()?;
+        let pack = self.pack.into_temp_path();
+        if let Err(e) = hook(Step::PackSynced) {
+            pack.keep().ok();
+            return Err(e);
+        }
+        let idx = encode_index(&mut self.entries, self.len);
+        let name = to_hex(blake3::hash(&idx).as_bytes());
+        let mut idx_tmp = super::temp_file_in(&self.dir, "segment-index")?;
+        idx_tmp.as_file_mut().write_all(&idx)?;
+        // On macOS this is F_FULLFSYNC, which also flushes the pack's
+        // pages pushed out above.
+        idx_tmp.as_file().sync_all()?;
+        let idx_tmp = idx_tmp.into_temp_path();
+        let crash = |e, pack: tempfile::TempPath, idx: tempfile::TempPath| {
+            pack.keep().ok();
+            idx.keep().ok();
+            Err(e)
+        };
+        if let Err(e) = hook(Step::IndexSynced) {
+            return crash(e, pack, idx_tmp);
+        }
+        pack.persist(self.dir.join(format!("{name}.pack")))
+            .map_err(|e| e.error)?;
+        if let Err(e) = hook(Step::PackRenamed) {
+            idx_tmp.keep().ok();
+            return Err(e);
+        }
+        idx_tmp
+            .persist(self.dir.join(format!("{name}.idx")))
+            .map_err(|e| e.error)?;
+        hook(Step::IndexRenamed)?;
+        crate::atomic::sync_parent_dir(&self.dir)?;
+        hook(Step::DirSynced)?;
+        Ok(name)
+    }
 }
 
 #[cfg(test)]

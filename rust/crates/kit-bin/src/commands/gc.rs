@@ -188,6 +188,11 @@ pub fn run(args: &[String]) -> u8 {
     } else {
         String::new()
     };
+    let temp_files = if report.packs_rewritten > 0 {
+        format!("{temp_files}, rewrote {} pack segment(s)", report.packs_rewritten)
+    } else {
+        temp_files
+    };
     let _ = writeln!(
         stderr,
         "gc{}: {prune_verb} {} object(s){}, {} bytes; scanned {}, live {} ({} chunks), kept-recent {}; {expire_verb} {} recovery entr{}",
