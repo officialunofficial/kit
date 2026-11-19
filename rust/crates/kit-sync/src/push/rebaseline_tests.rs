@@ -485,10 +485,35 @@ fn a_force_push_racing_a_re_baseline_lands() {
     assert!(rebuilds(&remote, s.ahead));
 }
 
-/// Force pushes keep the ordered path on a remote that offers neither
-/// advance: their head write stays unconditional.
 #[test]
-fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
+fn a_serialized_force_push_replans_when_the_head_disappears() {
+    let (_dir, local) = store();
+    let (_other_dir, other_store) = store();
+    let remote = Remote::new();
+    let tip = commit(&local, &[("a", "ours")], &[], 1);
+    let old = commit(&other_store, &[("b", "theirs")], &[], 2);
+    push(&remote, &local, tip, RefWriteCondition::Missing).unwrap();
+    push(&remote, &other_store, old, RefWriteCondition::Any).unwrap();
+    assert!(!local.contains(&old));
+    let map = packmap_ref("main");
+    let before = remote.read_ref(&map).unwrap().unwrap();
+
+    // The force plan's full-closure pack is already in the chain. The
+    // delete removes its head between planning and the serialized advance.
+    remote.before_advance(move |remote| remote.delete_ref(HEAD, &old).unwrap());
+    push(&remote, &local, tip, RefWriteCondition::Any).unwrap();
+
+    assert!(matches!(
+        remote.delete_ref(&map, &before),
+        Err(TransportError::RefConflict)
+    ));
+    assert_eq!(remote.read_ref(HEAD).unwrap(), Some(tip));
+    assert!(rebuilds(&remote, tip));
+}
+
+/// A force push leases the head it planned against on an ordered advance.
+#[test]
+fn a_force_push_on_an_ordered_advance_leases_the_observed_head() {
     let (_dir, store) = store();
     let remote = Remote {
         serialized: false,
@@ -499,7 +524,7 @@ fn a_force_push_on_an_ordered_advance_writes_the_head_unconditionally() {
     push(&remote, &store, s.ahead, RefWriteCondition::Any).unwrap();
     assert_eq!(
         *remote.head_conditions.lock().unwrap(),
-        [RefWriteCondition::Any]
+        [RefWriteCondition::Match(s.c[2])]
     );
     assert!(rebuilds(&remote, s.ahead));
 }

@@ -1,4 +1,5 @@
 //! Native repository push: bounded packs and conditioned ref publication.
+use crate::packmap::packmap_ref;
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
 use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
@@ -23,7 +24,7 @@ use deltas::encode_delta_candidates_batch;
 #[cfg(test)]
 use deltas::{DELTA_CANDIDATE_BATCH_CAP, cache_delta_bases, delta_plan_fanout_threshold};
 pub use error::PushError;
-use packmap::{advance_packmap, commit_head};
+use packmap::{PACKMAP_CAS_ATTEMPTS, advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
 pub use tags::{
     MAX_BASE_WALK_COMMITS, MAX_TAG_LISTING_BYTES, TagPushOutcome, TagPushRejection, TagPushResult,
@@ -93,7 +94,7 @@ fn repository_operation_error(tx: &PushContext<'_>, error: SourceError) -> PushE
 /// How the tracking lease is used for a branch push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushLease {
-    /// Unconditional head update; split steps still lease the prior step.
+    /// Overwrite the remote head even if the new tip does not fast-forward it.
     Force,
     /// Require the last locally tracked remote tip, allowing divergence.
     WithLease,
@@ -325,7 +326,8 @@ fn push_refs(
             // The remote's head decides, not the tracking ref: the remote
             // may have lost the branch since this repository last saw it.
             let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
-            if head == Some(tip) {
+            let at_tip = head == Some(tip);
+            if at_tip && tx.read_ref(&packmap_ref(remote))?.is_some() {
                 refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
                 return Ok(PushReport {
                     attestations_pushed: 0,
@@ -337,7 +339,8 @@ fn push_refs(
                     deleted: None,
                 });
             }
-            if matches!(policy, PushLease::FastForward)
+            if !at_tip
+                && matches!(policy, PushLease::FastForward)
                 && head.is_some()
                 && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
@@ -346,14 +349,21 @@ fn push_refs(
                     branch: remote.clone(),
                 });
             }
-            let condition = match (policy, lease(layout, options.remote_name, remote)?) {
-                (PushLease::Force, _) => refs::RefWriteCondition::Any,
-                // A fast-forward push of a branch the remote does not hold
-                // creates it: there is nothing on the remote to overwrite.
-                (PushLease::FastForward, refs::RefWriteCondition::Match(_)) if head.is_none() => {
-                    refs::RefWriteCondition::Missing
+            let condition = if at_tip {
+                // Rebuild the missing packmap only for the head we saw.
+                refs::RefWriteCondition::Match(tip)
+            } else {
+                match (policy, lease(layout, options.remote_name, remote)?) {
+                    (PushLease::Force, _) => refs::RefWriteCondition::Any,
+                    // A fast-forward push of a branch the remote does not hold
+                    // creates it: there is nothing on the remote to overwrite.
+                    (PushLease::FastForward, refs::RefWriteCondition::Match(_))
+                        if head.is_none() =>
+                    {
+                        refs::RefWriteCondition::Missing
+                    }
+                    (_, condition) => condition,
                 }
-                (_, condition) => condition,
             };
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
@@ -519,6 +529,8 @@ fn run_steps(
     };
     refs::check_pushable_branch(branch)?;
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
+        // A repair must rebuild the current tip in one advance. Publishing
+        // an intermediate commit would rewind the branch.
         return single(None, pack_payload_cap);
     };
     tx.observer.event(&SyncEvent::PushPlanning { done: 0 });
@@ -666,8 +678,7 @@ fn push_step_recovering(
             plan,
         );
     }
-    let plan = plan.map(|prepared| prepared.pack);
-    let once = |retry, plan| {
+    let once = |condition, retry, plan| {
         push_branch_once(
             tx,
             store,
@@ -680,20 +691,49 @@ fn push_step_recovering(
             plan,
         )
     };
-    match once(None, plan) {
+    let recovering = |condition, plan| match once(condition, None, plan) {
         Err(PushError::TicketRejected | PushError::PacklistNotInRepository) => {
-            once(Some(RetryReason::Replanned), None)
+            once(condition, Some(RetryReason::Replanned), None)
         }
-        Err(PushError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
+        Err(PushError::DeltaBaseUnavailable) => {
+            once(condition, Some(RetryReason::LostDeltaBase), None)
+        }
         result => result,
+    };
+    if !matches!(condition, refs::RefWriteCondition::Any) {
+        return recovering(condition, plan.map(|prepared| prepared.pack));
     }
+
+    // On an ordered transport a delete can remove both refs between the
+    // packmap write and the head write. Lease the observed head so this
+    // write cannot recreate it from a plan based on the deleted packmap.
+    refs::check_pushable_branch(branch)?;
+    let head_ref = crate::packmap::branch_head_ref(branch);
+    for _ in 0..PACKMAP_CAS_ATTEMPTS {
+        if tx.observer.cancelled() {
+            return Err(SyncError::Interrupted.into());
+        }
+        let condition = tx.read_ref(&head_ref)?.map_or(
+            refs::RefWriteCondition::Missing,
+            refs::RefWriteCondition::Match,
+        );
+        match recovering(condition, None) {
+            Err(PushError::NonFastForwardPush { .. }) => {}
+            result => return result,
+        }
+    }
+    Err(PushError::NonFastForwardPush {
+        branch: branch.to_owned(),
+    })
 }
 
 /// The remote head a push plans against, read before it plans.
 enum LeaseHead {
     /// The head, which the push's head condition holds for.
     Holds(Option<Hash>),
-    /// The head is already the tip: an earlier attempt landed.
+    /// The lease holds for the tip, but a repair must send its entire closure.
+    MissingPackmap,
+    /// The head is already the tip and has a packmap: an earlier attempt landed.
     Landed,
 }
 
@@ -705,8 +745,8 @@ enum LeaseHead {
 /// after the head moved away and back and a reset dropped what the plan
 /// left out; the head write would then publish a tip the packmap cannot
 /// rebuild. Such a push would fail its head condition at once, so it is
-/// refused before it plans. A head that is already `tip` means an earlier
-/// attempt landed, and the push writes nothing more.
+/// refused before it plans. A head at `tip` with a packmap can also be
+/// the result of an earlier attempt that landed.
 fn lease_head(
     tx: &PushContext<'_>,
     branch: &str,
@@ -719,10 +759,17 @@ fn lease_head(
         refs::RefWriteCondition::Missing => head.is_none(),
         refs::RefWriteCondition::Match(lease) => head == Some(lease),
     };
+    if head == Some(tip) {
+        let has_packmap = tx.read_ref(&packmap_ref(branch))?.is_some();
+        if holds && !has_packmap {
+            return Ok(LeaseHead::MissingPackmap);
+        }
+        if !holds && has_packmap {
+            return Ok(LeaseHead::Landed);
+        }
+    }
     if holds {
         Ok(LeaseHead::Holds(head))
-    } else if head == Some(tip) {
-        Ok(LeaseHead::Landed)
     } else {
         Err(PushError::NonFastForwardPush {
             branch: branch.to_owned(),
@@ -860,6 +907,7 @@ fn plan_branch(
     } else {
         match lease_head(tx, branch, condition, tip)? {
             LeaseHead::Holds(head) => head,
+            LeaseHead::MissingPackmap => None,
             LeaseHead::Landed => return Ok(None),
         }
     };

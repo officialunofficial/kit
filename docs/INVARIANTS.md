@@ -949,8 +949,13 @@ file transport) for a push whose head condition is `Match(h)` with `h` an
 ancestor of the new tip in the local store. A conditioned push plans only
 against a head its
 condition holds for, and is refused when the head it reads differs. Force
-pushes never reset, and on a serialized or atomic advance they re-plan when
-a concurrent reset dropped the chain node their plan depended on.
+pushes never reset a valid chain. On a serialized or atomic advance they
+re-plan when a concurrent reset drops the chain node their plan depended on.
+On an ordered or serialized advance they lease the head they read and re-plan
+if a concurrent writer moves it. A push that recreates a missing head moves
+the packmap even when the chain already lists all of its packs. A push of the
+current tip restores a missing packmap from the tip's full closure. A push
+whose plan depends on a previous head cannot start a new packmap chain.
 
 **Because:** a serialized advance writes the packmap before the head, so the
 new packmap and the old head are visible together, and stay together after a
@@ -959,7 +964,10 @@ head that chain rebuilt. A reset holds only the new tip's closure: it contains t
 closure exactly when the push fast-forwards that head. An ordered force
 append after a reset would publish packs whose bases the reset dropped. A
 lease that differs from the planned head can hold again after the head moves
-away and back while a reset drops what the plan left out.
+away and back while a reset drops what the plan left out. A delete's packmap
+CAS cannot remove the newer node published by a push that observed the head
+gone. A force push that loses its head lease must re-plan before it can recreate
+the branch.
 
 **If violated:** every fetch and clone of the branch fails with a missing
 object until another push repairs the chain.
@@ -968,7 +976,8 @@ object until another push repairs the chain.
 advance kind, a crash between the two writes, a force push racing a reset
 and a re-baseline, a lease that differs from the head the push reads),
 `kit-transport-file` `push_tests` (the advance's crash hook under the push
-driver), CLI `tests/pack_rebaseline.rs`, and the `advance3` models in
+driver), `kit-sync` `tests/ref_delete.rs`, CLI `tests/pack_rebaseline.rs` and
+`tests/ssh_ref_delete.rs`, and the `advance3` models in
 `formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`,
 `advance3_forceOrdered`, `advance3_atomicForceOrdered`,
 `advance3_leaseUnchecked` and `advance3_atomicLeaseUnchecked`, and the canary
