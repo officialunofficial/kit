@@ -691,9 +691,9 @@ fn a_tag_whose_closure_is_local_publishes_with_no_tag_map_read() {
 /// A tag over objects the store already holds, as a concurrent fetch leaves
 /// them, publishes only once their directory entries are durable: that fetch
 /// may have made them visible and not yet flushed them (SPEC-OBJECTS §10.1).
-/// So a barrier on each object's shard and a device flush come before the
-/// tag ref. The hook sees every store in the process, so it keeps only this
-/// repository's steps.
+/// So a barrier on every shard, the objects' among them, and a device flush
+/// come before the tag ref. The hook sees every store in the process, so it
+/// keeps only this repository's steps.
 #[test]
 fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
     let remote = Remote::new(Kind::Memory);
@@ -754,6 +754,8 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
         })
         .collect();
     assert!(shards.is_subset(&barriered), "{steps:?}");
+    // Chunks are checked but not listed, so every shard is flushed.
+    assert_eq!(barriered.len(), 256);
     assert!(
         steps[..=flush].iter().all(|(_, tag)| tag.is_none()),
         "the tag ref was written before the flush: {steps:?}"

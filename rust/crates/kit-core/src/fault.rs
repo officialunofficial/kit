@@ -63,7 +63,9 @@ type SyncHook = Box<dyn Fn(&SyncStep) + Send + Sync>;
 static SYNC_HOOK: std::sync::Mutex<Option<SyncHook>> = std::sync::Mutex::new(None);
 
 /// Call `hook` after every dirent barrier and device flush of every store in
-/// the process, until the guard drops. A test that sets one runs alone.
+/// the process, until the guard drops. A test keeps only the steps under its
+/// own objects directory. One hook is set at a time, and it must not flush a
+/// store: it runs under the hook's lock.
 #[must_use = "the hook ends when the guard drops"]
 pub fn on_sync(hook: impl Fn(&SyncStep) + Send + Sync + 'static) -> SyncHookGuard {
     *SYNC_HOOK

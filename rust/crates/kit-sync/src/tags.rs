@@ -178,10 +178,11 @@ pub(crate) struct TagProver {
     missing: MissingHistory,
     /// The missing objects that `missing` maps to.
     missing_objects: HashSet<Hash>,
-    /// The shards of the objects the closure checks found, never cleared. The
-    /// store may hold an object another process made visible and has not yet
-    /// made durable, so a tag publishes only after these are flushed.
-    shards: BTreeSet<u8>,
+    /// Whether a closure check found objects that local refs do not reach.
+    /// Another process may have made such an object visible and not yet made
+    /// its directory entry durable, so the tags then publish only after the
+    /// store's shards are flushed.
+    found: bool,
     /// Objects the closure checks visited, and signed objects the history
     /// walks read, over every call.
     pub(crate) objects_checked: usize,
@@ -219,7 +220,7 @@ impl TagProver {
             failed: FailedHistory::default(),
             missing: MissingHistory::new(),
             missing_objects: HashSet::new(),
-            shards: BTreeSet::new(),
+            found: false,
             objects_checked: 0,
             signed_read: 0,
         }
@@ -272,7 +273,7 @@ impl TagProver {
             failed,
             missing,
             missing_objects,
-            shards,
+            found,
             objects_checked,
             signed_read,
         } = self;
@@ -328,7 +329,7 @@ impl TagProver {
         match presence {
             Presence::Complete(checked) => {
                 *objects_checked += checked.len();
-                shards.extend(checked.iter().map(|h| h[0]));
+                *found |= !checked.is_empty();
                 if proved.len() + checked.len() > *cap {
                     proved.clear();
                 }
@@ -909,13 +910,17 @@ impl TagPhase<'_> {
     }
 
     /// Publish every proved tag under one hold of the worktree lock, each as
-    /// a create: a tag made locally meanwhile is refused, never moved. The
-    /// objects the proofs found are made durable first, with one flush.
+    /// a create: a tag made locally meanwhile is refused, never moved. When
+    /// the proofs found objects, every shard of the store is made durable
+    /// first, with one device flush: the found objects' chunks are checked
+    /// but not listed, so every shard stands for them.
     fn publish(self, prover: &TagProver, publish: Vec<(String, Hash)>) -> Result<(), SyncError> {
         if publish.is_empty() {
             return Ok(());
         }
-        self.store.sync_shards(prover.shards.iter().copied())?;
+        if prover.found {
+            self.store.sync_shards(0..=u8::MAX)?;
+        }
         let _lock = wait_for_worktree_lock(self.layout, self.observer, self.lock_wait)?;
         let mut first_error = None;
         for (name, value) in publish {
