@@ -1179,7 +1179,11 @@ condition, as an append is. Its packmap write is conditioned on the chain
 head the push read, and a push that loses that write reads the chain and
 decides again. A re-baseline lists at most 4,096 packs
 ([SPEC-TRANSPORT-CONNECT §7.4](SPEC-TRANSPORT-CONNECT.md)). A chain that
-holds more with the new packs keeps appending.
+holds more with the new packs keeps appending. A push MUST NOT append a
+node that makes the chain longer than a fetch walks: more than 100,000
+nodes or 1,000,000 listed packs
+([SPEC-PACKFILE](SPEC-PACKFILE.md#fetch-resource-limits)). It refuses the
+push before it writes the node, and the remote is unchanged.
 
 A reset replaces a chain with a node that does not list every pack of that
 chain, so it is not a superset. The reference push driver resets only a

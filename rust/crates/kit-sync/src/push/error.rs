@@ -25,6 +25,13 @@ pub enum PushError {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would link a node onto a pack chain that, with it, holds
+    /// more nodes or listed packs than a fetch walks, so no client without
+    /// the tip could fetch the branch. Nothing was published.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs); the remote is unchanged. Delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// One advance would need more data packs than the server permits per
     /// advance. `commit` names the single commit or merge that cannot be split
     /// further when the refusal came from the pre-flight dry seal, before

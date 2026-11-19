@@ -113,6 +113,12 @@ pub enum Error {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would make the branch's pack chain longer than a fetch
+    /// reads. Nothing was published.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs); the remote is unchanged. Delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// A packmap chain was malformed — it exceeded the depth cap, contained
     /// a cycle, or a node could not be downloaded/decoded. Indicates a
     /// corrupt or hostile remote.
@@ -434,6 +440,7 @@ impl From<kit_sync::PushError> for Error {
             P::Sync(error) => error.into(),
             P::NonFastForwardPush { branch } => Self::NonFastForwardPush { branch },
             P::PackmapContended { branch } => Self::PackmapContended { branch },
+            P::PackChainTooLong { branch } => Self::PackChainTooLong { branch },
             P::PushTooLarge {
                 packs,
                 limit,
