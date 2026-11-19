@@ -25,4 +25,6 @@ cd rust && cargo test --manifest-path fuzz/Cargo.toml
 
 Every target enforces the guardrails documented in `docs/FUZZ.md`: ≤100
 iterations per invocation, ≤64 KiB input per iteration, bounded per-op
-allocations, a 100 ms per-iteration cap, no unbounded loops, seeded PRNG.
+allocations, a 100 ms default per-iteration cap, no unbounded loops, and a
+seeded PRNG. The deterministic stored blob smoke allows 500 ms per iteration
+for durable scratch writes.
