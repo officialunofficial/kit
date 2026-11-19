@@ -25,8 +25,6 @@ use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::NamedTempFile;
 
@@ -68,8 +66,7 @@ pub fn envelope_path(layout: &RepoLayout, commit: &Hash, att_id: &Hash) -> PathB
 ///
 /// # Panics
 /// Panics if `envelope_path` (an internal helper) returns a path with
-/// no parent or no file name. Both invariants are upheld by the path
-/// builder, so this only fires on programmer error.
+/// no parent. The path builder upholds that invariant.
 pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, PathBuf), Error> {
     if bytes.len() > MAX_ENVELOPE_SIZE {
         return Err(Error::EnvelopeTooLarge {
@@ -191,19 +188,9 @@ fn parse_att_filename(name: &str) -> Option<Hash> {
     hash_mod::from_hex(stem).ok()
 }
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
-
 fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let parent = final_path.parent().expect("final_path has parent");
-    let file_name = final_path
-        .file_name()
-        .expect("final_path has file name")
-        .to_string_lossy();
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_prefix = format!(".{file_name}.tmp.{pid}.{seq}");
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_prefix, parent)
+    let mut tmp = NamedTempFile::with_prefix_in(".kit.tmp.", parent)
         .map_err(|e| Error::Io(format!("tmpfile: {e}")))?;
     tmp.as_file_mut()
         .write_all(bytes)
@@ -287,6 +274,18 @@ mod tests {
 
         let env = load(&path).unwrap();
         assert_eq!(env.payload, b"{\"k\":1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_embed_the_destination_name_in_its_temp_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a".repeat(255));
+
+        write_atomic(&path, b"envelope").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"envelope");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
