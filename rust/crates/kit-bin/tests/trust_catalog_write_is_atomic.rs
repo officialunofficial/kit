@@ -114,6 +114,32 @@ fn a_dangling_symlinked_catalog_is_created_and_stays_a_symlink() {
     assert!(text.contains(&format!("ed25519:{hex}")), "catalog: {text}");
 }
 
+#[test]
+fn a_dangling_catalog_chain_keeps_every_symlink() {
+    let td = tempfile::tempdir().unwrap();
+    let subdir = td.path().join("links");
+    fs::create_dir(&subdir).unwrap();
+    let first = td.path().join("trust-roots.toml");
+    let second = subdir.join("catalog.toml");
+    std::os::unix::fs::symlink("links/catalog.toml", &first).unwrap();
+    std::os::unix::fs::symlink("../real/catalog.toml", &second).unwrap();
+
+    let hex = "ff".repeat(32);
+    let out = trust_add(td.path(), &first, &hex, false);
+
+    assert!(out.status.success(), "trust add failed: {out:?}");
+    assert_eq!(
+        fs::read_link(&first).unwrap(),
+        Path::new("links/catalog.toml")
+    );
+    assert_eq!(
+        fs::read_link(&second).unwrap(),
+        Path::new("../real/catalog.toml")
+    );
+    let text = fs::read_to_string(td.path().join("real/catalog.toml")).unwrap();
+    assert!(text.contains(&format!("ed25519:{hex}")), "catalog: {text}");
+}
+
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     fs::metadata(path).unwrap().permissions().mode() & 0o777
