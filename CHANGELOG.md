@@ -331,6 +331,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Keep branches cloneable when a push recreates them during deletion, and repair a missing packmap when pushing the same tip again.
 - **Breaking:** Reject attestation envelopes with unescaped control characters in JSON key IDs or payload types, including previously stored envelopes.
 - Hash worktree cache misses across directories in one shared thread pool.
 - Stop limited history at merge frontiers and closed ranges at their excluded endpoint.

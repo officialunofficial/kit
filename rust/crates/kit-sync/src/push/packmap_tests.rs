@@ -192,7 +192,7 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
     // A retried push (e.g. a lost head-CAS race after the packmap
     // already landed) must not append a redundant node when the
     // prior chain already carries every key this attempt would add
-    // — only the head still needs to move.
+    // and the branch exists.
     let tx = MemoryTransport::new();
     let (k1, k2, k3) = (h("k1"), h("k2"), h("k3"));
     let prior_head = put_node(&tx, None, &[k1, k2, k3]);
@@ -202,6 +202,9 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
         &prior_head,
     )
     .unwrap();
+    let before = h("before");
+    tx.update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &before)
+        .unwrap();
     let tip = h("tip");
 
     advance_packmap(
@@ -210,7 +213,7 @@ fn advance_packmap_is_idempotent_when_every_key_already_chained() {
         &[k1, k2, k3],
         true,
         0,
-        refs::RefWriteCondition::Missing,
+        refs::RefWriteCondition::Match(before),
         tip,
     )
     .unwrap();
@@ -738,11 +741,18 @@ fn advance_packmap_genuine_head_conflict_stays_non_fast_forward() {
 #[test]
 fn commit_head_reissued_write_is_success() {
     let tx = LostResponseTransport::new(Reissue::HeadUpdate);
+    let map = put_node(&tx.inner, None, &[h("pack")]);
+    tx.update_ref(&packmap_ref("main"), refs::RefWriteCondition::Missing, &map)
+        .unwrap();
+    let old = h("old");
+    tx.inner
+        .update_ref("refs/heads/main", refs::RefWriteCondition::Missing, &old)
+        .unwrap();
     let tip = h("tip");
     commit_head(
         &tx,
         "refs/heads/main",
-        refs::RefWriteCondition::Missing,
+        refs::RefWriteCondition::Match(old),
         &tip,
         "main",
     )
