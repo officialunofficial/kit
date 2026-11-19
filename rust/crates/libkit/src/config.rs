@@ -797,11 +797,11 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
         }
         "push.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
-            val.clone_into(&mut cfg.push_attestations);
+            cfg.push_attestations = val.to_ascii_lowercase();
         }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
-            val.clone_into(&mut cfg.fetch_attestations);
+            cfg.fetch_attestations = val.to_ascii_lowercase();
         }
         "pull.require_signed" => {
             expect_one_of(

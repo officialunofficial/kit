@@ -331,6 +331,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Skip Git bridge and Git import attestations with private locators before uploading attestation packs.
+- Honor case-insensitive values for `fetch.attestations` and `push.attestations`.
 - Keep branches cloneable when a push recreates them during deletion, and repair a missing packmap when pushing the same tip again.
 - **Breaking:** Reject attestation envelopes with unescaped control characters in JSON key IDs or payload types, including previously stored envelopes.
 - Hash worktree cache misses across directories in one shared thread pool.
