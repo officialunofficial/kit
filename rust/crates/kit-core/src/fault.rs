@@ -66,7 +66,9 @@ static SYNC_HOOK: std::sync::Mutex<Option<SyncHook>> = std::sync::Mutex::new(Non
 /// the process, until the guard drops. A test that sets one runs alone.
 #[must_use = "the hook ends when the guard drops"]
 pub fn on_sync(hook: impl Fn(&SyncStep) + Send + Sync + 'static) -> SyncHookGuard {
-    *SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    *SYNC_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
     SyncHookGuard(())
 }
 
@@ -76,13 +78,17 @@ pub struct SyncHookGuard(());
 
 impl Drop for SyncHookGuard {
     fn drop(&mut self) {
-        *SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        *SYNC_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 }
 
 /// Report a completed step to the hook, if one is set.
 pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
-    let hook = SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hook = SYNC_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(hook) = hook.as_ref() {
         hook(&step());
     }

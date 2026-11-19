@@ -718,7 +718,9 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
         .iter()
         .map(|o| root.join(&hash::to_hex(&o.id().unwrap())[..2]))
         .collect();
-    let steps: Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>> = Arc::default();
+    // Each step this repository's store took, with the tag ref at that time.
+    type Steps = Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>>;
+    let steps: Steps = Arc::default();
     let _hook = {
         let steps = Arc::clone(&steps);
         let root = root.clone();
