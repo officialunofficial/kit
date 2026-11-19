@@ -178,6 +178,10 @@ pub(crate) struct TagProver {
     missing: MissingHistory,
     /// The missing objects that `missing` maps to.
     missing_objects: HashSet<Hash>,
+    /// The shards of the objects the closure checks found, never cleared. The
+    /// store may hold an object another process made visible and has not yet
+    /// made durable, so a tag publishes only after these are flushed.
+    shards: BTreeSet<u8>,
     /// Objects the closure checks visited, and signed objects the history
     /// walks read, over every call.
     pub(crate) objects_checked: usize,
@@ -215,6 +219,7 @@ impl TagProver {
             failed: FailedHistory::default(),
             missing: MissingHistory::new(),
             missing_objects: HashSet::new(),
+            shards: BTreeSet::new(),
             objects_checked: 0,
             signed_read: 0,
         }
@@ -267,6 +272,7 @@ impl TagProver {
             failed,
             missing,
             missing_objects,
+            shards,
             objects_checked,
             signed_read,
         } = self;
@@ -322,6 +328,7 @@ impl TagProver {
         match presence {
             Presence::Complete(checked) => {
                 *objects_checked += checked.len();
+                shards.extend(checked.iter().map(|h| h[0]));
                 if proved.len() + checked.len() > *cap {
                     proved.clear();
                 }
@@ -695,11 +702,11 @@ impl TagPhase<'_> {
             if !matches!(e, SyncError::Interrupted) {
                 // The first failure is the one to report; a failed publish
                 // here only leaves those tags for the next fetch.
-                let _ = self.publish(publish);
+                let _ = self.publish(&prover, publish);
             }
             return Err(e);
         }
-        self.publish(publish)
+        self.publish(&prover, publish)
     }
 
     /// Bring one tag's objects and prove it.
@@ -902,11 +909,13 @@ impl TagPhase<'_> {
     }
 
     /// Publish every proved tag under one hold of the worktree lock, each as
-    /// a create: a tag made locally meanwhile is refused, never moved.
-    fn publish(self, publish: Vec<(String, Hash)>) -> Result<(), SyncError> {
+    /// a create: a tag made locally meanwhile is refused, never moved. The
+    /// objects the proofs found are made durable first, with one flush.
+    fn publish(self, prover: &TagProver, publish: Vec<(String, Hash)>) -> Result<(), SyncError> {
         if publish.is_empty() {
             return Ok(());
         }
+        self.store.sync_shards(prover.shards.iter().copied())?;
         let _lock = wait_for_worktree_lock(self.layout, self.observer, self.lock_wait)?;
         let mut first_error = None;
         for (name, value) in publish {
