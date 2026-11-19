@@ -687,12 +687,13 @@ impl ObjectStore {
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
         let path = self.path_for(h);
-        let file = File::open(&path).map_err(|e| match e.kind() {
+        let mut file = File::open(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
             _ => StoreError::Io(e),
         })?;
-        let mut head = Vec::with_capacity(10);
-        file.take(10).read_to_end(&mut head)?;
+        let mut head = [0u8; 10];
+        let len = read_header_prefix(&mut file, &mut head)?;
+        let head = &head[..len];
         if head.len() < 6 {
             return Err(StoreError::Decode(KitError::EmptyData));
         }
@@ -1049,6 +1050,20 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
     options.open(path)?.sync_all()
 }
 
+/// Fill the header buffer unless the reader reaches EOF.
+fn read_header_prefix(reader: &mut impl Read, mut remaining: &mut [u8]) -> io::Result<usize> {
+    let len = remaining.len();
+    while !remaining.is_empty() {
+        match reader.read(remaining) {
+            Ok(0) => break,
+            Ok(n) => remaining = &mut remaining[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(len - remaining.len())
+}
+
 /// Shared by [`ObjectStore::read`] and [`ObjectStore::read_object`]: both
 /// compute an `actual` id from the on-disk bytes their own way (plain
 /// `object_id_from_bytes`, or the decode-reusing [`verified_id_and_object`])
@@ -1390,6 +1405,73 @@ mod tests {
             store.object_head(&id),
             Err(StoreError::Decode(KitError::EmptyData))
         ));
+    }
+
+    #[test]
+    fn object_head_requires_the_complete_blob_length() {
+        use crate::object::ObjectType;
+        let (_dir, store) = fresh_store();
+        let body = serialize::serialize(&Object::Blob(Blob {
+            data: b"chunk payload".to_vec(),
+        }))
+        .unwrap();
+        let id = store.write(&body).unwrap();
+        let path = store.path_for(&id);
+        for len in 6..10 {
+            fs::write(&path, &body[..len]).unwrap();
+            assert!(matches!(
+                store.object_head(&id),
+                Err(StoreError::Decode(KitError::EmptyData))
+            ));
+        }
+        fs::write(&path, &body[..10]).unwrap();
+        assert_eq!(
+            store.object_head(&id).unwrap(),
+            (ObjectType::Blob, Some(13))
+        );
+    }
+
+    #[test]
+    fn object_head_retries_interrupted_and_short_reads() {
+        struct HeaderReader<'a> {
+            source: &'a [u8],
+            interrupted: bool,
+        }
+
+        impl Read for HeaderReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                assert!(!buf.is_empty());
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                self.source.read(&mut buf[..1])
+            }
+        }
+
+        struct BrokenReader(bool);
+
+        impl Read for BrokenReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                assert!(!std::mem::replace(&mut self.0, true));
+                Err(io::ErrorKind::PermissionDenied.into())
+            }
+        }
+
+        let mut reader = HeaderReader {
+            source: b"0123456789x",
+            interrupted: false,
+        };
+        let mut head = [0; 10];
+        assert_eq!(read_header_prefix(&mut reader, &mut head).unwrap(), 10);
+        assert_eq!(&head, b"0123456789");
+        assert_eq!(reader.source, b"x");
+        assert_eq!(
+            read_header_prefix(&mut BrokenReader(false), &mut head)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]

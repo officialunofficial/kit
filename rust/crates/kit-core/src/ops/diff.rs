@@ -78,11 +78,18 @@ impl DiffResult {
 /// Callers scope detection to one diff or staging leg.
 ///
 /// # Errors
-/// A missing or invalid content object aborts detection without changing entries.
+/// When a deletion can pair, a missing or invalid candidate object aborts
+/// detection without changing entries.
 pub fn detect_content_renames<S: ObjectSource + ?Sized>(
     store: &S,
     entries: &mut Vec<DiffEntry>,
 ) -> Result<(), StoreError> {
+    if !entries
+        .iter()
+        .any(|entry| entry.kind == DiffKind::Removed && entry.old_hash.is_some())
+    {
+        return Ok(());
+    }
     let mut memo = std::collections::HashMap::new();
     for e in entries.iter() {
         let hash = match e.kind {
@@ -1842,6 +1849,22 @@ mod tests {
             name: name.to_vec(),
             mode,
             object_hash: h,
+        }
+    }
+
+    #[test]
+    fn added_content_is_not_read_without_a_rename_source() {
+        let (_dir, store) = fresh_store();
+        let addition = added("new", b"not in the store");
+        let mut deletion_without_hash = removed("old", b"also absent");
+        deletion_without_hash.old_hash = None;
+        for original in [
+            vec![addition.clone()],
+            vec![addition, deletion_without_hash],
+        ] {
+            let mut entries = original.clone();
+            detect_content_renames(&store, &mut entries).unwrap();
+            assert_eq!(entries, original);
         }
     }
 
