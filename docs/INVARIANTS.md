@@ -18,11 +18,23 @@ turn a successful reuse into a dangling ref.
 **If violated:** gc can delete an object after its writer refreshed it, or
 prune an old descendant hidden behind a map-cache hit.
 
-**Enforcement status:** shared/exclusive locks on the immutable format file,
+**Enforcement status:** shared/exclusive locks on the same format inode,
 `ObjectStore::prune_if_old`, `BulkWriter::reuse_object`, and import-run memoization.
 Deterministic sweep interleaving, killed-sweeper restart, read-only reuse and
 cached chunk-closure refresh regressions cover the boundaries. SPEC-GC states
 the remaining zero-grace and long-import restrictions.
+
+## Local pack publication preserves object identity
+
+A local pack is visible through its index and pack names. The store syncs
+both staged files and the packed marker before publication. The pack
+name is durable before the index name is published. Interrupted marker
+activation finishes on the existing format inode.
+
+Verified readers recompute the id of the selected copy and try other
+locations if it fails. Pack repair scans the full pack before replacing
+an index. The store tests exercise staged files, lone packs, complete
+pairs, concurrent publication, corruption, and index repair.
 
 ## Connect retries preserve identity and durable acknowledgements
 

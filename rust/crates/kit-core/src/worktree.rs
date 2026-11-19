@@ -921,8 +921,9 @@ impl IndexDir {
         // tree's length, the rule a `WriteBatch` dedups by. Otherwise the
         // tree is checked and written, whatever `base` says.
         if base == Some(self.id)
-            && fs::metadata(store.path_for(&self.id))
-                .is_ok_and(|m| u64::try_from(self.bytes.len()) == Ok(m.len()))
+            && store
+                .cached_object_size(&self.id)
+                .is_ok_and(|size| u64::try_from(self.bytes.len()) == Ok(size))
         {
             self.in_base = true;
             return;

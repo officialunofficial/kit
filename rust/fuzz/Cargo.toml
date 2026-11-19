@@ -609,3 +609,11 @@ path = "fuzz_targets/attestation_pack.rs"
 test = false
 doc = false
 required-features = ["libfuzzer"]
+
+[[bin]]
+name = "local_pack_index"
+path = "fuzz_targets/local_pack_index.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

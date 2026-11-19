@@ -530,21 +530,56 @@ Try activation before a fetch acquires its shared prune guard, once
 advertised work indicates the fetch may apply new data packs. An
 up-to-date fetch requires no activation. Under the exclusive `format`
 try-lock, validate the marker, append the single ASCII byte `P` after
-the canonical legacy bytes on the same inode, and make the file durable.
+the canonical legacy bytes on the same inode, using the recovery
+sequence below.
 The inode MUST survive activation, including on error. If the try-lock
-is busy and `P` is still absent when the shared guard is acquired, use
-loose writes for that fetch. A noncanonical legacy marker continues to
+is busy and a valid legacy marker remains when the shared guard is
+acquired, use loose writes for that fetch. A pending intent forbids pack
+publication even when `P` is visible. A noncanonical legacy marker continues to
 serve loose storage. If an I/O error leaves the marker or its durability
 uncertain, fail rather than publish until it can be validated and made
 durable.
 Lock details are in [SPEC-CONCURRENCY §3.4](SPEC-CONCURRENCY.md#34-object-refresh-versus-local-gc).
 
-A crash can leave a legacy store or a packed marker with only loose objects.
-Both are valid. Refuse malformed bytes and require marker recovery before
-opening the store. The marker is permanent once activated, including when
-no local packs remain. Before activation, upgrade every client sharing
-the common directory and drain legacy sessions that already opened it.
-The marker fences subsequent opens.
+Before changing the marker, write exactly `bmt-v2\nP` to a staged file
+beside it and sync that file. Rename it to `format.activate`, then sync
+the common directory. Append `P` through the locked handle, sync the
+marker, remove the intent and sync the common directory again. Hold the
+exclusive lock across these steps. Remove a published intent only after
+the marker sync succeeds. Publication requires a durable packed marker
+and no pending intent. No other operation writes the intent. Staged
+files from an interrupted intent write have no recovery meaning.
+
+Check the intent under the shared format lock before interpreting the
+marker. Bound the intent read and require an exact match. If the intent
+exists, release the shared lock and try the exclusive lock on the same
+inode. If acquired, recheck the intent under that lock. Activation must
+make the same check before validating the marker. If the exact intent
+still exists, make the intent and its directory entry durable before
+writing the complete packed marker at offset zero and setting its length
+to eight bytes through the locked handle. Sync the marker, remove the
+intent and sync the directory. If the intent has gone, validate the
+marker again. If the exclusive lock is busy, a reader can validate a
+legacy marker and open the loose store under the shared lock. A packed or
+malformed marker with a pending intent requires successful recovery
+before opening. Reacquire the shared lock and recheck both files before
+using the loose store. A reader without permission to recover follows the same
+rule. An invalid intent is an integrity error. Without a valid intent,
+malformed marker bytes remain an error. Never recreate a missing format
+inode during recovery.
+
+An interruption before the intent is published leaves a legacy store.
+An interruption after intent publication but before the append, during
+the append, or before marker sync completes must recover to the packed
+marker when the intent survives. A crash before the intent's directory
+sync may also leave just the legacy marker, since the append has not
+started. An interruption after marker sync or during intent removal
+leaves the packed marker with or without its intent. Exercise each
+boundary, including a torn recovery write, and check that recovery keeps
+the inode and never removes `P`. The packed marker is permanent even
+when no local packs remain. Upgrade all clients sharing the common
+directory and drain sessions opened by legacy clients before activation.
+The packed marker fences subsequent legacy opens.
 
 ### Object lookup
 
@@ -602,7 +637,9 @@ shared `format` guard or its exclusive lock from staging through the
 final directory flush. This prevents the orphan sweep from removing
 files of a live publisher.
 
-1. Ensure the marker with `P` and its directory entry are durable.
+1. Ensure the marker with `P` is durable and no intent is present. Sync
+   the common directory before publishing, including on retry after an
+   uncertain directory sync.
    Create `objects/pack/` if needed and make its entry durable in
    `objects/` before acknowledging the pair.
 2. Stage and verify the sealed pack and its index in

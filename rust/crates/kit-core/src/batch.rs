@@ -459,12 +459,15 @@ impl<'s> WriteBatch<'s> {
     /// mutex.
     #[must_use]
     pub fn contains(&self, h: &Hash) -> bool {
+        self.is_staged(h) || self.store.contains(h)
+    }
+
+    fn is_staged(&self, h: &Hash) -> bool {
         self.inner
             .lock()
             .expect("batch state mutex poisoned")
             .staged
             .contains_key(h)
-            || self.store.contains(h)
     }
 
     /// Make every staged object durable and visible: one full flush,
@@ -959,7 +962,7 @@ impl ObjectSink for WriteBatch<'_> {
     }
 
     fn has(&self, h: &Hash) -> bool {
-        self.contains(h)
+        self.is_staged(h) || self.store.known_object(h)
     }
 
     fn checkpoint(&self) -> StoreResult<()> {

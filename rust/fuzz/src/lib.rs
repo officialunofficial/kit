@@ -2055,6 +2055,11 @@ pub fn grant_field_parsers_one_iteration(input: &[u8]) {
     let _ = is_loopback_origin(text);
 }
 
+/// Exercise index validation with a bounded input.
+pub fn local_pack_index_one_iteration(input: &[u8]) {
+    kit_core::store::fuzz_local_pack_index(&input[..input.len().min(MAX_INPUT)]);
+}
+
 /// Capped stream read (`read_to_end_capped`): the first four input bytes
 /// pick the size hint and the limit, and the rest is the stream. The read
 /// returns the stream exactly when it fits the limit. Otherwise it returns
@@ -3920,6 +3925,11 @@ mod tests {
         for case in [&b""[..], b"a", &large[..]] {
             run_one(case, chunked_blob_build_one_iteration).unwrap();
         }
+    }
+
+    #[test]
+    fn unit_local_pack_index() {
+        run_iterated_unit(local_pack_index_one_iteration).unwrap();
     }
 
     #[test]

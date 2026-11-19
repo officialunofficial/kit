@@ -188,7 +188,7 @@ object encoder                            object decoder + verify
   │   SPEC-OBJECTS §2 prologue              │   BLAKE3 verify on read
   ▼                                         ▼
 content-addressed store                   refs
-  │   .kit/objects/<dd>/<hex62>            │   SPEC-REFS
+  │   loose files and local packs          │   SPEC-REFS
   ▼                                         ▼
 pack writer                               worktree materialize
   │   SPEC-PACKFILE                          │   symlink containment
@@ -200,6 +200,11 @@ transport                                 user
 Every stage validates the previous stage's output. Decoders refuse
 oversized allocations; the FastCDC chunker is fully deterministic
 (frozen seed, SPEC-FASTCDC §3.1); object readers re-hash bytes before returning.
+
+The local store resolves ids from raw indexed packs and loose files. The
+common directory's `format` inode declares packed-read capability `P`.
+Fetch and clone write loose files. Local pack format and durability are
+specified in [SPEC-OBJECTS §10](specs/SPEC-OBJECTS.md#10-storage).
 
 ---
 

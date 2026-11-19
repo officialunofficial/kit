@@ -42,7 +42,7 @@ document points here.
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
-| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared for bulk writes, cached reuse, format validation, and the fetch prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
+| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared for bulk writes, cached reuse, format validation, and the fetch prune guard. Exclusive, try-only, for marker activation and recovery, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
 | `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
@@ -172,7 +172,8 @@ ancestry.
 The common-dir `format` inode MUST NOT be replaced or unlinked while
 the repository is in use. Independently opened handles take shared locks
 for bulk writes, cached reuse, and format validation. The only marker
-update is the append described in SPEC-OBJECTS §10. A publisher tries
+updates are activation and recovery as described in SPEC-OBJECTS §10.
+A reader may try the exclusive lock to finish an interrupted activation. A publisher tries
 the exclusive lock for activation before taking a shared prune guard.
 After activation it releases the exclusive lock, takes the shared guard,
 and validates the marker again before publishing.

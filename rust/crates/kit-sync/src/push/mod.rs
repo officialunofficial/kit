@@ -962,8 +962,8 @@ fn estimate_pack_sizes_with(
         .iter()
         .map(|hash| {
             store
-                .object_metadata(hash)
-                .map(|meta| Incoming::raw(meta.len(), meta.len()))
+                .object_size(hash)
+                .map(|size| Incoming::raw(size, size))
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
@@ -1171,7 +1171,7 @@ fn build_packs<W: std::io::Write>(
     // *before* any object's content is actually read into memory.
     let raw_sizes: Vec<u64> = raw
         .iter()
-        .map(|h| Ok(store.object_metadata(h)?.len()))
+        .map(|h| Ok(store.object_size(h)?))
         .collect::<Result<_, PushError>>()?;
     let mut start = 0;
     for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {
@@ -1594,12 +1594,8 @@ mod tests {
     fn the_pack_estimate_splits_at_the_payload_and_serialized_limits() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
-        let size = store.object_metadata(&hashes[0]).unwrap().len();
-        assert!(
-            hashes
-                .iter()
-                .all(|h| store.object_metadata(h).unwrap().len() == size)
-        );
+        let size = store.object_size(&hashes[0]).unwrap();
+        assert!(hashes.iter().all(|h| store.object_size(h).unwrap() == size));
         let plan = transfer::PackPlan {
             raw: hashes,
             deltas: Vec::new(),

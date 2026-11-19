@@ -79,7 +79,7 @@ run 'part uploads' "$py" -I -B scripts/golden/blake3_subtree_ref.py \
     ${b3sum_flag[@]+"${b3sum_flag[@]}"}
 run 'grants' "$py" -I -B scripts/golden/grants_ref.py "$golden/grants" \
     ${b3sum_flag[@]+"${b3sum_flag[@]}"}
-for check in objects closure refs_index pack proofs transport disclosure http_objects git_bridge \
+for check in objects local_pack closure refs_index pack proofs transport disclosure http_objects git_bridge \
     auth_v2 attest ssh_serve sparse ed25519 ref_locks; do
     run "$check" "$py" -I -B "scripts/golden/${check}_ref.py" "$golden"
 done

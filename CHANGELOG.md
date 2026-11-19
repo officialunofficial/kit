@@ -7,6 +7,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Read and verify raw local object packs in repositories that declare capability `P`, and rebuild damaged pack indexes.
+
 ## [0.9.0] - 2026-11-19
 
 ### Security

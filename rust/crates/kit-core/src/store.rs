@@ -28,7 +28,7 @@
 //! ref or index written after the write/commit returns can never
 //! reference a non-durable object.
 //!
-//! Reads always verify integrity by recomputing BLAKE3 over the bytes
+//! Verified reads recompute the type-dependent id from the bytes
 //! and comparing against the requested hash; mismatch returns
 //! [`StoreError::HashMismatch`]. The one opt-in exception is
 //! [`ObjectStore::read_unverified`] (and the [`DisplaySource`] adapter
@@ -54,6 +54,8 @@ use crate::layout::RepoLayout;
 use crate::object::{KitError, Object, object_id_from_bytes, verified_id_and_object};
 use crate::serialize;
 
+mod format;
+mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
@@ -237,16 +239,36 @@ impl BulkWriter<'_> {
     /// path-layout invariant is violated.
     pub fn reuse_object(&mut self, h: &Hash) -> StoreResult<Vec<Hash>> {
         let _guard = self.store.lock_writer()?;
-        let children = self.store.cached_children(h)?;
-        let path = self.store.path_for(h);
-        if !self.refreshed.contains(h) {
-            refresh_mtime(&path)?;
-            self.refreshed.insert(*h);
-        }
-        self.dirs
-            .insert(path.parent().expect("object path has parent").to_path_buf());
-        self.files.insert(path);
-        Ok(children)
+        self.store.packs.lookup(self.store, h, true, |location| {
+            let mut contents = location.open()?;
+            let (object_type, _) = head_at(&mut contents)?;
+            let children = if location.is_packed()
+                || !matches!(
+                    object_type,
+                    crate::object::ObjectType::Blob | crate::object::ObjectType::Delta
+                ) {
+                let bytes = ObjectStore::raw_at(&location)?;
+                if location.is_packed() {
+                    ObjectStore::verify_at(&location, h, &bytes)?;
+                }
+                let object = serialize::deserialize_owned(bytes)?;
+                crate::ops::graph::children(&object, crate::ops::graph::ClosureMode::History)
+            } else {
+                Vec::new()
+            };
+            let path = location.path();
+            if !self.refreshed.contains(h) {
+                refresh_mtime(path)?;
+                self.refreshed.insert(*h);
+            }
+            self.dirs
+                .insert(path.parent().expect("object path has parent").to_path_buf());
+            if location.is_packed() {
+                self.dirs.insert(self.store.objects_root.clone());
+            }
+            self.files.insert(path.to_path_buf());
+            Ok(children)
+        })
     }
 
     /// Make the session durable: fsync the CONTENTS of any pre-existing
@@ -269,7 +291,8 @@ impl BulkWriter<'_> {
 #[must_use = "the guard protects the store only while it is alive"]
 #[derive(Debug)]
 pub struct PruneGuard {
-    _format: File,
+    #[cfg_attr(not(test), allow(dead_code))] // Owns the lock until drop.
+    format: File,
 }
 
 /// Result alias used throughout this module.
@@ -286,6 +309,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 pub struct ObjectStore {
     /// Absolute path to `<root>/.kit/objects`.
     objects_root: PathBuf,
+    packs: Arc<local_pack::LocalPacks>,
     /// Flush/rename primitive seam. Production code always uses
     /// [`RealSyncer`]; unit tests inject a recording double to assert
     /// flush ordering and counts (the O(1)-flushes-per-batch contract).
@@ -315,37 +339,10 @@ impl ObjectStore {
         if !objects_root.is_dir() {
             return Err(StoreError::NotAKitRepository);
         }
-        // Reject a repository that does not declare merkle object
-        // addressing — such a repo would mis-read every Tree /
-        // ChunkedBlob (and thus every Commit) under this id scheme.
-        let read_format = || -> io::Result<String> {
-            let file = File::open(layout.format_file())?;
-            file.lock_shared()?;
-            let bytes = crate::bounded_read::read_capped_from(&file, FORMAT_MAX_BYTES)?;
-            String::from_utf8(bytes)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "format file is not UTF-8"))
-        };
-        match read_format() {
-            Ok(s) if s.trim() == FORMAT_VALUE => {}
-            Ok(s) => {
-                return Err(StoreError::IncompatibleRepoFormat {
-                    found: Some(s.trim().to_owned()),
-                });
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Err(StoreError::IncompatibleRepoFormat { found: None });
-            }
-            // A marker longer than the cap or not UTF-8 is not a format this
-            // kit reads.
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                return Err(StoreError::IncompatibleRepoFormat {
-                    found: Some("unreadable".to_owned()),
-                });
-            }
-            Err(e) => return Err(StoreError::Io(e)),
-        }
+        let packed = format::check(&layout.format_file(), true)?;
         Ok(Self {
             objects_root,
+            packs: Arc::new(local_pack::LocalPacks::new(packed)),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
@@ -367,6 +364,7 @@ impl ObjectStore {
         fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
         Ok(Self {
             objects_root,
+            packs: Arc::new(local_pack::LocalPacks::new(false)),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
@@ -462,7 +460,16 @@ impl ObjectStore {
     /// **not** verify integrity — use [`Self::read`] for that.
     #[must_use]
     pub fn contains(&self, h: &Hash) -> bool {
-        self.path_for(h).is_file()
+        self.check_presence(h).is_ok()
+    }
+
+    /// Check for a usable location without verifying the object body.
+    ///
+    /// # Errors
+    /// Returns a lookup failure or `ObjectNotFound` for a confirmed miss.
+    pub fn check_presence(&self, h: &Hash) -> StoreResult<()> {
+        self.packs
+            .lookup(self, h, true, |location| location.present())
     }
 
     /// Write `bytes` to the store, returning their BLAKE3 hash. Atomic:
@@ -537,88 +544,110 @@ impl ObjectStore {
         }
     }
 
-    /// Open `h`'s on-disk file, cap its size at [`MAX_RAW_OBJECT_SIZE`],
-    /// and read it fully into a pre-sized buffer — the shared body of
-    /// [`Self::read`] and [`Self::read_unverified`]; neither hashes nor
-    /// verifies, that's each caller's job.
-    fn read_raw(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        #[cfg(test)]
-        self.read_calls.fetch_add(1, Ordering::Relaxed);
-        let path = self.path_for(h);
-        let file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
-        let meta = file.metadata()?;
-        let size = meta.len();
-        if u128::from(size) > MAX_RAW_OBJECT_SIZE as u128 {
+    fn raw_at(location: &local_pack::Location) -> StoreResult<Vec<u8>> {
+        let contents = location.open()?;
+        let len = contents.len;
+        if len > MAX_RAW_OBJECT_SIZE as u64 {
             return Err(StoreError::ObjectTooLarge);
         }
-        // We've already bounded `size` by `MAX_RAW_OBJECT_SIZE` (1 GiB),
-        // which fits in `usize` on every platform we support (32-bit
-        // included). Pre-size the buffer to avoid the doubling
-        // re-allocations of `read_to_end` for large objects.
-        let cap = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
-        read_to_end_capped(file, cap, MAX_RAW_OBJECT_SIZE)
-    }
-
-    /// Reads raw bytes for a verifier that must classify a hash mismatch
-    /// under the requested id. Unlike [`Self::read`], this deliberately
-    /// leaves identity verification to the caller; it is crate-private so
-    /// only verification code can use the raw bytes as data.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same store errors as [`Self::read_raw`].
-    pub(crate) fn read_raw_for_verification(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_raw(h)
-    }
-
-    /// Read raw bytes for `h`. Verifies that BLAKE3 of the on-disk
-    /// bytes equals `h` and returns [`StoreError::HashMismatch`] on
-    /// failure (the bytes are still discarded so callers cannot
-    /// accidentally use corrupt data).
-    pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        let bytes = self.read_raw(h)?;
-        check_hash(h, &object_id_from_bytes(&bytes))?;
+        let capacity = usize::try_from(len).map_err(|_| StoreError::ObjectTooLarge)?;
+        let bytes = read_to_end_capped(contents, capacity, MAX_RAW_OBJECT_SIZE)?;
+        if location.is_packed() && bytes.len() as u64 != len {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        }
         Ok(bytes)
     }
 
-    /// Read a verified pack base using the caller's budgeted allocator.
-    /// The same open handle supplies the size and bytes; growth is rejected
-    /// rather than letting `read_to_end` allocate outside that budget.
+    /// Retain one rejected copy only for the closure verifier's diagnostic.
+    /// Try every location for a verified copy first.
+    pub(crate) fn read_raw_for_verification(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        let mut rejected = None;
+        self.read_with(h, |location| {
+            let bytes = Self::raw_at(&location)?;
+            let result = Self::verify_at(&location, h, &bytes);
+            if let Err(e) = result {
+                if matches!(e, StoreError::HashMismatch { .. }) && rejected.is_none() {
+                    rejected = Some(location);
+                }
+                return Err(e);
+            }
+            Ok(bytes)
+        })
+        .or_else(|e| match rejected {
+            Some(location) => Self::raw_at(&location),
+            None => Err(e),
+        })
+    }
+
+    fn read_with<T>(
+        &self,
+        h: &Hash,
+        use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        #[cfg(test)]
+        self.read_calls.fetch_add(1, Ordering::Relaxed);
+        self.packs.lookup(self, h, true, use_location)
+    }
+
+    fn verify_at(location: &local_pack::Location, h: &Hash, bytes: &[u8]) -> StoreResult<()> {
+        let id = if location.is_packed() {
+            match local_pack::canonical_id(bytes) {
+                Ok(id) => id,
+                Err(e) => {
+                    check_hash(h, blake3::hash(bytes).as_bytes())?;
+                    return Err(e);
+                }
+            }
+        } else {
+            object_id_from_bytes(bytes)
+        };
+        check_hash(h, &id)
+    }
+
+    /// Read and verify the contents of the requested object.
+    pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.read_with(h, |location| {
+            let bytes = Self::raw_at(&location)?;
+            Self::verify_at(&location, h, &bytes)?;
+            Ok(bytes)
+        })
+    }
+
+    /// Try each location, reserving bytes before reading it through the
+    /// caller's allocator.
     pub(crate) fn read_with_allocator<E: From<StoreError>>(
         &self,
         h: &Hash,
-        allocate: impl FnOnce(usize) -> Result<Vec<u8>, E>,
+        mut allocate: impl FnMut(usize) -> Result<Vec<u8>, E>,
     ) -> Result<Vec<u8>, E> {
-        #[cfg(test)]
-        self.read_calls.fetch_add(1, Ordering::Relaxed);
-        let mut file = File::open(self.path_for(h)).map_err(|e| {
-            E::from(match e.kind() {
-                io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-                _ => StoreError::Io(e),
-            })
-        })?;
-        let size = file.metadata().map_err(StoreError::Io)?.len();
-        if size > MAX_RAW_OBJECT_SIZE as u64 {
-            return Err(StoreError::ObjectTooLarge.into());
-        }
-        let len = usize::try_from(size).map_err(|_| StoreError::ObjectTooLarge)?;
-        let mut bytes = allocate(len)?;
-        bytes.resize(len, 0);
-        file.read_exact(&mut bytes).map_err(StoreError::Io)?;
-        let mut extra = [0];
-        if file.read(&mut extra).map_err(StoreError::Io)? != 0 {
-            return Err(StoreError::ObjectTooLarge.into());
-        }
-        check_hash(h, &object_id_from_bytes(&bytes))?;
-        Ok(bytes)
+        let mut allocation_error = None;
+        let result = self.read_with(h, |location| {
+            let mut contents = location.open()?;
+            if contents.len > MAX_RAW_OBJECT_SIZE as u64 {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            let len = usize::try_from(contents.len).map_err(|_| StoreError::ObjectTooLarge)?;
+            let mut bytes = match allocate(len) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    allocation_error.get_or_insert(e);
+                    return Err(StoreError::OperationLimitExceeded("object allocation"));
+                }
+            };
+            bytes.resize(len, 0);
+            contents.read_exact(&mut bytes)?;
+            if contents.read(&mut [0])? != 0 {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            Self::verify_at(&location, h, &bytes)?;
+            Ok(bytes)
+        });
+        result.map_err(|e| allocation_error.unwrap_or_else(|| E::from(e)))
     }
 
-    /// Read raw bytes for `h` WITHOUT the BLAKE3 integrity check that
-    /// [`Self::read`] performs — a [`StoreError::HashMismatch`] can
-    /// therefore never come out of this path.
+    /// Read a loose object's bytes without the BLAKE3 check that
+    /// [`Self::read`] performs. Packed reads always verify the object's
+    /// encoding and id because the locator is separate from the payload.
     ///
     /// # Policy — display-only paths ONLY
     /// This exists for hot read-only rendering (`diff`/`show`/commit
@@ -645,7 +674,13 @@ impl ObjectStore {
     /// no-verify choice at the boundary instead of threading a flag
     /// through render code.
     pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_raw(h)
+        self.read_with(h, |location| {
+            let bytes = Self::raw_at(&location)?;
+            if location.is_packed() {
+                Self::verify_at(&location, h, &bytes)?;
+            }
+            Ok(bytes)
+        })
     }
 
     /// The object's type tag, from its 6-byte prologue — without
@@ -658,23 +693,14 @@ impl ObjectStore {
     /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
     /// for a short file, bad magic/version, or unknown tag.
     pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        let path = self.path_for(h);
-        let mut file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
-        let mut prologue = [0u8; 6];
-        file.read_exact(&mut prologue)
-            .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
-        if prologue[1..5] != crate::object::MAGIC {
-            return Err(StoreError::Decode(KitError::InvalidMagic));
-        }
-        let object_type =
-            crate::object::ObjectType::from_u8(prologue[0]).map_err(StoreError::Decode)?;
-        if prologue[5] != object_type.schema_version() {
-            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
-        }
-        Ok(object_type)
+        self.packs.lookup(self, h, true, |location| {
+            let mut prologue = [0; 6];
+            location
+                .open()?
+                .read_exact(&mut prologue)
+                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
+            parse_type(&prologue)
+        })
     }
 
     /// The object's type tag and, for a `Blob`, its content length, from the
@@ -686,33 +712,10 @@ impl ObjectStore {
     /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        let path = self.path_for(h);
-        let mut file = File::open(&path).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound => StoreError::ObjectNotFound(to_hex(h)),
-            _ => StoreError::Io(e),
-        })?;
-        let mut head = [0u8; 10];
-        let len = read_header_prefix(&mut file, &mut head)?;
-        let head = &head[..len];
-        if head.len() < 6 {
-            return Err(StoreError::Decode(KitError::EmptyData));
-        }
-        if head[1..5] != crate::object::MAGIC {
-            return Err(StoreError::Decode(KitError::InvalidMagic));
-        }
-        let object_type =
-            crate::object::ObjectType::from_u8(head[0]).map_err(StoreError::Decode)?;
-        if head[5] != object_type.schema_version() {
-            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
-        }
-        if object_type != crate::object::ObjectType::Blob {
-            return Ok((object_type, None));
-        }
-        let len: [u8; 4] = head
-            .get(6..10)
-            .and_then(|b| b.try_into().ok())
-            .ok_or(StoreError::Decode(KitError::EmptyData))?;
-        Ok((object_type, Some(u64::from(u32::from_le_bytes(len)))))
+        self.packs.lookup(self, h, true, |location| {
+            let mut contents = location.open()?;
+            head_at(&mut contents)
+        })
     }
 
     /// Convenience: read raw bytes and decode into a typed [`Object`].
@@ -732,13 +735,23 @@ impl ObjectStore {
     /// payload's length goes to [`serialize::deserialize`], so every
     /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        let bytes = self.read_raw(h)?;
-        let (actual, decoded) = verified_id_and_object(&bytes);
-        check_hash(h, &actual)?;
-        if let Some(obj) = decoded {
-            return Ok(obj);
-        }
-        Ok(serialize::deserialize_owned(bytes)?)
+        self.read_with(h, |location| {
+            let bytes = Self::raw_at(&location)?;
+            let (actual, decoded) = verified_id_and_object(&bytes);
+            check_hash(h, &actual)?;
+            let object = match decoded {
+                Some(object) => object,
+                None => serialize::deserialize_owned(bytes)?,
+            };
+            if location.is_packed() && matches!(object, Object::Delta(_)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "delta object in local pack",
+                )
+                .into());
+            }
+            Ok(object)
+        })
     }
 
     /// Hash-verifying variant of [`object_type`](Self::object_type): reads
@@ -753,19 +766,7 @@ impl ObjectStore {
     /// Use `object_type` on hot read-only paths (status/diff snapshots)
     /// where nothing durable is published.
     pub fn verify_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        let bytes = self.read(h)?; // read() re-hashes and rejects on mismatch
-        if bytes.len() < 6 {
-            return Err(StoreError::Decode(KitError::EmptyData));
-        }
-        if bytes[1..5] != crate::object::MAGIC {
-            return Err(StoreError::Decode(KitError::InvalidMagic));
-        }
-        let object_type =
-            crate::object::ObjectType::from_u8(bytes[0]).map_err(StoreError::Decode)?;
-        if bytes[5] != object_type.schema_version() {
-            return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
-        }
-        Ok(object_type)
+        parse_type(&self.read(h)?)
     }
 
     /// Enumerate every object hash currently in the store by walking
@@ -799,6 +800,9 @@ impl ObjectStore {
             }
             read_shard_dir(&shard.path(), dir, &mut out)?;
         }
+        self.packs.collect(self, None, &mut out)?;
+        out.sort_unstable();
+        out.dedup();
         Ok(out)
     }
 
@@ -811,6 +815,14 @@ impl ObjectStore {
     /// # Errors
     /// [`StoreError::Io`] if the directory cannot be read.
     pub fn list_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
+        let mut out = self.list_loose_shard(shard)?;
+        self.packs.collect(self, Some(shard), &mut out)?;
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    pub(crate) fn list_loose_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
         let dir = format!("{shard:02x}");
         let path = self.objects_root.join(&dir);
         // Like `iter_object_hashes`, which skips an entry that is not a
@@ -824,6 +836,29 @@ impl ObjectStore {
         let mut out = Vec::new();
         read_shard_dir(&path, &dir, &mut out)?;
         Ok(out)
+    }
+
+    /// Serialized size of the object, regardless of storage location.
+    ///
+    /// # Errors
+    /// Returns a lookup failure or `ObjectNotFound` for a confirmed miss.
+    pub fn object_size(&self, h: &Hash) -> StoreResult<u64> {
+        self.size_lookup(h, true)
+    }
+
+    pub(crate) fn cached_object_size(&self, h: &Hash) -> StoreResult<u64> {
+        self.size_lookup(h, false)
+    }
+
+    fn size_lookup(&self, h: &Hash, refresh: bool) -> StoreResult<u64> {
+        self.packs
+            .lookup(self, h, refresh, |location| location.size())
+    }
+
+    pub(crate) fn known_object(&self, h: &Hash) -> bool {
+        self.packs
+            .lookup(self, h, false, |location| location.present())
+            .is_ok()
     }
 
     /// Filesystem metadata for object `h` (size + mtime), for gc's
@@ -866,7 +901,7 @@ impl ObjectStore {
         Ok(out)
     }
 
-    // `format` is immutable after init and never unlinked. Reuse it as a
+    // The `format` inode is never replaced or unlinked. Reuse it as a
     // kernel-lock anchor, so exclusion needs no new on-disk state. Each guard
     // owns a separately opened handle; dropping it (including process death)
     // releases the lock. Object bytes never leave their canonical path.
@@ -900,20 +935,8 @@ impl ObjectStore {
     /// [`StoreError::Io`] if the `format` file cannot be opened or locked.
     pub fn prune_guard(&self) -> StoreResult<PruneGuard> {
         Ok(PruneGuard {
-            _format: self.lock_writer()?,
+            format: self.lock_writer()?,
         })
-    }
-
-    fn cached_children(&self, h: &Hash) -> StoreResult<Vec<Hash>> {
-        use crate::object::ObjectType;
-        if matches!(self.object_type(h)?, ObjectType::Blob | ObjectType::Delta) {
-            return Ok(Vec::new());
-        }
-        let object = serialize::deserialize(&self.read_raw(h)?)?;
-        Ok(crate::ops::graph::children(
-            &object,
-            crate::ops::graph::ClosureMode::History,
-        ))
     }
 
     /// Final grace-window check and unlink, excluded from concurrent bulk
@@ -1051,6 +1074,34 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
 }
 
 /// Fill the header buffer unless the reader reaches EOF.
+fn parse_type(prologue: &[u8]) -> StoreResult<crate::object::ObjectType> {
+    if prologue.len() < 6 {
+        return Err(StoreError::Decode(KitError::EmptyData));
+    }
+    if prologue[1..5] != crate::object::MAGIC {
+        return Err(StoreError::Decode(KitError::InvalidMagic));
+    }
+    let object_type = crate::object::ObjectType::from_u8(prologue[0])?;
+    if prologue[5] != object_type.schema_version() {
+        return Err(StoreError::Decode(KitError::UnsupportedObjectVersion));
+    }
+    Ok(object_type)
+}
+
+fn head_at(reader: &mut impl Read) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+    let mut head = [0; 10];
+    let len = read_header_prefix(reader, &mut head)?;
+    let object_type = parse_type(&head[..len])?;
+    if object_type != crate::object::ObjectType::Blob {
+        return Ok((object_type, None));
+    }
+    let size: [u8; 4] = head[..len]
+        .get(6..10)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(StoreError::Decode(KitError::EmptyData))?;
+    Ok((object_type, Some(u64::from(u32::from_le_bytes(size)))))
+}
+
 fn read_header_prefix(reader: &mut impl Read, mut remaining: &mut [u8]) -> io::Result<usize> {
     let len = remaining.len();
     while !remaining.is_empty() {
@@ -1265,6 +1316,12 @@ fn read_to_end_capped<R: Read>(reader: R, size: usize, limit: usize) -> StoreRes
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_read_to_end_capped(bytes: &[u8], size: usize, limit: usize) -> StoreResult<Vec<u8>> {
     read_to_end_capped(bytes, size, limit)
+}
+
+/// Exercise local pack index validation without accessing the filesystem.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_local_pack_index(bytes: &[u8]) {
+    local_pack::fuzz_index(bytes);
 }
 
 #[cfg(test)]

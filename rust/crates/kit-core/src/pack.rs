@@ -73,6 +73,7 @@ mod spool;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
+use crate::store::StoreError;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 pub use file_read::{
     MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
@@ -2029,6 +2030,17 @@ pub trait DeltaBaseSource {
         admit(bytes.len())?;
         Ok(Some(bytes))
     }
+    /// Admit a replacement after a corrupt copy. Each call replaces the
+    /// previous reservation for this object. Sources with one copy use
+    /// the same admission path as before.
+    #[doc(hidden)]
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        self.base_with_admission(id, admit)
+    }
 }
 
 /// A [`DeltaBaseSource`] with no external bases: a pack must be
@@ -2049,10 +2061,10 @@ impl DeltaBaseSource for &ObjectStore {
     const VERIFIED: bool = true;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        if self.contains(id) {
-            Ok(Some(self.read(id)?))
-        } else {
-            Ok(None)
+        match self.read(id) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::ObjectNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -2061,18 +2073,45 @@ impl DeltaBaseSource for &ObjectStore {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        if !self.contains(id) {
-            return Ok(None);
-        }
-        self.read_with_allocator(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        match self.read_with_allocator(id, |len| {
             admit(len)?;
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(len)
                 .map_err(|_| PackError::PackfileTooLarge)?;
             Ok(bytes)
-        })
-        .map(Some)
+        }) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(PackError::Store(StoreError::ObjectNotFound(_))) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// The run-once API can reuse the same reservation for another copy of the
+// same size. Different-sized copies need a replacement reservation.
+fn admit_same_size(
+    admit: impl FnOnce(usize) -> Result<(), PackError>,
+) -> impl FnMut(usize) -> Result<(), PackError> {
+    let mut admit = Some(admit);
+    let mut admitted = None;
+    move |len| {
+        if let Some(admit) = admit.take() {
+            admit(len)?;
+            admitted = Some(len);
+        }
+        if admitted != Some(len) {
+            return Err(PackError::PackfileTooLarge);
+        }
+        Ok(())
     }
 }
 
@@ -2224,7 +2263,7 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
     const VERIFIED: bool = B::VERIFIED;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        self.base_with_admission(id, |_| Ok(()))
+        self.base_with_retry_admission(id, |_| Ok(()))
     }
 
     fn base_with_admission(
@@ -2232,14 +2271,27 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        self.inner.base_with_admission(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        let result = self.inner.base_with_retry_admission(id, |len| {
+            if let Some(prev) = self.charged.remove(id) {
+                self.budget.used = self.budget.used.saturating_sub(prev);
+            }
             let charged_len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
             self.budget.charge(charged_len)?;
-            admit(len)?;
-            let held = self.charged.entry(*id).or_default();
-            *held = held.saturating_add(charged_len);
-            Ok(())
-        })
+            self.charged.insert(*id, charged_len);
+            admit(len)
+        });
+        if !matches!(result, Ok(Some(_))) {
+            self.release(id);
+        }
+        result
     }
 }
 
@@ -3463,7 +3515,8 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
         let mut reservation = None;
         let bytes = bases
-            .base_with_admission(&base_hash, |len| {
+            .base_with_retry_admission(&base_hash, |len| {
+                drop(reservation.take());
                 reservation = Some(budget.charge(len)?);
                 Ok(())
             })?
@@ -3964,6 +4017,56 @@ mod tests {
                 assert_eq!(bases.budget.used, 0);
                 assert_eq!(resident.used.load(Ordering::Relaxed), 0);
             }
+        }
+    }
+
+    #[test]
+    fn retrying_a_base_replaces_its_decode_and_resident_reservations() {
+        struct Source;
+        impl DeltaBaseSource for Source {
+            fn base(&mut self, _: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                unreachable!("this source admits before allocation")
+            }
+
+            fn base_with_retry_admission(
+                &mut self,
+                _id: &Hash,
+                mut admit: impl FnMut(usize) -> Result<(), PackError>,
+            ) -> Result<Option<Vec<u8>>, PackError> {
+                admit(8)?;
+                admit(12)?;
+                Ok(Some(vec![0; 12]))
+            }
+        }
+
+        let id = [0; 32];
+        let mut source = Source;
+        let mut budget = DecodeBudget { used: 0, max: 12 };
+        let mut charged = std::collections::HashMap::new();
+        let mut bases = ChargedBases {
+            inner: &mut source,
+            budget: &mut budget,
+            charged: &mut charged,
+        };
+        for cap in [11, 12] {
+            let resident = ResidentBudget::new(cap, None);
+            let mut reservation = None;
+            let result = bases.base_with_retry_admission(&id, |len| {
+                drop(reservation.take());
+                reservation = Some(resident.charge(len)?);
+                Ok(())
+            });
+            if cap == 12 {
+                assert_eq!(result.unwrap().unwrap().len(), 12);
+                assert_eq!(bases.budget.used, 12);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 12);
+            } else {
+                assert!(matches!(result, Err(PackError::PackfileTooLarge)));
+                assert_eq!(bases.budget.used, 0);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+            }
+            bases.release(&id);
+            drop(reservation);
         }
     }
 
