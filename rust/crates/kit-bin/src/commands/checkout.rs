@@ -383,14 +383,10 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         return restore_failure(&e);
     }
 
-    // Write the files first, then the `-b`/`-B` branch ref, HEAD and the
-    // index together, as git does. A checkout stopped or failed partway
-    // leaves HEAD and the index where they were, and the files it wrote
-    // show as unstaged changes;
-    // running the same checkout again (with `-f`) finishes it. Signals are
-    // held across the ref, HEAD and index writes, so they never split, and
-    // a refused or stopped switch leaves no orphan branch behind.
-    //
+    // Finish restoring files and publishing the branch ref, HEAD, and
+    // index after a first signal. A second signal can stop the switch.
+    crate::signal::install();
+
     // Materialise the tree with `clean = false`: tracked entries are
     // written/overwritten, untracked files are preserved. Then delete
     // the tracked paths the target drops (computed above) and prune any
