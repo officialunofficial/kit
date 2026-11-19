@@ -98,6 +98,62 @@ fn rescans_from_legacy_open_and_covers_the_object_accessors() {
 }
 
 #[test]
+fn write_sink_presence_checks_use_staged_loose_and_known_pack_objects() {
+    use crate::store::ObjectSink;
+
+    let (_dir, layout, store) = fresh();
+    let mut writer = writer(&store);
+    let packed = writer.write(&blob(b"packed object")).unwrap();
+    writer.finish().unwrap();
+
+    let reader = ObjectStore::open(&layout).unwrap();
+    let loose = reader.write(&blob(b"loose object")).unwrap();
+    let batch = reader.batch();
+    let staged = batch.write(&blob(b"staged object")).unwrap();
+
+    assert!(!batch.has(&packed));
+    assert!(reader.contains(&packed));
+    assert!(batch.has(&packed));
+    assert!(batch.has(&loose));
+    assert!(batch.has(&staged));
+    assert!(!batch.has(&[0; 32]));
+}
+
+#[test]
+fn delta_base_adapters_verify_packed_bytes_and_admit_allocation() {
+    use crate::pack::{DeltaBaseSource, PackError};
+
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"packed delta base");
+    let mut writer = writer(&store);
+    let id = writer.write(&bytes).unwrap();
+    writer.finish().unwrap();
+
+    let mut source = &store;
+    assert_eq!(source.base(&id).unwrap().as_deref(), Some(bytes.as_slice()));
+    assert!(source.base(&[0; 32]).unwrap().is_none());
+
+    let mut admissions = 0;
+    let base = source.base_with_admission(&id, |len| {
+        assert_eq!(len, bytes.len());
+        admissions += 1;
+        Ok(())
+    });
+    assert_eq!(base.unwrap().as_deref(), Some(bytes.as_slice()));
+    assert_eq!(admissions, 1);
+    assert!(matches!(
+        source.base_with_admission(&id, |_| Err(PackError::PackfileTooLarge)),
+        Err(PackError::PackfileTooLarge)
+    ));
+    assert!(
+        source
+            .base_with_admission(&[0; 32], |_| panic!("admitted an absent base"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
     let (_dir, layout, store) = fresh();
     let bytes = blob(b"pack damage");
