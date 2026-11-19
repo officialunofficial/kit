@@ -386,6 +386,7 @@ pub fn save(path: &Path, entries: &[TrustEntry]) -> Result<(), (String, u8)> {
 fn link_target(path: &Path) -> std::io::Result<PathBuf> {
     use std::io::{Error, ErrorKind};
 
+    const MAX_LINKS: usize = 40;
     match std::fs::canonicalize(path) {
         Ok(resolved) => return Ok(resolved),
         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -395,9 +396,12 @@ fn link_target(path: &Path) -> std::io::Result<PathBuf> {
     // Canonicalization requires the final file to exist. Walk a dangling
     // chain one link at a time, resolving relative targets beside each link.
     let mut target = path.to_path_buf();
-    for _ in 0..40 {
+    for followed in 0..=MAX_LINKS {
         match std::fs::symlink_metadata(&target) {
             Ok(meta) if meta.is_symlink() => {
+                if followed == MAX_LINKS {
+                    break;
+                }
                 let link = std::fs::read_link(&target)?;
                 target = target.parent().unwrap_or(Path::new("")).join(link);
             }

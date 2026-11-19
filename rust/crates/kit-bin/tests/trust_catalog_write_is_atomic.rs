@@ -140,6 +140,30 @@ fn a_dangling_catalog_chain_keeps_every_symlink() {
     assert!(text.contains(&format!("ed25519:{hex}")), "catalog: {text}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dangling_catalog_can_have_forty_links() {
+    let td = tempfile::tempdir().unwrap();
+    for i in 0..40 {
+        std::os::unix::fs::symlink(
+            format!("link-{}", i + 1),
+            td.path().join(format!("link-{i}")),
+        )
+        .unwrap();
+    }
+    let first = td.path().join("link-0");
+    let hex = "ff".repeat(32);
+    let out = trust_add(td.path(), &first, &hex, false);
+
+    assert!(out.status.success(), "trust add failed: {out:?}");
+    assert_eq!(
+        fs::read_link(td.path().join("link-39")).unwrap(),
+        Path::new("link-40")
+    );
+    let text = fs::read_to_string(td.path().join("link-40")).unwrap();
+    assert!(text.contains(&format!("ed25519:{hex}")), "catalog: {text}");
+}
+
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
     fs::metadata(path).unwrap().permissions().mode() & 0o777
