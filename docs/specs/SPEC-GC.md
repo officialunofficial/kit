@@ -23,7 +23,7 @@ per-tree locks gc already holds are what serializes it, see §3.2).
 
 ## Why this spec exists
 
-kit's object store is append-only and never prunes, so unreachable
+Normal object-store writes append data, so unreachable
 objects accumulate (notably the commits superseded by `commit --amend`,
 `reset`, and `rebase`). `kit gc` reclaims them. Pruning is
 safe **only** against a complete, exact retention root set: anything
@@ -31,12 +31,11 @@ reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object &mdash; silent corruption.
 This spec pins that root set so gc has one normative definition to honor.
 
-The store keeps objects as loose files because gc removes single objects.
-Their ids are spread over the whole BLAKE3 keyspace, and unreachability has
-no link to insertion order. The Commonware `Freezer` has no per-key delete: its only
-removal, `destroy`, drops the whole structure. The `prunable::Archive` removes
-by `prune(min)`, which drops every index below the bound. Neither can
-remove one interior object and keep older and newer live objects.
+Gc can reclaim a loose object individually. Local packs retain every
+object they contain, including unreachable objects, through lossless
+merges. The mark, including chunk type checks, uses the shared object
+lookup (SPEC-OBJECTS §10). See
+[local pack maintenance](#local-pack-maintenance).
 
 ## Retention roots
 
@@ -226,7 +225,7 @@ pruned any of them (SPEC-TRANSPORT, "Pack-chain fetch").
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
-transport root, while gc sweeps only loose objects in
+transport root, while gc sweeps only the local store in
 `<common_dir>/objects` and takes roots only from `<common_dir>`. The two
 are disjoint, so gc cannot delete a pushed object, and a pushed ref is not
 a gc root.
@@ -250,8 +249,8 @@ objects or malformed cached reference metadata abort import before ref publicati
 locks and do not need an mtime refresh.
 
 The sweep's preliminary metadata read is advisory. Its final age check and
-unlink hold an exclusive kernel lock on the existing, immutable common-dir
-`format` file. Bulk writes and cached reuse hold the corresponding shared
+unlink hold an exclusive kernel lock on the existing common-dir
+`format` inode. Bulk writes and cached reuse hold the corresponding shared
 lock across their presence check, refresh and any rewrite, and a fetch
 holds it for its whole run. If refresh wins, the final check sees the new
 mtime; if unlink wins, a later write recreates the object and cached reuse
@@ -266,10 +265,10 @@ modification time is at least `grace` old, through the same final check as an
 object: under the exclusive lock of `format`, kept on contention, on uncertain
 metadata or when the file is younger. A fetch or a bulk write that is alive
 holds the shared lock, and any other writer holds a worktree lock that gc
-holds, so the sweep never removes the temp file of a live writer. The sweep
-touches no other file in the object directories.
+holds, so the sweep never removes the temp file of a live writer. The loose sweep
+touches no other file in the shard directories.
 
-Objects are never renamed out of the canonical namespace during a sweep.
+Loose objects are unlinked in place during a sweep.
 A crash before unlink leaves the object there, and the kernel releases the
 lock. A subsequent open can read it and a subsequent gc applies the same
 root and age checks. A crash after unlink has removed only an old,
@@ -286,7 +285,7 @@ roots that stay unchanged during the gc run) is present at `T` with
 T - mtime < grace
 ```
 
-using the object file's on-disk `mtime`. This holds because a gc whose
+using the on-disk `mtime` of the object file or its pack. This holds because a gc whose
 mark precedes the publication read `now <= T`, so it keeps every such
 object, and a gc whose mark follows the publication sees the new ref as a
 root. The bound is tight: with `T - mtime <= grace` instead, a gc can
@@ -311,11 +310,96 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
   Clock rollback or timestamp precision that violates the strict on-disk
   bound also falls outside this guarantee.
 
+## Local pack maintenance
+
+A published local pack has both final names and a valid index
+([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)). A scan
+recognizes only the final name and staged-file forms in SPEC-OBJECTS
+§10.1 and SPEC-PACKFILE §3.1.1, and considers only regular files in
+those forms. Readers and integrity scans ignore unknown files. Gc
+leaves them untouched. An optional sidecar cannot determine discovery,
+object identity, reachability, or retention.
+
+A pack's age comes from the on-disk mtime of its `.pack` file.
+A writer that reuses and refreshes an object refreshes the file
+containing the selected copy under the shared `format` guard. The
+index's mtime and the pack key convey no age. Under the exclusive
+`format` try-lock, the orphan sweep rechecks name, counterpart,
+file identity, and age. Keep a candidate on contention or uncertain,
+changed, or young metadata. Recognized staging files and lone final
+members are eligible after grace. A pair with a damaged index is an
+integrity error, even if every requested object has a loose copy.
+Gc aborts before sweeping on such an error. Enumeration skips a lone
+member, but existing hard-root closure checks still fail if any
+required object has no readable copy.
+
+Gc can merge packs to bound their count. The merge preserves every
+distinct id in the inputs, including unreachable ids. It verifies each
+copied object's canonical encoding and id, and fully verifies and
+publishes all replacements durably before retiring an input. An input
+whose coverage cannot be verified stays in place. If a merge cannot
+write some entries under its writer limits, it keeps packs containing
+those entries. An input key also used as an output key stays in place.
+
+Retirement takes the exclusive `format` try-lock and rechecks input
+identity and durable coverage by the verified replacement packs.
+Keep an input when its replacements cannot be read independently of it.
+Remove the pack name first.
+Make all such removals durable in the pack directory before removing
+their index names. Flush the directory after those index unlinks.
+Directory syncs can cover a batch of removals under the same lock.
+A crash before the first directory flush leaves either a complete input
+pair or a lone index. After that flush, the retired pack name cannot
+reappear through an index rebuild. A reader with a stale location can
+rediscover the replacements.
+
+Gc also drops a loose duplicate, including one left by a push, after
+verifying a durable packed copy of the same id. It rechecks the loose
+candidate and replacement under the exclusive `format` try-lock. Keep
+a loose copy still within grace when the packed copy is older. A
+duplicate can be reachable because the operation leaves a verified,
+usable copy. Gc keeps the loose copy when
+verification or durability is uncertain. This rule does not relax the
+mark or age checks for deleting the last copy of an object.
+
+### Dry run
+
+`kit gc -n` uses the same retention mark and integrity checks as a
+real run. It reports serialized payload bytes by physical copy:
+unreachable bytes in wholly dead packs, unreachable bytes in packs
+with both live and dead entries, and unreachable bytes old enough to
+pass grace. It also reports the live payload bytes in mixed packs
+with eligible dead bytes as the predicted survivor writes for
+rewriting those packs. These estimates exclude framing and index
+overhead. They do not imply that the current sweep reclaims packed
+garbage. The dry run changes no files.
+
+### Integrity checks and repair
+
+Fsck verifies the index and pack against each other, including the
+whole-file key, trailer, frame layout, canonical object bytes, and
+type-dependent ids. In repair mode, fsck MUST rebuild a bad index
+beside a verified pack. Under the exclusive `format` try-lock, recheck
+the same pack is still present, scan and verify it independently of
+the old index, and make its name durable before publishing a staged
+replacement index under SPEC-OBJECTS §10.1. If the pack changed, restart
+validation. A lone index is a crash leftover and cannot be rebuilt.
+Ordinary repair leaves a lone pack invisible. Gc handles recognized
+leftovers after grace.
+
+If the payload cannot be verified, report the damage. Invalidate the
+affected applied-pack records and fetch shortcuts, conservatively
+clearing them when their coverage is unknown, so refetch can obtain
+verified copies. Serialize invalidation with operations that read or
+publish those records. An integrity repair does not advance refs or
+create applied-pack records. Unresolved corruption remains an error.
+
+
 ## Invariants
 
 | Invariant | Enforced by |
 |---|---|
-| No live object is ever pruned | prune set is `store ∖ live`, the reachable closure over the complete `collect_roots` set ("Retention roots") |
+| No live object loses its last copy | loose pruning uses the complete retention mark. Duplicate removal and pack retirement require durable replacement coverage ("Local pack maintenance") |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |
