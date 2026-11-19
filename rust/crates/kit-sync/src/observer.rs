@@ -32,6 +32,9 @@ pub enum SyncEvent {
     PushPlanning { done: usize },
     /// Local lease checks completed; a branch is about to be transferred.
     PushBranchStarted { branch: String },
+    /// A tag publication finished. The command can report it if a later tag fails.
+    #[doc(hidden)]
+    TagPublished(crate::push::TagPushResult),
     /// One outgoing object was staged into a pack.
     ObjectsPacked { count: usize },
     /// A sealed outgoing pack was uploaded successfully.
