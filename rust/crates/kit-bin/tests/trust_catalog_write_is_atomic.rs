@@ -151,9 +151,8 @@ fn a_dangling_catalog_can_have_forty_links() {
         )
         .unwrap();
     }
-    let first = td.path().join("link-0");
     let hex = "ff".repeat(32);
-    let out = trust_add(td.path(), &first, &hex, false);
+    let out = trust_add(td.path(), Path::new("link-0"), &hex, false);
 
     assert!(out.status.success(), "trust add failed: {out:?}");
     assert_eq!(
