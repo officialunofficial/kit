@@ -688,6 +688,9 @@ fn a_tag_whose_closure_is_local_publishes_with_no_tag_map_read() {
     }
 }
 
+/// Each step a store took, with a tag ref's value at that time.
+type Steps = Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>>;
+
 /// A tag over objects the store already holds, as a concurrent fetch leaves
 /// them, publishes only once their directory entries are durable: that fetch
 /// may have made them visible and not yet flushed them (SPEC-OBJECTS §10.1).
@@ -718,8 +721,6 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
         .iter()
         .map(|o| root.join(&hash::to_hex(&o.id().unwrap())[..2]))
         .collect();
-    // Each step this repository's store took, with the tag ref at that time.
-    type Steps = Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>>;
     let steps: Steps = Arc::default();
     let _hook = {
         let steps = Arc::clone(&steps);
