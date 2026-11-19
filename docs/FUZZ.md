@@ -176,7 +176,7 @@ All targets share the same base invariants:
 - No panic.
 - No out-of-memory that is not an explicit `Vec::with_capacity`-caught
   allocation failure at the parser boundary.
-- Every iteration has a wall-clock budget. Use 100 ms by default.
+- Every iteration completes in under 100 ms of wall-clock.
 
 Target-specific invariants:
 
@@ -264,10 +264,9 @@ Every target body must satisfy all six:
      `claimed_entries > 100_000`) that short-circuit before calling
      into core, so the most pathological inputs don't even reach the
      parsers.
-4. **Time every iteration.** The default budget is 100 ms. The
-   deterministic stored blob smoke allows 500 ms because it waits for
-   filesystem write barriers on the scratch disk. The single-input
-   runner retries a slow call once to allow for transient stalls.
+4. **Every iteration is timed; if it takes more than 100 ms the test
+   aborts the remainder.** A slow iteration runs once more first. A busy
+   machine can stall one call. Only two slow calls in a row fail the test.
 5. **No `loop {}` or `while true {}` without a bounded iteration
    counter.**
 6. **Seeded deterministic PRNG.** Inputs are synthesized from a fixed

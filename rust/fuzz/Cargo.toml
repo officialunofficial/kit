@@ -21,7 +21,7 @@
 #      kit-core uses the global allocator in production, so we do not
 #      swap in a custom allocator in the fuzz harness — that would make
 #      the harness diverge from production. See docs/FUZZ.md.
-#   4. 100 ms wall-clock cap per iteration by default.
+#   4. 100 ms wall-clock cap per iteration.
 #   5. No unbounded loops; iteration counter mandatory.
 #   6. Seeded RNG so failures reproduce.
 
