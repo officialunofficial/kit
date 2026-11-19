@@ -64,7 +64,8 @@ pub enum CloneInitError {
 /// record of applied packs kept, so the pull that follows resumes that clone
 /// without downloading those packs again. Everything else an earlier run
 /// published or recorded is dropped: its remote-tracking refs, tags, records of
-/// verified tips, its fetch checkpoints and cursor records. A clone builds
+/// verified tips, its fetch checkpoints and cursor records, and the history of
+/// a branch it made and undid. A clone builds
 /// its trust from nothing, so the resumed pull checks every closure and
 /// history in full, locally, and republishes each branch it lists. When they
 /// cannot be dropped, the directory is refused as
@@ -91,17 +92,23 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
 }
 
 /// What a clone writes before it makes a branch or lands `HEAD`,
-/// lock files (`*.lock`) aside.
-const UNFINISHED_CLONE_ENTRIES: [&str; 8] = [
+/// lock files (`*.lock`) aside, and [`BRANCH_HISTORY_DIR`].
+const UNFINISHED_CLONE_ENTRIES: [&str; 9] = [
     "HEAD",
     "applied-packs",
     "attestations",
     "config",
     "format",
+    BRANCH_HISTORY_DIR,
     "objects",
     "refs",
     "tmp",
 ];
+
+/// The branch history a build with history records writes beside a branch.
+/// A clone interrupted once it made its branch undoes the branch but leaves
+/// this; a restart drops it.
+const BRANCH_HISTORY_DIR: &str = "history-v1";
 
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
 /// it made a branch or landed `HEAD`: `dir` holds only the repository
@@ -195,6 +202,10 @@ fn restart(dir: &Path, remote: &CloneRemote) -> Option<RepoLayout> {
     crate::anchor::remove_dir_if_present(&tracking).ok()?;
     crate::anchor::remove_dir_if_present(&dir.join(kit_core::store::KIT_DIR).join("refs/tags"))
         .ok()?;
+    crate::anchor::remove_dir_if_present(
+        &dir.join(kit_core::store::KIT_DIR).join(BRANCH_HISTORY_DIR),
+    )
+    .ok()?;
     crate::anchor::forget_all(&layout).ok()?;
     crate::checkpoint::forget_all(&layout).ok()?;
     crate::cursor::forget_all(&layout).ok()?;
