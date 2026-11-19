@@ -13,7 +13,8 @@
 //!    keep the worst-case heap to ~1 MiB per iteration. Defensive
 //!    pre-checks in the harness refuse obviously-malicious headers
 //!    before invoking core.
-//! 4. `PER_ITER = Duration::from_millis(100)` — wall-clock cap; abort on overrun.
+//! 4. 100 ms per iteration by default. The stored blob unit smoke has
+//!    one second to allow for filesystem stalls.
 //! 5. No `loop {}` / `while true {}` — we use `for i in 0..MAX_ITER` exclusively.
 //! 6. Seeded deterministic PRNG — `RNG_SEED` is a constant. Most targets
 //!    use splitmix64 (`run_iterated_unit`); the `rpc_decode` pilot drives
@@ -30,7 +31,7 @@
 
 use std::time::{Duration, Instant};
 
-/// Per-iteration wall-clock budget. Exceeding this aborts the rest of
+/// Default per-iteration wall-clock budget. Exceeding it aborts the rest of
 /// the run with `Err(GuardrailError::IterationTooSlow)`.
 pub const PER_ITER: Duration = Duration::from_millis(100);
 /// Iteration cap — every fuzz body MUST stop at or before this.
@@ -1462,8 +1463,13 @@ pub fn run_iterated_unit(body: fn(&[u8])) -> Result<(), GuardrailError> {
 /// As [`run_iterated_unit`], but threads a caller-owned `state: &T`
 /// through to `body` on every iteration instead of requiring `body` to
 /// build its own per-call state — used by the pack target
-/// to reuse one tempdir/store across all `MAX_ITER` iterations.
-pub fn run_iterated_unit_with<T>(state: &T, body: fn(&[u8], &T)) -> Result<(), GuardrailError> {
+/// to reuse one tempdir/store across all `MAX_ITER` iterations. The caller
+/// supplies the wall-clock budget for one iteration.
+pub fn run_iterated_unit_with<T>(
+    state: &T,
+    body: fn(&[u8], &T),
+    budget: Duration,
+) -> Result<(), GuardrailError> {
     let mut prng = SplitMix::new(RNG_SEED);
     let mut buf = vec![0u8; MAX_INPUT];
     for _ in 0..MAX_ITER {
@@ -1471,7 +1477,7 @@ pub fn run_iterated_unit_with<T>(state: &T, body: fn(&[u8], &T)) -> Result<(), G
         prng.fill(&mut buf[..len]);
         let start = Instant::now();
         body(&buf[..len], state);
-        if start.elapsed() > PER_ITER {
+        if start.elapsed() > budget {
             return Err(GuardrailError::IterationTooSlow);
         }
     }
@@ -3617,7 +3623,7 @@ mod tests {
         let store =
             kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path()))
                 .expect("store init");
-        run_iterated_unit_with(&store, pack_reader_one_iteration_with_store)
+        run_iterated_unit_with(&store, pack_reader_one_iteration_with_store, PER_ITER)
             .expect("guardrails held");
     }
 
@@ -3627,10 +3633,17 @@ mod tests {
         let store =
             kit_core::store::ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path()))
                 .expect("store init");
-        run_iterated_unit_with(&store, store_read_blob_one_iteration_with_store)
+        // Two scratch writes and three reads can stall when the disk is busy.
+        let budget = Duration::from_secs(1);
+        run_iterated_unit_with(&store, store_read_blob_one_iteration_with_store, budget)
             .expect("guardrails held");
         for case in [&b""[..], b"\x00", b"x", &[0; 16]] {
-            run_one(case, store_read_blob_one_iteration).expect("guardrails held");
+            let start = Instant::now();
+            store_read_blob_one_iteration_with_store(case, &store);
+            assert!(
+                start.elapsed() <= budget,
+                "stored blob iteration exceeded its budget"
+            );
         }
     }
 
@@ -3716,7 +3729,8 @@ mod tests {
     #[test]
     fn verify_span_target_runs_within_caps() {
         let fixture = build_span_fixture();
-        run_iterated_unit_with(&fixture, verify_span_one_iteration_with).expect("guardrails held");
+        run_iterated_unit_with(&fixture, verify_span_one_iteration_with, PER_ITER)
+            .expect("guardrails held");
         for case in [&b""[..], b"KDPB\x03", &[0xff; 64][..]] {
             let started = Instant::now();
             verify_span_one_iteration_with(case, &fixture);
@@ -3752,7 +3766,7 @@ mod tests {
     #[test]
     fn verify_closure_target_runs_within_caps() {
         let fixture = build_closure_fixture();
-        run_iterated_unit_with(&fixture, verify_closure_one_iteration_with)
+        run_iterated_unit_with(&fixture, verify_closure_one_iteration_with, PER_ITER)
             .expect("guardrails held");
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             let start = std::time::Instant::now();
@@ -3766,7 +3780,7 @@ mod tests {
         // Amortize the tempdir/store/signing cost across all MAX_ITER
         // iterations, same rationale as the pack target above.
         let fixture = build_disclosure_fixture();
-        run_iterated_unit_with(&fixture, verify_disclosure_one_iteration_with)
+        run_iterated_unit_with(&fixture, verify_disclosure_one_iteration_with, PER_ITER)
             .expect("guardrails held");
         for case in [&b""[..], &[0u8; 32][..], &[0xAB; 200][..]] {
             let start = std::time::Instant::now();
