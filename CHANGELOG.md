@@ -10,6 +10,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Keep all symlinks intact when saving a trust catalog through a dangling chain.
+- Reduce stderr writes when printing the commit summary.
 
 ## [0.9.0] - 2026-11-19
 
