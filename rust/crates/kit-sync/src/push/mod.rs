@@ -226,9 +226,15 @@ pub fn push(
     let mut store = ObjectStore::open(&layout)?;
     store.set_sync_policy(options.sync_policy);
     let tx = PushContext::new(source, options.control.observer, &store);
-    let mut report = push_refs(&layout, &store, &tx, options)?;
+    let mut report = {
+        // Held until the last tracking ref is written, as a fetch holds it:
+        // a gc that runs during the push deletes nothing, so a tracking ref
+        // never names a tip gc removed (see `ObjectStore::prune_guard`).
+        let _prune_guard = store.prune_guard()?;
+        push_refs(&layout, &store, &tx, options)?
+    };
     if options.attestations {
-        attestations::run(&layout, &store, &tx, options, &mut report);
+        attestations::run(&layout, &store, &tx, options, &mut report)?;
         tx.observer.event(&SyncEvent::AttestationsPushed {
             count: report.attestations_pushed,
         });
@@ -305,7 +311,11 @@ fn push_refs(
                         options.rebaseline_threshold,
                         options.pack_payload_cap,
                         &options.control,
-                        &mut |published| Ok(tracking.write(&r.name, &published)?),
+                        &mut |published| {
+                            publish_tracking(layout, tx, || {
+                                Ok(tracking.write(&r.name, &published)?)
+                            })
+                        },
                     )?;
                     report.refs += 1;
                 }
@@ -323,12 +333,24 @@ fn push_refs(
             let tip = refs::read_ref(layout, local)?
                 .ok_or_else(|| SyncError::RemoteBranchMissing(local.clone()))?;
             refs::check_pushable_branch(remote)?;
+            // Read once: the fast-forward check and the lease must use the
+            // same value. A fetch that moved the tracking ref between two
+            // reads could pass the check against one tip and lease another,
+            // so a plain push would replace a head it never checked.
+            let tracked = refs::read_remote_ref(layout, options.remote_name, remote)?;
             // The remote's head decides, not the tracking ref: the remote
             // may have lost the branch since this repository last saw it.
             let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
             let at_tip = head == Some(tip);
             if at_tip && tx.read_ref(&packmap_ref(remote))?.is_some() {
-                refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
+                publish_tracking(layout, tx, || {
+                    Ok(refs::write_remote_ref(
+                        layout,
+                        options.remote_name,
+                        remote,
+                        &tip,
+                    )?)
+                })?;
                 return Ok(PushReport {
                     attestations_pushed: 0,
                     attestation_warnings: Vec::new(),
@@ -342,7 +364,7 @@ fn push_refs(
             if !at_tip
                 && matches!(policy, PushLease::FastForward)
                 && head.is_some()
-                && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
+                && let Some(tracked) = tracked
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
             {
                 return Err(PushError::NonFastForwardPush {
@@ -353,7 +375,11 @@ fn push_refs(
                 // Rebuild the missing packmap only for the head we saw.
                 refs::RefWriteCondition::Match(tip)
             } else {
-                match (policy, lease(layout, options.remote_name, remote)?) {
+                let lease = tracked.map_or(
+                    refs::RefWriteCondition::Missing,
+                    refs::RefWriteCondition::Match,
+                );
+                match (policy, lease) {
                     (PushLease::Force, _) => refs::RefWriteCondition::Any,
                     // A fast-forward push of a branch the remote does not hold
                     // creates it: there is nothing on the remote to overwrite.
@@ -378,12 +404,14 @@ fn push_refs(
                 options.pack_payload_cap,
                 &options.control,
                 &mut |published| {
-                    Ok(refs::write_remote_ref(
-                        layout,
-                        options.remote_name,
-                        remote,
-                        &published,
-                    )?)
+                    publish_tracking(layout, tx, || {
+                        Ok(refs::write_remote_ref(
+                            layout,
+                            options.remote_name,
+                            remote,
+                            &published,
+                        )?)
+                    })
                 },
             )?;
             Ok(PushReport {
@@ -438,6 +466,24 @@ fn push_tag_report(
         deleted: None,
     })
 }
+/// Write a tracking ref under the worktree lock, as a fetch publishes one.
+/// gc holds that lock across its mark and sweep, so it either marks from
+/// the new ref or finishes before the ref exists; the prune guard the push
+/// holds keeps its sweep from deleting anything meanwhile.
+fn publish_tracking(
+    layout: &kit_core::layout::RepoLayout,
+    tx: &PushContext<'_>,
+    write: impl FnOnce() -> Result<(), PushError>,
+) -> Result<(), PushError> {
+    let _lock = crate::lock::wait_for_lock(
+        layout.worktree_state_dir(),
+        kit_core::repo_lock::WORKTREE_LOCK,
+        tx.observer,
+        &crate::lock::LockWait::new(None),
+    )?;
+    write()
+}
+
 fn lease(
     layout: &kit_core::layout::RepoLayout,
     remote: &str,
