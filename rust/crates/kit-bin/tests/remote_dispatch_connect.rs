@@ -2407,7 +2407,11 @@ fn check_attestation_push(advertised: bool) {
     )
     .unwrap();
     let bytes = attestation_fetch::envelope(tip);
-    kit_attest::store::save(&RepoLayout::single(local.path()), &tip, &bytes).unwrap();
+    let layout = RepoLayout::single(local.path());
+    kit_attest::store::save(&layout, &tip, &bytes).unwrap();
+    let mirror = "https://example.org/repo?key=example";
+    let unsafe_envelope = attestation_fetch::git_locator_envelope(tip, "git-bridge", mirror);
+    let (unsafe_id, _) = kit_attest::store::save(&layout, &tip, &unsafe_envelope).unwrap();
     let mut options = kit_sync::PushOptions::default();
     options.attestations = true;
     options.remote_name = "origin";
@@ -2424,7 +2428,17 @@ fn check_attestation_push(advertised: bool) {
     .unwrap();
     assert_eq!(report.steps, 0);
     assert_eq!(report.attestations_pushed, usize::from(advertised));
-    assert_eq!(report.attestation_warnings.len(), 1);
+    assert_eq!(
+        report.attestation_warnings.len(),
+        if advertised { 2 } else { 1 }
+    );
+    if advertised {
+        assert!(report.attestation_warnings.iter().any(|warning| {
+            warning.contains("skipped")
+                && warning.contains(&kit_core::hash::to_hex(&unsafe_id))
+                && !warning.contains(mirror)
+        }));
+    }
     assert_eq!(
         calls
             .lock()

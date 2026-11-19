@@ -36,7 +36,7 @@ fn cli_config_opt_out_and_explicit_refetch_control_envelope_writes() {
     assert!(!path.exists());
     std::fs::write(
         config_root.join("kit/config"),
-        "fetch.attestations = false\n",
+        "fetch.attestations = FALSE\n",
     )
     .unwrap();
     let out = run(&cloned, &["fetch"]);
@@ -119,7 +119,7 @@ fn attestation_config_supports_set_show_scopes_and_unset_without_invalid_writes(
     let root = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| config_run(root.path(), args);
     assert!(run(&["init"]).status.success());
-    let set = run(&["config", "--global", "fetch.attestations", "false"]);
+    let set = run(&["config", "--global", "fetch.attestations", "fAlSe"]);
     assert!(
         set.status.success(),
         "{}",
