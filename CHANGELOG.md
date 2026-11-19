@@ -7,6 +7,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Continue SSH transfers in a fresh session after 10,000 requests.
+- Report tags that landed before a tag push failed.
+
 ## [0.9.0] - 2026-11-19
 
 ### Security

@@ -952,7 +952,16 @@ impl TagPush<'_, '_> {
 
     fn record(&mut self, local: &Local, row: Row, advance: Advance) {
         match advance {
-            Advance::Landed { .. } => self.finish(local, row.landed(local.value)),
+            Advance::Landed { .. } => {
+                let outcome = row.landed(local.value);
+                self.tx
+                    .observer
+                    .event(&crate::SyncEvent::TagPublished(TagPushResult {
+                        name: local.name.clone(),
+                        outcome: outcome.clone(),
+                    }));
+                self.finish(local, outcome);
+            }
             Advance::Conflict => self.retry.push(local.clone()),
             Advance::Refused { message, .. }
             | Advance::Stale(message)

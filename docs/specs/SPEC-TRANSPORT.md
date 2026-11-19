@@ -757,7 +757,7 @@ The `kit serve` server enforces per-connection budgets to bound a
 misbehaving or malicious client (see
 [`kit-serve/src/budget.rs`](../../rust/crates/kit-serve/src/budget.rs)):
 
-- `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on frames after `Hello`.
+- `MAX_FRAMES_PER_CONN = 10_000` &mdash; hard cap on top-level frames after `Hello`.
 - `MAX_BYTES_PER_CONN  = 1 GiB`  &mdash; cap on estimated request bytes.
 
 Each cap trips emits an `Error{ ERROR_CODE_INVALID_REQUEST }` and
@@ -772,22 +772,18 @@ branch changed: the SSH transport names no repository, so a fetch keeps no
 per-branch checkpoint for it and walks each packmap chain again. The tag phase
 (§1.4) adds one `ListRefs` of `refs/tags/`, and one of `refs/kit/tagmap/` only
 when some tag is not yet proved from local objects. With one node per packmap
-chain and no new tag that is two frames plus two per branch, so one session
-fetches at most 4,999 branches; a fetch of more fails closed with the reply
-above. A new annotated tag pushed alone adds one node and one pack download,
-so a clone of a remote with about 5,000 such tags fails the same way; tags
-pushed together share their node and pack.
+chain and no new tag, 4,999 branches use all 10,000 frames. Additional
+requests require a fresh session. A clone of many individually pushed
+annotated tags can also take multiple sessions as it downloads their nodes
+and packs. Tags pushed together share a node and pack.
 When the served repository offers a cursor (§4.2.2), a fetch that finds the
 cursor it recorded after its last complete fetch costs one frame, the
-`ReadRepoCursor` request, and the 4,999-branch limit does not apply to it. A
-fetch that finds another cursor, or none, works as above. A server that
-predates the request makes every fetch work as above, plus one frame.
-`kit fetch`, `kit pull` and `kit clone` open one session each. A push walks
-the branch's whole packmap chain over its session. A push re-baselines the
-chain (§7.2), so the walk stays within the re-baseline depth while one node
-can list the chain's packs. Past that, a push's frames grow with the number
-of pushes the branch has had. The cap is not raised: it is what bounds
-a client that sends requests without end.
+`ReadRepoCursor` request. A fetch that finds another cursor, finds none, or
+uses a server that predates the request can use the full session budget.
+A push walks the branch's packmap chain. Re-baselining (§7.2) keeps the
+chain short while one node can list its packs. A push that walks a longer
+chain or an attestation transfer that walks a long log can need more than
+one session. Each ref listing uses one request frame and one response frame.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
@@ -830,11 +826,14 @@ stop at the sink as `TransportError::PayloadTooLarge`.
 
 ### 4.5 Retry / reconnect
 
-When the next request would exceed the byte budget in §4.4, the client
-closes the current session and starts a new one with `Hello` before
-sending that request. During a push, the client starts the next pack
-upload at its header on the new session. The push publishes its refs
-after uploading all required data packs and the packlist.
+When the next request would exceed either session budget in §4.4, the
+client closes the current session and starts a new one with `Hello` before
+sending that request. An upload counts as one top-level frame and stays
+on one session. At the 1 GiB byte limit, the client needs at most 1,311
+chunk frames, within the server's separate upload chunk cap. The client
+refuses a larger upload before reading the pack or sending its header.
+A reconnect for budget rollover continues with the next request. The push
+publishes its refs after uploading all required data packs and the packlist.
 
 `SshTransport` is connection-oriented (a single long-lived `ssh(1)`
 child), so honoring the §7 retry ladder for `ConnectionFailed` takes
