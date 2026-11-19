@@ -38,7 +38,7 @@ impl LocalPacks {
 
     fn refresh_enabled(&self, store: &ObjectStore) -> StoreResult<bool> {
         if !self.enabled.load(Ordering::Relaxed) {
-            let enabled = format::check(&store.format_path(), false)?;
+            let enabled = format::check(&store.format_path())?;
             if enabled {
                 self.enabled.store(true, Ordering::Relaxed);
             }

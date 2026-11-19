@@ -29,7 +29,7 @@ impl<'a> Writer<'a> {
     ) -> StoreResult<Self> {
         assert!((1..=MAX_ENTRIES).contains(&max_entries));
         assert!((1..=MAX_TOTAL_PAYLOAD).contains(&max_payload));
-        if !format::check(&store.format_path(), true)? {
+        if !format::check(&store.format_path())? {
             // A publisher racing the first activation can try again once the
             // other publisher releases the exclusive lock.
             format::activate(&store.format_path())?;

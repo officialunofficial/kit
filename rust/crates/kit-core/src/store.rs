@@ -339,7 +339,7 @@ impl ObjectStore {
         if !objects_root.is_dir() {
             return Err(StoreError::NotAKitRepository);
         }
-        let packed = format::check(&layout.format_file(), true)?;
+        let packed = format::check(&layout.format_file())?;
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(packed)),

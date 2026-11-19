@@ -28,8 +28,9 @@ the remaining zero-grace and long-import restrictions.
 
 A local pack is visible through its index and pack names. The store syncs
 both staged files and the packed marker before publication. The pack
-name is durable before the index name is published. Interrupted marker
-activation finishes on the existing format inode.
+name is durable before the index name is published. Readers treat the
+exact zero-tail marker as loose storage. Activation writes and syncs the
+capability byte at offset seven on the existing format inode.
 
 Verified readers recompute the id of the selected copy and try other
 locations if it fails. Pack repair scans the full pack before replacing
