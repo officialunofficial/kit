@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-19: macOS fix PR 212 verified by a green macOS dispatch run on its branch; not merged because kit-ci-pr (Cloud Build) is red. kit-ci-pr is also red on merged PR 213, so the failure is repo-wide since 2026-11-18 and its log is unreadable from the GitHub tools; needs a person to open the build log. main macOS leg still red until 212 lands. PR 195/152/93 unchanged; Dependabot 171/173 left for Monday.",
+  "last_findings": "2026-11-19: PR 212 (macOS TMPDIR trailing-slash fix) was merged by a person; the macOS leg on main should turn green on the next push, verify next run. kit-ci-pr (Cloud Build) was red on PRs 212 and 213 since 2026-11-18, cause unread. PR 195/152/93 unchanged; Dependabot 171/173 left for Monday.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
