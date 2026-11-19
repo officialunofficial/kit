@@ -2410,7 +2410,7 @@ fn check_attestation_push(advertised: bool) {
     let layout = RepoLayout::single(local.path());
     kit_attest::store::save(&layout, &tip, &bytes).unwrap();
     let mirror = "https://example.org/repo?key=example";
-    let unsafe_envelope = attestation_fetch::git_bridge_envelope(tip, mirror);
+    let unsafe_envelope = attestation_fetch::git_locator_envelope(tip, "git-bridge", mirror);
     let (unsafe_id, _) = kit_attest::store::save(&layout, &tip, &unsafe_envelope).unwrap();
     let mut options = kit_sync::PushOptions::default();
     options.attestations = true;

@@ -407,8 +407,15 @@ fn depth_64_rebaseline_preserves_oldest_first_pack_order_under_update_permission
 }
 
 #[test]
-fn push_skips_unsafe_git_bridge_envelopes_and_publishes_safe_envelopes() {
-    for (mirror, reason) in [
+fn push_skips_private_git_locators_and_publishes_safe_envelopes() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&tx);
+    let (dir, tip) = local(&tx, "example.com/local/v1");
+    let layout = RepoLayout::single(dir.path());
+    let safe = std::fs::read(&kit_attest::store::list(&layout, &tip).unwrap()[0]).unwrap();
+    let mut published = vec![safe];
+    let mut skipped = Vec::new();
+    let bridge_cases = [
         ("https://user:example@example.org/repo", Some("userinfo")),
         ("ssh://user@example.org/repo", Some("userinfo")),
         ("/private/example/repo", Some("local path")),
@@ -429,48 +436,63 @@ fn push_skips_unsafe_git_bridge_envelopes_and_publishes_safe_envelopes() {
         ("https://example.org/:/private/repo", Some("local path")),
         ("1https://example.org/repo", Some("local path")),
         ("ssh://[::1]:22/group/repo", None),
+        ("ssh://[::1]/group/repo", None),
+        ("https://example.org:443/repo", None),
         ("https://example.org/repo", None),
         ("local", None),
+    ];
+    let import_cases = [
+        ("/private/old-import/repo", Some("local path")),
+        ("https://user:partial", Some("userinfo")),
+        ("https://[user:partial]/repo", Some("userinfo")),
+        ("https://user:123:456/repo", Some("userinfo")),
+        ("https://[::1]partial/repo", Some("userinfo")),
+        ("https://[::1/repo", Some("userinfo")),
+        ("https://:443/repo", Some("userinfo")),
+        ("https://example.org:/repo", Some("userinfo")),
+        ("file:///private/source/repo", Some("local path")),
+        ("https://example.org/source", None),
+        ("local", None),
+    ];
+    for (kind, cases) in [
+        ("git-bridge", bridge_cases.as_slice()),
+        ("git-import", import_cases.as_slice()),
     ] {
-        let tx = kit_transport_memory::MemoryTransport::new();
-        attestation_fetch::code(&tx);
-        let (dir, tip) = local(&tx, "example.com/local/v1");
-        let layout = RepoLayout::single(dir.path());
-        let safe = std::fs::read(&kit_attest::store::list(&layout, &tip).unwrap()[0]).unwrap();
-        let bridge = attestation_fetch::git_bridge_envelope(tip, mirror);
-        let (id, path) = kit_attest::store::save(&layout, &tip, &bridge).unwrap();
-        let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
-        assert_eq!(
-            report.attestations_pushed,
-            1 + usize::from(reason.is_none())
-        );
-        let mut pushed = if let Some(reason) = reason {
-            assert!(report.attestation_warnings.iter().any(|warning| {
-                warning.contains("skipped")
-                    && warning.contains(&hash::to_hex(&id))
-                    && warning.contains(reason)
-                    && !warning.contains(mirror)
-            }));
-            assert!(path.is_file());
-            vec![safe.as_slice()]
-        } else {
-            assert!(
-                report
-                    .attestation_warnings
-                    .iter()
-                    .all(|warning| !warning.contains("git-bridge"))
-            );
-            vec![safe.as_slice(), bridge.as_slice()]
-        };
-        pushed.sort_by_key(|bytes| hash::hash(bytes));
-        let expected = kit_attest::pack::build(&pushed, 4096).unwrap();
-        let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
-        let node = kit_core::transfer::decode_packlist(
-            &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(node.packs, vec![hash::hash(&expected)]);
+        for &(locator, reason) in cases {
+            let bytes = attestation_fetch::git_locator_envelope(tip, kind, locator);
+            let (id, path) = kit_attest::store::save(&layout, &tip, &bytes).unwrap();
+            if let Some(reason) = reason {
+                skipped.push((kind, locator, id, path, reason));
+            } else {
+                published.push(bytes);
+            }
+        }
     }
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, published.len());
+    assert_eq!(report.attestation_warnings.len(), skipped.len() + 1);
+    for (kind, locator, id, path, reason) in skipped {
+        assert!(report.attestation_warnings.iter().any(|warning| {
+            warning.contains("skipped")
+                && warning.contains(kind)
+                && warning.contains(&hash::to_hex(&id))
+                && warning.contains(reason)
+                && !warning.contains(locator)
+        }));
+        assert!(path.is_file());
+    }
+    published.sort_by_key(|bytes| hash::hash(bytes));
+    let expected = kit_attest::pack::build(
+        &published.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        1 << 20,
+    )
+    .unwrap();
+    let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
+    let node = kit_core::transfer::decode_packlist(
+        &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(node.packs, vec![hash::hash(&expected)]);
 }
 
 #[test]
@@ -478,7 +500,7 @@ fn compaction_skips_reuploading_unsafe_git_bridge_envelopes() {
     let tx = kit_transport_memory::MemoryTransport::new();
     let (tip, _) = attestation_fetch::code(&tx);
     let mirror = "https://example.org/repo?key=example";
-    let bridge = attestation_fetch::git_bridge_envelope(tip, mirror);
+    let bridge = attestation_fetch::git_locator_envelope(tip, "git-bridge", mirror);
     let safe = attestation_fetch::envelope(tip);
     let safe_pack = kit_attest::pack::build(&[&safe], 4096).unwrap();
     let old_pack = kit_attest::pack::build(&[&bridge, &safe], 4096).unwrap();
@@ -506,6 +528,7 @@ fn compaction_skips_reuploading_unsafe_git_bridge_envelopes() {
     assert_eq!(node.packs, vec![hash::hash(&safe_pack)]);
     assert!(report.attestation_warnings.iter().any(|warning| {
         warning.contains("skipped")
+            && warning.contains("during compaction")
             && warning.contains(&hash::to_hex(&hash::hash(&bridge)))
             && warning.contains("query")
             && !warning.contains(mirror)

@@ -214,7 +214,13 @@ fn publish(
         if hash::hash(&bytes) != *expected || fetched(layout, expected)? {
             return Err("candidate changed during push".into());
         }
-        batch.add(bytes, tx, &mut prepared, &mut report.attestation_warnings)?;
+        batch.add(
+            bytes,
+            tx,
+            &mut prepared,
+            &mut report.attestation_warnings,
+            "",
+        )?;
     }
     batch.flush(tx, &mut prepared)?;
     let budget = tx
@@ -418,28 +424,36 @@ fn chain(tx: &PushContext<'_>, mut head: Option<Hash>) -> Result<(usize, Vec<Has
     Ok((seen.len(), packs))
 }
 
-fn git_bridge_mirror_issue(payload: &[u8]) -> Result<Option<&'static str>, serde_json::Error> {
+fn git_locator_issue(
+    payload: &[u8],
+) -> Result<Option<(&'static str, &'static str)>, serde_json::Error> {
     let statement: serde_json::Value = serde_json::from_slice(payload)?;
-    Ok(statement
+    let (kind, field) = match statement
         .get("predicateType")
         .and_then(serde_json::Value::as_str)
-        .filter(|kind| kind.ends_with("/git-bridge/v1"))
-        .and_then(|_| statement.pointer("/predicate/mirror"))
+    {
+        Some(kind) if kind.ends_with("/git-bridge/v1") => ("git-bridge", "/predicate/mirror"),
+        Some(kind) if kind.ends_with("/git-import/v1") => ("git-import", "/predicate/remoteUrl"),
+        _ => return Ok(None),
+    };
+    Ok(statement
+        .pointer(field)
         .and_then(serde_json::Value::as_str)
-        .and_then(mirror_issue))
+        .and_then(locator_issue)
+        .map(|reason| (kind, reason)))
 }
 
-fn mirror_issue(mirror: &str) -> Option<&'static str> {
+fn locator_issue(locator: &str) -> Option<&'static str> {
     const LOCAL_PATH: &str = "contains a local path or ambiguous locator";
-    if mirror == "local" {
+    if locator == "local" {
         return None;
     }
-    let Some((scheme, rest)) = mirror.split_once("://") else {
+    let Some((scheme, rest)) = locator.split_once("://") else {
         return Some(LOCAL_PATH);
     };
     let mut scheme_bytes = scheme.bytes();
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    if scheme.len() < 2
+    if scheme.len() == 1
         || scheme.eq_ignore_ascii_case("file")
         || !scheme_bytes
             .next()
@@ -447,21 +461,42 @@ fn mirror_issue(mirror: &str) -> Option<&'static str> {
         || !scheme_bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
         || authority.is_empty()
         || path.starts_with(':')
-        || mirror.contains('\\')
+        || locator.contains('\\')
     {
         return Some(LOCAL_PATH);
     }
     // An unexpected delimiter anywhere in a legacy locator can be part of a
     // malformed credential. Treat it as private even outside the authority.
-    if mirror.contains('?') {
+    if locator.contains('?') {
         Some("contains a URL query")
-    } else if mirror.contains('#') {
+    } else if locator.contains('#') {
         Some("contains a URL fragment")
-    } else if mirror.contains('@') || authority.contains('%') {
+    } else if locator.contains('@') || authority.contains('%') || !network_authority(authority) {
         Some("may contain URL userinfo")
     } else {
         None
     }
+}
+
+// Older imports could strip part of a credential as a query or fragment,
+// leaving a non-port after the authority's colon.
+fn network_authority(authority: &str) -> bool {
+    let (host, port) = if let Some(address) = authority.strip_prefix('[') {
+        let Some((host, port)) = address.split_once(']') else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        (host, port)
+    } else {
+        authority.split_at(authority.find(':').unwrap_or(authority.len()))
+    };
+    !host.is_empty()
+        && (port.is_empty()
+            || port.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+            }))
 }
 
 struct Batch {
@@ -485,16 +520,17 @@ impl Batch {
         tx: &PushContext<'_>,
         keys: &mut Vec<Prepared>,
         warnings: &mut Vec<String>,
+        warning_context: &str,
     ) -> Result<(), Failure> {
         // Check the exact bytes used to build new and compacted packs.
         let env = kit_attest::envelope::decode_expecting(
             &bytes,
             kit_attest::envelope::PAYLOAD_TYPE_IN_TOTO,
         )?;
-        if let Some(reason) = git_bridge_mirror_issue(&env.payload)? {
+        if let Some((kind, reason)) = git_locator_issue(&env.payload)? {
             let id = hash::to_hex(&hash::hash(&bytes));
             warnings.push(format!(
-                "skipped git-bridge attestation {id}: mirror {reason}"
+                "skipped {kind} attestation {id}{warning_context}: locator {reason}"
             ));
             return Ok(());
         }
@@ -610,7 +646,15 @@ fn compact_packs(
                 if seen.len() == attestation_records::PUSH_CACHE_IDS {
                     error = Some("attestation compaction envelope limit".into());
                 } else if seen.insert(id) {
-                    error = batch.add(bytes.to_vec(), tx, &mut keys, warnings).err();
+                    error = batch
+                        .add(
+                            bytes.to_vec(),
+                            tx,
+                            &mut keys,
+                            warnings,
+                            " during compaction",
+                        )
+                        .err();
                 }
             },
         )?;
@@ -695,7 +739,7 @@ mod tests {
         let mut batch = Batch::new(4096);
         let mut packs = Vec::new();
         batch
-            .add(bytes.to_vec(), &context, &mut packs, &mut Vec::new())
+            .add(bytes.to_vec(), &context, &mut packs, &mut Vec::new(), "")
             .unwrap();
         batch.flush(&context, &mut packs).unwrap();
         kit_core::pack::sweep_spool_dir(&store.spool_dir());
