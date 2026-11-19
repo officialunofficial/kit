@@ -201,8 +201,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inactivity.
 - **Breaking:** `kit-transport-connect` changes `PACK_TRANSFER_TIMEOUT` from 300 seconds to 60
   seconds of inactivity, using the `kit-sync` default.
-- **Breaking:** Stash snapshots now require a scope marker. `stash apply` and `stash pop`
-  refuse snapshots saved before the upgrade.
+- **Breaking:** Stash snapshots now require a scope marker. Apply or pop any existing stash
+  with kit 0.8.1 before upgrading. In 0.9.0, `stash apply` and `stash pop` refuse old
+  stashes with `stash manifest format is invalid`.
 - **Breaking:** `verify-attest` succeeds when at least one bound envelope has a trusted
   signature. Use `--predicate-type` to limit the match to one predicate type. Untrusted
   envelopes still appear in the report.

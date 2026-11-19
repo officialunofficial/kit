@@ -74,12 +74,14 @@ kit remote add origin kit+file:///srv/kit/my-repo
 kit push origin
 ```
 
-Attest to the commit. Then verify the attestation against keys that you trust:
+Attest to the commit and verify the signature. Use `jq` to read the key ID
+from the attestation envelope.
 
 ```sh
 kit attest --predicate-type https://example.com/sign-off/v1
-kit keygen --print-pubkey                 # prints ed25519:<hex>
-kit trust add ed25519:<hex> <hex>         # trust your own key
+pub=$(kit keygen --print-pubkey)
+keyid=$(jq -er '.signatures[0].keyid' .kit/attestations/"$(kit rev-parse HEAD)"/*.dsse)
+kit trust add "$keyid" "${pub#ed25519:}"
 kit verify-attest
 ```
 
