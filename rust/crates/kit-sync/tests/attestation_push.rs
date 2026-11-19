@@ -795,3 +795,36 @@ fn concurrent_compaction_and_append_preserve_every_envelope() {
         );
     }
 }
+
+/// Always reports an interrupt, as after a Ctrl-C.
+struct Interrupted;
+impl kit_sync::Observer<kit_sync::SyncEvent> for Interrupted {
+    fn cancelled(&self) -> bool {
+        true
+    }
+}
+
+/// An interrupt in the attestation phase ends the push as interrupted, not
+/// as a success with a warning. The branch is already up to date, so the
+/// attestation phase is the first to see the interrupt.
+#[test]
+fn an_interrupt_in_the_attestation_phase_ends_the_push_as_interrupted() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&tx);
+    let (dir, _) = local(&tx, "example.com/new/v1");
+    let before = tx.read_ref(ATTESTMAP_REF).unwrap();
+    let mut opts = options();
+    opts.control.observer = &Interrupted;
+    let result = kit_sync::push(dir.path(), &TransportSource::new(&tx), &opts);
+    assert!(
+        matches!(
+            result,
+            Err(kit_sync::PushError::Sync(kit_sync::SyncError::Interrupted))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(tx.read_ref(ATTESTMAP_REF).unwrap(), before);
+    // The next push publishes the envelope.
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, 1);
+}
