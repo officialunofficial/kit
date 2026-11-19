@@ -136,8 +136,8 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 pub(crate) struct RealSyncer;
 
 impl RealSyncer {
-    /// Per-file write barrier: order this file's writeback ahead of the
-    /// batch's terminal device flush, as cheaply as the platform allows.
+    /// Order writeback for an open file or directory ahead of the next
+    /// full device flush.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn file_barrier(file: &File) -> io::Result<()> {
         use std::os::unix::io::AsRawFd;
@@ -201,13 +201,26 @@ impl Syncer for RealSyncer {
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
-        // F_BARRIERFSYNC on the directory fd: pushes the dirent
-        // updates toward the device and orders them ahead of the
-        // batch's terminal F_FULLFSYNC, at a fraction of its cost.
-        // Some filesystems reject the fcntl on directories — fall back
-        // to the full dir fsync rather than weaken durability.
+        use std::os::unix::fs::MetadataExt;
+
         match File::open(dir) {
-            Ok(d) => d.sync_data().or_else(|_| d.sync_all()),
+            Ok(shard) => {
+                // The terminal F_FULLFSYNC runs on the objects root.
+                // A shard on another volume needs its own full flush.
+                let same_volume = dir.parent().is_some_and(|root| {
+                    shard
+                        .metadata()
+                        .ok()
+                        .zip(fs::metadata(root).ok())
+                        .is_some_and(|(shard, root)| shard.dev() == root.dev())
+                });
+                if same_volume {
+                    Self::file_barrier(&shard)
+                } else {
+                    shard.sync_data()
+                }
+                .or_else(|_| shard.sync_all())
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }
