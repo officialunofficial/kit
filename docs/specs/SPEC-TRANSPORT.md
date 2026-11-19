@@ -1451,7 +1451,7 @@ Before adding a key to the object `AppliedPacks` record, push MUST verify the
 pack's commits, remixes, and tags under the same checks a fetch applies
 with signature checking enabled. If the pack cannot pass those checks,
 omit its key. A later fetch with signature checking enabled therefore
-cannot skip an unchecked push. If persisting the cache fails, the next
+cannot skip an unchecked push. If persisting that record fails, the next
 fetch can download the pack again. The remote ref advance still stands. Push produces wire packs using the
 existing transport encoding.
 
