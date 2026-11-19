@@ -92,6 +92,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Reduce full device flushes during batched object writes on macOS and iOS.
 - Skip rename content reads in status when there are no staged deletions.
 - Compact the applied-pack cache from 1 million digests to 900,000 per remote.
 - Keep up to 32 sparse witnesses per repository within a 512 MiB cache budget.
