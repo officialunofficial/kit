@@ -407,38 +407,109 @@ fn depth_64_rebaseline_preserves_oldest_first_pack_order_under_update_permission
 }
 
 #[test]
-fn git_bridge_warns_for_userinfo_and_local_mirrors_without_printing_them() {
-    for (mirror, expected) in [
-        ("https://user:secret@example.org/repo", true),
-        ("/local/private/path", true),
-        ("https://example.org/repo", false),
+fn push_skips_unsafe_git_bridge_envelopes_and_publishes_safe_envelopes() {
+    for (mirror, reason) in [
+        ("https://user:example@example.org/repo", Some("userinfo")),
+        ("ssh://user@example.org/repo", Some("userinfo")),
+        ("/private/example/repo", Some("local path")),
+        ("relative/repo", Some("local path")),
+        ("git@example.org:repo", Some("local path")),
+        ("FiLe:///private/example/repo", Some("local path")),
+        ("https://example.org/repo?key=example", Some("query")),
+        ("https://example.org/repo?", Some("query")),
+        ("https://example.org/repo#example", Some("fragment")),
+        ("https://example.org/path@revision", Some("userinfo")),
+        ("https://user:part/part@example.org/repo", Some("userinfo")),
+        ("https://user%40example.org/repo", Some("userinfo")),
+        ("/private/https://example.org/repo", Some("local path")),
+        ("helper::https://example.org/repo", Some("local path")),
+        ("C://private/repo", Some("local path")),
+        (r"https://localhost\private\repo", Some("local path")),
+        ("https:///private/repo", Some("local path")),
+        ("https://example.org/:/private/repo", Some("local path")),
+        ("1https://example.org/repo", Some("local path")),
+        ("ssh://[::1]:22/group/repo", None),
+        ("https://example.org/repo", None),
+        ("local", None),
     ] {
         let tx = kit_transport_memory::MemoryTransport::new();
         attestation_fetch::code(&tx);
         let (dir, tip) = local(&tx, "example.com/local/v1");
         let layout = RepoLayout::single(dir.path());
-        let mut env = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
-        let mut statement: serde_json::Value = serde_json::from_slice(&env.payload).unwrap();
-        statement["predicateType"] = "https://kit.dev/git-bridge/v1".into();
-        statement["predicate"] = serde_json::json!({"mirror": mirror});
-        env.payload = serde_json::to_vec(&statement).unwrap();
-        kit_attest::store::save(&layout, &tip, env.encode().unwrap().as_bytes()).unwrap();
+        let safe = std::fs::read(&kit_attest::store::list(&layout, &tip).unwrap()[0]).unwrap();
+        let bridge = attestation_fetch::git_bridge_envelope(tip, mirror);
+        let (id, path) = kit_attest::store::save(&layout, &tip, &bridge).unwrap();
         let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
-        assert_eq!(report.attestations_pushed, 2);
         assert_eq!(
-            report
-                .attestation_warnings
-                .iter()
-                .any(|warning| warning.contains("git-bridge")),
-            expected
+            report.attestations_pushed,
+            1 + usize::from(reason.is_none())
         );
-        assert!(
-            report
-                .attestation_warnings
-                .iter()
-                .all(|warning| !warning.contains(mirror))
-        );
+        let mut pushed = if let Some(reason) = reason {
+            assert!(report.attestation_warnings.iter().any(|warning| {
+                warning.contains("skipped")
+                    && warning.contains(&hash::to_hex(&id))
+                    && warning.contains(reason)
+                    && !warning.contains(mirror)
+            }));
+            assert!(path.is_file());
+            vec![safe.as_slice()]
+        } else {
+            assert!(
+                report
+                    .attestation_warnings
+                    .iter()
+                    .all(|warning| !warning.contains("git-bridge"))
+            );
+            vec![safe.as_slice(), bridge.as_slice()]
+        };
+        pushed.sort_by_key(|bytes| hash::hash(bytes));
+        let expected = kit_attest::pack::build(&pushed, 4096).unwrap();
+        let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
+        let node = kit_core::transfer::decode_packlist(
+            &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(node.packs, vec![hash::hash(&expected)]);
     }
+}
+
+#[test]
+fn compaction_skips_reuploading_unsafe_git_bridge_envelopes() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let mirror = "https://example.org/repo?key=example";
+    let bridge = attestation_fetch::git_bridge_envelope(tip, mirror);
+    let safe = attestation_fetch::envelope(tip);
+    let safe_pack = kit_attest::pack::build(&[&safe], 4096).unwrap();
+    let old_pack = kit_attest::pack::build(&[&bridge, &safe], 4096).unwrap();
+    let key = hash::hash(&old_pack);
+    tx.upload_blob(&old_pack, &PackKey::new(key), None).unwrap();
+    let node = kit_core::transfer::encode_packlist(None, &vec![key; 4096]).unwrap();
+    let head = hash::hash(&node);
+    tx.upload_blob(&node, &PackKey::new(head), None).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &head)
+        .unwrap();
+    attestation_fetch::append(&tx, &safe_pack);
+    let (dir, tip) = local(&tx, "example.com/local/v1");
+    let layout = RepoLayout::single(dir.path());
+    for path in kit_attest::store::list(&layout, &tip).unwrap() {
+        std::fs::remove_file(path).unwrap();
+    }
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, 0);
+    let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
+    let node = kit_core::transfer::decode_packlist(
+        &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
+    )
+    .unwrap();
+    assert!(node.prev.is_none());
+    assert_eq!(node.packs, vec![hash::hash(&safe_pack)]);
+    assert!(report.attestation_warnings.iter().any(|warning| {
+        warning.contains("skipped")
+            && warning.contains(&hash::to_hex(&hash::hash(&bridge)))
+            && warning.contains("query")
+            && !warning.contains(mirror)
+    }));
 }
 #[test]
 fn cached_push_never_walks_an_incomplete_tree() {

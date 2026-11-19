@@ -168,7 +168,7 @@ fn publish(
         if !reachable.contains(&subject) {
             continue;
         }
-        let checked = (|| -> Result<(Hash, bool), Failure> {
+        let checked = (|| -> Result<(), Failure> {
             let bytes = kit_core::bounded_read::read_capped(
                 &path,
                 kit_attest::store::MAX_ENVELOPE_SIZE as u64,
@@ -189,24 +189,10 @@ fn publish(
             if kit_attest::verify::extract_primary_commit_hash(&env.payload)? != subject {
                 return Err("attestation subject differs from its directory".into());
             }
-            let statement: serde_json::Value = serde_json::from_slice(&env.payload)?;
-            let unsafe_mirror = statement
-                .get("predicateType")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| s.ends_with("/git-bridge/v1"))
-                && statement
-                    .pointer("/predicate/mirror")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| s.contains('@') || (s != "local" && !s.contains("://")));
-            Ok((id, unsafe_mirror))
+            Ok(())
         })();
         match checked {
-            Ok((id, unsafe_mirror)) => {
-                if unsafe_mirror {
-                    report.attestation_warnings.push("git-bridge envelope publishes a mirror containing user information or a local path".into());
-                }
-                pending.push((id, path));
-            }
+            Ok(()) => pending.push((expected, path)),
             Err(error) => report
                 .attestation_warnings
                 .push(format!("skipped invalid local attestation: {error}")),
@@ -228,7 +214,7 @@ fn publish(
         if hash::hash(&bytes) != *expected || fetched(layout, expected)? {
             return Err("candidate changed during push".into());
         }
-        batch.add(bytes, tx, &mut prepared)?;
+        batch.add(bytes, tx, &mut prepared, &mut report.attestation_warnings)?;
     }
     batch.flush(tx, &mut prepared)?;
     let budget = tx
@@ -432,6 +418,52 @@ fn chain(tx: &PushContext<'_>, mut head: Option<Hash>) -> Result<(usize, Vec<Has
     Ok((seen.len(), packs))
 }
 
+fn git_bridge_mirror_issue(payload: &[u8]) -> Result<Option<&'static str>, serde_json::Error> {
+    let statement: serde_json::Value = serde_json::from_slice(payload)?;
+    Ok(statement
+        .get("predicateType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| kind.ends_with("/git-bridge/v1"))
+        .and_then(|_| statement.pointer("/predicate/mirror"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(mirror_issue))
+}
+
+fn mirror_issue(mirror: &str) -> Option<&'static str> {
+    const LOCAL_PATH: &str = "contains a local path or ambiguous locator";
+    if mirror == "local" {
+        return None;
+    }
+    let Some((scheme, rest)) = mirror.split_once("://") else {
+        return Some(LOCAL_PATH);
+    };
+    let mut scheme_bytes = scheme.bytes();
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if scheme.len() < 2
+        || scheme.eq_ignore_ascii_case("file")
+        || !scheme_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        || !scheme_bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+        || authority.is_empty()
+        || path.starts_with(':')
+        || mirror.contains('\\')
+    {
+        return Some(LOCAL_PATH);
+    }
+    // An unexpected delimiter anywhere in a legacy locator can be part of a
+    // malformed credential. Treat it as private even outside the authority.
+    if mirror.contains('?') {
+        Some("contains a URL query")
+    } else if mirror.contains('#') {
+        Some("contains a URL fragment")
+    } else if mirror.contains('@') || authority.contains('%') {
+        Some("may contain URL userinfo")
+    } else {
+        None
+    }
+}
+
 struct Batch {
     bytes: Vec<Vec<u8>>,
     size: u64,
@@ -452,7 +484,20 @@ impl Batch {
         bytes: Vec<u8>,
         tx: &PushContext<'_>,
         keys: &mut Vec<Prepared>,
+        warnings: &mut Vec<String>,
     ) -> Result<(), Failure> {
+        // Check the exact bytes used to build new and compacted packs.
+        let env = kit_attest::envelope::decode_expecting(
+            &bytes,
+            kit_attest::envelope::PAYLOAD_TYPE_IN_TOTO,
+        )?;
+        if let Some(reason) = git_bridge_mirror_issue(&env.payload)? {
+            let id = hash::to_hex(&hash::hash(&bytes));
+            warnings.push(format!(
+                "skipped git-bridge attestation {id}: mirror {reason}"
+            ));
+            return Ok(());
+        }
         if self.size + bytes.len() as u64 + 15 > self.max
             || self.decoded + bytes.len() as u64 + 10 > kit_attest::pack::MAX_PACK_DECODED_BYTES
         {
@@ -565,7 +610,7 @@ fn compact_packs(
                 if seen.len() == attestation_records::PUSH_CACHE_IDS {
                     error = Some("attestation compaction envelope limit".into());
                 } else if seen.insert(id) {
-                    error = batch.add(bytes.to_vec(), tx, &mut keys).err();
+                    error = batch.add(bytes.to_vec(), tx, &mut keys, warnings).err();
                 }
             },
         )?;
@@ -649,7 +694,9 @@ mod tests {
         let bytes = include_bytes!("../../../../tests/golden/attest/envelope_basic.json");
         let mut batch = Batch::new(4096);
         let mut packs = Vec::new();
-        batch.add(bytes.to_vec(), &context, &mut packs).unwrap();
+        batch
+            .add(bytes.to_vec(), &context, &mut packs, &mut Vec::new())
+            .unwrap();
         batch.flush(&context, &mut packs).unwrap();
         kit_core::pack::sweep_spool_dir(&store.spool_dir());
         packs[0].upload(&context).unwrap();
