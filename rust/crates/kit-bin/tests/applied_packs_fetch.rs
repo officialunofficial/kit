@@ -29,15 +29,18 @@ fn kit_bin() -> &'static str {
     env!("CARGO_BIN_EXE_kit")
 }
 
-fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
+fn run_result(cwd: &Path, args: &[&str]) -> std::process::Output {
     let xdg = tempfile::tempdir().expect("xdg tempdir");
-    let out = Command::new(kit_bin())
+    Command::new(kit_bin())
         .args(args)
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", xdg.path())
         .output()
-        .expect("spawn kit");
-    drop(xdg);
+        .expect("spawn kit")
+}
+
+fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
+    let out = run_result(cwd, args);
     assert!(
         out.status.success(),
         "kit {args:?} failed: {}",
@@ -54,6 +57,117 @@ fn init_repo(dir: &Path) {
 fn commit_all(dir: &Path, msg: &str) {
     run_in(dir, &["add", "."]);
     run_in(dir, &["commit", "-m", msg]);
+}
+
+#[test]
+fn closure_verify_enables_the_next_fetch_to_repair_a_missing_chunk() {
+    repair_after(&["closure", "verify", "origin/main", "--history"], true);
+}
+
+#[test]
+fn gc_enables_the_next_fetch_to_repair_a_missing_chunk() {
+    repair_after(&["gc"], false);
+}
+
+#[test]
+fn restore_enables_the_next_fetch_to_repair_a_missing_chunk() {
+    repair_after(&["restore", "--force", "dir/large"], false);
+}
+
+fn repair_after(diagnostic: &[&str], advance: bool) {
+    let source = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+    let client = client_dir.path().join("client");
+    init_repo(source.path());
+    init_repo(remote.path());
+    let url = format!("kit+file://{}", remote.path().display());
+    run_in(source.path(), &["remote", "add", "origin", &url]);
+    fs::create_dir(source.path().join("dir")).unwrap();
+    let len = usize::try_from(kit_core::worktree::CHUNK_THRESHOLD).unwrap() + 1;
+    fs::write(source.path().join("dir/large"), vec![42; len]).unwrap();
+    commit_all(source.path(), "large file");
+    run_in(source.path(), &["push", "origin"]);
+    run_in(
+        client_dir.path(),
+        &["clone", "-o", "origin", &url, "client"],
+    );
+
+    let layout = RepoLayout::single(&client);
+    let store = ObjectStore::open(&layout).unwrap();
+    let chunk = store
+        .iter_object_hashes()
+        .unwrap()
+        .into_iter()
+        .find_map(|id| match store.read_object(&id).unwrap() {
+            kit_core::object::Object::ChunkedBlob(manifest) => Some(manifest.chunks()[0]),
+            _ => None,
+        })
+        .unwrap();
+    store.remove_object(&chunk).unwrap();
+    run_in(&client, &["remote", "add", "other", &url]);
+    let records = layout.applied_packs_dir();
+    let applied = records.join("origin");
+    let anchors = records.join(".verified");
+    let heads = records.join(".heads");
+    let cursors = records.join(".cursors");
+    let attestation_record = cursors.join("test.attest-fetch");
+    assert!(applied.is_file());
+    assert_eq!(fs::read_dir(&anchors).unwrap().count(), 1);
+    // Addressed transports can leave checkpoints and cursors here.
+    // Seed both so their invalidation is tested on every operating system.
+    fs::create_dir_all(&heads).unwrap();
+    fs::write(heads.join("a".repeat(64)), b"checkpoint").unwrap();
+    fs::create_dir_all(&cursors).unwrap();
+    fs::write(cursors.join("b".repeat(64)), b"cursor").unwrap();
+    fs::write(&attestation_record, b"attestation record").unwrap();
+    let other_record = records.join("other");
+    fs::write(&other_record, b"other remote's record").unwrap();
+
+    if diagnostic == ["gc"] {
+        let preview = run_result(&client, &["gc", "--dry-run"]);
+        assert!(!preview.status.success());
+        assert!(applied.is_file());
+    }
+    if advance {
+        let guard = store.prune_guard().unwrap();
+        let busy = run_result(&client, diagnostic);
+        assert!(!busy.status.success());
+        assert!(String::from_utf8_lossy(&busy.stderr).contains("could not clear fetch records"));
+        assert!(applied.is_file());
+        assert_eq!(fs::read_dir(&anchors).unwrap().count(), 1);
+        drop(guard);
+    }
+
+    let out = run_result(&client, diagnostic);
+    assert!(!out.status.success(), "diagnostic {diagnostic:?} succeeded");
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(output.contains(&hash::to_hex(&chunk)), "{output}");
+    assert!(!applied.exists());
+    assert!(!heads.exists());
+    assert_eq!(fs::read_dir(&anchors).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&cursors).unwrap().count(), 1);
+    assert_eq!(
+        fs::read(&attestation_record).unwrap(),
+        b"attestation record"
+    );
+    assert_eq!(fs::read(&other_record).unwrap(), b"other remote's record");
+
+    if advance {
+        fs::write(source.path().join("small"), b"new").unwrap();
+        commit_all(source.path(), "small file");
+        run_in(source.path(), &["push", "origin"]);
+    }
+    run_in(&client, &["fetch", "origin"]);
+    assert!(
+        store.contains(&chunk),
+        "fetch must restore the missing chunk"
+    );
+    run_in(&client, &["closure", "verify", "origin/main", "--history"]);
 }
 
 /// Counts calls to `download_pack` specifically (NOT `download_blob`, which

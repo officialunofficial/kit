@@ -236,7 +236,12 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     };
     let root = match revspec::resolve_revision(&store, &layout, &opts.commit_id) {
         Ok(h) => h,
-        Err(e) => return emit_err(&format!("{e}"), exit::DATAERR),
+        Err(e) => {
+            if matches!(e, revspec::Error::ReadObject(StoreError::ObjectNotFound(_))) {
+                super::fetch_repair::note_missing(&layout, &store, None);
+            }
+            return emit_err(&format!("{e}"), exit::DATAERR);
+        }
     };
     let mode = if opts.history {
         ClosureMode::History
@@ -279,6 +284,9 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
             Err(e) => return emit_err(&e.to_string(), exit::DATAERR),
         }
     };
+    if !report.missing.is_empty() {
+        super::fetch_repair::note_missing(&layout, &store, Some(root));
+    }
     emit_report(&report, json, opts.show_unreferenced)
 }
 

@@ -390,8 +390,9 @@ leftovers after grace.
 If the payload cannot be verified, report the damage. Invalidate the
 affected applied-pack records and fetch shortcuts, conservatively
 clearing them when their coverage is unknown, so refetch can obtain
-verified copies. Serialize invalidation with operations that read or
-publish those records. An integrity repair does not advance refs or
+verified copies. Use the exclusive `format` try-lock and the
+fetch-shortcut invalidation rules in SPEC-TRANSPORT §1.2 to exclude fetch
+while clearing records. An integrity repair does not advance refs or
 create applied-pack records. Unresolved corruption remains an error.
 
 

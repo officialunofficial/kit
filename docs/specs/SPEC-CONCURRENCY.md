@@ -42,7 +42,7 @@ document points here.
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
-| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared for bulk writes, cached reuse, format validation, and the fetch prune guard. Exclusive, try-only, for marker activation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
+| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except a fetch's guard, which lasts the whole fetch | shared for bulk writes, cached reuse, format validation, and the fetch prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
 | `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
@@ -186,6 +186,10 @@ its replacement coverage where applicable, and any age condition
 under that lock before changing a name. A process must not acquire
 a worktree or ref lock under the exclusive lock.
 
+A command that finds a missing object tries the exclusive lock before
+discarding fetch records (§1.2 of SPEC-TRANSPORT). On contention, it tells
+the user to repeat the diagnostic before fetching.
+
 A fetch takes the shared lock as a prune guard before it reads its record of
 applied packs, and holds it until after its last remote-tracking ref publish.
 While a guard is held, gc keeps every candidate at any grace, so the objects
@@ -200,12 +204,10 @@ acquire another repository lock. Bulk commit does not hold it while
 publishing refs. The prune guard is the one exception. A fetch holds it and
 then takes `worktree.lock`, and the ref locks below it, to publish a ref.
 This inverts the order above and cannot deadlock. The guard is a shared lock,
-so it never waits for another shared holder. The one process that holds
-`worktree.lock` and wants the exclusive format lock is gc, and it only tries
-the exclusive lock and moves on, so a fetch that waits for gc's
-`worktree.lock` while holding the guard waits for gc to finish, not for a
-lock gc is waiting on. Exclusive marker activation and index repair likewise
-never wait for a shared holder. The existing local-filesystem locking
+so it never waits for another shared holder. A command holding
+`worktree.lock` only tries the exclusive format lock and moves on. A fetch
+holding the prune guard can therefore wait for that command to release
+`worktree.lock` without a deadlock. The existing local-filesystem locking
 assumptions apply.
 
 ## 4. Global lock order and per-command lock sets

@@ -23,6 +23,7 @@ pub mod conflict;
 pub mod diff;
 pub mod epoch;
 pub mod fetch;
+mod fetch_repair;
 mod fetched_tags;
 pub mod for_each_ref;
 pub mod gc;

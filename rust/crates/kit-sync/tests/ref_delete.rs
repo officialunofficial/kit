@@ -203,6 +203,8 @@ type Hook<'a> = dyn Fn(&str, &dyn Transport) + Send + Sync + 'a;
 /// crash in place of it.
 struct Faulty<'a> {
     inner: &'a dyn Transport,
+    /// Runs before each update reaches the transport.
+    before_update: Mutex<Option<Box<Hook<'a>>>>,
     /// Runs before each delete reaches the transport.
     before_delete: Mutex<Option<Box<Hook<'a>>>>,
     /// A ref whose delete never reaches the transport and fails, as a
@@ -216,10 +218,15 @@ impl<'a> Faulty<'a> {
     fn new(inner: &'a dyn Transport) -> Self {
         Self {
             inner,
+            before_update: Mutex::default(),
             before_delete: Mutex::default(),
             crash_on: Mutex::default(),
             deleted: Mutex::default(),
         }
+    }
+
+    fn before_update(&self, hook: impl Fn(&str, &dyn Transport) + Send + Sync + 'a) {
+        *self.before_update.lock().unwrap() = Some(Box::new(hook));
     }
 
     fn before_delete(&self, hook: impl Fn(&str, &dyn Transport) + Send + Sync + 'a) {
@@ -260,6 +267,9 @@ impl Transport for Faulty<'_> {
         condition: RefWriteCondition,
         hash: &Hash,
     ) -> TransportResult<()> {
+        if let Some(hook) = self.before_update.lock().unwrap().as_ref() {
+            hook(name, self.inner);
+        }
         self.inner.update_ref(name, condition, hash)
     }
     fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
@@ -542,6 +552,182 @@ fn a_crash_between_the_deletes_leaves_a_packmap_the_next_push_appends_to() {
         let (_clone, report) = clone_of(&TransportSource::new(tx.as_ref()));
         assert_eq!(report.branches_fetched, 1, "{kind:?}");
     }
+}
+
+#[test]
+fn a_push_between_the_deletes_keeps_the_recreated_branch_cloneable_in_memory() {
+    a_push_between_the_deletes_keeps_the_recreated_branch_cloneable(
+        Kind::Memory,
+        PushLease::FastForward,
+    );
+}
+
+#[test]
+fn a_push_between_the_deletes_keeps_the_recreated_branch_cloneable_on_disk() {
+    a_push_between_the_deletes_keeps_the_recreated_branch_cloneable(
+        Kind::File,
+        PushLease::FastForward,
+    );
+}
+
+#[test]
+fn a_force_push_between_the_deletes_keeps_the_recreated_branch_cloneable_on_disk() {
+    a_push_between_the_deletes_keeps_the_recreated_branch_cloneable(Kind::File, PushLease::Force);
+}
+
+fn a_push_between_the_deletes_keeps_the_recreated_branch_cloneable(kind: Kind, lease: PushLease) {
+    let (tx, _dir) = transport(kind);
+    let (work, tip) = pushed_main(tx.as_ref());
+    let previous = tx.read_ref(MAIN_MAP).unwrap().unwrap();
+    let (other, _) = clone_of(&TransportSource::new(tx.as_ref()));
+    let faulty = Faulty::new(tx.as_ref());
+    faulty.before_delete(move |name, inner| {
+        if name == MAIN_MAP {
+            assert_eq!(inner.read_ref(MAIN).unwrap(), None, "{kind:?}");
+            let mut options = PushOptions::default();
+            options.target = PushTarget::Branch {
+                local: "main".into(),
+                remote: "main".into(),
+                lease,
+            };
+            kit_sync::push(
+                &other.path().join("clone"),
+                &TransportSource::new(inner),
+                &options,
+            )
+            .unwrap();
+        }
+    });
+    work.delete(
+        &TransportSource::new(&faulty),
+        DeleteTarget::Branch("main".into()),
+    )
+    .unwrap();
+
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip), "{kind:?}");
+    let map = tx
+        .read_ref(MAIN_MAP)
+        .unwrap()
+        .expect("recreated branch has a packmap");
+    assert_ne!(map, previous, "{kind:?}");
+    let (_clone, report) = clone_of(&TransportSource::new(tx.as_ref()));
+    assert_eq!(report.branches_fetched, 1, "{kind:?}");
+}
+
+#[test]
+fn an_ordered_force_push_replans_after_a_delete_before_its_head_write() {
+    let tx = MemoryTransport::new();
+    let (work, tip) = pushed_main(&tx);
+    let next = work.commit(Some(tip));
+    work.branch("main", next);
+    let deleted = Mutex::new(false);
+    let faulty = Faulty::new(&tx);
+    faulty.before_update(|name, inner| {
+        let mut deleted = deleted.lock().unwrap();
+        if name == MAIN && !*deleted {
+            let map = inner.read_ref(MAIN_MAP).unwrap().unwrap();
+            assert_eq!(
+                inner.delete_refs(MAIN, &tip, MAIN_MAP, Some(&map)).unwrap(),
+                AdvanceOutcome::Committed
+            );
+            assert_eq!(inner.read_ref(MAIN_MAP).unwrap(), None);
+            *deleted = true;
+        }
+    });
+    work.run(
+        &TransportSource::new(&faulty),
+        PushTarget::All { force: true },
+    )
+    .unwrap();
+
+    assert!(*deleted.lock().unwrap());
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(next));
+    assert!(tx.read_ref(MAIN_MAP).unwrap().is_some());
+    let (_clone, report) = clone_of(&TransportSource::new(&tx));
+    assert_eq!(report.branches_fetched, 1);
+}
+
+#[test]
+fn a_delete_before_the_packmap_write_cannot_leave_a_dependent_root() {
+    for lease in [PushLease::FastForward, PushLease::Force] {
+        let tx = MemoryTransport::new();
+        let (work, tip) = pushed_main(&tx);
+        let next = work.commit(Some(tip));
+        work.branch("main", next);
+        let deleted = Mutex::new(false);
+        let faulty = Faulty::new(&tx);
+        faulty.before_update(|name, inner| {
+            let mut deleted = deleted.lock().unwrap();
+            if name == MAIN_MAP && !*deleted {
+                let map = inner.read_ref(MAIN_MAP).unwrap().unwrap();
+                assert_eq!(
+                    inner.delete_refs(MAIN, &tip, MAIN_MAP, Some(&map)).unwrap(),
+                    AdvanceOutcome::Committed
+                );
+                *deleted = true;
+            }
+        });
+        let target = PushTarget::Branch {
+            local: "main".into(),
+            remote: "main".into(),
+            lease,
+        };
+        let result = work.run(&TransportSource::new(&faulty), target.clone());
+        assert!(*deleted.lock().unwrap());
+        if lease == PushLease::FastForward {
+            assert!(matches!(result, Err(PushError::NonFastForwardPush { .. })));
+            assert_eq!(tx.read_ref(MAIN_MAP).unwrap(), None);
+            work.run(&TransportSource::new(&tx), target).unwrap();
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(tx.read_ref(MAIN).unwrap(), Some(next));
+        let map = tx.read_ref(MAIN_MAP).unwrap().unwrap();
+        assert_eq!(node(&tx, map).prev, None, "{lease:?}");
+        let (_clone, report) = clone_of(&TransportSource::new(&tx));
+        assert_eq!(report.branches_fetched, 1, "{lease:?}");
+    }
+}
+
+#[test]
+fn a_repeat_push_repairs_a_branch_with_no_packmap_in_memory() {
+    a_repeat_push_repairs_a_branch_with_no_packmap(Kind::Memory);
+}
+
+#[test]
+fn a_repeat_push_repairs_a_branch_with_no_packmap_on_disk() {
+    a_repeat_push_repairs_a_branch_with_no_packmap(Kind::File);
+}
+
+#[test]
+fn a_force_push_of_all_branches_repairs_a_missing_packmap_on_disk() {
+    let (tx, _dir) = transport(Kind::File);
+    let (work, tip) = pushed_main(tx.as_ref());
+    let previous = tx.read_ref(MAIN_MAP).unwrap().unwrap();
+    tx.delete_ref(MAIN_MAP, &previous).unwrap();
+
+    let source = TransportSource::new(tx.as_ref());
+    work.run(&source, PushTarget::All { force: true }).unwrap();
+
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    assert!(tx.read_ref(MAIN_MAP).unwrap().is_some());
+    let (_clone, report) = clone_of(&source);
+    assert_eq!(report.branches_fetched, 1);
+}
+
+fn a_repeat_push_repairs_a_branch_with_no_packmap(kind: Kind) {
+    let (tx, _dir) = transport(kind);
+    let (work, tip) = pushed_main(tx.as_ref());
+    let previous = tx.read_ref(MAIN_MAP).unwrap().unwrap();
+    tx.delete_ref(MAIN_MAP, &previous).unwrap();
+
+    let source = TransportSource::new(tx.as_ref());
+    work.push_branch(&source, "main");
+
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip), "{kind:?}");
+    assert!(tx.read_ref(MAIN_MAP).unwrap().is_some(), "{kind:?}");
+    let (_clone, report) = clone_of(&source);
+    assert_eq!(report.branches_fetched, 1, "{kind:?}");
 }
 
 /// A push that moves the tag map between the two deletes makes the

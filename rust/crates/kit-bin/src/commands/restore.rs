@@ -30,12 +30,14 @@ use std::path::{Component, Path, PathBuf};
 
 use clap::Parser;
 use kit_core::hash::Hash;
-use kit_core::index::{self, EntryStatus, Index, IndexEntry};
+use kit_core::index::{self, EntryStatus, Index, IndexEntry, IndexError};
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
-use kit_core::ops::restore::{RestoreOptions, SparsePattern, restore_tree_to_worktree_with};
-use kit_core::store::ObjectStore;
-use kit_core::worktree;
+use kit_core::ops::restore::{
+    RestoreError, RestoreOptions, SparsePattern, restore_tree_to_worktree_with,
+};
+use kit_core::store::{ObjectStore, StoreError};
+use kit_core::worktree::{self, WorktreeError};
 
 use crate::clap_args;
 use crate::exit;
@@ -107,14 +109,24 @@ pub fn run(args: &[String]) -> u8 {
 
     let mut idx = match super::read_or_seed_index_from_head(&layout, &store) {
         Ok(i) => i,
-        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        Err(e) => {
+            // This shared helper has already formatted the store error.
+            // Probe tracking closures before making any repair changes.
+            super::fetch_repair::note_missing(&layout, &store, None);
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
     };
 
     // HEAD's tree (None on an unborn branch) — the source for `--staged`
     // unstaging, and the worktree source when a path is not in the index.
     let head_tree = match super::current_head_tree(&layout, &store) {
         Ok(t) => t,
-        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        Err(e) => {
+            // This shared helper has already formatted the store error.
+            // Probe tracking closures before making any repair changes.
+            super::fetch_repair::note_missing(&layout, &store, None);
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
     };
 
     // Resolve an explicit `--source <rev>` to its tree once. When set it
@@ -131,10 +143,11 @@ pub fn run(args: &[String]) -> u8 {
     // against. For unstaging this is `--source` (when given) or HEAD; for
     // the worktree-source fallback it is the same. Computing it once keeps
     // the path lookups O(1) per arg.
-    let restore_index: Option<Index> = match resolve_restore_index(&store, source_tree, head_tree) {
-        Ok(i) => i,
-        Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
-    };
+    let restore_index: Option<Index> =
+        match resolve_restore_index(&layout, &store, source_tree, head_tree) {
+            Ok(i) => i,
+            Err(e) => return emit_err(&e, exit::GENERAL_ERROR),
+        };
 
     // Resolve every pathspec to a repo-relative path.
     let mut rels: Vec<String> = Vec::with_capacity(opts.paths.len());
@@ -156,6 +169,7 @@ pub fn run(args: &[String]) -> u8 {
     if do_worktree
         && let Err(code) = restore_worktree(
             &cwd,
+            &layout,
             &store,
             &idx,
             &index_before,
@@ -177,8 +191,15 @@ fn resolve_source_tree(
     layout: &RepoLayout,
     spec: &str,
 ) -> Result<Hash, (String, u8)> {
-    let commit = libkit::revspec::resolve_revision(store, layout, spec)
-        .map_err(|e| (format!("bad --source '{spec}': {e}"), exit::GENERAL_ERROR))?;
+    let commit = libkit::revspec::resolve_revision(store, layout, spec).map_err(|e| {
+        if matches!(
+            e,
+            libkit::revspec::Error::ReadObject(StoreError::ObjectNotFound(_))
+        ) {
+            super::fetch_repair::note_missing(layout, store, None);
+        }
+        (format!("bad --source '{spec}': {e}"), exit::GENERAL_ERROR)
+    })?;
     match store.read_object(&commit) {
         Ok(Object::Commit(c)) => Ok(c.tree_hash),
         Ok(Object::Remix(r)) => Ok(r.tree_hash),
@@ -187,7 +208,12 @@ fn resolve_source_tree(
             format!("--source '{spec}' does not resolve to a commit or tree"),
             exit::GENERAL_ERROR,
         )),
-        Err(e) => Err((format!("read --source object: {e}"), exit::GENERAL_ERROR)),
+        Err(e) => {
+            if matches!(e, StoreError::ObjectNotFound(_)) {
+                super::fetch_repair::note_missing(layout, store, None);
+            }
+            Err((format!("read --source object: {e}"), exit::GENERAL_ERROR))
+        }
     }
 }
 
@@ -196,15 +222,19 @@ fn resolve_source_tree(
 /// no `--source`), in which case unstaging removes the entry and the
 /// worktree-source fallback finds nothing.
 fn resolve_restore_index(
+    layout: &RepoLayout,
     store: &ObjectStore,
     source_tree: Option<Hash>,
     head_tree: Option<Hash>,
 ) -> Result<Option<Index>, String> {
     let tree = source_tree.or(head_tree);
     match tree {
-        Some(t) => index::from_tree(store, t)
-            .map(Some)
-            .map_err(|e| format!("read source tree: {e}")),
+        Some(t) => index::from_tree(store, t).map(Some).map_err(|e| {
+            if matches!(e, IndexError::Store(StoreError::ObjectNotFound(_))) {
+                super::fetch_repair::note_missing(layout, store, None);
+            }
+            format!("read source tree: {e}")
+        }),
         None => Ok(None),
     }
 }
@@ -272,8 +302,10 @@ fn apply_index_restore(idx: &mut Index, path: &str, source: Option<IndexEntry>) 
 /// file from the source tree. Refuses (unless `force`) to clobber a
 /// worktree file whose content diverges from the *index* entry, mirroring
 /// the destructive-restore guards.
+#[allow(clippy::too_many_arguments)]
 fn restore_worktree(
     cwd: &Path,
+    layout: &RepoLayout,
     store: &ObjectStore,
     idx: &Index,
     index_before: &Index,
@@ -311,7 +343,7 @@ fn restore_worktree(
     // worktree content matches the index, is safe to rewrite.
     if !force {
         for entry in &to_write {
-            if let Some(reason) = dirty_reason(cwd, store, index_before, &entry.path) {
+            if let Some(reason) = dirty_reason(cwd, layout, store, index_before, &entry.path) {
                 return Err(emit_err(&reason, exit::GENERAL_ERROR));
             }
         }
@@ -325,6 +357,9 @@ fn restore_worktree(
     let source_tree = match worktree::build_tree_from_index(store, source) {
         Ok(t) => t,
         Err(e) => {
+            if matches!(e, WorktreeError::Store(StoreError::ObjectNotFound(_))) {
+                super::fetch_repair::note_missing(layout, store, None);
+            }
             return Err(emit_err(
                 &format!("build source tree: {e}"),
                 exit::GENERAL_ERROR,
@@ -351,6 +386,9 @@ fn restore_worktree(
         &restore_opts,
         &crate::restore_fanout::read_chunks_fanout,
     ) {
+        if matches!(e, RestoreError::Store(StoreError::ObjectNotFound(_))) {
+            super::fetch_repair::note_missing(layout, store, None);
+        }
         return Err(emit_err(&format!("restore worktree: {e}"), exit::CANTCREAT));
     }
     Ok(())
@@ -370,7 +408,13 @@ fn entry_matches(idx: &Index, rel: &str) -> Vec<IndexEntry> {
 /// Return `Some(reason)` when the worktree file for `path` exists but
 /// diverges from its staged (index) blob — the un-staged edit a worktree
 /// restore would silently discard. Mirrors `rm`'s dirty check.
-fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Option<String> {
+fn dirty_reason(
+    root: &Path,
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    idx: &Index,
+    path: &str,
+) -> Option<String> {
     let staged = idx
         .entries
         .iter()
@@ -382,9 +426,16 @@ fn dirty_reason(root: &Path, store: &ObjectStore, idx: &Index, path: &str) -> Op
         let target_str = target.to_str()?;
         symlink_blob_hash(target_str)?
     } else if meta.file_type().is_file() {
-        let clean = worktree::file_content_eq(store, &staged.object_hash, &abs).is_ok_and(
-            |(opened, equal)| equal && super::file_exec_status(&opened) == staged.status,
-        );
+        let clean = match worktree::file_content_eq(store, &staged.object_hash, &abs) {
+            Ok((opened, equal)) => equal && super::file_exec_status(&opened) == staged.status,
+            Err(WorktreeError::Store(StoreError::ObjectNotFound(id))) => {
+                super::fetch_repair::note_missing(layout, store, None);
+                return Some(format!(
+                    "'{path}' has unreadable staged content: object {id} not found"
+                ));
+            }
+            Err(_) => false,
+        };
         return if clean {
             None
         } else {
