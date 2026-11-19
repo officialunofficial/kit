@@ -73,8 +73,10 @@ use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
 /// automatically.
 const CLIENT_ID: &str = concat!("kit ", env!("CARGO_PKG_VERSION"));
 
-// Match the reference server's fixed byte budget (SPEC-TRANSPORT §4.4).
+// Match the reference server's fixed session budgets (SPEC-TRANSPORT §4.4).
+// Only top-level requests after Hello count toward the frame budget.
 // Uploads cost their declared length. Other requests cost 64 bytes.
+const SESSION_FRAMES: u32 = 10_000;
 const SESSION_BYTES: u64 = 1 << 30;
 const CONTROL_REQUEST_BYTES: u64 = 64;
 
@@ -133,7 +135,7 @@ pub enum SshInitError {
 /// pipe that already desynced would corrupt every subsequent frame, so
 /// the only safe retry is a full reconnect. `upload_pack` is
 /// content-addressed and safe to resend in full on the new connection
-/// (SPEC-TRANSPORT §7). A request that would exceed the session byte
+/// (SPEC-TRANSPORT §7). A request that would exceed either session
 /// budget starts on a fresh connection. A retried `update_ref` CAS write is not
 /// idempotent and callers MUST disambiguate a `RefConflict` with
 /// `read_ref` as usual.
@@ -162,6 +164,7 @@ struct ChildIo {
     child: Child,
     stdin_tx: Option<mpsc::SyncSender<WriteJob>>,
     stdout_rx: mpsc::Receiver<Result<SshFrame, FrameError>>,
+    remaining_frames: u32,
     remaining_bytes: u64,
     /// `true` once we've shut down the child pipe. Guards double-close
     /// from `Drop` + explicit `close`.
@@ -237,11 +240,12 @@ impl SshTransport {
             Some(ssh_frame::Body::UploadPack(header)) => header.total_bytes.unwrap_or_default(),
             _ => CONTROL_REQUEST_BYTES,
         };
-        if io.closed || bytes > io.remaining_bytes {
+        if io.closed || io.remaining_frames == 0 || bytes > io.remaining_bytes {
             let _ = shut_child(io);
             *io = spawn_and_handshake(&self.target, &self.options)
                 .map_err(|_| TransportError::ConnectionFailed)?;
         }
+        io.remaining_frames -= 1;
         io.remaining_bytes -= bytes;
         write_child_frame_or_err(io, request)
     }
@@ -291,6 +295,7 @@ fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<Child
         child,
         stdin_tx: Some(stdin_tx),
         stdout_rx,
+        remaining_frames: SESSION_FRAMES,
         remaining_bytes: SESSION_BYTES,
         closed: false,
     };
