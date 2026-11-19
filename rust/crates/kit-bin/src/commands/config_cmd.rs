@@ -126,17 +126,18 @@ pub fn run(args: &[String]) -> u8 {
     if let Err(e) = config::validate_value(value) {
         return emit_err(&format!("invalid value: {e}"), exit::CONFIG_ERROR);
     }
-    if matches!(key, "fetch.attestations" | "push.attestations")
-        && !matches!(value, "true" | "false")
-    {
-        return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
-    }
     if key == "grant.webauthn_rp"
         && let Err(e) = crate::grants::parse_relying_parties(&[value.to_owned()])
     {
         return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
-    let normalized_value = if key == "user.identity" {
+    let normalized_value = if matches!(key, "fetch.attestations" | "push.attestations") {
+        let value = value.to_ascii_lowercase();
+        if !matches!(value.as_str(), "true" | "false") {
+            return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
+        }
+        value
+    } else if key == "user.identity" {
         match config::expand_user_identity(value) {
             Ok(v) => v,
             Err(e) => return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR),
