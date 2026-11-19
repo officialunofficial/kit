@@ -1777,3 +1777,85 @@ fn request_policy_survives_both_builder_orders_on_writes() {
         assert_eq!(observer.seen.borrow().len(), 1);
     }
 }
+
+/// A push never appends a node that makes the chain list more packs than a
+/// reader walks. The prior chain lists `listed` packs (one key repeated)
+/// over nodes of at most 4,096; the push adds one pack.
+#[test]
+fn an_append_past_the_fetch_pack_bound_is_refused_before_the_node_uploads() {
+    use kit_core::transfer::encode_packlist;
+    const MAX_PACKS: usize = 1_000_000;
+
+    for (listed, refused) in [(MAX_PACKS - 1, false), (MAX_PACKS, true)] {
+        let mut chain = std::collections::HashMap::new();
+        let (mut head, mut left) = (None, listed);
+        while left > 0 {
+            let count = left.min(4096);
+            let bytes = encode_packlist(head, &vec![[9; 32]; count]).unwrap();
+            let key = pack_key(&bytes);
+            chain.insert(key, bytes);
+            head = Some(key);
+            left -= count;
+        }
+        let prior = head.unwrap();
+        let entry = blob(1);
+        let Entry::Raw { bytes, .. } = &entry else {
+            unreachable!()
+        };
+        let mut limits = Limits::from_server_info(&info(), bytes.len() as u64, 1 << 20).unwrap();
+        limits.ticket_threshold_bytes = info().begin_upload_threshold_bytes.unwrap();
+        let plan = Plan::prepare([entry], limits).unwrap();
+        assert_eq!(plan.pack_ids().count(), 1);
+        let script = Script::new(&log(), move |_, request| match method(request).as_str() {
+            "GetServerInfo" => unary(&info()),
+            "UploadPack" => stream(&proto::UploadPackResponse::default()),
+            "ReadRef" => unary(&proto::ReadRefResponse {
+                exists: Some(true),
+                object_id: Some(prior.to_vec()),
+                ..Default::default()
+            }),
+            "DownloadPack" => {
+                let asked =
+                    proto::DownloadPackRequest::decode_from_slice(&request.body()[5..]).unwrap();
+                let key: Hash = asked.pack_id.unwrap().try_into().unwrap();
+                capture_download_reply(key, &chain[&key])
+            }
+            "AdvanceRefs" => unary(&proto::AdvanceRefsResponse {
+                outcome: Some(proto::AdvanceOutcome::Committed.into()),
+                ..Default::default()
+            }),
+            other => panic!("unexpected {other}"),
+        });
+        let push = Push::new(
+            destination(),
+            "main",
+            RefWriteCondition::Match([6; 32]),
+            [4; 32],
+            PackmapMode::Append {
+                self_contained: false,
+            },
+            plan,
+            i64::MAX,
+        )
+        .unwrap();
+        let result = block_on(push.run(&script, &PolicySigner::new(&log()), &TestClock::new()));
+        let sent = script.seen.borrow();
+        let node_uploads = sent
+            .iter()
+            .filter(|request| method(request) == "UploadPack")
+            .map(capture_uploaded_pack)
+            .filter(|(_, bytes)| bytes.starts_with(b"KPKL"))
+            .count();
+        let advances = sent
+            .iter()
+            .filter(|request| method(request) == "AdvanceRefs")
+            .count();
+        if refused {
+            assert!(matches!(result, Err(Error::Limit(_))), "{result:?}");
+            assert_eq!((node_uploads, advances), (0, 0));
+        } else {
+            assert_eq!(result.unwrap(), kit_client::Outcome::Committed);
+            assert_eq!((node_uploads, advances), (1, 1));
+        }
+    }
+}

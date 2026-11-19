@@ -102,8 +102,7 @@ pub(crate) fn advance_packmap(
             return Err(PushError::Sync(SyncError::Interrupted));
         }
         let prior = tx.read_ref(&packmap_name)?;
-        let mut chain = ChainSize::default();
-        let state = match prior {
+        let (state, chain) = match prior {
             // A delete may remove the base chain between CAS attempts.
             // Dependent packs cannot serve as a new root, even if the
             // head CAS would refuse the push after writing that root.
@@ -112,20 +111,27 @@ pub(crate) fn advance_packmap(
                     branch: branch.to_owned(),
                 });
             }
-            None => ChainState::Missing,
+            None => (ChainState::Missing, ChainSize::default()),
             Some(head) => match probe_chain(tx, branch, head) {
                 Ok((depth, packs)) => {
-                    chain = ChainSize {
+                    let chain = ChainSize {
                         nodes: depth,
                         packs: packs.len(),
                     };
-                    ChainState::validated(head, depth, packs, pack_keys.len(), rollover_threshold)
+                    let state = ChainState::validated(
+                        head,
+                        depth,
+                        packs,
+                        pack_keys.len(),
+                        rollover_threshold,
+                    );
+                    (state, chain)
                 }
                 // Broken chain: a self-contained pack can reset to escape it;
                 // a delta push must block (its bases live in the broken tail).
                 // Transient transport errors propagate (don't reset on a blip).
                 Err(PushError::Sync(SyncError::PackChainInvalid { .. })) if self_contained => {
-                    ChainState::Reset { prior }
+                    (ChainState::Reset { prior }, ChainSize::default())
                 }
                 Err(e) => return Err(e),
             },

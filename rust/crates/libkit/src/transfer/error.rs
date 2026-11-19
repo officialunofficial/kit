@@ -114,9 +114,9 @@ pub enum Error {
     )]
     PackmapContended { branch: String },
     /// The push would make the branch's pack chain longer than a fetch
-    /// reads. Nothing was published.
+    /// reads. The advance that would cross the bound was not published.
     #[error(
-        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs); the remote is unchanged. Delete the remote branch and push it again to start a new chain"
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
     )]
     PackChainTooLong { branch: String },
     /// A packmap chain was malformed — it exceeded the depth cap, contained

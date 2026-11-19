@@ -158,19 +158,30 @@ fn fetched_root_pack(tx: &MemoryTransport, map: Hash) -> Hash {
     transfer::decode_packlist(&bytes).unwrap().packs[0]
 }
 
+/// Listings that make the pushed chain `nodes` deep, listing `packs` packs
+/// in its first grown node.
+fn deep(nodes: usize, packs: usize) -> Vec<usize> {
+    let mut listings = vec![packs];
+    listings.resize(nodes - 1, 0);
+    listings
+}
+
 /// 100,000 nodes listing 4,097 packs: too many packs for a re-baseline, so
 /// the next push would append a node a fetch refuses to walk.
 fn node_bound() -> Vec<usize> {
-    let mut listings = vec![NODE_PACKS];
-    listings.resize(MAX_NODES - 1, 0);
+    deep(MAX_NODES, NODE_PACKS)
+}
+
+/// Listings that make the pushed chain list `packs` packs.
+fn listing(packs: usize) -> Vec<usize> {
+    let mut listings = vec![NODE_PACKS; (packs - 1) / NODE_PACKS];
+    listings.push(packs - 1 - listings.len() * NODE_PACKS);
     listings
 }
 
 /// 1,000,000 listed packs over 246 nodes.
 fn pack_bound() -> Vec<usize> {
-    let mut listings = vec![NODE_PACKS; (MAX_PACKS - 1) / NODE_PACKS];
-    listings.push(MAX_PACKS - 1 - listings.len() * NODE_PACKS);
-    listings
+    listing(MAX_PACKS)
 }
 
 #[test]
@@ -205,4 +216,43 @@ fn a_push_refuses_a_chain_a_fetch_would_refuse() {
             fetched_chain(&tx).unwrap();
         }
     }
+}
+
+/// A push that lands exactly on a bound is published, and a fetch walks the
+/// chain it leaves.
+#[test]
+fn a_push_that_reaches_a_bound_is_published() {
+    for (case, listings, size) in [
+        (
+            "nodes",
+            deep(MAX_NODES - 1, NODE_PACKS),
+            (MAX_NODES, NODE_PACKS + 2),
+        ),
+        (
+            "packs",
+            listing(MAX_PACKS - 1),
+            (2 + listing(MAX_PACKS - 1).len(), MAX_PACKS),
+        ),
+    ] {
+        for lease in [PushLease::FastForward, PushLease::Force] {
+            let tx = MemoryTransport::new();
+            let (work, _c1, c2) = at_the_bound(&tx, &listings);
+            work.push(&TransportSource::new(&tx), lease)
+                .unwrap_or_else(|error| panic!("{case} {lease:?}: {error}"));
+            assert_eq!(tx.read_ref(MAIN).unwrap(), Some(c2), "{case} {lease:?}");
+            assert_eq!(fetched_chain(&tx).unwrap(), size, "{case} {lease:?}");
+        }
+    }
+}
+
+/// A chain at the node bound that one node can list re-baselines: the new
+/// node has no predecessor, so the bound does not refuse it.
+#[test]
+fn a_push_at_the_node_bound_re_baselines_a_chain_one_node_can_list() {
+    let tx = MemoryTransport::new();
+    let (work, _c1, c2) = at_the_bound(&tx, &deep(MAX_NODES, 1));
+    work.push(&TransportSource::new(&tx), PushLease::FastForward)
+        .unwrap();
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(c2));
+    assert_eq!(fetched_chain(&tx).unwrap(), (1, 3));
 }

@@ -27,9 +27,11 @@ pub enum PushError {
     PackmapContended { branch: String },
     /// The push would link a node onto a pack chain that, with it, holds
     /// more nodes or listed packs than a fetch walks, so no client without
-    /// the tip could fetch the branch. Nothing was published.
+    /// the tip could fetch the branch. The advance that would cross the
+    /// bound was not published, and neither is any later one, so a split
+    /// push reports this error alone rather than as a resumable prefix.
     #[error(
-        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs); the remote is unchanged. Delete the remote branch and push it again to start a new chain"
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
     )]
     PackChainTooLong { branch: String },
     /// One advance would need more data packs than the server permits per

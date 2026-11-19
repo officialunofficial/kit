@@ -683,6 +683,9 @@ fn publish_steps(
         }
         if let Err(cause) = outcome {
             return Err(match published {
+                // Every later advance would be refused too: a re-run cannot
+                // resume, and the error says what to do instead.
+                Some(_) if matches!(cause, PushError::PackChainTooLong { .. }) => cause,
                 Some(head) => PushError::SplitInterrupted {
                     branch: branch.to_owned(),
                     head: kit_core::hash::to_hex(&head),
