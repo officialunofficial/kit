@@ -205,6 +205,15 @@ pub fn pull(
         return Err(e.into());
     }
     if observer.cancelled() {
+        // The restore has not begun. A pull that made the branch, as a
+        // clone's does, undoes it and HEAD, so the clone can resume: a clone
+        // resumes only into a repository with no branch. A pull that moved a
+        // branch leaves `PULL_HEAD`, and the next pull finishes the restore.
+        if local_tip.is_none()
+            && rollback_pull_ref_and_head(&layout, &branch, None, remote_tip, original_head).is_ok()
+        {
+            clear_pull_head(&layout)?;
+        }
         return Err(SyncError::Interrupted);
     }
     if let Err(e) = crate::worktree::restore_worktree_and_index_progress(

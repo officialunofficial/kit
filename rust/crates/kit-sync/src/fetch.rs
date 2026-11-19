@@ -672,6 +672,13 @@ fn fetch_objects_inner(
     if options.prune {
         prune_tracking(layout, source, observer, remote, &listed, lock_wait, report)?;
     }
+    // The local tags the tag phase compares with the remote. The phase only
+    // adds tags, so the local tags match the remote after it only while they
+    // are these and the ones it published.
+    let mut matched_tags = match cursor {
+        Some(_) => refs::list_tags(layout)?,
+        None => Vec::new(),
+    };
     if options.tags {
         TagPhase {
             store,
@@ -685,6 +692,7 @@ fn fetch_objects_inner(
             verified: &mut *verified,
             stop,
             report: &mut *report,
+            published: &mut matched_tags,
             packs_since_refresh: 0,
         }
         .run()?;
@@ -707,9 +715,10 @@ fn fetch_objects_inner(
         // no record is written and the next fetch lists the remote again. The
         // refs are read after the digest: a ref that still holds its tip now
         // held it when the digest was taken, or the digest no longer matches
-        // the refs on disk.
+        // the refs on disk. Likewise a tag made, moved or deleted while the
+        // fetch ran leaves local tags the fetch never compared.
         if tips_still_published(layout, remote, &published)
-            && tags_still_published(layout, &report.tags_fetched)?
+            && tag_digest == crate::cursor::digest_of(&mut matched_tags)
         {
             let record = crate::cursor::CursorRecord {
                 cursor,
@@ -731,18 +740,6 @@ fn tips_still_published(layout: &RepoLayout, remote: &str, published: &[(String,
     published.iter().all(|(name, tip)| {
         matches!(refs::read_remote_ref(layout, remote, name), Ok(Some(held)) if held == *tip)
     })
-}
-
-/// Whether every tag in `fetched` is still a local tag. A local tag moved
-/// since the digest was taken no longer matches it; one deleted since is
-/// caught here.
-fn tags_still_published(layout: &RepoLayout, fetched: &[String]) -> Result<bool, SyncError> {
-    for name in fetched {
-        if refs::read_tag(layout, name)?.is_none() {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Delete the tracking refs of `remote` whose branch the listing lacks. It

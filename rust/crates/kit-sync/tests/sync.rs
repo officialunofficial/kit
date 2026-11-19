@@ -17,8 +17,8 @@ use kit_core::refs::{self, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
 use kit_core::transfer;
 use kit_sync::{
-    CloneError, CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError, SyncEvent,
-    SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
+    CloneError, CloneRemote, NoopObserver, Observer, PullOutcome, RemoteSource, SyncError,
+    SyncEvent, SyncOptions, TransportSource, clone, fetch, init_clone_dir, pull,
 };
 use kit_transport_memory::MemoryTransport;
 

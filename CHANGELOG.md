@@ -9,6 +9,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.
+- A clone interrupted after it made its branch, before it wrote the files, undoes the branch
+  and `HEAD`, so running the same clone again resumes it.
+- Fetch writes no cursor record when a local tag changes while it runs, so the next fetch
+  restores a tag deleted meanwhile.
+- `kit push --delete <remote> <name>` deletes a tag whose name is too long for a branch.
 
 ## [0.9.0] - 2026-11-19
 

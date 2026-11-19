@@ -526,6 +526,8 @@ pub(crate) struct TagPhase<'a> {
     pub(crate) verified: &'a mut VerifiedHistory,
     pub(crate) stop: StopSet,
     pub(crate) report: &'a mut FetchReport,
+    /// The tags this phase published, with their values.
+    pub(crate) published: &'a mut Vec<refs::Ref>,
     /// `report.packs_downloaded` when `M` was last refreshed.
     pub(crate) packs_since_refresh: usize,
 }
@@ -911,7 +913,13 @@ impl TagPhase<'_> {
         let mut first_error = None;
         for (name, value) in publish {
             match refs::update_tag(self.layout, &name, refs::RefWriteCondition::Missing, &value) {
-                Ok(()) => self.report.tags_fetched.push(name),
+                Ok(()) => {
+                    self.published.push(refs::Ref {
+                        name: name.clone(),
+                        hash: Some(value),
+                    });
+                    self.report.tags_fetched.push(name);
+                }
                 Err(refs::RefError::Conflict(_)) => {
                     // No tag at the name means the path is another tag's
                     // directory, as a case-folding file system shows `V1/rc`
