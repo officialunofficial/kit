@@ -912,8 +912,9 @@ impl TagPhase<'_> {
     /// Publish every proved tag under one hold of the worktree lock, each as
     /// a create: a tag made locally meanwhile is refused, never moved. When
     /// the proofs found objects, every shard of the store is made durable
-    /// first, with one device flush: the found objects' chunks are checked
-    /// but not listed, so every shard stands for them.
+    /// first, with one device flush. The closure check verifies a chunked
+    /// file's chunks without listing them, so the flush covers every shard
+    /// rather than the listed objects' shards.
     fn publish(self, prover: &TagProver, publish: Vec<(String, Hash)>) -> Result<(), SyncError> {
         if publish.is_empty() {
             return Ok(());
