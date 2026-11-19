@@ -7,7 +7,7 @@
 //!
 //! Safety: the live set is computed **before** anything is deleted and
 //! the whole run is **fail-closed** — a missing/corrupt root, a malformed
-//! ref, or the reachability cap aborts with nothing removed (see
+//! ref, or the reachability cap aborts without removing any objects (see
 //! `kit_core::ops::gc`). Unreachable objects younger than the grace
 //! window (default 14 days) are kept as a belt-and-suspenders against
 //! objects written just before a reference that points at them. Use
@@ -30,9 +30,9 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::run_gc_observed;
+use kit_core::ops::gc::{GcRootsError, run_gc_observed};
 use kit_core::ops::recovery::{self, RetentionPolicy};
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_args;
 use crate::exit;
@@ -157,6 +157,9 @@ pub fn run(args: &[String]) -> u8 {
         Ok(r) => r,
         Err(e) => {
             drop(progress);
+            if !opts.dry_run && matches!(e, GcRootsError::Store(StoreError::ObjectNotFound(_))) {
+                super::fetch_repair::note_missing(&layout, &store, None);
+            }
             return emit_err(&format!("gc: {e}"), exit::GENERAL_ERROR);
         }
     };
