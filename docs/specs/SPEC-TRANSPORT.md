@@ -158,11 +158,16 @@ fetch. A fetch that does its full work, because the cursor changed or no
 record matches it, checks the closure down to its anchors (see "Pack-chain
 fetch"). If the local store loses an object below a tracking tip, run
 `kit closure verify <ref> --history`, then fetch the affected remote. A
-local closure verification, gc mark or restore that discovers a missing
-object discards the signature anchors and applied-pack records of remotes
-with incomplete tracking histories. It also discards fetch cursors and
-checkpoints, whose addresses may have changed. The next fetch downloads
-the affected pack chain again and checks the closure before publication.
+local closure verification, gc mark, or restore that finds
+`ObjectNotFound` identifies configured remotes with incomplete tracking
+histories. When any are affected, the command tries the exclusive
+`format` lock (SPEC-CONCURRENCY §3.4). It clears the affected remotes'
+signature anchors and applied-pack records, and clears object fetch
+cursors and checkpoints across repository addresses, which may have
+changed. Attestation records retain their own lifetime. On lock contention
+or invalidation failure, the command warns to repeat the diagnostic
+before fetching. After successful invalidation, the next fetch downloads
+the affected pack chain again and checks its closure before publication.
 
 **Reference-server behavior.** The memory transport's cursor is a number
 unique to the instance and the count of its committed ref writes. The file
@@ -357,7 +362,18 @@ in that walk are still processed.
 Push is opt-in. It sends only envelopes made locally, excluding every id
 marked fetched from any remote. Select subjects in the remote's closure
 after code publication and exclude ids in its push cache. This also runs
-when code refs are up to date. Split packs at `max_pack_bytes`, upload them,
+when code refs are up to date.
+
+Before adding an envelope to a new or compacted pack, check the exact
+envelope bytes for private Git locators. Check `predicate.mirror` on
+Git bridge predicates and `predicate.remoteUrl` on Git import predicates.
+Accept the literal `local`. Skip envelopes with local paths, ambiguous
+locators, URL queries or fragments, or possible user information. The
+latter includes malformed network authorities and percent escapes in the
+authority. Report the envelope digest and the reason without printing the
+locator. Other predicates do not take this locator check.
+
+Split packs at `max_pack_bytes`, upload them,
 and append a node using `Missing` or `Match(old)` CAS. On conflict, re-read
 and retry within the existing budget without re-uploading the pack.
 Re-baseline past depth 64. Above 4,096 listed packs, the next writer with
@@ -1094,7 +1110,9 @@ caller obligations are therefore:
 - On `HeadConflict` or `PackmapConflict` from `advance_refs`, the caller
   MUST likewise read the ref whose precondition failed. A packmap that
   already holds the caller's node means only the head write remains; a
-  head that already holds the caller's value means the advance landed.
+  head that already holds the caller's value can indicate the advance
+  landed. A branch push also checks that the corresponding packmap exists
+  before treating the advance as complete.
 - `update_ref` with `Any` may be re-issued freely: it writes the same
   value again. Like any `Any` write, it can overwrite a value another
   writer stored between the two attempts.
@@ -1183,20 +1201,28 @@ plan may send an object the remote holds. It never omits one the remote lacks.
 A push conditioned on `Missing` or `Match` MUST plan only
 against a head its condition holds for. When the head it reads fails the
 condition, the push is refused as a non-fast-forward before it plans,
-unless that head is already the new head, in which case an earlier
-attempt landed and the push writes nothing. A retry that plans the full
+unless that head is already the new head and its packmap exists. In that
+case the previous advance can be treated as complete. A retry that plans the full
 closure of the new head depends on no head and reads none. A condition that differs from
 the planned head could hold again after the head moves away and back while
 a reset drops what the plan left out, and the advance would then publish a
 head its chain cannot reconstruct, on every kind of advance.
 
-A force push (`Any`) never requests a reset. On a serialized or an atomic
-advance it uses the guarded force driver: it conditions the packmap write
-on the chain its plan read, and plans again when that chain no longer
-contains the node the plan depended on, so it never appends packs whose
-bases a concurrent reset dropped. A re-baseline replaces that node too, so
-a force push plans again after one. On an ordered advance no reset happens
-except over a broken chain, and a force push appends on the ordered path.
+A force push (`Any`) never resets a valid chain. On a serialized or atomic
+advance it conditions the packmap write on the chain its plan read. If
+that chain no longer contains the node the plan depended on, the push plans
+again. A reset or re-baseline can remove that node. On an ordered or
+serialized advance, a force push leases the head it read and plans again
+if another writer moves it. A plan that depends on a previous head cannot
+start a new packmap chain.
+
+A push that recreates a missing branch MUST publish a new packmap value
+before or atomically with the head. When the existing chain already lists
+every required pack, publish a node with that chain as its predecessor
+and an empty pack list. A pending delete's compare-and-swap on the old
+packmap then fails. If the head already equals the pushed tip but has no
+packmap, push rebuilds the tip's full closure and publishes its packmap
+under a lease on the observed head.
 
 **Tag maps.** A tag push moves `refs/tags/<t>` and its tag map
 `refs/kit/tagmap/<t>` (§1.4) as a branch push moves a head and its
@@ -1293,10 +1319,11 @@ second case the chain ref may stay behind, as after a crash.
 
 Once the head is gone the delete has happened. A crash before the chain ref
 goes, or a lost CAS on it, leaves a chain ref without its head. A fetch reads
-it as a stale listing and publishes nothing for it, and the next push of that
-name appends to it: a branch push extends the chain it finds, and a tag push
-takes the leftover row of §7.2. No reader sees a head whose chain ref is
-missing, because the head goes first.
+it as a stale listing and publishes nothing for it. A branch push that
+recreates the head moves the packmap as specified in §7.2, so a pending
+delete cannot remove the new value with its old lease. A tag push uses the
+leftover row of §7.2. Deleting the head first preserves the chain while
+the head is published.
 
 A transport that deletes both refs in one transaction (Connect, one
 `AdvanceRefs` with `delete`, SPEC-TRANSPORT-CONNECT §7.8) deletes both or
@@ -1382,14 +1409,44 @@ Fetch MUST authenticate each requested pack and pack-list node before decoding
 or applying it. The CLI downloads the missing packs of a chain one at a time
 in chain order. It spools each pack into an unnamed file in `.kit/tmp/`,
 checking its length, its digest and its trailer as the bytes arrive. Only a
-pack that passes all three is read: it is unpacked into the object store one
-window at a time, the signatures of the objects it wrote are checked, it is
-recorded as applied, and its file is closed before the next download. A
-partial spool is never read. On Unix a killed fetch leaves nothing in
-`.kit/tmp/`; on Windows a power loss can leave a spool there until the
-next fetch, push or gc removes it (§1.1). No repository lock is held while the packs download and
-apply, so other commands run during a fetch of any size. The CLI limits chain packs to one million and
-pack-list nodes to 100,000.
+pack that passes all three is read. Close its spool before downloading
+the next pack. A partial spool is never read. On Unix a killed fetch
+leaves nothing in `.kit/tmp/`. On Windows a power loss can leave a
+spool there until the next fetch, push or gc removes it (§1.1).
+Downloads and apply hold no worktree lock. The CLI limits chain packs
+to one million and pack-list nodes to 100,000.
+
+Fetch and clone pack fetched objects whose serialized size is smaller
+than 16 KiB. Objects of 16 KiB or more and chunks stay loose. The latter
+rule includes short final chunks and chunks from small fixed-size
+layouts. A chunk shares the Blob encoding of a whole-file blob. A writer
+that lacks enough information to classify a blob writes it loose.
+Local creation and import write loose objects. The local reader accepts
+the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
+
+Fetch stages accepted objects in 64 MiB publication windows of decoded
+serialized bytes. A window can span several remote packs. Seal the
+current window before adding an object that would pass the target.
+A larger loose object occupies a window by itself. Seal a final partial
+window before closing the branch or tag batch.
+Respect the local pack caps and any lower staging-memory bound. Publish
+one local pack for the window's eligible objects when `P` is active and
+commit its loose writes using [SPEC-OBJECTS §10.1](SPEC-OBJECTS.md#101-durability).
+A window with no eligible objects needs no local pack. The cadence fixes
+when progress is durable. Flush batching and decode-window sizes remain
+implementation choices.
+
+The writer includes each eligible id once per local pack, even if
+another location holds that id. During private decoding, resolve delta
+bases from the store, accepted objects in the open publication window,
+and earlier decoded objects in the same remote pack. Verify the
+type-dependent id of a base read back from pending storage before
+using it. Required signature checks see the same combined view. Before
+publishing any window, enforce SPEC-PACKFILE §6.1 for each remote pack
+that contributes objects to it. Keep
+provisional data private and discard it on refusal. Private staging or
+a verification pass over the spool can meet this rule without holding
+all decoded bytes in memory.
 
 The fetch takes the repository's prune guard, a shared lock on the `format`
 file, before it reads its record of applied packs, and holds it until after
@@ -1401,18 +1458,34 @@ ref write and the checkpoint. It waits for that lock with no deadline, tells
 its observer once that it waits, and stops on an interrupt, because its
 downloads are done and a timeout would discard them.
 
-The applied-pack record gains a line for each pack as the pack is applied,
-after the pack's objects are committed and its signatures are checked. A
-fetch that dies resumes after its last applied pack. A failed, interrupted or
-killed fetch leaves the packs it applied in the store and in the record, with
-no ref naming their objects. A later `gc` may prune those objects. The record
-is then stale, and the next fetch repairs the store: when a run that skipped
-a recorded pack finds an object missing, whether a delta base during unpack
-or an object of the tip's closure, it clears the record and applies the whole
-chain again, once. Every other failure propagates. A failed download, digest
-check, write or apply publishes no ref. A local disk error on the spool or on
-a store write, a full disk say, ends the fetch as a local I/O error; the spool
-error names `.kit/tmp/`. It is not retried, and no other location is tried.
+Record the **remote** pack key as applied once every window of that
+pack, including its loose writes, is durable and its required signature
+checks pass. Record every remote pack a window completes before
+proceeding. The last object of a small pack can wait for a shared window
+to seal. A fetch or resumed clone can skip recorded packs. A crash can
+leave published windows of a remote pack with no record entry for it.
+A retry can download and apply that pack again.
+A closing closure or tip-history error leaves accepted windows in the
+store and publishes no ref for the failed tip. Objects in completed
+packs can remain unreferenced. Gc can prune their loose entries.
+If a run skipped a recorded pack and finds a missing delta base or a
+missing object in the tip's closure, it clears the stale record and
+applies the whole chain again once. This retry handles missing objects
+found during fetch. Local diagnostics invalidate fetch shortcuts under
+§1.2. An unresolved local integrity error propagates with repair information. Other failures also propagate.
+A local spool or store write error ends the fetch as a local I/O error
+and is never retried at another location. A spool error names
+`.kit/tmp/`.
+
+After a successful remote ref advance, push records its own data-pack
+keys as applied for that remote once it holds their objects durably.
+Before adding a key to the object `AppliedPacks` record, push MUST verify the
+pack's commits, remixes, and tags under the same checks a fetch applies
+with signature checking enabled. If the pack cannot pass those checks,
+omit its key. A later fetch with signature checking enabled therefore
+cannot skip an unchecked push. If persisting that record fails, the next
+fetch can download the pack again. The remote ref advance still stands.
+Push produces wire packs using the existing transport encoding.
 
 The closure check before ref publication stops at its anchors. With
 signature checking on, an anchor is the tip of a tracking ref of the fetched
@@ -1444,9 +1517,10 @@ on a branch chain downloads only its own nodes and packs. The tag phase
 self-heals at most once per fetch, so a remote whose every tag lacks an object
 costs one full walk, not one per tag.
 
-A fetch holds one window of one pack, not the pack, except over a transport
-that buffers the body (§1.1). The signature check
-reads only the commits, remixes and tags a pack stored, in runs whose
+A fetch bounds resident decoding to one decode window of one remote pack,
+except over a transport that buffers the body (§1.1). Pending publication
+data can live on disk. The signature check
+reads only the commits, remixes and tags a pack supplies, in runs whose
 objects together stay within 256 MiB, charged twice their size; one object
 over that is checked alone. What still grows with a pack is per-object
 bookkeeping, a few hundred bytes for each entry.

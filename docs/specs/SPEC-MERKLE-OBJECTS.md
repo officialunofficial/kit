@@ -383,5 +383,5 @@ fixed big- or little-endian as specified; no host-endian leakage).
 The serialized **byte layout** of `Tree` and `ChunkedBlob` is given in
 SPEC-OBJECTS §4/§7. `schema_version` is `0x01` for a `Tree` and `0x02` for a
 `ChunkedBlob`. A conformant store MUST refuse to open a repository whose
-on-disk format marker is not `bmt-v2`, the marker of the leaves in §3,
-rather than silently mis-reading it (SPEC-OBJECTS §10).
+on-disk marker lacks the `bmt-v2` addressing scheme for the leaves in §3
+or requires an unsupported storage capability (SPEC-OBJECTS §10).
