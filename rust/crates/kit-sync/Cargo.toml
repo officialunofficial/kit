@@ -19,10 +19,10 @@ workspace = true
 
 [dependencies]
 serde_json = "1.0.154"
-kit-attest = { version = "=0.8.1", path = "../kit-attest" }
+kit-attest = { version = "=0.9.0", path = "../kit-attest" }
 # `default-features = false`: the zstd C backend is this crate's own
 # `pack-zstd` feature (on by default), so an embedder can build without it.
-kit-core = { version = "=0.8.1", path = "../kit-core", default-features = false }
+kit-core = { version = "=0.9.0", path = "../kit-core", default-features = false }
 # Fan-out of signature verification, ref reads and chunk reads.
 rayon = "1.12.0"
 # Private staging directory for downloaded packs.
@@ -30,7 +30,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 
 # --- `client`: the kit-client backend -----------------------------------
-kit-client = { version = "=0.8.1", path = "../kit-client", default-features = false, optional = true }
+kit-client = { version = "=0.9.0", path = "../kit-client", default-features = false, optional = true }
 # Drives kit-client's futures to completion from the synchronous engine.
 futures-executor = { version = "0.3.34", optional = true }
 

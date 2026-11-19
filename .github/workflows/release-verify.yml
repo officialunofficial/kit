@@ -13,17 +13,9 @@ name: "Release: verify distribution channels"
 # happened to test by hand. Windows is not a supported target (see
 # docs/INVARIANTS.md), so there is no Windows/Scoop channel to verify.
 #
-# CURRENT LIMITATION (as of 2026-07-14, before the repository is public):
-# install.sh, cargo binstall's prebuilt-binary path, and Homebrew all
-# resolve through GitHub Releases or a tap that mirrors them — all of
-# which need the repo to be PUBLIC for anonymous access. The Homebrew tap
-# also doesn't have a real formula yet (see docs/RELEASE.md's pre-release
-# checklist). Until the repo goes public AND a real release has gone
-# through the distribution flow, expect `install-script` and `homebrew`
-# below to fail, and `cargo-binstall` to silently fall back to a
-# from-source build instead of fetching a prebuilt binary. `cargo-install`
-# is unaffected, because crates.io is public regardless of this repo's
-# visibility.
+# Run the Homebrew check after the stable release updates the tap to the
+# requested version. The install script and prebuilt binary checks need
+# public access to the GitHub release archives.
 
 on:
   workflow_dispatch:
@@ -142,8 +134,6 @@ jobs:
 
   homebrew:
     name: brew install (macOS)
-    # See the limitation note at the top of this file — expected to fail
-    # until officialunofficial/homebrew-tap has a real Formula/kit.rb.
     runs-on: macos-latest
     steps:
       - name: Checkout
