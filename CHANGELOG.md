@@ -7,6 +7,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Reduce full device flushes during batched object writes on macOS and iOS.
 - Skip rename content reads in status when there are no staged deletions.
 - Evict old applied-pack digests and sparse witnesses when their cache limits are reached.
 - Reconnect between packs when a push over SSH reaches the session byte limit.

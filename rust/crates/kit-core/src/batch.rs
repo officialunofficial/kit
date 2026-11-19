@@ -200,14 +200,33 @@ impl Syncer for RealSyncer {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // Linux does not compile this implementation.
+    #[cfg_attr(false, mutants::skip)]
     fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
-        // F_BARRIERFSYNC on the directory fd: pushes the dirent
-        // updates toward the device and orders them ahead of the
-        // batch's terminal F_FULLFSYNC, at a fraction of its cost.
-        // Some filesystems reject the fcntl on directories — fall back
-        // to the full dir fsync rather than weaken durability.
+        use std::os::unix::fs::MetadataExt;
+
         match File::open(dir) {
-            Ok(d) => d.sync_data().or_else(|_| d.sync_all()),
+            Ok(shard) => {
+                // The terminal F_FULLFSYNC runs on the objects root.
+                // A shard on another volume needs its own full flush.
+                let same_volume = dir.parent().is_some_and(|root| {
+                    shard
+                        .metadata()
+                        .ok()
+                        .zip(fs::metadata(root).ok())
+                        .is_some_and(|(shard, root)| shard.dev() == root.dev())
+                });
+                // Complete directory writeback to the drive. The terminal
+                // full flush drains its cache after every shard finishes.
+                if same_volume {
+                    match rustix::fs::fsync(&shard) {
+                        Ok(()) => return Ok(()),
+                        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                shard.sync_data().or_else(|_| shard.sync_all())
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }

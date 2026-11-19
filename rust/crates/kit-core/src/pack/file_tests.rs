@@ -646,6 +646,43 @@ fn a_spool_takes_writes_larger_than_its_buffer() {
     assert_eq!(store.read(&id).unwrap(), big);
 }
 
+#[test]
+fn file_unpack_uses_two_full_flushes_per_byte_window() {
+    use crate::batch::testing::{Ev, RecordingSyncer};
+    use std::sync::Arc;
+
+    let mut writer = PackWriter::new_raw_only();
+    for i in 0u8..6 {
+        let (id, bytes) = blob(&[i; 64]);
+        writer.push_raw(id, &bytes).unwrap();
+    }
+    let pack = writer.finish().unwrap();
+    // Six equal frames fit two at a time.
+    let window_bytes = ((pack.len() - HEADER_LEN - TRAILER_LEN) / 3) as u64;
+    let (dir, mut store) = fresh_store();
+    let file = verified(&pack, dir.path());
+    let syncer = Arc::new(RecordingSyncer::default());
+    store.set_syncer(syncer.clone());
+
+    let report = read_file(
+        &file,
+        &store,
+        WindowShape {
+            entries: 6,
+            bytes: window_bytes,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(report.raw_count, 6);
+    let events = syncer.events();
+    let full_flushes = events.iter().filter(|event| matches!(event, Ev::Full(_)));
+    assert_eq!(full_flushes.count(), 6);
+    assert!(!events.iter().any(|event| matches!(event, Ev::DirSync(_))));
+}
+
 /// A small file whose header claims ten million entries is refused by the
 /// header check, before the reader charges or allocates anything for them.
 #[test]
