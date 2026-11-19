@@ -109,6 +109,7 @@ is used.
 | Magic | Bytes | Format | Owning spec |
 |---|---|---|---|
 | `KIT\0` | 4 | Pack file | SPEC-PACKFILE |
+| `KITX` | 4 | Local pack index | SPEC-PACKFILE |
 | `KITKSV1\0` | 8 | Encrypted key record | SPEC-KEYSTORE |
 | `KOB1` | 4 | Object prologue | SPEC-OBJECTS |
 | `KIDX` | 4 | Staging index | SPEC-INDEX |
