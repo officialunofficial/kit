@@ -3,7 +3,9 @@
 use super::{
     PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs, dry_seal,
     effective_payload_cap, estimate_pack_sizes,
-    packmap::{ChainSize, PACKMAP_CAS_ATTEMPTS, check_fetchable, plan_branch_node, tip_has_packmap},
+    packmap::{
+        ChainSize, PACKMAP_CAS_ATTEMPTS, check_fetchable, plan_branch_node, tip_has_packmap,
+    },
     repository_operation_error,
 };
 use crate::SyncError;

@@ -14,9 +14,7 @@ use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_core::transfer;
 use kit_sync::push::{PushError, PushLease, PushOptions, PushTarget};
-use kit_sync::{
-    CloneRemote, NoopObserver, RemoteSource, TransportSource, init_clone_dir,
-};
+use kit_sync::{CloneRemote, NoopObserver, RemoteSource, TransportSource, init_clone_dir};
 use kit_transport_memory::MemoryTransport;
 
 const REMOTE: &str = "default";
@@ -110,7 +108,6 @@ impl Work {
         };
         kit_sync::push(&self.path, source, &options)
     }
-
 }
 
 /// Link `nodes` onto the packmap of `main`, each listing the packs of one
@@ -155,7 +152,9 @@ fn at_the_bound(tx: &MemoryTransport, listings: &[usize]) -> (Work, Hash, Hash) 
 }
 
 fn fetched_root_pack(tx: &MemoryTransport, map: Hash) -> Hash {
-    let bytes = tx.download_blob(&PackKey::from_hash(map), Some(MAIN), 1 << 20).unwrap();
+    let bytes = tx
+        .download_blob(&PackKey::from_hash(map), Some(MAIN), 1 << 20)
+        .unwrap();
     transfer::decode_packlist(&bytes).unwrap().packs[0]
 }
 
