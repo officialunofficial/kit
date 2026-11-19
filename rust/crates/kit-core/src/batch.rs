@@ -200,6 +200,8 @@ impl Syncer for RealSyncer {
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
+    // Linux does not compile this implementation.
+    #[cfg_attr(false, mutants::skip)]
     fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
