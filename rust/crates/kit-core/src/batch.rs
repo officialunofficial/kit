@@ -2252,6 +2252,34 @@ mod tests {
     }
 
     /// A second batch dedups against objects in an earlier segment.
+    /// Threads that miss at the same time in a store that has not loaded its
+    /// segments yet all find their objects, not only the thread that loads.
+    #[test]
+    fn concurrent_first_reads_of_a_segment_all_find_their_objects() {
+        let (dir, store) = fresh_store();
+        let n = pack_min() + 400;
+        let batch = store.batch();
+        let hashes: Vec<Hash> = (0..n)
+            .map(|i| batch.write(format!("object {i}").as_bytes()).unwrap())
+            .collect();
+        batch.commit().unwrap();
+        let packed = &hashes[pack_min()..];
+        for _ in 0..50 {
+            let fresh = ObjectStore::open(&crate::layout::RepoLayout::single(dir.path())).unwrap();
+            let start = std::sync::Barrier::new(8);
+            std::thread::scope(|s| {
+                for t in 0..8 {
+                    let (fresh, start) = (&fresh, &start);
+                    s.spawn(move || {
+                        start.wait();
+                        let h = &packed[t * 37 % packed.len()];
+                        assert!(fresh.contains(h), "thread {t} lost a packed object");
+                    });
+                }
+            });
+        }
+    }
+
     #[test]
     fn later_batch_dedups_against_a_segment() {
         let (_dir, store) = fresh_store();

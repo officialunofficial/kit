@@ -113,6 +113,8 @@ for p in sorted(glob.glob('d*/f*'))[::2]:
   (cd g && env $env "$bin" gc --grace-secs 0 2>gc.log)
   t1=$(now)
   echo "gc $1: $(tail -1 g/gc.log)" >&2
+  # A failed gc must fail the job, not report a fast time.
+  if ! grep -q '^gc: pruned' g/gc.log; then echo "gc $1 failed" >&2; echo failed; return; fi
   python3 -c "print(round($t1 - $t0, 3))"
 }
 

@@ -188,9 +188,9 @@ impl PackSet {
             return Some(read_at(&seg.pack, e));
         }
         drop(loaded);
-        if !self.reload_if_changed() {
-            return None;
-        }
+        // Look again even when this thread loaded nothing: another thread
+        // may have loaded the segment between the miss and the reload.
+        self.reload_if_changed();
         let loaded = self.loaded.read().expect("pack set poisoned");
         loaded
             .segments
@@ -210,9 +210,7 @@ impl PackSet {
                 return Some(*e);
             }
         }
-        if !self.reload_if_changed() {
-            return None;
-        }
+        self.reload_if_changed();
         let loaded = self.loaded.read().expect("pack set poisoned");
         loaded.segments.iter().find_map(|s| s.find(h)).copied()
     }
@@ -224,24 +222,22 @@ impl PackSet {
         loaded.stamp = None;
     }
 
-    /// Load any index that appeared since the last load. Returns whether
-    /// anything new was loaded.
-    fn reload_if_changed(&self) -> bool {
+    /// Load any index that appeared since the last load.
+    fn reload_if_changed(&self) {
         let Ok(meta) = fs::metadata(&self.dir) else {
-            return false;
+            return;
         };
         let Ok(mtime) = meta.modified() else {
-            return false;
+            return;
         };
         let Ok(names) = index_names(&self.dir) else {
-            return false;
+            return;
         };
         let stamp = Some((mtime, names.len()));
         let mut loaded = self.loaded.write().expect("pack set poisoned");
         if loaded.stamp == stamp {
-            return false;
+            return;
         }
-        let mut grew = false;
         for name in names {
             if loaded.segments.iter().any(|s| s.name == name) {
                 continue;
@@ -250,11 +246,9 @@ impl PackSet {
             // objects stay unresolved and a read reports them missing.
             if let Ok(seg) = load_segment(&self.dir, &name) {
                 loaded.segments.push(seg);
-                grew = true;
             }
         }
         loaded.stamp = stamp;
-        grew
     }
 }
 

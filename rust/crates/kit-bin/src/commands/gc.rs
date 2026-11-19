@@ -189,7 +189,10 @@ pub fn run(args: &[String]) -> u8 {
         String::new()
     };
     let temp_files = if report.packs_rewritten > 0 {
-        format!("{temp_files}, rewrote {} pack segment(s)", report.packs_rewritten)
+        format!(
+            "{temp_files}, rewrote {} pack segment(s)",
+            report.packs_rewritten
+        )
     } else {
         temp_files
     };
