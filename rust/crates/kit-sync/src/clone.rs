@@ -111,7 +111,7 @@ const UNFINISHED_CLONE_ENTRIES: [&str; 9] = [
 const BRANCH_HISTORY_DIR: &str = "history-v1";
 
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
-/// it made a branch or landed `HEAD`: `dir` holds only the repository
+/// it made a branch or landed `HEAD`, or undid both: `dir` holds only the repository
 /// directory, which holds only what such a clone writes
 /// ([`UNFINISHED_CLONE_ENTRIES`] and lock files), with the config a clone of `remote`
 /// writes, byte for byte, the `HEAD` a new repository starts with, no branch,

@@ -673,8 +673,8 @@ fn fetch_objects_inner(
         prune_tracking(layout, source, observer, remote, &listed, lock_wait, report)?;
     }
     // The local tags the tag phase compares with the remote. The phase only
-    // adds tags, so the local tags match the remote after it only while they
-    // are these and the ones it published.
+    // adds tags, so after it the local tags are the ones it compared only
+    // while they are these and the ones it published.
     let mut matched_tags = match cursor {
         Some(_) => refs::list_tags(layout)?,
         None => Vec::new(),
