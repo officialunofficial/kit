@@ -826,6 +826,27 @@ impl ObjectStore {
         Ok(out)
     }
 
+    /// Make durable the directory entries of the shard directories
+    /// `objects/<2-hex>/` named by `shards`, each the first byte of the ids
+    /// it holds: one barrier per shard, then one device flush. Nothing for
+    /// no shards.
+    ///
+    /// Call it before a ref names objects this process found in the store
+    /// rather than wrote. A visible object's bytes are durable, but another
+    /// process may have renamed it into place and not yet flushed its
+    /// directory entry (SPEC-OBJECTS §10.1).
+    ///
+    /// # Errors
+    /// [`StoreError::Io`] if a barrier or the flush fails.
+    pub fn sync_shards(&self, shards: impl IntoIterator<Item = u8>) -> StoreResult<()> {
+        let dirs: std::collections::BTreeSet<PathBuf> = shards
+            .into_iter()
+            .map(|shard| self.objects_root.join(format!("{shard:02x}")))
+            .collect();
+        crate::batch::flush_dirents(self, dirs)?;
+        Ok(())
+    }
+
     /// Filesystem metadata for object `h` (size + mtime), for gc's
     /// grace-window check.
     ///

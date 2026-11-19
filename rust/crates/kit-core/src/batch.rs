@@ -578,22 +578,41 @@ impl<'s> WriteBatch<'s> {
                         syncer.rename(tmp, &store.path_for(&h))?;
                     }
                 }
-                // 4. Dirent barriers, once per touched shard dir,
-                //    concurrently (sorted first so the work list is
-                //    deterministic).
-                let mut shards: Vec<PathBuf> = touched_shards.into_iter().collect();
-                shards.sort();
-                if !shards.is_empty() {
-                    parallel_io(shards.len(), |i| syncer.dir_barrier(&shards[i]))?;
-                    // 5. Terminal device flush: makes the dirent
-                    //    barriers (and, on platforms where step 2 was
-                    //    a barrier-anchored flush, everything) durable.
-                    syncer.device_flush(store.objects_root())?;
-                }
+                // 4-5. Dirent barriers, then the terminal device flush.
+                flush_dirents(store, touched_shards)?;
                 Ok(())
             }
         }
     }
+}
+
+/// Make the dirents of `shards` durable: one barrier per shard directory,
+/// run concurrently (sorted first so the work list is deterministic), then
+/// one terminal device flush, which makes the dirent barriers (and, on
+/// platforms where a batch's full flush was barrier-anchored, everything)
+/// durable. No shards, no flush.
+pub(crate) fn flush_dirents(
+    store: &ObjectStore,
+    shards: impl IntoIterator<Item = PathBuf>,
+) -> io::Result<()> {
+    let syncer = store.syncer();
+    let mut shards: Vec<PathBuf> = shards.into_iter().collect();
+    if shards.is_empty() {
+        return Ok(());
+    }
+    shards.sort();
+    parallel_io(shards.len(), |i| {
+        syncer.dir_barrier(&shards[i])?;
+        #[cfg(feature = "fault-injection")]
+        crate::fault::sync_step(|| crate::fault::SyncStep::DirBarrier(shards[i].clone()));
+        Ok(())
+    })?;
+    syncer.device_flush(store.objects_root())?;
+    #[cfg(feature = "fault-injection")]
+    crate::fault::sync_step(|| {
+        crate::fault::SyncStep::DeviceFlush(store.objects_root().to_path_buf())
+    });
+    Ok(())
 }
 
 /// Whether a checkpoint that took `small_staged` small objects renames
@@ -1963,6 +1982,28 @@ mod tests {
         let h = batch.write(&[0u8; 16]).unwrap();
         batch.commit().unwrap();
         assert!(store.contains(&h));
+    }
+
+    #[test]
+    fn sync_shards_barriers_each_shard_once_then_flushes_the_device() {
+        let (_dir, store, rec) = recording_store();
+        let root = store.objects_root().to_path_buf();
+
+        store.sync_shards([0xab, 0x01, 0xab]).unwrap();
+
+        // The barriers run concurrently, so they may record in any order.
+        let mut evs = rec.events();
+        assert_eq!(evs.pop(), Some(Ev::Full(root.clone())));
+        evs.sort_by_key(|e| format!("{e:?}"));
+        assert_eq!(
+            evs,
+            [
+                Ev::DirBarrier(root.join("01")),
+                Ev::DirBarrier(root.join("ab")),
+            ]
+        );
+        store.sync_shards([]).unwrap();
+        assert_eq!(rec.events().len(), 3, "no shards, no flush");
     }
 
     #[test]

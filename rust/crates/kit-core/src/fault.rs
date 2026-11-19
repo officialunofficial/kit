@@ -1,4 +1,6 @@
-//! Injected write failures, for tests of how a full disk ends a transfer.
+//! Injected write failures, for tests of how a full disk ends a transfer, and a
+//! hook on the store's dirent flushes, for tests of what is durable before a
+//! ref names it.
 //!
 //! Built with the `fault-injection` feature,
 //! which only test builds turn on. A failure applies to every thread of the
@@ -42,5 +44,46 @@ pub(crate) fn check(site: Site) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::from(io::ErrorKind::StorageFull))
+    }
+}
+
+/// A step that makes the store's directory entries durable, as
+/// [`on_sync`] reports it once the step has completed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncStep {
+    /// The dirents of one shard directory were barriered.
+    DirBarrier(std::path::PathBuf),
+    /// The terminal device flush that makes the barriers durable, anchored
+    /// at the store's `objects/` directory.
+    DeviceFlush(std::path::PathBuf),
+}
+
+type SyncHook = Box<dyn Fn(&SyncStep) + Send + Sync>;
+
+static SYNC_HOOK: std::sync::Mutex<Option<SyncHook>> = std::sync::Mutex::new(None);
+
+/// Call `hook` after every dirent barrier and device flush of every store in
+/// the process, until the guard drops. A test that sets one runs alone.
+#[must_use = "the hook ends when the guard drops"]
+pub fn on_sync(hook: impl Fn(&SyncStep) + Send + Sync + 'static) -> SyncHookGuard {
+    *SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    SyncHookGuard(())
+}
+
+/// Ends a hook set by [`on_sync`] when dropped.
+#[derive(Debug)]
+pub struct SyncHookGuard(());
+
+impl Drop for SyncHookGuard {
+    fn drop(&mut self) {
+        *SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// Report a completed step to the hook, if one is set.
+pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
+    let hook = SYNC_HOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hook) = hook.as_ref() {
+        hook(&step());
     }
 }
