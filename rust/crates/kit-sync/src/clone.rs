@@ -65,9 +65,9 @@ pub enum CloneInitError {
 /// without downloading those packs again. Everything else an earlier run
 /// published or recorded is dropped: its remote-tracking refs, tags, records of
 /// verified tips, its fetch checkpoints and cursor records, and the history of
-/// a branch it made and undid. A clone builds
-/// its trust from nothing, so the resumed pull checks every closure and
-/// history in full, locally, and republishes each branch it lists. When they
+/// a branch it made and undid. A clone builds its trust from nothing, so the
+/// resumed pull checks every closure and history in full, locally, and
+/// republishes each branch it lists. When they
 /// cannot be dropped, the directory is refused as
 /// [`CloneInitError::AlreadyInitialized`], as is a clone another process is
 /// still running into `dir`.
