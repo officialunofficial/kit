@@ -503,9 +503,31 @@ pub(in crate::store) fn fuzz_index(bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::{FRAME_LEN, Frame, HEADER_LEN, Index, Pair, encode};
+    use crate::object::KitError;
+    use crate::serialize;
+    use crate::store::StoreError;
     use crate::store::local_pack::LocalPacks;
     use std::path::Path;
     use std::sync::Arc;
+
+    #[test]
+    fn packed_blob_identity_rejects_a_truncated_payload() {
+        let bytes = serialize::blob_prologue(20).unwrap();
+        assert!(matches!(
+            super::canonical_id(&bytes),
+            Err(StoreError::Decode(KitError::UnexpectedEof))
+        ));
+    }
+
+    #[test]
+    fn packed_blob_identity_rejects_trailing_payload_bytes() {
+        let mut bytes = serialize::blob_prologue(1).unwrap().to_vec();
+        bytes.extend_from_slice(b"ab");
+        assert!(matches!(
+            super::canonical_id(&bytes),
+            Err(StoreError::Decode(KitError::TrailingData))
+        ));
+    }
 
     #[test]
     fn cache_evicts_the_oldest_index_at_its_byte_and_entry_limits() {
