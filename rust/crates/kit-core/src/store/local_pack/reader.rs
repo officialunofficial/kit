@@ -15,7 +15,8 @@ use super::{StoreError, StoreResult, is_disappeared};
 
 // Keep room for loose objects, transports and other repository files.
 const HANDLE_LIMIT: usize = 96;
-const ROW_CACHE_BYTES: usize = 64 << 20;
+pub(super) const ROW_CACHE_BYTES: usize = 64 << 20;
+pub(super) const ROUTE_CACHE_BYTES: usize = 288 << 20;
 
 #[derive(Debug, Default)]
 pub(super) struct Handles(MutexHandles);
@@ -29,6 +30,11 @@ pub(super) enum Member {
 }
 
 impl Handles {
+    #[cfg(test)]
+    pub(super) fn cached(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
     pub(super) fn get(&self, locator: &Arc<Locator>, member: Member) -> StoreResult<Arc<File>> {
         let mut handles = self.0.lock().expect("local pack handles mutex");
         let handle = if let Some(position) = handles
@@ -79,11 +85,12 @@ pub(in crate::store) struct Locator {
     trailer: u64,
     fanout: Box<[u8; FANOUT_END]>,
     rows: Box<[u8]>,
+    prefixes: Box<[u32]>,
 }
 
 impl Locator {
-    pub(super) fn open(pair: &Pair, budget: usize) -> StoreResult<Self> {
-        let result = Self::load(pair, budget);
+    pub(super) fn open(pair: &Pair, rows: usize, routes: usize) -> StoreResult<Self> {
+        let result = Self::load(pair, rows, routes);
         if let Err(error) = &result
             && !is_disappeared(error)
         {
@@ -96,7 +103,7 @@ impl Locator {
         result
     }
 
-    fn load(pair: &Pair, budget: usize) -> StoreResult<Self> {
+    fn load(pair: &Pair, row_budget: usize, route_budget: usize) -> StoreResult<Self> {
         let mut pack = open_regular(&pair.pack)?;
         let pack_stamp = Stamp::get(&pack.metadata()?)?;
         let (count, trailer, _) = read_header(&mut pack)?;
@@ -116,26 +123,31 @@ impl Locator {
         if le_u32(&fanout[8..12]) as usize != count {
             return Err(invalid("index count differs from pack count").into());
         }
-        let mut prev = 0;
-        for bucket in fanout[12..].chunks_exact(4) {
-            let end = le_u32(bucket) as usize;
-            if end < prev || end > count {
-                return Err(invalid("invalid index fanout").into());
-            }
-            prev = end;
-        }
-        if prev != count {
-            return Err(invalid("index fanout does not reach frame count").into());
-        }
+        super::index::validate_fanout_bounds(&fanout[12..], count)?;
         let mut key = [0; 32];
         read_spooled(&index, (size - 64) as u64, &mut key)?;
         if key != pair.key {
             return Err(invalid("index key differs from filename").into());
         }
         let mut rows = Vec::new();
-        if Self::row_charge(count) <= budget {
-            rows.resize(row_bytes, 0);
-            index.read_exact(&mut rows)?;
+        let mut prefixes = Vec::new();
+        let route_bytes = count * (size_of::<Route>() + size_of::<u32>());
+        if route_bytes <= route_budget {
+            if row_bytes <= row_budget {
+                rows.resize(row_bytes, 0);
+                index.read_exact(&mut rows)?;
+            } else {
+                prefixes.reserve_exact(count);
+                let mut buffer = [0; 32 * 256];
+                let mut remaining = count;
+                while remaining != 0 {
+                    let entries = remaining.min(256);
+                    let bytes = &mut buffer[..entries * 32];
+                    index.read_exact(bytes)?;
+                    prefixes.extend(bytes.chunks_exact(32).map(prefix));
+                    remaining -= entries;
+                }
+            }
         }
         Ok(Self {
             pair: pair.clone(),
@@ -145,18 +157,23 @@ impl Locator {
             trailer,
             fanout,
             rows: rows.into_boxed_slice(),
+            prefixes: prefixes.into_boxed_slice(),
         })
     }
 
-    fn row_charge(count: usize) -> usize {
-        count * (INDEX_ROW_LEN + size_of::<Route>())
+    pub(super) fn row_charge(&self) -> usize {
+        self.rows.len()
     }
 
-    pub(super) fn charge(&self) -> usize {
+    pub(super) fn route_charge(&self) -> usize {
+        self.route_count() * (size_of::<Route>() + size_of::<u32>())
+    }
+
+    pub(super) fn route_count(&self) -> usize {
         if self.rows.is_empty() {
-            0
+            self.prefixes.len()
         } else {
-            Self::row_charge(self.count)
+            self.count
         }
     }
 
@@ -230,21 +247,29 @@ impl Locator {
         id: &Hash,
         row: Option<usize>,
     ) -> StoreResult<Option<Frame>> {
-        let (file, row) = if let Some(row) = row {
-            if self.rows[row * 32..(row + 1) * 32] != id[..] {
-                return Ok(None);
-            }
-            (None, row)
-        } else {
-            if self.bucket(id[0]).is_empty() {
+        let file = if self.rows.is_empty() {
+            if row.is_none() && self.bucket(id[0]).is_empty() {
                 return Ok(None);
             }
             self.check_current()?;
-            let file = handles.get(self, Member::Index)?;
-            let Some(row) = self.find_row(&file, id).map_err(|e| self.pair.error(e))? else {
+            Some(handles.get(self, Member::Index)?)
+        } else {
+            None
+        };
+        let row = if let Some(row) = row {
+            let candidate: Hash = self
+                .read_column(file.as_deref(), row * 32)
+                .map_err(|e| self.pair.error(e))?;
+            if candidate != *id {
+                return Ok(None);
+            }
+            row
+        } else {
+            let file = file.as_deref().expect("unrouted rows are on disk");
+            let Some(row) = self.find_row(file, id).map_err(|e| self.pair.error(e))? else {
                 return Ok(None);
             };
-            (Some(file), row)
+            row
         };
         let frame = self
             .frame_from_row(file.as_deref(), row)
@@ -267,10 +292,12 @@ impl Locator {
         self.rows
             .chunks_exact(32)
             .take(self.count)
+            .map(prefix)
+            .chain(self.prefixes.iter().copied())
             .enumerate()
-            .map(move |(row, id)| Route {
-                prefix: prefix(id),
-                pack: u32::try_from(pack).expect("bounded by row cache"),
+            .map(move |(row, prefix)| Route {
+                prefix,
+                pack: u32::try_from(pack).expect("bounded pack number"),
                 row: u32::try_from(row).expect("bounded index row"),
             })
     }
@@ -301,15 +328,11 @@ impl Locator {
 
 #[derive(Debug)]
 pub(super) struct Route {
-    pub(super) prefix: u64,
+    pub(super) prefix: u32,
     pub(super) pack: u32,
     pub(super) row: u32,
 }
 
-pub(super) fn prefix(id: &[u8]) -> u64 {
-    u64::from_le_bytes(id[..8].try_into().expect("id prefix"))
-}
-
-pub(super) fn row_budget() -> usize {
-    ROW_CACHE_BYTES
+pub(super) fn prefix(id: &[u8]) -> u32 {
+    u32::from_le_bytes(id[..4].try_into().expect("id prefix"))
 }

@@ -142,6 +142,7 @@ fn write_sink_presence_checks_use_staged_loose_and_known_pack_objects() {
     let packed = writer.write(&blob(b"packed object")).unwrap();
     writer.finish().unwrap();
 
+    assert!(store.batch().has(&packed));
     let reader = ObjectStore::open(&layout).unwrap();
     let loose = reader.write(&blob(b"loose object")).unwrap();
     let batch = reader.batch();
@@ -226,7 +227,7 @@ fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
 
 #[test]
 fn verified_accessors_try_another_pack_after_the_cached_copy_fails() {
-    let (_dir, _layout, store) = fresh();
+    let (_dir, layout, store) = fresh();
     let bytes = blob(b"survives in another pack");
     let mut damaged = writer(&store);
     let id = damaged.write(&bytes).unwrap();
@@ -241,12 +242,12 @@ fn verified_accessors_try_another_pack_after_the_cached_copy_fails() {
         store.read(&id),
         Err(StoreError::HashMismatch { .. })
     ));
-    let mut good = writer(&store);
+    let other = ObjectStore::open(&layout).unwrap();
+    let mut good = writer(&other);
     good.write(&bytes).unwrap();
     good.write(&blob(b"pack key differs")).unwrap();
     good.finish().unwrap();
 
-    assert_eq!(store.read(&id).unwrap(), bytes);
     let mut allocations = 0;
     let result = store.read_with_allocator::<StoreError>(&id, |size| {
         allocations += 1;
@@ -254,6 +255,7 @@ fn verified_accessors_try_another_pack_after_the_cached_copy_fails() {
     });
     assert_eq!(allocations, 2);
     assert_eq!(result.unwrap(), bytes);
+    assert_eq!(store.read(&id).unwrap(), bytes);
     assert_eq!(store.read_unverified(&id).unwrap(), bytes);
     assert_eq!(store.read_raw_for_verification(&id).unwrap(), bytes);
 }
@@ -1462,7 +1464,7 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
 
     let (_dir, layout, store) = fresh();
     let mut writer = Writer::new(&store, 1, MAX_TOTAL_PAYLOAD).unwrap();
-    let objects: Vec<_> = (0..72)
+    let objects: Vec<_> = (0..104)
         .map(|n| {
             let bytes = blob(&[n]);
             (writer.write(&bytes).unwrap(), bytes)
@@ -1488,6 +1490,7 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
         ));
     }
     assert_eq!(loads(), objects.len());
+    assert_eq!(reader.packs.handles.cached(), 96);
 }
 
 #[test]
@@ -1547,4 +1550,59 @@ fn cached_pack_handles_do_not_keep_unpublished_locations_visible() {
         replacement.finish().unwrap();
         assert_eq!(reader.read(&id).unwrap(), bytes);
     }
+}
+
+#[test]
+fn an_index_outside_the_row_budget_routes_without_reopening_on_misses() {
+    use super::reader::{Handles, Locator, prefix};
+
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"read rows from disk");
+    let mut writer = writer(&store);
+    let id = writer.write(&bytes).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+
+    let locator = std::sync::Arc::new(Locator::open(&pair, 0, 64).unwrap());
+    assert_eq!(locator.row_charge(), 0);
+    let catalog = super::Catalog::from_packs(vec![std::sync::Arc::clone(&locator)], None);
+    let routes: Vec<_> = catalog.candidates(&id).collect();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].1, Some(0));
+    let mut absent = id;
+    absent[0] ^= 1;
+    assert_ne!(prefix(&absent), prefix(&id));
+    assert!(catalog.candidates(&absent).next().is_none());
+    let handles = Handles::default();
+    assert!(locator.find(&handles, &id, routes[0].1).unwrap().is_some());
+    let mut different = id;
+    different[31] ^= 1;
+    assert!(
+        locator
+            .find(&handles, &different, routes[0].1)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_discovery_notices_publication_with_restored_directory_mtime() {
+    let (_dir, layout, store) = fresh();
+    let mut writer = writer(&store);
+    writer.write(&blob(b"known object")).unwrap();
+    writer.finish().unwrap();
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(!reader.contains(&[0; 32]));
+    let dir = fs::File::open(store.pack_dir()).unwrap();
+    let mtime = dir.metadata().unwrap().modified().unwrap();
+
+    let bytes = blob(b"published with unchanged directory mtime");
+    let mut writer = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    let id = writer.write(&bytes).unwrap();
+    writer.finish().unwrap();
+    dir.set_modified(mtime).unwrap();
+    assert_eq!(dir.metadata().unwrap().modified().unwrap(), mtime);
+    assert_eq!(reader.read(&id).unwrap(), bytes);
 }

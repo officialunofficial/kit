@@ -270,7 +270,7 @@ impl Staged {
             .packs
             .enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        store.packs.forget(&pair.key);
+        store.packs.remember_publication(&pair);
         Ok(())
     }
 }

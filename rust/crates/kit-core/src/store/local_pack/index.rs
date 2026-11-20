@@ -121,6 +121,26 @@ impl Stamp {
         })
     }
 
+    pub(super) fn settled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::time::{Duration, SystemTime};
+            let (seconds, nanos) = self.changed;
+            let Ok(seconds) = u64::try_from(seconds) else {
+                return false;
+            };
+            let Ok(nanos) = u32::try_from(nanos) else {
+                return false;
+            };
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::new(seconds, nanos))
+                .and_then(|changed| changed.elapsed().ok())
+                .is_some_and(|age| age >= Duration::from_secs(1))
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
     pub(super) fn same_file(&self, other: &Self) -> bool {
         #[cfg(unix)]
         return self.identity == other.identity && self.len == other.len;
@@ -189,6 +209,7 @@ impl Index {
         if blake3::hash(&bytes[..checksum_at]).as_bytes() != &bytes[checksum_at..] {
             return Err(invalid("index checksum mismatch"));
         }
+        validate_fanout_bounds(&bytes[12..FANOUT_END], self.count)?;
         if (1..self.count).any(|i| self.id(i - 1) >= self.id(i)) {
             return Err(invalid("index ids must be strictly increasing"));
         }
@@ -352,6 +373,21 @@ pub(super) fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
         return Err(invalid("local pack frame is not raw"));
     }
     Ok(le_u32(&header[1..]))
+}
+
+pub(super) fn validate_fanout_bounds(fanout: &[u8], count: usize) -> io::Result<()> {
+    let mut prev = 0;
+    for bucket in fanout.chunks_exact(4) {
+        let end = le_u32(bucket) as usize;
+        if end < prev || end > count {
+            return Err(invalid("invalid index fanout"));
+        }
+        prev = end;
+    }
+    if prev != count {
+        return Err(invalid("index fanout does not reach frame count"));
+    }
+    Ok(())
 }
 
 pub(super) fn le_u32(bytes: &[u8]) -> u32 {

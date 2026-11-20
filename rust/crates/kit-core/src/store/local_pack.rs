@@ -20,18 +20,37 @@ mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
-use reader::{Handles, Locator, Member, Route, prefix, row_budget};
+use reader::{Handles, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix};
 pub use writer::LocalPackWriter;
 
 #[derive(Debug, Default)]
 struct Catalog {
-    dir: Option<index::Stamp>,
+    error: Option<Arc<StoreError>>,
     packs: Vec<Arc<Locator>>,
     routes: Vec<Route>,
     on_disk: Vec<usize>,
 }
 
 impl Catalog {
+    fn from_packs(packs: Vec<Arc<Locator>>, error: Option<StoreError>) -> Self {
+        let mut routes = Vec::with_capacity(packs.iter().map(|p| p.route_count()).sum());
+        let mut on_disk = Vec::new();
+        for (number, pack) in packs.iter().enumerate() {
+            if pack.route_count() == 0 {
+                on_disk.push(number);
+            } else {
+                routes.extend(pack.routes(number));
+            }
+        }
+        routes.sort_unstable_by_key(|route| (route.prefix, route.pack));
+        Self {
+            error: error.map(Arc::new),
+            packs,
+            routes,
+            on_disk,
+        }
+    }
+
     fn candidates(&self, id: &Hash) -> impl Iterator<Item = (&Arc<Locator>, Option<usize>)> {
         let prefix = prefix(id);
         let start = self.routes.partition_point(|route| route.prefix < prefix);
@@ -46,6 +65,8 @@ impl Catalog {
 #[derive(Debug, Default)]
 struct Discovery {
     catalog: Arc<Catalog>,
+    latest: Option<Arc<Locator>>,
+    dir: Option<index::Stamp>,
     scanned: bool,
 }
 
@@ -81,14 +102,29 @@ impl LocalPacks {
     }
 
     fn forget(&self, key: &Hash) {
-        self.discovery
-            .lock()
-            .expect("local pack catalog mutex")
-            .scanned = false;
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        discovery.scanned = false;
+        if discovery
+            .latest
+            .as_ref()
+            .is_some_and(|pack| pack.pair.key == *key)
+        {
+            discovery.latest = None;
+        }
         self.handles.retain(|locator| locator.pair.key != *key);
     }
 
-    fn discover(&self, dir: &Path, force: bool) -> StoreResult<(Arc<Catalog>, Option<StoreError>)> {
+    fn remember_publication(&self, pair: &Pair) {
+        // A writer frequently reads back the pair it just sealed. Keep
+        // its locator until discovery sees it without rebuilding on hits.
+        if let Ok(locator) = Locator::open(pair, 0, 0) {
+            let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+            discovery.latest = Some(Arc::new(locator));
+            discovery.scanned = false;
+        }
+    }
+
+    fn discover(&self, dir: &Path, force: bool) -> StoreResult<Arc<Catalog>> {
         let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
         let stamp = match fs::symlink_metadata(dir) {
             Ok(meta) if meta.is_dir() => Some(index::Stamp::get(&meta)?),
@@ -96,65 +132,80 @@ impl LocalPacks {
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
-        // A publication changes the directory's status time even if its
-        // modification time is restored. Without a status time, scan on a miss.
-        if cfg!(unix) && !force && discovery.scanned && discovery.catalog.dir == stamp {
-            return Ok((Arc::clone(&discovery.catalog), None));
+        // A publication changes ctime even when mtime is restored. A
+        // recent ctime may share its filesystem tick with a later publish.
+        if !force && discovery.scanned && discovery.dir == stamp {
+            return Ok(Arc::clone(&discovery.catalog));
         }
-        let mut catalog = Catalog {
-            dir: stamp,
-            ..Catalog::default()
-        };
+        let settled = stamp.as_ref().is_none_or(index::Stamp::settled);
         let old: BTreeMap<_, _> = discovery
             .catalog
             .packs
             .iter()
             .map(|p| (p.pair.key, p))
             .collect();
-        let mut budget = row_budget() - old.values().map(|p| p.charge()).sum::<usize>();
-        let mut error = None;
+        let mut pairs = Vec::new();
         visit_pairs(dir, |pair| {
-            let previous = old.get(&pair.key).copied();
-            if let Some(locator) = previous {
-                budget += locator.charge();
-            }
-            let locator = match previous {
-                Some(locator) if locator.check_current().is_ok() => Arc::clone(locator),
-                _ => {
-                    #[cfg(test)]
-                    self.index_loads.fetch_add(1, Ordering::Relaxed);
-                    match Locator::open(&pair, budget) {
-                        Ok(locator) => Arc::new(locator),
-                        Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
-                        Err(e) if is_disappeared(&e) => return Ok(()),
-                        Err(e) => {
-                            error.get_or_insert(e);
-                            return Ok(());
-                        }
+            pairs.push(pair);
+            Ok(())
+        })?;
+        pairs.sort_unstable_by_key(|pair| pair.key);
+
+        let mut row_budget = ROW_CACHE_BYTES;
+        let mut route_budget = ROUTE_CACHE_BYTES;
+        for locator in pairs.iter().filter_map(|pair| old.get(&pair.key)) {
+            row_budget -= locator.row_charge();
+            route_budget -= locator.route_charge();
+        }
+        let mut packs = Vec::with_capacity(pairs.len());
+        let mut error = None;
+        for pair in pairs {
+            let retained = old.get(&pair.key);
+            let locator = if let Some(locator) = retained.filter(|p| p.check_current().is_ok()) {
+                Arc::clone(locator)
+            } else {
+                if let Some(locator) = retained {
+                    row_budget += locator.row_charge();
+                    route_budget += locator.route_charge();
+                }
+                #[cfg(test)]
+                self.index_loads.fetch_add(1, Ordering::Relaxed);
+                match Locator::open(&pair, row_budget, route_budget) {
+                    Ok(locator) => {
+                        row_budget -= locator.row_charge();
+                        route_budget -= locator.route_charge();
+                        Arc::new(locator)
+                    }
+                    Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
+                    Err(e) if is_disappeared(&e) => continue,
+                    Err(e) => {
+                        error.get_or_insert(e);
+                        continue;
                     }
                 }
             };
-            let pack = catalog.packs.len();
-            if locator.charge() == 0 {
-                catalog.on_disk.push(pack);
-            } else {
-                budget -= locator.charge();
-                catalog.routes.extend(locator.routes(pack));
-            }
-            catalog.packs.push(locator);
-            Ok(())
-        })?;
-        catalog
-            .routes
-            .sort_unstable_by_key(|route| (route.prefix, route.pack));
-        let live: BTreeMap<_, _> = catalog.packs.iter().map(|p| (p.pair.key, p)).collect();
-        self.handles.retain(|p| {
-            live.get(&p.pair.key)
-                .is_some_and(|live| Arc::ptr_eq(live, p))
+            packs.push(locator);
+        }
+        discovery.scanned = settled;
+        discovery.dir = stamp;
+        if packs.len() == discovery.catalog.packs.len()
+            && packs
+                .iter()
+                .zip(&discovery.catalog.packs)
+                .all(|(new, old)| Arc::ptr_eq(new, old))
+            && error.is_none()
+            && discovery.catalog.error.is_none()
+        {
+            return Ok(Arc::clone(&discovery.catalog));
+        }
+        self.handles.retain(|locator| {
+            packs
+                .binary_search_by_key(&locator.pair.key, |p| p.pair.key)
+                .is_ok_and(|i| Arc::ptr_eq(&packs[i], locator))
         });
-        discovery.scanned = error.is_none();
-        discovery.catalog = Arc::new(catalog);
-        Ok((Arc::clone(&discovery.catalog), error))
+        discovery.latest = None;
+        discovery.catalog = Arc::new(Catalog::from_packs(packs, error));
+        Ok(Arc::clone(&discovery.catalog))
     }
 
     pub(super) fn collect(
@@ -182,14 +233,16 @@ impl LocalPacks {
         refresh: bool,
         mut use_location: impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
-        let known = Arc::clone(
-            &self
-                .discovery
-                .lock()
-                .expect("local pack catalog mutex")
-                .catalog,
-        );
+        let (known, latest) = {
+            let discovery = self.discovery.lock().expect("local pack catalog mutex");
+            (Arc::clone(&discovery.catalog), discovery.latest.clone())
+        };
         let mut errors = LookupErrors::default();
+        if let Some(pack) = latest
+            && let Some(value) = self.try_pack(&pack, id, None, &mut errors, &mut use_location)?
+        {
+            return Ok(value);
+        }
         if let Some(value) = self.try_catalog(&known, id, None, &mut errors, &mut use_location)? {
             return Ok(value);
         }
@@ -198,8 +251,13 @@ impl LocalPacks {
         }
         let mut pair_error = None;
         if refresh && self.refresh_enabled(store)? {
-            let (fresh, error) = self.discover(&store.pack_dir(), errors.stale)?;
-            pair_error = error;
+            let fresh = self.discover(&store.pack_dir(), errors.stale)?;
+            pair_error = fresh.error.as_ref().map(|error| {
+                StoreError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    Arc::clone(error),
+                ))
+            });
             if !Arc::ptr_eq(&known, &fresh)
                 && let Some(value) =
                     self.try_catalog(&fresh, id, Some(&known), &mut errors, &mut use_location)?
@@ -226,23 +284,32 @@ impl LocalPacks {
             if checked.is_some_and(|old| old.candidates(id).any(|(p, _)| Arc::ptr_eq(p, locator))) {
                 continue;
             }
-            let value = (|| {
-                let Some(frame) = locator.find(&self.handles, id, row)? else {
-                    return Ok(None);
-                };
-                let file = self.handles.get(locator, Member::Pack)?;
-                use_location(Location::Packed(Arc::clone(locator), frame, file)).map(Some)
-            })();
-            match value {
-                Err(ref error) if is_disappeared(error) => errors.stale = true,
-                _ => {
-                    if let Some(Some(value)) = errors.attempt(value)? {
-                        return Ok(Some(value));
-                    }
-                }
+            if let Some(value) = self.try_pack(locator, id, row, errors, use_location)? {
+                return Ok(Some(value));
             }
         }
         Ok(None)
+    }
+
+    fn try_pack<T>(
+        &self,
+        locator: &Arc<Locator>,
+        id: &Hash,
+        row: Option<usize>,
+        errors: &mut LookupErrors,
+        use_location: &mut impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<Option<T>> {
+        let value = (|| {
+            let Some(frame) = locator.find(&self.handles, id, row)? else {
+                return Ok(None);
+            };
+            let file = self.handles.get(locator, Member::Pack)?;
+            use_location(Location::Packed(Arc::clone(locator), frame, file)).map(Some)
+        })();
+        if value.as_ref().is_err_and(is_disappeared) {
+            errors.stale = true;
+        }
+        Ok(errors.attempt(value)?.flatten())
     }
 }
 
