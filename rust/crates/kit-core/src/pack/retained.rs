@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 const MAX_RETAINED_PACKS: usize = 4;
 
 /// How long a pack stays in the cache.
-const MAX_RETAINED_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+const MAX_RETAINED_AGE: Duration = Duration::from_hours(7 * 24);
 
 /// The directory under the spool directory that holds the cache.
 const DIR_NAME: &str = "retained";

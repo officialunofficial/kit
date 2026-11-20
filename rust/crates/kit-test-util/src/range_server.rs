@@ -5,6 +5,7 @@
 //! response can be cut anywhere in its body, as a dropped network would cut
 //! it.
 
+use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{Shutdown, TcpListener};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -108,9 +109,12 @@ pub fn honest(object: &[u8], etag: &str, request: &Request) -> Response {
     if request.header("if-match").is_some_and(|tag| tag != etag) {
         return Response::new(412, b"");
     }
-    match request.range_start() {
-        Some(start) if (start as usize) < object.len() => {
-            let rest = &object[start as usize..];
+    match request
+        .range_start()
+        .and_then(|start| Some((start, usize::try_from(start).ok()?)))
+    {
+        Some((start, at)) if at < object.len() => {
+            let rest = &object[at..];
             Response::new(206, rest).header("etag", etag).header(
                 "content-range",
                 &format!("bytes {start}-{}/{}", object.len() - 1, object.len()),
@@ -204,7 +208,7 @@ fn serve(
         response.declared.unwrap_or(response.body.len()),
     );
     for (name, value) in &response.headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(head, "{name}: {value}\r\n");
     }
     head.push_str("\r\n");
     let sent = response
