@@ -905,7 +905,8 @@ impl ObjectStore {
     /// The guard protects only against a gc that holds the worktree locks
     /// across its mark and sweep, as `kit gc` does: a gc that marks before the
     /// fetch or push publishes and sweeps after the guard drops would not see
-    /// the new ref. Both publish under the worktree lock for that reason. It stops the delete step, not the mark.
+    /// the new ref. Both publish under the worktree lock for that reason. It
+    /// stops the delete step, not the mark.
     ///
     /// The guard relies on a local filesystem that honours kernel file locks,
     /// as SPEC-CONCURRENCY already requires. On Linux NFS a shared lock can

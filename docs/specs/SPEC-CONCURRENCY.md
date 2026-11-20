@@ -109,8 +109,9 @@ non-blocking exclusive probe of that same `serve.lock`
 stderr and proceeds anyway &mdash; it does not refuse or block. The paths that
 take `worktree.lock` without the helper run the same probe
 (`kit_core::repo_lock::is_served`) right after acquiring it: the per-branch
-publish step of `fetch`/`pull` and the fast-forward phase of
-`pull` (`kit_sync::fetch` and `kit_sync::pull`, through `kit-sync`'s own
+publish step of `fetch`/`pull`, each remote-tracking ref write of
+`push`, and the fast-forward phase of `pull` (`kit_sync::fetch`,
+`kit_sync::push` and `kit_sync::pull`, through `kit-sync`'s own
 `warn_if_served`), and `status`'s opportunistic index refresh
 (`libkit::lock::warn_if_served`). So every command that takes
 `worktree.lock` or `worktrees.lock` emits the warning: the
@@ -291,7 +292,7 @@ the history lock):
 | `clone`, `fetch`, and the fetch phase of `pull` | optional exclusive `format` try-lock for marker activation (§3.4), released before taking the shared `format` prune guard. Hold the guard from before reading applied packs until the last ref publish. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
 | Fetched attestations | after download and pack validation, this tree's `worktree.lock`, then the common directory's `attest-fetch.lock` across storage accounting and envelope publication |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`kit_sync::pull`) |
-| `push` | the shared `format` prune guard (§3.4) from before it plans the first branch until after its last remote-tracking ref write. Per remote-tracking ref write: this tree's `worktree.lock`, with no limit on the wait, then that ref's `refs-<ref>.lock`, both released before the next upload (`kit_sync::push`) |
+| `push` | the shared `format` prune guard (§3.4) from before it plans the first branch until after its last remote-tracking ref write. Per remote-tracking ref write: this tree's `worktree.lock`, with no limit on the wait (the wait reports once and ends on an interrupt), then that ref's `refs-<ref>.lock`, both released before the next upload (`kit_sync::push`) |
 | `kit git import`/`fetch`/`pull` (import phase) | `git-<remote>.lock`, then (first import only) `git-import-key.lock`, then per written tag or remote-tracking ref its `refs-<ref>.lock`; this tree's `worktree.lock` around each local attestation write, after signing (`git_import::import_into`) |
 | `kit git export` | `git-<remote>.lock`, then this tree's `worktree.lock` around each local attestation write, after signing (`git::export`) |
 | `kit git pull` (fast-forward phase), after the import phase released `git-<remote>.lock` | this tree's `worktree.lock`, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`git_import::fast_forward_current`) |

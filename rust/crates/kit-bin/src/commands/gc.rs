@@ -90,9 +90,9 @@ pub fn run(args: &[String]) -> u8 {
     // deadlock. The root publishers `tag` and `attest` take their tree's
     // worktree.lock, and `fetch` and `push` take it around each
     // remote-tracking ref write, so they serialize against gc. Their objects
-    // are kept by their prune guard, not by this lock. The grace window protects only writers
-    // outside gc's lock set (SPEC-GC "Concurrent writers and the grace
-    // window").
+    // are kept by their prune guard, not by this lock. The grace window
+    // protects only writers outside gc's lock set (SPEC-GC "Concurrent
+    // writers and the grace window").
     // Registry lock FIRST (global lock order: worktrees.lock before
     // any per-tree worktree.lock, see SPEC-WORKTREE §4.3): freezes the
     // worktree set for the whole run, so a `worktree add` cannot

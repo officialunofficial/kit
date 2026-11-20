@@ -1060,7 +1060,8 @@ lock would wait as long as the longest fetch.
 (the lock free mid-download and mid-apply, the publish wait and its interrupt,
 gc during a fetch with and without a reused old object, a fetch killed in each
 download, gc after a killed fetch then a fetch, two fetches at once, a resumed
-clone equal to an uninterrupted one); `kit-bin` `fetch_pull_lock_scope`
+clone equal to an uninterrupted one); `kit-sync` `push_tracking` (gc during a
+push); `kit-bin` `fetch_pull_lock_scope`
 (`add` and `commit` during a paused fetch); and `stage::tests`.
 
 ## A fetch closure check counts no chunk
