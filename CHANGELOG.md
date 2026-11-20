@@ -34,6 +34,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A plain push leases the tracking ref it checked, so a fetch during the push can no longer let it replace a remote head without `--force`.
 - A gc during a push no longer prunes the tip of the tracking ref the push writes.
 - Ctrl-C during the attestation phase of fetch or push exits 75 instead of reporting success.
+- Refuse a push that would make a branch's pack chain longer than a fetch reads, instead of leaving a branch no new client can fetch.
 
 ## [0.9.0] - 2026-11-19
 

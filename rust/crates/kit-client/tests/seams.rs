@@ -99,7 +99,7 @@ fn error(status: u16, body: &str) -> Result<Response<Vec<u8>>, String> {
 
 struct TestClock {
     now: Cell<i64>,
-    nonces: Cell<u8>,
+    nonces: Cell<u32>,
     /// Where `wait` leaves the clock, to land exactly on an expiry.
     after_wait: Cell<Option<i64>>,
 }
@@ -117,8 +117,11 @@ impl Clock for TestClock {
         self.now.get()
     }
     fn nonce(&self) -> Result<Hash, String> {
+        // Distinct for every request, as a long chain walk sends many.
         self.nonces.set(self.nonces.get() + 1);
-        Ok([self.nonces.get(); 32])
+        let mut nonce = [0; 32];
+        nonce[..4].copy_from_slice(&self.nonces.get().to_le_bytes());
+        Ok(nonce)
     }
     async fn wait(&self, _: Duration) {
         if let Some(now) = self.after_wait.get() {
@@ -1775,5 +1778,100 @@ fn request_policy_survives_both_builder_orders_on_writes() {
             .unwrap();
         assert_eq!(policy.calls.get(), 1);
         assert_eq!(observer.seen.borrow().len(), 1);
+    }
+}
+
+/// A push never appends a node that makes the chain longer, or list more
+/// packs, than a reader walks. The prior chain lists `listed` packs (one key
+/// repeated) over nodes of at most `per_node`; the push adds one node with
+/// one pack.
+#[test]
+fn an_append_past_a_fetch_bound_is_refused_before_the_node_uploads() {
+    use kit_core::transfer::encode_packlist;
+    const MAX_PACKS: usize = 1_000_000;
+    const MAX_NODES: usize = 100_000;
+
+    for (listed, per_node, refused) in [
+        (MAX_PACKS - 1, 4096, false),
+        (MAX_PACKS, 4096, true),
+        (MAX_NODES - 1, 1, false),
+        (MAX_NODES, 1, true),
+    ] {
+        let mut chain = std::collections::HashMap::new();
+        let (mut head, mut left) = (None, listed);
+        while left > 0 {
+            let count = left.min(per_node);
+            let bytes = encode_packlist(head, &vec![[9; 32]; count]).unwrap();
+            let key = pack_key(&bytes);
+            chain.insert(key, bytes);
+            head = Some(key);
+            left -= count;
+        }
+        let prior = head.unwrap();
+        let entry = blob(1);
+        let Entry::Raw { bytes, .. } = &entry else {
+            unreachable!()
+        };
+        let mut limits = Limits::from_server_info(&info(), bytes.len() as u64, 1 << 20).unwrap();
+        limits.ticket_threshold_bytes = info().begin_upload_threshold_bytes.unwrap();
+        let plan = Plan::prepare([entry], limits).unwrap();
+        assert_eq!(plan.pack_ids().count(), 1);
+        let script = Script::new(&log(), move |_, request| match method(request).as_str() {
+            "GetServerInfo" => unary(&info()),
+            "UploadPack" => stream(&proto::UploadPackResponse::default()),
+            "ReadRef" => unary(&proto::ReadRefResponse {
+                exists: Some(true),
+                object_id: Some(prior.to_vec()),
+                ..Default::default()
+            }),
+            "DownloadPack" => {
+                let asked =
+                    proto::DownloadPackRequest::decode_from_slice(&request.body()[5..]).unwrap();
+                let key: Hash = asked.pack_id.unwrap().try_into().unwrap();
+                capture_download_reply(key, &chain[&key])
+            }
+            "AdvanceRefs" => unary(&proto::AdvanceRefsResponse {
+                outcome: Some(proto::AdvanceOutcome::Committed.into()),
+                ..Default::default()
+            }),
+            other => panic!("unexpected {other}"),
+        });
+        let push = Push::new(
+            destination(),
+            "main",
+            RefWriteCondition::Match([6; 32]),
+            [4; 32],
+            PackmapMode::Append {
+                self_contained: false,
+            },
+            plan,
+            i64::MAX,
+        )
+        .unwrap();
+        let result = block_on(push.run(&script, &PolicySigner::new(&log()), &TestClock::new()));
+        let sent = script.seen.borrow();
+        let node_uploads = sent
+            .iter()
+            .filter(|request| method(request) == "UploadPack")
+            .map(capture_uploaded_pack)
+            .filter(|(_, bytes)| bytes.starts_with(b"KPKL"))
+            .count();
+        let advances = sent
+            .iter()
+            .filter(|request| method(request) == "AdvanceRefs")
+            .count();
+        if refused {
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Limit("packmap chain past the fetch bounds"))
+                ),
+                "{listed}/{per_node}: {result:?}"
+            );
+            assert_eq!((node_uploads, advances), (0, 0));
+        } else {
+            assert_eq!(result.unwrap(), kit_client::Outcome::Committed);
+            assert_eq!((node_uploads, advances), (1, 1), "{listed}/{per_node}");
+        }
     }
 }
