@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// The most packs the cache keeps. The oldest go first.
-pub const MAX_RETAINED_PACKS: usize = 4;
+const MAX_RETAINED_PACKS: usize = 4;
 
 /// How long a pack stays in the cache.
-pub const MAX_RETAINED_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_RETAINED_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The directory under the spool directory that holds the cache.
 const DIR_NAME: &str = "retained";

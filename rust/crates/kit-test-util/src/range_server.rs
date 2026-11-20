@@ -122,6 +122,7 @@ pub fn honest(object: &[u8], etag: &str, request: &Request) -> Response {
 }
 
 /// The scripted server. It stays up for the life of the process.
+#[derive(Debug)]
 pub struct RangeServer {
     address: std::net::SocketAddr,
     requests: Arc<Mutex<Vec<Request>>>,

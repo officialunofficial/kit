@@ -897,12 +897,29 @@ including a wasm client without that facility, MUST leave opt-in absent or
 false. Clients MUST provide a configuration switch that disables location
 opt-in.
 
+**Continuing a location.** When a location body stops after some bytes, a
+client MAY ask the location host for the rest instead of reading the body again
+from its start, if the first answer was `200` with a strong `ETag` (not
+starting `W/`) and a `Content-Length`. The request is the same credential-free
+`GET` with `Range: bytes=<n>-` for the `n` bytes already taken and `If-Match`
+with that `ETag`; these are the only headers a continuation adds. The client MUST
+take the body only from a `206` whose `ETag` is the first answer's, whose
+`Content-Range` is `bytes <n>-<total-1>/<total>` for the first answer's length,
+and whose `Content-Length` is `total - n`. It MUST treat any other answer,
+including `200`, `412`, `416` and a `206` that fails a check, as a request to read
+the location again from its start, and MUST NOT append its body to the prefix.
+A prefix does not authenticate itself: the client verifies the whole pack's
+length and key, as for any location bytes, and on a mismatch falls back as above.
+A client SHOULD bound the number of continuations of one location, and ends the
+fetch, so the fallback of the previous paragraph applies, when they run out.
+
 **Reference-client behavior.** The native location channel uses a separate,
 credential-free HTTPS connector and rejects non-public destinations by default.
 Its filtering resolver checks connection addresses; IP literals pass the same
 policy. A local caller can allow private destinations with
 `kit_sync::NativeHttp::allow_private_pack_locations(true)`. The channel does
-not follow redirects, requires HTTP 200 and identity content encoding, and
+not follow redirects, requires HTTP 200 (or an exact `206` to a continuation) and
+identity content encoding, continues an interrupted body at most three times, and
 bounds response bytes before pack verification. `RequestPolicy::request_timeout`
 covers the initial RPC, location fetch, and any streaming fallback. The location
 fetch receives only the remaining budget and cannot exceed its own transfer

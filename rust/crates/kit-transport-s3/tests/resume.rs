@@ -215,7 +215,9 @@ fn an_answer_that_is_not_the_rest_reads_the_pack_again() {
         (
             "wrong start",
             RestartReason::Range,
-            Box::new(|a| a.header("content-range", &format!("bytes 99-{}/{total}", total - 1))),
+            Box::new(move |a| {
+                a.header("content-range", &format!("bytes 99-{}/{total}", total - 1))
+            }),
         ),
         (
             "wrong end",
@@ -252,7 +254,7 @@ fn an_answer_that_is_not_the_rest_reads_the_pack_again() {
         let ignored = name == "range ignored";
         let object_for_script = object.clone();
         let (downloaded, verified, sink, requests) =
-            download(&object, &key, move |n, request, answer| match n {
+            download(&object, &key, move |n, _, answer| match n {
                 0 => answer.cut_after(100),
                 1 if ignored => Response::new(200, &object_for_script).header("etag", ETAG),
                 1 => tamper(answer),

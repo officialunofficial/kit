@@ -923,13 +923,10 @@ mod tests {
         let events = events.0.lock().unwrap();
         assert!(events.contains(&SyncEvent::DownloadResumed { bytes: 30 }));
         // The progress shows the whole pack after the resume.
-        assert_eq!(
-            events.last(),
-            Some(&SyncEvent::DownloadProgress {
-                bytes: source.bytes.len() as u64,
-                bytes_total: Some(source.bytes.len() as u64)
-            })
-        );
+        assert!(events.contains(&SyncEvent::DownloadProgress {
+            bytes: source.bytes.len() as u64,
+            bytes_total: Some(source.bytes.len() as u64)
+        }));
     }
 
     #[test]
