@@ -322,11 +322,7 @@ impl PackSweep {
     /// exclusive try that follows: the process would otherwise fail its own
     /// try. A failed copy, such as a full disk, keeps every copy input and
     /// still lets the wholly dead retirement free space.
-    fn copy_survivors(
-        &self,
-        store: &ObjectStore,
-        report: &mut GcReport,
-    ) -> Option<Copied> {
+    fn copy_survivors(&self, store: &ObjectStore, report: &mut GcReport) -> Option<Copied> {
         match &self.copy {
             Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
                 Ok(copied) => Some(copied),
