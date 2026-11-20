@@ -14,7 +14,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
 - Fetch and clone pack small objects and keep chunks loose when their manifests arrive before publication. Once activated, the repository requires a reader that supports local packs.
 
-- Read and verify raw local object packs in repositories that declare capability `P`, and rebuild damaged pack indexes.
+- Read and verify raw local object packs in repositories that declare capability `P`.
+- Run `kit closure repair-indexes` to rebuild damaged local pack indexes from verified packs.
 
 ### Changed
 
