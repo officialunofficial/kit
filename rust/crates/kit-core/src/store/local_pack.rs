@@ -329,11 +329,21 @@ fn stage_index(
 }
 
 fn stage_file(dir: &Path, suffix: &str) -> io::Result<tempfile::NamedTempFile> {
-    // The random part is formatted as hex for the orphan sweep's name rule.
-    loop {
+    stage_file_with_nonce(dir, suffix, || {
         let mut nonce = [0; 16];
         getrandom::fill(&mut nonce).map_err(|e| io::Error::other(e.to_string()))?;
-        let nonce = u128::from_le_bytes(nonce);
+        Ok(u128::from_le_bytes(nonce))
+    })
+}
+
+fn stage_file_with_nonce(
+    dir: &Path,
+    suffix: &str,
+    mut next_nonce: impl FnMut() -> io::Result<u128>,
+) -> io::Result<tempfile::NamedTempFile> {
+    // The random part is formatted as hex for the orphan sweep's name rule.
+    loop {
+        let nonce = next_nonce()?;
         let name = format!(".{nonce:032x}{suffix}");
         let path = dir.join(name);
         match fs::OpenOptions::new()

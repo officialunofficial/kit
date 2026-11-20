@@ -601,6 +601,29 @@ mod tests {
     }
 
     #[test]
+    fn index_validation_accepts_the_payload_limit_and_refuses_more() {
+        let at_limit = u32::try_from(super::MAX_RAW_OBJECT_SIZE).unwrap();
+        let decode = |lengths: &[u32]| {
+            let mut end = HEADER_LEN as u64;
+            let rows: Vec<_> = lengths
+                .iter()
+                .enumerate()
+                .map(|(i, &len)| {
+                    let id = [u8::try_from(i).unwrap(); 32];
+                    let offset = end + FRAME_LEN;
+                    end = offset + u64::from(len);
+                    (id, Frame { offset, len })
+                })
+                .collect();
+            let pair = Pair::new(Path::new(""), [0; 32]);
+            let bytes = encode(pair.key, &rows);
+            Index::decode(pair, bytes, rows.len(), end)
+        };
+        assert!(decode(&[at_limit; 4]).is_ok());
+        assert!(decode(&[at_limit, at_limit, at_limit, at_limit, 6]).is_err());
+    }
+
+    #[test]
     fn index_lookup_requires_distinct_sorted_ids_in_each_fanout_bucket() {
         let mut first = [0x40; 32];
         let mut last = first;

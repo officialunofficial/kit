@@ -494,6 +494,21 @@ fn staging_stops_on_a_noncollision_error() {
 }
 
 #[test]
+fn staging_retries_a_collision_without_replacing_the_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let occupied = dir.path().join(format!(".{:032x}.tmp.pack", 7_u128));
+    fs::write(&occupied, b"existing stage").unwrap();
+    let mut nonces = [7, 8].into_iter();
+
+    let staged =
+        super::stage_file_with_nonce(dir.path(), ".tmp.pack", || Ok(nonces.next().unwrap()))
+            .unwrap();
+    assert_ne!(staged.path(), occupied);
+    assert_eq!(fs::read(occupied).unwrap(), b"existing stage");
+    assert_eq!(nonces.next(), None);
+}
+
+#[test]
 fn rejects_invalid_index_rows_even_with_a_valid_checksum() {
     let (_dir, layout, store) = fresh();
     let mut writer = writer(&store);
