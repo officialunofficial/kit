@@ -46,6 +46,10 @@ fn temp_prefix() -> String {
     format!(".kit.tmp.{pid}.{seq}")
 }
 
+pub(crate) fn temp_file_in(parent: &Path) -> io::Result<NamedTempFile> {
+    NamedTempFile::with_prefix_in(temp_prefix(), parent)
+}
+
 /// Atomically write `bytes` to `final_path`, fsyncing the file CONTENTS
 /// before the rename but deferring the directory fsync to the caller.
 /// This is the durable-before-visible primitive for [`store::BulkWriter`]:
@@ -59,8 +63,7 @@ pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Resul
     let parent = final_path
         .parent()
         .expect("atomic::write_content_synced: path has parent");
-    let tmp_name = temp_prefix();
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;
@@ -79,9 +82,7 @@ pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) 
     if make_parents {
         fs::create_dir_all(parent)?;
     }
-    let tmp_name = temp_prefix();
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;
@@ -115,9 +116,7 @@ pub(crate) fn write_create_new(
     // never a half-written `final_path` that later readers would see as
     // a corrupt ref. Writing straight into `final_path` with `O_EXCL`
     // (the previous approach) poisons the slot on partial-write failure.
-    let tmp_name = temp_prefix();
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
 

@@ -226,6 +226,29 @@ fn add_dot_then_commit_reproduces_full_worktree_snapshot() {
     assert!(body.contains("sub"));
 }
 
+#[test]
+fn commit_prints_every_create_mode_line_for_a_large_summary() {
+    let td = init_repo();
+    let paths: Vec<_> = (0..128)
+        .map(|i| format!("file-{i:03}-{}.txt", "a".repeat(56)))
+        .collect();
+    for path in &paths {
+        fs::write(td.path().join(path), b"contents\n").unwrap();
+    }
+    ok(td.path(), &["add", "."]);
+
+    let out = ok(td.path(), &["commit", "-m", "add files"]);
+    let summary = String::from_utf8(out.stderr).unwrap();
+    assert!(summary.starts_with("[main (root-commit) "));
+    assert!(summary.contains("128 files changed, 128 insertions(+)"));
+    assert!(summary.ends_with('\n'));
+    let actual: Vec<_> = summary
+        .lines()
+        .filter_map(|line| line.strip_prefix(" create mode 100644 "))
+        .collect();
+    assert_eq!(actual, paths);
+}
+
 #[cfg(unix)]
 #[test]
 fn add_one_preserves_executable_mode() {

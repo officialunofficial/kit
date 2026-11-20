@@ -148,6 +148,32 @@ fn an_unrelated_non_empty_directory_is_refused_and_left_alone() {
     assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"mine");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_relative_clone_resumes_through_a_symlink_and_keeps_the_display_path() {
+    let (_td, bare, url, tip) = upstream();
+    let dest = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dest.path().join("real/subdir")).unwrap();
+    std::os::unix::fs::symlink("real/subdir", dest.path().join("link")).unwrap();
+    let target = "link/../clone";
+
+    let pack = newest_pack(bare.path());
+    let held = bare.path().join("held");
+    fs::rename(&pack, &held).unwrap();
+    let first = run_in(dest.path(), &["clone", &url, target]);
+    fs::rename(&held, &pack).unwrap();
+    assert!(!first.status.success(), "{first:?}");
+    assert!(stderr_str(&first).contains("Cloning into 'link/../clone'"));
+
+    let resumed = run_in(dest.path(), &["clone", &url, target]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(stderr_str(&resumed).contains("Resuming the unfinished clone in 'link/../clone'"));
+    let clone = dest.path().join("real/clone");
+    assert_eq!(read_ref(&clone, "refs/heads/main"), Some(tip));
+    assert_eq!(fs::read(clone.join("two.txt")).unwrap(), b"two");
+    assert!(!dest.path().join("clone").exists());
+}
+
 #[test]
 fn a_clone_stopped_after_its_first_branch_resumes_when_run_again() {
     // `aside` is fetched before `main`, and its tracking ref is published

@@ -10,12 +10,12 @@
 //! ```
 //!
 //! Writes are atomic: bytes are first written to a sibling temp file, made
-//! durable, then renamed into place. A single or batched write names the temp
-//! file `.<name>.tmp.<pid>.<seq>` followed by a random suffix; a bulk write
-//! names it `.kit.tmp.<pid>.<seq>` the same way. Enumeration skips every file
-//! whose name is not 62 hex digits, so temp files are never objects. A crash
-//! mid-write leaves only the temp file behind and never produces a visible
-//! object that fails the read-time hash check.
+//! durable, then renamed into place. Temp names start with
+//! `.kit.tmp.<pid>.<seq>` and end with a random suffix.
+//! [`ObjectStore::iter_object_hashes`] keeps only files named with 62 hex
+//! digits, so temp files are never objects. A crash mid-write leaves only
+//! the temp file behind and never produces a visible object that fails the
+//! read-time hash check.
 //!
 //! Durability comes in three shapes (see [`crate::batch`] for the full
 //! contract): [`ObjectStore::write`] flushes per object
@@ -41,11 +41,9 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process;
 use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use tempfile::NamedTempFile;
 
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
@@ -274,12 +272,6 @@ pub struct PruneGuard {
 
 /// Result alias used throughout this module.
 pub type StoreResult<T> = Result<T, StoreError>;
-
-// Tiny per-process counter for unique temp-file names. We use this
-// instead of pulling in `rand` because the temp name only needs to be
-// unique within the process; the atomic `rename` enforces global
-// correctness even if two processes collide on a name.
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Local content-addressed object store backed by the filesystem.
 #[derive(Debug, Clone)]
@@ -860,7 +852,7 @@ impl ObjectStore {
     }
 
     /// The temp files in one shard directory, `objects/<2-hex>/`: the files a
-    /// writer names `.<name>.tmp.*` or `.kit.tmp.*` before it renames them into
+    /// writer names `.kit.tmp.*` before it renames them into
     /// place. A writer that dies leaves its temp file behind. An absent
     /// directory has none.
     ///
@@ -1044,9 +1036,8 @@ fn read_shard_dir(path: &std::path::Path, dir: &str, out: &mut Vec<Hash>) -> Sto
     Ok(())
 }
 
-/// Whether `name` is a temp file of an object write: `.<name>.tmp.*` from a
-/// single or batched write, `.kit.tmp.*` from a bulk write. No object file
-/// starts with a dot.
+/// Whether `name` is a temp file of an object write. No object file starts
+/// with a dot.
 fn is_temp_file_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|name| name.starts_with('.') && name.contains(".tmp."))
@@ -1101,23 +1092,11 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
     Ok(())
 }
 
-/// Create a uniquely-named sibling temp file in `parent` for the object
-/// file `file_name`. A bulk write ([`BulkWriter`]) names its temp files
-/// `.kit.tmp.*` instead. The name is `.{name}.tmp.{pid}.{seq}` followed by
-/// the random suffix that `NamedTempFile` appends. [`ObjectStore::iter_object_hashes`]
-/// does not rely on that shape: it keeps only files named with 62 hex digits.
-pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTempFile> {
-    let pid = process::id();
-    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(".{file_name}.tmp.{pid}.{seq}");
-    NamedTempFile::with_prefix_in(tmp_name, parent)
-}
-
 /// Atomically write `bytes` to `final_path` with per-object durability
 /// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
 /// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
 /// to concurrent readers and replaces the destination. On Windows,
-/// [`NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
+/// [`tempfile::NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
 /// semantics so the replace-existing path works there too.
 ///
 /// After a successful rename we flush the parent directory on Unix to
@@ -1130,12 +1109,7 @@ pub(crate) fn temp_file_in(parent: &Path, file_name: &str) -> io::Result<NamedTe
 /// exactly.
 fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
     let parent = final_path.parent().expect("write_atomic: path has parent");
-    let file_name = final_path
-        .file_name()
-        .expect("write_atomic: path has file name")
-        .to_string_lossy();
-
-    let mut tmp = temp_file_in(parent, &file_name)?;
+    let mut tmp = crate::atomic::temp_file_in(parent)?;
     #[cfg(feature = "fault-injection")]
     crate::fault::check(crate::fault::Site::Store)?;
     tmp.as_file_mut().write_all(bytes)?;

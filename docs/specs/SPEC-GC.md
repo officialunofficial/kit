@@ -258,10 +258,10 @@ refuses the missing object. Lock contention or uncertain metadata keeps the
 candidate. No process ever blocks on the exclusive lock: the sweep only tries
 it. The lock order is specified by SPEC-CONCURRENCY.
 
-A writer that dies leaves its temp file in the shard directory of the object
-it was writing: `.<name>.tmp.*` from a single or batched write and
-`.kit.tmp.*` from a bulk write. The sweep removes such a file once its
-modification time is at least `grace` old, through the same final check as an
+A writer that dies leaves its `.kit.tmp.*` file in the object's shard
+directory. The sweep also recognizes `.<name>.tmp.*` files left by older
+writers. It removes a temp file once its modification time is at least
+`grace` old, through the same final check as an
 object: under the exclusive lock of `format`, kept on contention, on uncertain
 metadata or when the file is younger. A fetch or a bulk write that is alive
 holds the shared lock, and any other writer holds a worktree lock that gc
