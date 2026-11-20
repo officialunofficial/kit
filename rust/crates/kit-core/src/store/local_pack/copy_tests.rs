@@ -152,7 +152,7 @@ fn two_packs_with_the_same_ids_retire_one_as_covered_and_the_same_one_every_time
     keep(&layout, "b", &ids[1]);
 
     let report = run(&store, &layout, false);
-    assert_eq!(report.packs_retired_covered, 1);
+    assert_eq!(report.packs_retired_covered, 1, "{report:?}");
     assert_eq!(report.survivor_bytes_copied, 0);
     // Equal ages: the lower key is the home, and the other pack goes.
     let (home, gone) = if first.key < second.key {
