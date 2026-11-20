@@ -265,6 +265,9 @@ fn a_kept_pack_whose_retry_fails_again_stays_for_the_next() {
     assert_eq!(retained_files(&work), Vec::<String>::new());
 }
 
+/// How a test spoils a kept pack.
+type Damage = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
+
 #[test]
 fn a_damaged_stale_or_short_kept_pack_is_refused_and_downloaded_again() {
     let _guard = serial();
@@ -277,7 +280,6 @@ fn a_damaged_stale_or_short_kept_pack_is_refused_and_downloaded_again() {
             .unwrap();
         writer.finish().unwrap()
     };
-    type Damage = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
     let cases: Vec<(&str, Damage)> = vec![
         (
             "flipped byte",
@@ -315,7 +317,7 @@ fn a_kept_pack_that_has_aged_out_is_dropped_when_a_fetch_starts() {
     let source = Downloads::new(&remote);
     failed_apply(&work, &source);
     let path = retained_path(&work, remote.pack);
-    let eight_days = Duration::from_secs(8 * 24 * 60 * 60);
+    let eight_days = Duration::from_hours(8 * 24);
     std::fs::File::options()
         .write(true)
         .open(&path)
