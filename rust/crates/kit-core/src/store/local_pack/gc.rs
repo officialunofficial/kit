@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
-use crate::ops::gc::{GcReport, LiveSet, PackedGcReport};
+use crate::ops::gc::{GcReport, LiveSet};
 use crate::store::{ObjectStore, StoreError, StoreResult};
 
 #[derive(Default)]
@@ -73,7 +73,7 @@ impl ObjectStore {
         live: &LiveSet,
         now: u64,
         grace: u64,
-        report: &mut PackedGcReport,
+        report: &mut GcReport,
     ) -> StoreResult<PackSweep> {
         let mut plan = self.plan_pack_retirement(live, now, grace, report, &|| Ok(()))?;
         let dir = self.pack_dir();
@@ -95,7 +95,7 @@ impl ObjectStore {
         live: &LiveSet,
         now: u64,
         grace: u64,
-        report: &mut PackedGcReport,
+        report: &mut GcReport,
         checkpoint: &dyn Fn() -> StoreResult<()>,
     ) -> StoreResult<PackSweep> {
         let mut plan = PackSweep::default();
@@ -132,7 +132,7 @@ impl ObjectStore {
                 // holds. Verify the body before authorizing any deletion.
                 let rows = match scan_pair_checked(&pair, checkpoint) {
                     Ok(rows) => rows,
-                    Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
+                    Err(error @ StoreError::LocalPackDamaged { .. }) => {
                         report.skipped_pack_errors.push(error.to_string());
                         return Ok(());
                     }
@@ -209,7 +209,6 @@ impl ObjectStore {
         now: u64,
         grace: u64,
         report: &mut GcReport,
-        packed: &mut PackedGcReport,
     ) -> StoreResult<BTreeSet<Hash>> {
         let mut loose_shards = [false; 256];
         for shard in 0..=u8::MAX {
@@ -287,7 +286,7 @@ impl ObjectStore {
                     fs::remove_file(path)?;
                 }
                 report.bytes_reclaimed += loose.len;
-                packed.loose_duplicates_pruned += 1;
+                report.loose_duplicates_pruned += 1;
             }
             Ok(())
         })?;
@@ -308,25 +307,19 @@ impl PackSweep {
         self.pairs.is_empty() && self.leftovers.is_empty()
     }
 
-    pub(crate) fn run(
-        &self,
-        store: &ObjectStore,
-        report: &mut GcReport,
-        packed: &mut PackedGcReport,
-    ) -> StoreResult<()> {
-        self.run_with(store, report, packed, || Ok(())).map(|_| ())
+    pub(crate) fn run(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<()> {
+        self.run_with(store, report, || Ok(())).map(|_| ())
     }
 
     pub(crate) fn run_with(
         &self,
         store: &ObjectStore,
         report: &mut GcReport,
-        packed: &mut PackedGcReport,
         after_pack_sync: impl FnOnce() -> StoreResult<()>,
     ) -> StoreResult<bool> {
         if report.dry_run {
-            packed.packs_retired = self.pairs.len();
-            packed.pack_leftovers_pruned = self.leftovers.len();
+            report.packs_retired = self.pairs.len();
+            report.pack_leftovers_pruned = self.leftovers.len();
             report.bytes_reclaimed += self
                 .pairs
                 .values()
@@ -377,12 +370,12 @@ impl PackSweep {
         for (pair, r) in &retire {
             fs::remove_file(&pair.index)?;
             store.packs.forget(&pair.key);
-            packed.packs_retired += 1;
+            report.packs_retired += 1;
             report.bytes_reclaimed += r.pack.len + r.index.len;
         }
         for (path, stamp) in &leftovers {
             fs::remove_file(path)?;
-            packed.pack_leftovers_pruned += 1;
+            report.pack_leftovers_pruned += 1;
             report.bytes_reclaimed += stamp.len;
         }
         if !retire.is_empty() || !leftovers.is_empty() {

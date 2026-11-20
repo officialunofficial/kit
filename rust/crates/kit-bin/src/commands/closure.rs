@@ -190,7 +190,7 @@ fn run_repair_indexes() -> u8 {
             "the format lock is busy. Retry `kit closure repair-indexes` after other kit commands finish.",
             exit::TEMPFAIL,
         ),
-        Err(StoreError::Io(e)) if e.kind() == ErrorKind::InvalidData => {
+        Err(e @ StoreError::LocalPackDamaged { .. }) => {
             super::fetch_repair::note_bad_pack(repo.layout());
             emit_err(
                 &format!(
@@ -275,7 +275,7 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     if opts.show_unreferenced
         && let Err(e) = store.check_local_packs(false)
     {
-        if matches!(&e, StoreError::Io(err) if err.kind() == ErrorKind::InvalidData) {
+        if matches!(e, StoreError::LocalPackDamaged { .. }) {
             super::fetch_repair::note_bad_pack(&layout);
         }
         return emit_err(&format!("check local packs: {e}"), exit::DATAERR);

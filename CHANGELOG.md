@@ -26,6 +26,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 - **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
+- **Breaking:** Damage in a local pack or its index is `StoreError::LocalPackDamaged { pack, reason }`, not `StoreError::Io` with kind `InvalidData`. Match the variant instead of the I/O kind. A failed read of a pack or index stays `StoreError::Io`.
+- **Breaking:** `GcReport` and `UnpackReport` are `#[non_exhaustive]`. Build one with `Default::default()` and read its fields. `GcReport` also reports packed payload bytes, packs retired, leftovers and loose duplicates pruned, and damaged packs it kept.
 - **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
 

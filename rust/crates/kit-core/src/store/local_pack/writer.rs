@@ -80,7 +80,7 @@ fn prepare_dir(store: &ObjectStore, guard: &PruneGuard) -> StoreResult<()> {
     let dir = store.pack_dir();
     fs::create_dir_all(&dir)?;
     if !fs::symlink_metadata(&dir)?.is_dir() {
-        return Err(index::invalid("local pack directory is not a directory").into());
+        return Err(index::invalid_at(&dir, "not a directory"));
     }
     crate::atomic::sync_dir(store.objects_root())?;
     Ok(())
@@ -90,7 +90,13 @@ fn checked_id(bytes: &[u8]) -> StoreResult<Hash> {
     if bytes.len() > MAX_RAW_OBJECT_SIZE {
         return Err(StoreError::ObjectTooLarge);
     }
-    index::canonical_id(bytes)
+    // Bytes handed to a writer are input. Rejecting them is not damage.
+    index::canonical_id(bytes).map_err(|error| match error {
+        StoreError::LocalPackDamaged { reason, .. } => {
+            io::Error::new(io::ErrorKind::InvalidData, reason.into_string()).into()
+        }
+        other => other,
+    })
 }
 
 fn write_frame(mut writer: impl Write, bytes: &[u8]) -> StoreResult<()> {
@@ -216,7 +222,8 @@ impl Staged {
             digest.update(&buffer[..read]);
         }
         pack.write_all(digest.finalize().as_bytes())?;
-        let (key, rows) = index::scan(pack.as_file_mut())?;
+        let (key, rows) =
+            index::scan(pack.as_file_mut()).map_err(|error| index::named(pack.path(), error))?;
         let dir = store.pack_dir();
         let pair = Pair::new(&dir, key);
         pack.as_file().sync_all()?;
@@ -247,7 +254,7 @@ impl Staged {
                 }
                 // The staged copy was fully verified and has this exact key.
                 // Replace a damaged member without making the pair disappear.
-                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                Err(StoreError::LocalPackDamaged { .. }) => {
                     staged.persist(&pair.pack).map_err(|e| e.error)?;
                 }
                 Err(e) => return Err(e),
