@@ -57,9 +57,10 @@ mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
+pub use local_pack::LocalPackWriter;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
-pub use source::{DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
+pub use source::{ClosureSource, DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.
@@ -289,8 +290,8 @@ impl BulkWriter<'_> {
 #[must_use = "the guard protects the store only while it is alive"]
 #[derive(Debug)]
 pub struct PruneGuard {
-    #[cfg_attr(not(test), allow(dead_code))] // Owns the lock until drop.
     format: File,
+    objects_root: PathBuf,
 }
 
 /// Result alias used throughout this module.
@@ -860,8 +861,9 @@ impl ObjectStore {
 
     /// Make durable the directory entries of the shard directories
     /// `objects/<2-hex>/` named by `shards`, each the first byte of the ids
-    /// it holds: one barrier per shard, then one device flush. Nothing for
-    /// no shards.
+    /// it holds and of the pack directory in a packed store. Issue a
+    /// barrier per directory and one device flush. With no shards, skip
+    /// the barriers and the flush.
     ///
     /// Call it before a ref names objects this process found in the store
     /// rather than wrote. A visible object's bytes are durable, but another
@@ -871,10 +873,13 @@ impl ObjectStore {
     /// # Errors
     /// [`StoreError::Io`] if a barrier or the flush fails.
     pub fn sync_shards(&self, shards: impl IntoIterator<Item = u8>) -> StoreResult<()> {
-        let dirs: std::collections::BTreeSet<PathBuf> = shards
+        let mut dirs: std::collections::BTreeSet<PathBuf> = shards
             .into_iter()
             .map(|shard| self.objects_root.join(format!("{shard:02x}")))
             .collect();
+        if !dirs.is_empty() && self.local_packs_enabled()? {
+            dirs.insert(self.objects_root.join("pack"));
+        }
         crate::batch::flush_dirents(self, dirs)?;
         Ok(())
     }
@@ -957,6 +962,7 @@ impl ObjectStore {
     pub fn prune_guard(&self) -> StoreResult<PruneGuard> {
         Ok(PruneGuard {
             format: self.lock_writer()?,
+            objects_root: self.objects_root.clone(),
         })
     }
 

@@ -856,6 +856,8 @@ impl TagPush<'_, '_> {
         };
         let refused = match outcome {
             CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                self.tx
+                    .record_advance(keys.iter().copied().map(PackKey::into_hash));
                 return Ok(Advance::Landed { members: true });
             }
             // The tag map's condition failed: this write may have landed

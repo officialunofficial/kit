@@ -355,6 +355,41 @@ impl<'s> WriteBatch<'s> {
     /// CPU of every clone/fetch). A wrong hash here would corrupt the
     /// content addressing — never expose this publicly.
     pub(crate) fn write_prehashed(&self, h: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
+        self.stage_prehashed(h, parts, true)
+    }
+
+    /// Stage fetched bytes even if the loose path already holds a copy.
+    ///
+    /// # Errors
+    /// An oversized object or a local write error.
+    #[doc(hidden)]
+    pub fn write_fetched(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > crate::store::MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        self.stage_prehashed(crate::object::object_id_from_bytes(bytes), &[bytes], false)
+    }
+
+    /// Stage the loose entries of a verified fetch window, then join every
+    /// worker before returning. The caller commits the batch.
+    ///
+    /// # Errors
+    /// An error reading or staging an entry.
+    #[doc(hidden)]
+    pub fn stage_fetched<T: Sync>(
+        &self,
+        entries: &[T],
+        read: impl Fn(&T) -> StoreResult<Vec<u8>> + Sync,
+    ) -> StoreResult<()> {
+        crate::pack::stage_independent(entries, |entry| {
+            let bytes = read(entry)?;
+            self.write_fetched(&bytes).map(drop)
+        })
+        .into_iter()
+        .collect()
+    }
+
+    fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_loose: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
         let final_path = self.store.path_for(&h);
@@ -375,7 +410,7 @@ impl<'s> WriteBatch<'s> {
             !st.created_shards.contains(&shard_dir)
         };
         let total_len: u64 = parts.iter().map(|p| p.len() as u64).sum();
-        if fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
+        if reuse_loose && fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
@@ -2007,6 +2042,58 @@ mod tests {
         assert!(store.contains(&h));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fetched_loose_entries_can_stage_concurrently() {
+        let workers = std::thread::available_parallelism().unwrap().get();
+        if workers < 2 {
+            return;
+        }
+        let (_dir, store, _recorder) = recording_store();
+        let batch = store.batch();
+        let entries: Vec<_> = (0..workers * 8).map(usize::to_le_bytes).collect();
+        let arrived = Mutex::new(0);
+        let wake = std::sync::Condvar::new();
+        batch
+            .stage_fetched(&entries, |bytes| {
+                if *bytes == entries[0] || *bytes == entries[8] {
+                    let mut count = arrived.lock().unwrap();
+                    *count += 1;
+                    wake.notify_all();
+                    let (count, _) = wake
+                        .wait_timeout_while(count, std::time::Duration::from_secs(5), |n| *n < 2)
+                        .unwrap();
+                    assert_eq!(*count, 2, "both staging workers must reach the gate");
+                }
+                Ok(bytes.to_vec())
+            })
+            .unwrap();
+        batch.commit().unwrap();
+        for bytes in entries {
+            assert_eq!(store.read(&hash::hash(&bytes)).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_fetched_loose_write_checks_the_size_limit_before_staging() {
+        let (_dir, store, recorder) = recording_store();
+        let batch = store.batch();
+        batch.write(b"staged").unwrap();
+        recorder.fail_renames_after(0);
+        assert!(batch.checkpoint().is_err());
+
+        // A failed batch lets the test reach the staging gate without writing a GiB.
+        let padded = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        assert!(matches!(
+            batch.write_fetched(&padded[..MAX_RAW_OBJECT_SIZE]),
+            Err(StoreError::Io(_))
+        ));
+        assert!(matches!(
+            batch.write_fetched(&padded),
+            Err(StoreError::ObjectTooLarge)
+        ));
+    }
+
     #[test]
     fn sync_shards_barriers_each_shard_once_then_flushes_the_device() {
         let (_dir, store, rec) = recording_store();
@@ -2027,6 +2114,27 @@ mod tests {
         );
         store.sync_shards([]).unwrap();
         assert_eq!(rec.events().len(), 3, "no shards, no flush");
+    }
+
+    #[test]
+    fn sync_shards_barriers_the_pack_directory_for_a_packed_store() {
+        let (_dir, store, rec) = recording_store();
+        store.try_activate_local_packs().unwrap();
+        let root = store.objects_root();
+
+        store.sync_shards([]).unwrap();
+        assert!(rec.events().is_empty());
+        store.sync_shards([0xab]).unwrap();
+        let mut events = rec.events();
+        assert_eq!(events.pop(), Some(Ev::Full(root.to_path_buf())));
+        events.sort_by_key(|event| format!("{event:?}"));
+        assert_eq!(
+            events,
+            [
+                Ev::DirBarrier(root.join("ab")),
+                Ev::DirBarrier(root.join("pack")),
+            ]
+        );
     }
 
     #[test]

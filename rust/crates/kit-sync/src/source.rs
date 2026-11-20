@@ -751,6 +751,8 @@ mod tests {
             &mut applied,
             false,
             &mut crate::apply::ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |_| Ok(()),
         )
         else {
             panic!("wrong pack error")

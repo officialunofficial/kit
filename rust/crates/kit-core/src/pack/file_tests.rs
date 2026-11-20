@@ -931,6 +931,40 @@ fn the_report_lists_exactly_the_signed_objects_stored() {
 }
 
 #[test]
+fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
+    let (dir, store) = fresh_store();
+    let (base, base_bytes) = blob(b"base contents");
+    let (target, target_bytes) = blob(b"changed contents");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(base, &base_bytes).unwrap();
+    let first = verified(&writer.finish().unwrap(), dir.path());
+    let pending = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&first, &store, None, &pending).unwrap();
+    assert_eq!(report.raw_count, 1);
+    assert!(!store.contains(&base));
+
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base, &delta::encode(&base_bytes, &target_bytes).unwrap())
+        .unwrap();
+    // Independent raw frames can stage in parallel. This frame must never
+    // supply the earlier delta, although it carries the exact base bytes.
+    writer.push_raw(base, &base_bytes).unwrap();
+    let second = verified(&writer.finish().unwrap(), dir.path());
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    assert!(matches!(
+        PackReader::stage_verified(&second, &store, None, &staged),
+        Err(PackError::DeltaBaseMissing(_)),
+    ));
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&second, &store, Some(&pending), &staged).unwrap();
+    assert_eq!((report.raw_count, report.delta_count), (1, 1));
+    assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
+    assert!(!store.contains(&base));
+    assert!(!store.contains(&target));
+}
+
+#[test]
 fn an_empty_pack_reads_from_a_file() {
     let pack = PackWriter::new().finish().unwrap();
     let dir = TempDir::new().unwrap();

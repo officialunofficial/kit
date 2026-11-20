@@ -142,6 +142,40 @@ fn pushed_main(tx: &MemoryTransport) -> (Work, Hash, Hash) {
     (work, c1, c2)
 }
 
+#[test]
+fn successful_push_records_only_packs_with_verified_signatures() {
+    for signed in [true, false] {
+        let tx = MemoryTransport::new();
+        let work = Work::new();
+        let mut tip = work.commit(None);
+        if !signed {
+            let Object::Commit(mut commit) = work.store.read_object(&tip).unwrap() else {
+                panic!("expected a commit");
+            };
+            commit.signature = [0; 64];
+            tip = work.write(&Object::Commit(commit));
+        }
+        work.branch("main", tip);
+        work.push(
+            &TransportSource::new(&tx),
+            "main",
+            PushLease::FastForward,
+            None,
+        )
+        .unwrap();
+        let map = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
+        let bytes = tx
+            .download_blob(&PackKey::from_hash(map), None, u64::MAX)
+            .unwrap();
+        let packs = kit_core::transfer::decode_packlist(&bytes).unwrap().packs;
+        assert!(!packs.is_empty());
+        let applied = kit_sync::AppliedPacks::load(&work.layout, REMOTE).unwrap();
+        for pack in packs {
+            assert_eq!(applied.contains(&PackKey::from_hash(pack)), signed);
+        }
+    }
+}
+
 /// A plain push of a tip that does not descend from the tracking ref is
 /// refused, even though the remote still holds the tracking ref, so the
 /// lease alone would let the push replace it.

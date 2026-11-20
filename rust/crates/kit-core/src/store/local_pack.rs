@@ -16,8 +16,8 @@ use index::{Frame, Index, Pair, open_regular};
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
 mod writer;
+pub use writer::LocalPackWriter;
 
 const CACHE_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 64;
@@ -367,6 +367,46 @@ fn stage_file_with_nonce(
 impl ObjectStore {
     pub(super) fn format_path(&self) -> PathBuf {
         self.objects_root.with_file_name(super::FORMAT_FILE)
+    }
+
+    /// Try the one-way local-pack activation before taking a prune guard.
+    /// Contention and readable noncanonical legacy markers leave it loose.
+    ///
+    /// # Errors
+    /// An unreadable, incompatible or unwritable format marker.
+    #[doc(hidden)]
+    pub fn try_activate_local_packs(&self) -> StoreResult<()> {
+        format::try_activate(&self.format_path())
+    }
+
+    /// Check whether the current marker selects packed storage.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible marker.
+    #[doc(hidden)]
+    pub fn local_packs_enabled(&self) -> StoreResult<bool> {
+        self.packs.refresh_enabled(self)
+    }
+
+    /// Check the marker on the handle that holds the shared prune guard.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible format marker.
+    #[doc(hidden)]
+    pub fn local_packs_active(&self, guard: &super::PruneGuard) -> StoreResult<bool> {
+        self.check_prune_guard(guard)?;
+        format::packed_under_guard(guard)
+    }
+
+    fn check_prune_guard(&self, guard: &super::PruneGuard) -> StoreResult<()> {
+        if guard.objects_root != self.objects_root {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prune guard belongs to a different object store",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn pack_dir(&self) -> PathBuf {

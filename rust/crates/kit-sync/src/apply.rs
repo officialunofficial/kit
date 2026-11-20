@@ -1,17 +1,15 @@
 //! Downloading and applying the packs of a chain.
 //!
-//! Each pack is downloaded into an unnamed spool file in the store's spool
-//! directory (`.kit/tmp/`), checked against its length, key and trailer as it
-//! arrives, unpacked from that file into the object store by window,
-//! signature-checked and recorded as applied, then dropped, in chain order.
-//! No repository lock is held, and memory does not grow with the pack: a
-//! chain of any size needs one spool on disk and one window in memory,
-//! unless the transport itself buffers the body. The
-//! caller holds a [`kit_core::store::PruneGuard`] for the whole fetch: the
-//! objects of a pack applied here are unreferenced until the fetch publishes
-//! its ref, and the guard keeps gc from deleting them.
+//! Fetch authenticates one wire spool at a time, decodes into an unnamed
+//! object spool, and checks signatures before it accepts those objects.
+//! An accepted pack can contribute to several publication windows. A window
+//! can also hold objects from other accepted packs. Fetch records a wire pack
+//! after the window that finishes it is durable.
+//! The caller holds the prune guard until the ref names the objects.
+//! Downloads and window publication run outside the worktree lock.
 
 use kit_core::protocol::{PackSink, TransportResult};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -62,15 +60,16 @@ impl ProgressSink<'_> {
 }
 
 use kit_core::hash::Hash;
-use kit_core::pack::{PackError, PackReader, PackSpool, VerifiedPack};
+use kit_core::pack::{ObjectSpool, PackError, PackReader, PackSpool, VerifiedPack};
 use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectStore, PruneGuard};
 
 use crate::SourceError;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::chain_label;
+use crate::publication::{PendingView, Publication};
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
 
@@ -179,35 +178,68 @@ pub(crate) fn apply_pack_chain(
     applied: &mut AppliedPacks,
     require_signed: bool,
     done: &mut ChainApplied,
+    guard: &PruneGuard,
+    validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
+    let mut publication = Publication::new(store, guard)?;
+    let mut failure = None;
     for &pk in chain {
         if observer.cancelled() {
-            return Err(SyncError::Interrupted);
+            failure = Some(SyncError::Interrupted);
+            break;
         }
         let key = PackKey::from_hash(pk);
-        if applied.contains(&key) {
+        if applied.contains(&key) || publication.completed(&key) {
             done.skipped += 1;
             continue;
         }
-        let pack = download_verified_pack(store, source, head_ref, &key, observer)?;
-        done.objects += apply_pack(
-            store,
-            observer,
-            remote,
-            &key,
-            &pack,
-            applied,
-            require_signed,
-        )?;
+        let decoded = download_verified_pack(store, source, head_ref, &key, observer)
+            .and_then(|pack| decode_pack(store, &pack, publication.pending(), require_signed));
+        let (spool, unpacked) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        };
+        publication.accept(&spool, key, observer, remote, applied)?;
+        if unpacked > 0 {
+            observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
+        }
+        done.objects += unpacked;
         done.packs += 1;
     }
-    Ok(())
+    if let Some(error) = failure {
+        // Keep the accepted prefix when a later download is interrupted or
+        // refused. The failed pack never entered the publication window.
+        publication.seal(observer, remote, applied, &HashSet::new())?;
+        return Err(error);
+    }
+    let view = publication.view();
+    let checked = validate(&view);
+    let chunks = view.chunks();
+    publication.seal(observer, remote, applied, &chunks)?;
+    checked
 }
 
-/// Unpack `pack`, already checked against `key`, check the signatures of the
-/// commits, remixes and tags it stored, and record it as applied. Returns the
-/// objects it wrote. A record that cannot be appended is reported and does
-/// not fail the fetch: the objects landed, and the record is a cache.
+fn decode_pack(
+    store: &ObjectStore,
+    pack: &VerifiedPack,
+    pending: Option<&ObjectSpool>,
+    require_signed: bool,
+) -> Result<(ObjectSpool, usize), SyncError> {
+    let dir = store.spool_dir();
+    let spool = ObjectSpool::new(&dir).map_err(|e| spool_error(&dir, e.kind(), &e.to_string()))?;
+    let report = PackReader::stage_verified(pack, store, pending, &spool)?;
+    verify_new_object_signatures(
+        &PendingView::new(store, Some(&spool)),
+        &report.signed,
+        require_signed,
+    )?;
+    Ok((spool, (report.raw_count + report.delta_count) as usize))
+}
+
+#[cfg(test)]
 fn apply_pack(
     store: &ObjectStore,
     observer: &dyn Observer<SyncEvent>,
@@ -217,17 +249,13 @@ fn apply_pack(
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, SyncError> {
-    let report = PackReader::read_verified(pack, store)?;
-    let unpacked = (report.raw_count + report.delta_count) as usize;
+    let guard = store.prune_guard()?;
+    let mut publication = Publication::new(store, &guard)?;
+    let (spool, unpacked) = decode_pack(store, pack, None, require_signed)?;
+    publication.accept(&spool, *key, observer, remote, applied)?;
+    publication.seal(observer, remote, applied, &HashSet::new())?;
     if unpacked > 0 {
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
-    }
-    verify_new_object_signatures(store, &report.signed, require_signed)?;
-    if let Err(e) = applied.record_applied(key) {
-        observer.event(&SyncEvent::AppliedPacksPersistFailed {
-            remote: remote.to_owned(),
-            error: e.to_string(),
-        });
     }
     Ok(unpacked)
 }
@@ -348,6 +376,8 @@ mod tests {
             applied,
             false,
             done,
+            &store.prune_guard()?,
+            |_| Ok(()),
         )
     }
 
@@ -417,8 +447,9 @@ mod tests {
         let b = upload_blob_pack(&tx, &[b"second"]);
         let c = upload_blob_pack(&tx, &[b"third"]);
         let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
         let source = TransportSource::new(&tx);
-        // `a` repeats, so its second turn is skipped as applied.
+        // The second listing of `a` arrives before its window seals.
         let chain = [a, a, b, c];
         let mut done = ChainApplied::default();
         apply(&store, &source, &chain, &mut applied, &mut done).unwrap();
@@ -459,6 +490,38 @@ mod tests {
         assert!(reloaded.contains(&PackKey::from_hash(a)));
         assert!(reloaded.contains(&PackKey::from_hash(b)));
         assert!(!reloaded.contains(&PackKey::from_hash(missing)));
+    }
+
+    #[test]
+    fn an_interrupted_final_check_keeps_the_accepted_window() {
+        let tx = MemoryTransport::new();
+        let key = upload_blob_pack(&tx, &[b"kept"]);
+        let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
+        let result = apply_pack_chain(
+            &store,
+            &TransportSource::new(&tx),
+            &NoopObserver,
+            "origin",
+            "refs/heads/main",
+            &[key],
+            &mut applied,
+            true,
+            &mut ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |view| {
+                assert!(view.contains(&blob(b"kept").id().unwrap()));
+                assert!(!store.contains(&blob(b"kept").id().unwrap()));
+                Err(SyncError::Interrupted)
+            },
+        );
+        assert!(matches!(result, Err(SyncError::Interrupted)));
+        assert!(store.contains(&blob(b"kept").id().unwrap()));
+        assert!(
+            AppliedPacks::load(&layout, "origin")
+                .unwrap()
+                .contains(&PackKey::from_hash(key))
+        );
     }
 
     /// A source whose every pack is `len` zero bytes, declared up front.

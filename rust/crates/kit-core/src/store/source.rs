@@ -86,6 +86,43 @@ impl ObjectSource for ObjectStore {
     }
 }
 
+/// Extensions for the closure walker, whose durable source can read only
+/// the prologue of a leaf. An overlay can prove the same facts from its bytes.
+#[doc(hidden)]
+pub trait ClosureSource: ObjectSource + Sync {
+    /// Read the object's type. The durable store can inspect only its header.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        Ok(self.read_object(h)?.object_type())
+    }
+
+    /// Read the object's type and the content length of a blob.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        let object = self.read_object(h)?;
+        let len = match &object {
+            Object::Blob(blob) => Some(blob.data.len() as u64),
+            _ => None,
+        };
+        Ok((object.object_type(), len))
+    }
+}
+impl ClosureSource for ObjectStore {
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        ObjectStore::object_type(self, h)
+    }
+
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        ObjectStore::object_head(self, h)
+    }
+}
+
 /// In-memory object overlay for **ephemeral worktree snapshots**
 /// (`status`, `diff`, conflict/restore safety checks).
 ///
@@ -471,10 +508,52 @@ mod tests {
     use std::io::{self, Seek, Write};
     use tempfile::TempDir;
 
+    impl ClosureSource for crate::store::MemorySource {}
+
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    #[test]
+    fn closure_source_reads_blob_lengths_and_non_blob_types() {
+        use crate::object::{Blob, ObjectType, Tree};
+        use crate::store::MemorySource;
+
+        let mut source = MemorySource::default();
+        for (object, kind, length) in [
+            (
+                Object::Blob(Blob {
+                    data: b"contents".to_vec(),
+                }),
+                ObjectType::Blob,
+                Some(8),
+            ),
+            (
+                Object::Tree(Tree {
+                    entries: Vec::new(),
+                }),
+                ObjectType::Tree,
+                None,
+            ),
+        ] {
+            let id = object.id().unwrap();
+            source
+                .insert(id, serialize::serialize(&object).unwrap())
+                .unwrap();
+            assert_eq!(source.object_type(&id).unwrap(), kind);
+            assert_eq!(source.object_head(&id).unwrap(), (kind, length));
+        }
+        let missing = crate::hash::hash(b"missing");
+        assert!(matches!(
+            source.object_type(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert!(matches!(
+            source.object_head(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     #[test]

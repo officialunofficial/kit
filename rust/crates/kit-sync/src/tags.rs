@@ -25,7 +25,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{KitError, Object, ObjectType};
 use kit_core::ops::{Known, Presence};
 use kit_core::refs::{self, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
-use kit_core::store::{ObjectStore, StoreError};
+use kit_core::store::{ClosureSource, ObjectStore, PruneGuard, StoreError};
 
 use crate::applied_packs::AppliedPacks;
 use crate::apply::{ChainApplied, apply_pack_chain};
@@ -228,11 +228,11 @@ impl TagProver {
 
     /// Drop the entries of `M` whose object the store now holds. Called after
     /// each chain apply.
-    pub(crate) fn refresh_missing(&mut self, store: &ObjectStore) {
+    pub(crate) fn refresh_missing(&mut self, contains: impl Fn(&Hash) -> bool) {
         let found: HashSet<Hash> = self
             .missing_objects
             .iter()
-            .filter(|object| store.contains(object))
+            .filter(|object| contains(object))
             .copied()
             .collect();
         if found.is_empty() {
@@ -250,7 +250,7 @@ impl TagProver {
     /// on where the walk starts and are not.
     pub(crate) fn prove(
         &mut self,
-        store: &ObjectStore,
+        store: &dyn ClosureSource,
         layout: &RepoLayout,
         observer: &dyn Observer<SyncEvent>,
         verified: &mut VerifiedHistory,
@@ -314,18 +314,19 @@ impl TagProver {
             }
         };
         let stop = || observer.cancelled();
-        let presence =
-            match kit_core::ops::check_closure_present_above(store, &value, &known, *cap, &stop) {
-                Ok(presence) => presence,
-                Err(StoreError::Decode(
-                    e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
-                )) => {
-                    return Ok(Proof::Refused(TagRejectReason::Transfer(
-                        SyncError::RemoteObject(e).to_string(),
-                    )));
-                }
-                Err(e) => return Err(e.into()),
-            };
+        let presence = match kit_core::ops::check_closure_present_above_from(
+            store, &value, &known, *cap, &stop,
+        ) {
+            Ok(presence) => presence,
+            Err(StoreError::Decode(
+                e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
+            )) => {
+                return Ok(Proof::Refused(TagRejectReason::Transfer(
+                    SyncError::RemoteObject(e).to_string(),
+                )));
+            }
+            Err(e) => return Err(e.into()),
+        };
         match presence {
             Presence::Complete(checked) => {
                 *objects_checked += checked.len();
@@ -365,7 +366,7 @@ impl TagProver {
     /// set holds. `None` when the tag passes.
     fn peel(
         &self,
-        store: &ObjectStore,
+        store: &dyn ClosureSource,
         name: &str,
         value: Hash,
     ) -> Result<Option<Proof>, SyncError> {
@@ -408,7 +409,7 @@ impl TagProver {
     /// `verified` holds runs first and fills the anchored part.
     fn trusted_set(
         &self,
-        store: &ObjectStore,
+        store: &dyn ClosureSource,
         layout: &RepoLayout,
         observer: &dyn Observer<SyncEvent>,
         verified: &VerifiedHistory,
@@ -458,7 +459,7 @@ impl TagProver {
 /// walked again, a missing one is skipped, and the walk stops once `into`
 /// holds `cap` ids. `cancelled` is polled every few thousand objects.
 fn reach(
-    store: &ObjectStore,
+    store: &dyn ClosureSource,
     tips: &[Hash],
     into: &mut HashSet<Hash>,
     skip: &HashSet<Hash>,
@@ -530,14 +531,13 @@ pub(crate) struct TagPhase<'a> {
     pub(crate) remote: &'a str,
     pub(crate) require_signed: bool,
     pub(crate) lock_wait: &'a LockWait,
+    pub(crate) guard: &'a PruneGuard,
     pub(crate) applied: &'a mut AppliedPacks,
     pub(crate) verified: &'a mut VerifiedHistory,
     pub(crate) stop: StopSet,
     pub(crate) report: &'a mut FetchReport,
     /// The tags this phase published, with their values.
     pub(crate) published: &'a mut Vec<refs::Ref>,
-    /// `report.packs_downloaded` when `M` was last refreshed.
-    pub(crate) packs_since_refresh: usize,
 }
 
 /// What became of one listed tag.
@@ -620,8 +620,11 @@ impl From<SyncError> for ChainFailure {
 impl TagPhase<'_> {
     /// List the remote's tags and publish each one that proves, refusing the
     /// rest one by one.
-    pub(crate) fn run(mut self) -> Result<(), SyncError> {
-        let listed = match self.source.list_refs(TAG_REF_PREFIX) {
+    pub(crate) fn run(
+        mut self,
+        listed: Option<Result<Vec<refs::Ref>, crate::SourceError>>,
+    ) -> Result<(), SyncError> {
+        let listed = match listed.unwrap_or_else(|| self.source.list_refs(TAG_REF_PREFIX)) {
             Ok(listed) => listed,
             // A listing cut short by an interrupt is the interrupt.
             Err(_) if self.observer.cancelled() => return Err(SyncError::Interrupted),
@@ -759,10 +762,16 @@ impl TagPhase<'_> {
                 None => return Ok(Outcome::Refused(TagRejectReason::NoTransferChain)),
             }
         };
-        let applied = self.apply_chain(&tag_ref, map, true, &mut attempts.failed_packs);
-        self.refresh_after_apply(prover);
+        let applied = self.apply_chain(
+            &tag_ref,
+            map,
+            true,
+            &mut attempts.failed_packs,
+            prover,
+            (name, value),
+        );
         let skipped = match applied {
-            Ok((skipped, keys)) => match self.prove(prover, name, value).map_err(Err)? {
+            Ok((skipped, keys, proof)) => match proof {
                 Proof::Proved => {
                     self.stop.extend(keys);
                     return Ok(Outcome::Publish(value));
@@ -796,10 +805,16 @@ impl TagPhase<'_> {
             self.applied.clear();
             crate::fetch::persist_record(self.applied, self.observer, self.remote);
         }
-        let applied = self.apply_chain(&tag_ref, map, !heal, &mut attempts.failed_packs);
-        self.refresh_after_apply(prover);
+        let applied = self.apply_chain(
+            &tag_ref,
+            map,
+            !heal,
+            &mut attempts.failed_packs,
+            prover,
+            (name, value),
+        );
         match applied {
-            Ok((_, keys)) => match self.prove(prover, name, value).map_err(Err)? {
+            Ok((_, keys, proof)) => match proof {
                 Proof::Proved => {
                     self.stop.extend(keys);
                     Ok(Outcome::Publish(value))
@@ -831,28 +846,21 @@ impl TagPhase<'_> {
         )
     }
 
-    /// Drop what `M` holds for objects the last apply brought, if it brought
-    /// any.
-    fn refresh_after_apply(&mut self, prover: &mut TagProver) {
-        if self.packs_since_refresh != self.report.packs_downloaded {
-            self.packs_since_refresh = self.report.packs_downloaded;
-            prover.refresh_missing(self.store);
-        }
-    }
-
     /// Walk the chain of `tag_ref` from `map`, stopping at the stop set when
     /// `use_stop`, and apply its packs. A chain that holds a pack this fetch
     /// already refused is refused with no download, and a pack refused here
     /// joins `failed_packs`. Returns whether anything was skipped (a recorded
     /// pack or a node of the stop set) and the nodes it walked.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn apply_chain(
         &mut self,
         tag_ref: &str,
         map: Hash,
         use_stop: bool,
         failed_packs: &mut HashMap<Hash, FailedPack>,
-    ) -> Result<(bool, Vec<Hash>), (bool, ChainFailure)> {
+        prover: &mut TagProver,
+        (name, value): (&str, Hash),
+    ) -> Result<(bool, Vec<Hash>, Proof), (bool, ChainFailure)> {
         let stop = &self.stop;
         let walk = walk_pack_chain_until(self.source, self.observer, tag_ref, map, &|key| {
             use_stop && stop.contains(key)
@@ -868,6 +876,7 @@ impl TagPhase<'_> {
             return Err((stopped, ChainFailure::Refused(reason)));
         }
         let mut done = ChainApplied::default();
+        let mut proof = None;
         let result = apply_pack_chain(
             self.store,
             self.source,
@@ -878,6 +887,19 @@ impl TagPhase<'_> {
             self.applied,
             self.require_signed,
             &mut done,
+            self.guard,
+            |view| {
+                prover.refresh_missing(|id| view.contains(id));
+                proof = Some(prover.prove(
+                    view,
+                    self.layout,
+                    self.observer,
+                    self.verified,
+                    name,
+                    value,
+                )?);
+                Ok(())
+            },
         );
         self.report.packs_downloaded += done.packs;
         self.report.packs_already_applied += done.skipped;
@@ -895,7 +917,11 @@ impl TagPhase<'_> {
             }
             return Err((skipped, failure));
         }
-        Ok((skipped, keys))
+        Ok((
+            skipped,
+            keys,
+            proof.expect("successful apply checks the tag"),
+        ))
     }
 
     fn refuse(&mut self, name: String, reason: TagRejectReason) {

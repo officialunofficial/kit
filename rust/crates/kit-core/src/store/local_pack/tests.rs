@@ -452,7 +452,7 @@ fn a_known_pack_does_not_hide_a_newly_published_pair() {
 #[test]
 fn a_symlink_cannot_supply_the_pack_directory() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path()).unwrap();
+    crate::store::format::activate(&store.format_path(), true).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), store.pack_dir()).unwrap();
 
@@ -466,7 +466,7 @@ fn a_symlink_cannot_supply_the_pack_directory() {
 #[test]
 fn pack_scan_reports_filesystem_errors_other_than_absence() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path()).unwrap();
+    crate::store::format::activate(&store.format_path(), true).unwrap();
     let objects = layout.objects_dir();
     fs::remove_dir(&objects).unwrap();
     std::os::unix::fs::symlink(&objects, &objects).unwrap();
@@ -614,7 +614,7 @@ fn a_reader_refreshes_a_rebuilt_index_with_the_same_key() {
 #[test]
 fn concurrent_publishers_deduplicate_and_make_the_pair_readable() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path()).unwrap();
+    crate::store::format::activate(&store.format_path(), true).unwrap();
     let bytes = blob(b"two publishers");
     let barrier = std::sync::Barrier::new(2);
     let id = index::canonical_id(&bytes).unwrap();
@@ -761,4 +761,81 @@ fn mixed_golden_vector() {
         assert_eq!(store.object_size(&id).unwrap(), bytes.len() as u64);
         assert_eq!(store.read(&id).unwrap(), bytes);
     }
+}
+
+#[test]
+fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
+    use super::writer::LocalPackWriter;
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(a.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    let other = ObjectStore::init(&RepoLayout::single(b.path())).unwrap();
+
+    assert!(!store.local_packs_enabled().unwrap());
+    let busy = store.prune_guard().unwrap();
+    store.try_activate_local_packs().unwrap();
+    assert!(!store.local_packs_active(&busy).unwrap());
+    assert!(LocalPackWriter::new(&store, &busy).is_err());
+    drop(busy);
+
+    store.try_activate_local_packs().unwrap();
+    let guard = store.prune_guard().unwrap();
+    assert!(store.local_packs_active(&guard).unwrap());
+    assert!(store.local_packs_enabled().unwrap());
+    assert!(LocalPackWriter::new(&other, &guard).is_err());
+    LocalPackWriter::new(&store, &guard)
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 0);
+
+    let bytes = blob(b"overlap");
+    let id = store.write(&bytes).unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+    assert_eq!(writer.write(&bytes).unwrap(), id);
+    assert_eq!(writer.write(&bytes).unwrap(), id);
+    writer.publish().unwrap();
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 2);
+    store.remove_object(&id).unwrap();
+    assert_eq!(
+        ObjectStore::open(&layout).unwrap().read(&id).unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn the_fetch_writer_publishes_many_small_objects_in_one_pack() {
+    use super::writer::LocalPackWriter;
+
+    let (_dir, _layout, store) = fresh();
+    store.try_activate_local_packs().unwrap();
+    let guard = store.prune_guard().unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+    let objects = (0..20).map(|n| blob(&[n; 16_000])).collect::<Vec<_>>();
+    let ids: Vec<_> = objects
+        .iter()
+        .map(|bytes| writer.write(bytes).unwrap())
+        .collect();
+    writer.publish().unwrap();
+
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 2);
+    for (id, bytes) in ids.iter().zip(objects) {
+        assert_eq!(store.read(id).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn the_fetch_batch_replaces_a_same_length_damaged_loose_copy() {
+    let (_dir, _layout, store) = fresh();
+    let good = blob(b"good");
+    let bad = blob(b"torn");
+    let id = store.write(&good).unwrap();
+    fs::write(store.path_for(&id), &bad).unwrap();
+    let batch = store.batch();
+    assert_eq!(batch.write_fetched(&good).unwrap(), id);
+    assert_eq!(fs::read(store.path_for(&id)).unwrap(), bad);
+    batch.commit().unwrap();
+    assert_eq!(store.read(&id).unwrap(), good);
 }
