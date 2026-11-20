@@ -2440,7 +2440,8 @@ mod sweep_crash_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false, &mut |_, _, _| {}).unwrap();
+        let report =
+            crate::ops::gc::run_gc(&reopened, &layout, now, 10, false, &mut |_, _, _| {}).unwrap();
         assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
         assert!(!reopened.contains(&control));
         assert_eq!(report.pruned, 1);

@@ -1336,8 +1336,7 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         set_pack_age(&loose, loose_age);
 
         let expected_bytes = if keep { 0 } else { bytes.len() as u64 };
-        let preview_totals =
-            run_gc(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+        let preview_totals = run_gc(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             preview_totals.loose_duplicates_pruned,
             usize::from(!keep),
@@ -1506,8 +1505,7 @@ fn a_damaged_dead_pack_does_not_block_collection_of_verified_garbage() {
     fs::write(&damaged.pack, bytes).unwrap();
 
     for dry_run in [true, false] {
-        let report =
-            run_gc(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {}).unwrap();
+        let report = run_gc(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.skipped_pack_errors.len(), 1);
         assert!(report.skipped_pack_errors[0].contains("invalid pack trailer"));
         assert_eq!(report.packs_retired, 1);
@@ -2272,7 +2270,10 @@ fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
         let result = crate::ops::gc::live_objects(&gc, &layout);
         if damaged {
             assert!(
-                matches!(result, Err(GcRootsError::Store(StoreError::HashMismatch { .. }))),
+                matches!(
+                    result,
+                    Err(GcRootsError::Store(StoreError::HashMismatch { .. }))
+                ),
                 "{result:?}"
             );
         } else {
