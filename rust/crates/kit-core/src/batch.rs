@@ -510,6 +510,9 @@ impl<'s> WriteBatch<'s> {
         let stage = {
             let mut slot = self.pack.lock().expect("pack stage poisoned");
             if slot.is_none() {
+                // The format file must name packs before any segment can
+                // become visible, so an older kit refuses the repository.
+                self.store.mark_packs()?;
                 let dir = self.store.packs().dir().to_path_buf();
                 fs::create_dir_all(&dir)?;
                 let tmp = temp_file_in(&dir, "segment")?;
@@ -2278,6 +2281,87 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// What a kit that predates segments checks: the whole trimmed format
+    /// file equals the base value.
+    fn old_kit_opens(dir: &std::path::Path) -> bool {
+        let text = fs::read_to_string(dir.join(".kit").join(crate::store::FORMAT_FILE)).unwrap();
+        text.trim() == crate::store::FORMAT_VALUE
+    }
+
+    #[test]
+    fn the_first_segment_marks_the_format_so_an_older_kit_refuses_the_repo() {
+        let (dir, store) = fresh_store();
+        let small = store.batch();
+        small.write(b"one object").unwrap();
+        small.commit().unwrap();
+        assert!(
+            old_kit_opens(dir.path()),
+            "a repo with no segment stays readable by older kit"
+        );
+
+        let batch = store.batch();
+        for i in 0..pack_min() + 10 {
+            batch.write(format!("object {i}").as_bytes()).unwrap();
+        }
+        batch.commit().unwrap();
+        assert!(
+            !old_kit_opens(dir.path()),
+            "older kit must refuse a repo with segments"
+        );
+        let text =
+            fs::read_to_string(dir.path().join(".kit").join(crate::store::FORMAT_FILE)).unwrap();
+        assert_eq!(
+            text,
+            format!(
+                "{}\n{}\n",
+                crate::store::FORMAT_VALUE,
+                crate::store::PACKS_FEATURE
+            )
+        );
+        ObjectStore::open(&crate::layout::RepoLayout::single(dir.path()))
+            .expect("this kit still opens it");
+    }
+
+    #[test]
+    fn an_interrupted_marker_write_is_ignored_then_completed() {
+        let (dir, _store) = fresh_store();
+        let format = dir.path().join(".kit").join(crate::store::FORMAT_FILE);
+        fs::write(&format, format!("{}\npacks-", crate::store::FORMAT_VALUE)).unwrap();
+        let store = ObjectStore::open(&crate::layout::RepoLayout::single(dir.path()))
+            .expect("a partial feature line is an interrupted write, not a new format");
+        let batch = store.batch();
+        for i in 0..pack_min() + 10 {
+            batch.write(format!("object {i}").as_bytes()).unwrap();
+        }
+        batch.commit().unwrap();
+        assert_eq!(
+            fs::read_to_string(&format).unwrap(),
+            format!(
+                "{}\n{}\n",
+                crate::store::FORMAT_VALUE,
+                crate::store::PACKS_FEATURE
+            )
+        );
+    }
+
+    #[test]
+    fn format_file_parsing_refuses_unknown_features() {
+        use crate::store::parse_format;
+        assert_eq!(parse_format("bmt-v2\n"), Some(false));
+        assert_eq!(parse_format("bmt-v2"), Some(false));
+        assert_eq!(parse_format("bmt-v2\npacks-v1\n"), Some(true));
+        assert_eq!(parse_format("bmt-v2\npacks-v1"), Some(true));
+        assert_eq!(parse_format("bmt-v2\npack"), Some(false));
+        assert_eq!(
+            parse_format("bmt-v2\npack\n"),
+            None,
+            "a full line must be a known feature"
+        );
+        assert_eq!(parse_format("bmt-v2\nzstd-v9\n"), None);
+        assert_eq!(parse_format("bmt-v1\n"), None);
+        assert_eq!(parse_format(""), None);
     }
 
     #[test]

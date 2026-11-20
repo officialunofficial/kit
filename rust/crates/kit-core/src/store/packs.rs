@@ -313,6 +313,35 @@ pub(crate) fn read_at(_pack: &File, e: Entry) -> StoreResult<Vec<u8>> {
     Err(StoreError::ObjectNotFound(to_hex(&e.id)))
 }
 
+/// One index entry as the fuzz harness sees it: id, offset, length.
+#[doc(hidden)]
+pub type FuzzEntry = (Hash, u64, u32);
+
+/// Decode a pack index for the fuzz harness: `(id, offset, len)` per
+/// entry and the pack length, or `None` when the index is refused. Not a
+/// stable API.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_decode_index(bytes: &[u8]) -> Option<(Vec<FuzzEntry>, u64)> {
+    decode_index(bytes).ok().map(|(es, len)| {
+        (
+            es.into_iter().map(|e| (e.id, e.offset, e.len)).collect(),
+            len,
+        )
+    })
+}
+
+/// Encode a pack index for the fuzz harness. Not a stable API.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_encode_index(entries: &[FuzzEntry], pack_len: u64) -> Vec<u8> {
+    let mut es: Vec<Entry> = entries
+        .iter()
+        .map(|&(id, offset, len)| Entry { id, offset, len })
+        .collect();
+    encode_index(&mut es, pack_len)
+}
+
 /// A step of a segment's publish or removal, reported to a test hook so a
 /// test can stop the sequence at any point, as a crash would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

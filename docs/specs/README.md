@@ -23,6 +23,7 @@ proofs that check them, with each result's bounds.
 - [SPEC-HTTP-OBJECTS](SPEC-HTTP-OBJECTS.md) &mdash; HTTP object serving, published-view access, and disclosure proofs.
 - [SPEC-INDEX](SPEC-INDEX.md) &mdash; repo-local staging-area index (advisory, not exchanged).
 - [SPEC-KEYSTORE](SPEC-KEYSTORE.md) &mdash; key vault interface, backends, and `kit key` CLI surface.
+- [SPEC-LOCAL-PACKS](SPEC-LOCAL-PACKS.md) &mdash; local pack segments in the object store (draft).
 - [SPEC-MERKLE-OBJECTS](SPEC-MERKLE-OBJECTS.md) &mdash; merkelized ChunkedBlob and Tree object hashing.
 - [SPEC-OBJECTS](SPEC-OBJECTS.md) &mdash; on-disk object model and canonical serialization over BLAKE3 IDs.
 - [SPEC-PACKFILE](SPEC-PACKFILE.md) &mdash; packfile wire format for object exchange.

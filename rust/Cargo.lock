@@ -2339,6 +2339,7 @@ name = "kit-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "blake3",
  "buffa",
  "commonware-invariants",
  "flate2",

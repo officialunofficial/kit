@@ -1584,6 +1584,43 @@ pub fn fetch_cursor_record_one_iteration(input: &[u8]) {
     );
 }
 
+/// Local pack index decoder (`pack_index_decode`): never panics; an accepted
+/// index has strictly ascending ids and every range inside the pack, and
+/// re-encodes to exactly the input.
+pub fn pack_index_decode_one_iteration(input: &[u8]) {
+    let input = &input[..input.len().min(MAX_INPUT)];
+    check_pack_index(input);
+    // Random bytes almost never carry a valid trailer; also try the input
+    // with its last 32 bytes replaced by the right one, to reach the entry
+    // checks.
+    if input.len() >= 32 {
+        let body = &input[..input.len() - 32];
+        let mut sealed = body.to_vec();
+        sealed.extend_from_slice(blake3::hash(body).as_bytes());
+        check_pack_index(&sealed);
+    }
+}
+
+fn check_pack_index(input: &[u8]) {
+    let Some((entries, pack_len)) = kit_core::store::fuzz_decode_pack_index(input) else {
+        return;
+    };
+    for pair in entries.windows(2) {
+        assert!(pair[0].0 < pair[1].0, "ids strictly ascending");
+    }
+    for &(_, offset, len) in &entries {
+        let end = offset
+            .checked_add(u64::from(len))
+            .expect("range overflow accepted");
+        assert!(end <= pack_len, "range past the pack accepted");
+    }
+    assert_eq!(
+        kit_core::store::fuzz_encode_pack_index(&entries, pack_len),
+        input,
+        "an accepted index re-encodes to itself"
+    );
+}
+
 /// Index file decoder (`index_decode`): `index::deserialize` never panics,
 /// and an accepted index survives a serialize and deserialize round trip.
 pub fn index_decode_one_iteration(input: &[u8]) {
@@ -3316,6 +3353,26 @@ mod tests {
         ] {
             run_one(case, ref_wire_decode_one_iteration).unwrap();
         }
+    }
+
+    #[test]
+    fn unit_pack_index_decode() {
+        run_iterated_unit(pack_index_decode_one_iteration).unwrap();
+        let empty = kit_core::store::fuzz_encode_pack_index(&[], 0);
+        let one = kit_core::store::fuzz_encode_pack_index(&[([7; 32], 0, 5)], 5);
+        let mut flipped = one.clone();
+        flipped[30] ^= 1;
+        for case in [
+            &b""[..],
+            &empty[..],
+            &one[..],
+            &flipped[..],
+            &[0xFF; 96][..],
+        ] {
+            run_one(case, pack_index_decode_one_iteration).unwrap();
+        }
+        assert!(kit_core::store::fuzz_decode_pack_index(&one).is_some());
+        assert!(kit_core::store::fuzz_decode_pack_index(&flipped).is_none());
     }
 
     #[test]

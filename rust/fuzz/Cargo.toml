@@ -45,6 +45,7 @@ undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 arbitrary = "1.5.0"
+blake3 = "1.8.7"
 buffa = "0.9.2"
 flate2 = "1.1.11"
 kit-attest = { path = "../crates/kit-attest", features = ["grants"] }
@@ -302,6 +303,14 @@ required-features = ["libfuzzer"]
 [[bin]]
 name = "name_rules"
 path = "fuzz_targets/name_rules.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]
+
+[[bin]]
+name = "pack_index_decode"
+path = "fuzz_targets/pack_index_decode.rs"
 test = false
 doc = false
 bench = false

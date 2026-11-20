@@ -57,6 +57,11 @@ use crate::serialize;
 mod memory;
 mod memory_overlay;
 pub(crate) mod packs;
+#[doc(hidden)]
+pub use packs::{
+    FuzzEntry as FuzzPackIndexEntry, fuzz_decode_index as fuzz_decode_pack_index,
+    fuzz_encode_index as fuzz_encode_pack_index,
+};
 mod source;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
@@ -84,6 +89,12 @@ pub const FORMAT_FILE: &str = "format";
 /// The only supported object-addressing format value (see
 /// `docs/specs/SPEC-MERKLE-OBJECTS.md`): Tree/ChunkedBlob keyed by BMT root.
 pub const FORMAT_VALUE: &str = "bmt-v2";
+
+/// Feature line added under [`FORMAT_VALUE`] in the format file the first
+/// time a write batch creates a local pack segment. A kit that predates
+/// segments compares the whole trimmed file with [`FORMAT_VALUE`], so it
+/// refuses such a repository instead of reporting packed objects missing.
+pub const PACKS_FEATURE: &str = "packs-v1";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;
@@ -298,6 +309,8 @@ pub struct ObjectStore {
     default_policy: SyncPolicy,
     /// Local pack segments under `objects/packs/`, loaded lazily.
     packs: Arc<packs::PackSet>,
+    /// Whether the format file already carries [`PACKS_FEATURE`].
+    packs_marked: Arc<std::sync::atomic::AtomicBool>,
     /// Test-only counter of physical reads (`read_raw` calls) this store
     /// has performed. There is no read-side equivalent of `syncer` to
     /// inject a recording double against, so this is a plain counter
@@ -328,13 +341,15 @@ impl ObjectStore {
             String::from_utf8(bytes)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "format file is not UTF-8"))
         };
-        match read_format() {
-            Ok(s) if s.trim() == FORMAT_VALUE => {}
-            Ok(s) => {
-                return Err(StoreError::IncompatibleRepoFormat {
-                    found: Some(s.trim().to_owned()),
-                });
-            }
+        let packs_marked = match read_format() {
+            Ok(s) => match parse_format(&s) {
+                Some(marked) => marked,
+                None => {
+                    return Err(StoreError::IncompatibleRepoFormat {
+                        found: Some(s.trim().to_owned()),
+                    });
+                }
+            },
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Err(StoreError::IncompatibleRepoFormat { found: None });
             }
@@ -346,9 +361,10 @@ impl ObjectStore {
                 });
             }
             Err(e) => return Err(StoreError::Io(e)),
-        }
+        };
         Ok(Self {
             packs: Arc::new(packs::PackSet::new(&objects_root)),
+            packs_marked: Arc::new(std::sync::atomic::AtomicBool::new(packs_marked)),
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
@@ -371,6 +387,7 @@ impl ObjectStore {
         fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
         Ok(Self {
             packs: Arc::new(packs::PackSet::new(&objects_root)),
+            packs_marked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             objects_root,
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
@@ -1023,6 +1040,54 @@ impl ObjectStore {
         }
     }
 
+    /// Add [`PACKS_FEATURE`] to the format file and make it durable, once,
+    /// before the first segment of this store is created. A repository that
+    /// never packs keeps the plain marker, so an older kit still opens it.
+    ///
+    /// The file is a lock anchor and is never replaced, so the line is
+    /// written in place right after the first line. A crash mid-write can
+    /// leave a partial line; [`parse_format`] ignores a partial prefix of
+    /// the feature, which is safe because no segment is visible before this
+    /// returns, and the next call writes the line whole.
+    pub(crate) fn mark_packs(&self) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        use std::sync::atomic::Ordering as O;
+        if self.packs_marked.load(O::Acquire) {
+            return Ok(());
+        }
+        let path = self.objects_root.with_file_name(FORMAT_FILE);
+        let mut file = fs::OpenOptions::new().read(true).write(true).open(&path)?;
+        let bytes = crate::bounded_read::read_capped_from(&file, FORMAT_MAX_BYTES)?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "format file is not UTF-8"))?;
+        match parse_format(&text) {
+            Some(true) => {
+                self.packs_marked.store(true, O::Release);
+                return Ok(());
+            }
+            Some(false) => {}
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected format file",
+                ));
+            }
+        }
+        let first_line_end = text.find('\n').map_or(text.len(), |i| i + 1);
+        let mut line = String::new();
+        if first_line_end == text.len() && !text.ends_with('\n') {
+            line.push('\n');
+        }
+        line.push_str(PACKS_FEATURE);
+        line.push('\n');
+        file.seek(SeekFrom::Start(first_line_end as u64))?;
+        file.write_all(line.as_bytes())?;
+        file.set_len((first_line_end + line.len()) as u64)?;
+        file.sync_all()?;
+        self.packs_marked.store(true, O::Release);
+        Ok(())
+    }
+
     /// Remove pack segment `name` if its pack is still older than the grace
     /// window, under the exclusive lock of `format`, as
     /// [`prune_if_old`](Self::prune_if_old) does for one object. The index
@@ -1100,6 +1165,33 @@ fn read_shard_dir(path: &std::path::Path, dir: &str, out: &mut Vec<Hash>) -> Sto
 /// Whether `name` is a temp file of an object write: `.<name>.tmp.*` from a
 /// single or batched write, `.kit.tmp.*` from a bulk write. No object file
 /// starts with a dot.
+/// Parse the format file: `Some(packs)` when this kit can read the
+/// repository, where `packs` says whether it may hold pack segments, and
+/// `None` otherwise. The first line is [`FORMAT_VALUE`]; each later full line
+/// is [`PACKS_FEATURE`] or empty. A last line with no newline that is a
+/// prefix of [`PACKS_FEATURE`] is an interrupted [`ObjectStore::mark_packs`]
+/// and is ignored. Anything else is refused.
+pub(crate) fn parse_format(text: &str) -> Option<bool> {
+    let mut packs = false;
+    let mut lines = text.split('\n').peekable();
+    if lines.next()?.trim() != FORMAT_VALUE {
+        return None;
+    }
+    while let Some(line) = lines.next() {
+        let last = lines.peek().is_none();
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        if line == PACKS_FEATURE {
+            packs = true;
+        } else if !(last && PACKS_FEATURE.starts_with(line)) {
+            return None;
+        }
+    }
+    Some(packs)
+}
+
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),

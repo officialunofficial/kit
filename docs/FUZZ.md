@@ -44,6 +44,7 @@ from recurring.
 | `fuzz_targets/fetch_cursor_record.rs` | `kit_sync::cursor::parse` (an accepted record survives a write and a parse) |
 | `fuzz_targets/ref_wire_decode.rs` | `refs::decode_ref_wire` / `refs::parse_lowercase_hash` (an accepted hash survives an encode and decode round trip) |
 | `fuzz_targets/index_decode.rs` | `index::deserialize` (an accepted index survives a serialize and deserialize round trip) |
+| `fuzz_targets/pack_index_decode.rs` | local pack segment index decode, `store::packs::decode_index` (never panics; an accepted index has strictly ascending ids and every range inside the pack, and re-encodes to exactly the input; each input is also tried with a valid trailer) |
 | `fuzz_targets/history_order_decode.rs` | `TimestampDiscovery::decode` (every accepted input re-encodes to exactly itself) |
 | `fuzz_targets/conflict_state_decode.rs` | `ops::conflict_state::deserialize_conflicts` (an accepted list survives a serialize and deserialize round trip) |
 | `fuzz_targets/sparse_wire_decode.rs` | `sparse::decode_sparse_response` / `sparse::decode_sparse_cache` (never panics on any input) |
@@ -117,6 +118,7 @@ Each one has a fuzz target, or a written reason why it has none.
 | `kit_core::refs::decode_ref_wire`, `parse_lowercase_hash` | `ref_wire_decode` |
 | `kit_sync::cursor::parse` | `fetch_cursor_record` |
 | `kit_core::index::deserialize` | `index_decode` |
+| `kit_core::store` local pack index decode (`fuzz_decode_pack_index`) | `pack_index_decode` |
 | `kit_core::history_order` `TimestampDiscovery::decode` | `history_order_decode` |
 | `kit_core::ops::conflict_state::deserialize_conflicts` | `conflict_state_decode` |
 | `kit_core::ops::stash::deserialize_list` | `stash_list` |
