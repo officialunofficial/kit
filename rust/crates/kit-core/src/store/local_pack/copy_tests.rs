@@ -583,7 +583,7 @@ fn outputs_roll_over_at_the_entry_cap_and_the_payload_cap() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-fn a_write_failure_during_the_copy_leaves_the_inputs_untouched() {
+fn a_write_failure_during_the_copy_keeps_the_inputs_and_the_run_goes_on() {
     let (_dir, layout, store) = fresh();
     let x = obj("x", 2000);
     let dead: Vec<_> = (0..4).map(|n| obj(&format!("dead{n}"), 2000)).collect();
@@ -593,8 +593,10 @@ fn a_write_failure_during_the_copy_leaves_the_inputs_untouched() {
     keep(&layout, "x", &ids[0]);
 
     let failing = crate::fault::fail_writes(crate::fault::Site::Store);
-    assert!(run_gc_observed(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
+    let report = run(&store, &layout, false);
     drop(failing);
+    assert!(report.pack_copy_error.is_some());
+    assert_eq!(report.packs_rewritten, 0);
     assert!(exists(&pair));
     assert_eq!(packs(&store).len(), 1, "no output was published");
     assert_eq!(store.read(&ids[0]).unwrap(), x);

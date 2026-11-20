@@ -170,6 +170,12 @@ pub fn run(args: &[String]) -> u8 {
     for error in &report.skipped_pack_errors {
         let _ = writeln!(stderr, "warning: kept damaged local pack: {error}");
     }
+    if let Some(error) = &report.pack_copy_error {
+        let _ = writeln!(
+            stderr,
+            "warning: kept the local packs gc meant to rewrite or merge: {error}"
+        );
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(

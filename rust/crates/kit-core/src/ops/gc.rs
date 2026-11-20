@@ -818,6 +818,9 @@ pub struct GcReport {
     pub pack_leftovers_pruned: usize,
     /// Loose files reclaimed because a verified packed copy remains.
     pub loose_duplicates_pruned: usize,
+    /// Why copy-then-retire stopped, such as a full disk. Gc kept every pack it
+    /// meant to copy and went on with the rest of the run.
+    pub pack_copy_error: Option<String>,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,
 }

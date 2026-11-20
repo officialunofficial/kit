@@ -343,10 +343,20 @@ impl PackSweep {
         }
         // Copy under the shared guard, which `execute` releases before the
         // exclusive try below: the process would otherwise fail its own try.
+        // A failed copy, such as a full disk, keeps every copy input and still
+        // lets the wholly dead retirement below free space.
         let copied = match &self.copy {
-            Some(copy) if !copy.is_empty() => Some(copy.execute(store, report)?),
+            Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
+                Ok(copied) => Some(copied),
+                Err(error) => {
+                    report.pack_copy_error = Some(error.to_string());
+                    None
+                }
+            },
             _ => None,
         };
+        #[cfg(test)]
+        super::tests::after_copy_publish()?;
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
             return Ok(false);

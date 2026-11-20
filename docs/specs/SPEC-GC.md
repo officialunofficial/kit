@@ -356,8 +356,9 @@ required object has no readable copy.
 
 Gc rewrites and merges local packs by copy-then-retire. After the
 retention mark, gc classifies every published pair that the wholly dead
-retirement below does not take. A pair whose every entry has a verified
-copy in a pair that stays is retired without a copy. A pair past grace
+retirement below does not take. A pair whose live entries all have a
+verified copy in a pair that stays, and whose unreachable entries are all
+past grace, is retired without a copy. A pair past grace
 whose dead bytes, plus the bytes of live entries held by a pair that
 stays, reach a quarter of its payload is rewritten. Pairs smaller than
 16 MiB of payload and 16,384 entries are merged when at least eight exist.
@@ -379,13 +380,15 @@ relies on it. An entry that cannot be read or verified keeps its input in
 place. An input key also used as an output key stays in place.
 
 Gc publishes every output durably (SPEC-OBJECTS §10.1) under the shared
-`format` guard. It then releases the guard and reopens each output index
+`format` guard and reopens each output index. It then releases the guard
 before retiring any input. Under the exclusive `format` try-lock, before
 the first input unlink, gc checks that both members of every output and
 covering pair are present under their final names with unchanged stamps. It
 then flushes those files, the pack directory and the objects directory.
 A missed try-lock retires nothing. The outputs stay as duplicates, and
-the next run retires the inputs as covered, with nothing to copy.
+the next run takes them as coverage for the live entries. It copies again
+only the entries that coverage may not drop. If the copy itself fails, gc
+keeps every input, reports the error, and goes on with the rest of the run.
 
 Gc also retires a pack when every verified entry is unreachable and the
 pack has passed grace. Gc records the pack's mtime after the retention mark

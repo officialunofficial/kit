@@ -289,8 +289,6 @@ impl CopyPlan {
         self.verify_coverage(&mut work, report)?;
         let (outputs, copied) = self.copy(store, &mut work, report)?;
         report.survivor_bytes_copied += copied;
-        #[cfg(test)]
-        super::tests::after_copy_publish()?;
 
         let mut inputs = Vec::new();
         for (input, work) in self.inputs.iter().zip(&work) {
