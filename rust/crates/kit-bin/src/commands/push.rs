@@ -312,12 +312,17 @@ fn push_tags(
 }
 
 /// The ref `--delete` names: a full `refs/heads/` or `refs/tags/` name, or a
-/// short name that the remote resolves.
+/// short name that the remote resolves. A short name too long for a branch
+/// can name only a tag.
 fn delete_target(spec: &str) -> DeleteTarget {
     if let Some(branch) = spec.strip_prefix("refs/heads/") {
         DeleteTarget::Branch(branch.to_owned())
     } else if let Some(tag) = spec.strip_prefix("refs/tags/") {
         DeleteTarget::Tag(tag.to_owned())
+    } else if !kit_core::refs::validate_ref_name(&format!("refs/heads/{spec}"))
+        && kit_core::refs::validate_ref_name(&format!("refs/tags/{spec}"))
+    {
+        DeleteTarget::Tag(spec.to_owned())
     } else {
         DeleteTarget::Name(spec.to_owned())
     }
@@ -894,6 +899,26 @@ mod interrupted_hint_tests {
         assert!(
             !interrupted_hint("kit+https://example.test/repo", UploadLimits::default())
                 .contains("BeginUpload")
+        );
+    }
+}
+
+#[cfg(test)]
+mod delete_target_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_name_too_long_for_a_branch_names_the_tag() {
+        let longest_tag = "t".repeat(kit_core::refs::MAX_REF_NAME_BYTES - "refs/tags/".len());
+        assert_eq!(
+            delete_target(&longest_tag),
+            DeleteTarget::Tag(longest_tag.clone())
+        );
+        assert_eq!(delete_target("v1"), DeleteTarget::Name("v1".to_owned()));
+        let too_long = format!("{longest_tag}t");
+        assert_eq!(
+            delete_target(&too_long),
+            DeleteTarget::Name(too_long.clone())
         );
     }
 }
