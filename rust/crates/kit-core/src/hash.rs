@@ -70,13 +70,19 @@ pub enum FromHexError {
 /// hex encoder. Use this everywhere a byte slice needs hex rendering.
 #[must_use]
 pub fn to_hex_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
+    let mut out = vec![0u8; bytes.len() * 2];
+    encode_hex(bytes, &mut out);
+    // `encode_hex` writes only ASCII, so the conversion cannot fail.
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Write the lowercase hex of `src` into `dst`, which is `2 * src.len()` bytes.
+fn encode_hex(src: &[u8], dst: &mut [u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (b, pair) in src.iter().zip(dst.chunks_exact_mut(2)) {
+        pair[0] = HEX[(b >> 4) as usize];
+        pair[1] = HEX[(b & 0x0f) as usize];
     }
-    out
 }
 
 /// Render a [`Hash`](tyalias@Hash) as lowercase hex.
@@ -184,12 +190,12 @@ impl fmt::Display for ObjectPath {
 /// Split a [`Hash`](tyalias@Hash) into its object-store path components.
 #[must_use]
 pub fn object_path(h: &Hash) -> ObjectPath {
-    let hex = to_hex(h);
-    let bytes = hex.as_bytes();
+    let mut hex = [0u8; HEX_LEN];
+    encode_hex(h, &mut hex);
     let mut dir = [0u8; 2];
     let mut file = [0u8; 62];
-    dir.copy_from_slice(&bytes[..2]);
-    file.copy_from_slice(&bytes[2..]);
+    dir.copy_from_slice(&hex[..2]);
+    file.copy_from_slice(&hex[2..]);
     ObjectPath { dir, file }
 }
 
