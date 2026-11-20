@@ -845,6 +845,21 @@ mod tests {
         s.write(&bytes).unwrap()
     }
 
+    #[test]
+    fn observed_closure_reports_completed_objects_and_propagates_missing_objects() {
+        let (_dir, store) = store();
+        let tip = make_single_file_tree(&store, b"file", b"contents");
+        let progress = std::cell::Cell::new(0);
+        assert!(!check_closure_present_observed(&store, &tip, &|done| progress.set(done)).unwrap());
+        assert_eq!(progress.get(), 2);
+
+        let missing = hash::hash(b"missing tip");
+        assert!(matches!(
+            check_closure_present_observed(&store, &missing, &|_| {}),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+    }
+
     /// The closure check stops at the objects `known` calls present: below
     /// them it neither reads nor reports, and it returns what it checked. A
     /// missing object above them ends it with the path to that object, an

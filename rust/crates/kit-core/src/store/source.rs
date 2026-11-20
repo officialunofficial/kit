@@ -508,10 +508,52 @@ mod tests {
     use std::io::{self, Seek, Write};
     use tempfile::TempDir;
 
+    impl ClosureSource for crate::store::MemorySource {}
+
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    #[test]
+    fn closure_source_reads_blob_lengths_and_non_blob_types() {
+        use crate::object::{Blob, ObjectType, Tree};
+        use crate::store::MemorySource;
+
+        let mut source = MemorySource::default();
+        for (object, kind, length) in [
+            (
+                Object::Blob(Blob {
+                    data: b"contents".to_vec(),
+                }),
+                ObjectType::Blob,
+                Some(8),
+            ),
+            (
+                Object::Tree(Tree {
+                    entries: Vec::new(),
+                }),
+                ObjectType::Tree,
+                None,
+            ),
+        ] {
+            let id = object.id().unwrap();
+            source
+                .insert(id, serialize::serialize(&object).unwrap())
+                .unwrap();
+            assert_eq!(source.object_type(&id).unwrap(), kind);
+            assert_eq!(source.object_head(&id).unwrap(), (kind, length));
+        }
+        let missing = crate::hash::hash(b"missing");
+        assert!(matches!(
+            source.object_type(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert!(matches!(
+            source.object_head(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     #[test]

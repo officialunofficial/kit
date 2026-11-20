@@ -2024,6 +2024,26 @@ mod tests {
     }
 
     #[test]
+    fn a_fetched_loose_write_checks_the_size_limit_before_staging() {
+        let (_dir, store, recorder) = recording_store();
+        let batch = store.batch();
+        batch.write(b"staged").unwrap();
+        recorder.fail_renames_after(0);
+        assert!(batch.checkpoint().is_err());
+
+        // A failed batch lets the test reach the staging gate without writing a GiB.
+        let padded = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        assert!(matches!(
+            batch.write_fetched(&padded[..MAX_RAW_OBJECT_SIZE]),
+            Err(StoreError::Io(_))
+        ));
+        assert!(matches!(
+            batch.write_fetched(&padded),
+            Err(StoreError::ObjectTooLarge)
+        ));
+    }
+
+    #[test]
     fn sync_shards_barriers_each_shard_once_then_flushes_the_device() {
         let (_dir, store, rec) = recording_store();
         let root = store.objects_root().to_path_buf();
@@ -2043,6 +2063,27 @@ mod tests {
         );
         store.sync_shards([]).unwrap();
         assert_eq!(rec.events().len(), 3, "no shards, no flush");
+    }
+
+    #[test]
+    fn sync_shards_barriers_the_pack_directory_for_a_packed_store() {
+        let (_dir, store, rec) = recording_store();
+        store.try_activate_local_packs().unwrap();
+        let root = store.objects_root();
+
+        store.sync_shards([]).unwrap();
+        assert!(rec.events().is_empty());
+        store.sync_shards([0xab]).unwrap();
+        let mut events = rec.events();
+        assert_eq!(events.pop(), Some(Ev::Full(root.to_path_buf())));
+        events.sort_by_key(|event| format!("{event:?}"));
+        assert_eq!(
+            events,
+            [
+                Ev::DirBarrier(root.join("ab")),
+                Ev::DirBarrier(root.join("pack")),
+            ]
+        );
     }
 
     #[test]

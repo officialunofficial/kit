@@ -182,6 +182,46 @@ mod tests {
     }
 
     #[test]
+    fn the_spool_accepts_the_size_limit_and_rejects_one_byte_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = ObjectSpool::new(dir.path()).unwrap();
+        let (id, bytes) = blob(b"existing frame");
+        spool.append(0, id, ObjectType::Blob, &bytes).unwrap();
+
+        // Keep the first frame for this id so neither body needs a disk write.
+        let padded = vec![0u8; MAX_RAW_OBJECT_SIZE + 1];
+        spool
+            .append(1, id, ObjectType::Blob, &padded[..MAX_RAW_OBJECT_SIZE])
+            .unwrap();
+        assert!(matches!(
+            spool.append(2, id, ObjectType::Blob, &padded),
+            Err(StoreError::ObjectTooLarge)
+        ));
+        assert_eq!(spool.read(&id).unwrap(), Some(bytes));
+    }
+
+    #[test]
+    fn duplicate_ids_keep_the_earliest_decode_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = ObjectSpool::new(dir.path()).unwrap();
+        let (id, bytes) = blob(b"repeated base");
+
+        spool.append(4, id, ObjectType::Blob, &bytes).unwrap();
+        spool.append(2, id, ObjectType::Blob, &bytes).unwrap();
+        spool.append(3, id, ObjectType::Blob, &bytes).unwrap();
+        assert_eq!(
+            spool.read_before::<StoreError>(&id, 3, |_| Ok(())).unwrap(),
+            Some(bytes.clone())
+        );
+
+        spool.append(2, id, ObjectType::Blob, &bytes).unwrap();
+        let state = spool.inner.lock().unwrap();
+        assert_eq!(state.by_id[&id].position, 2);
+        assert_eq!(state.by_id[&id].offset, bytes.len() as u64);
+        assert_eq!(state.end, 2 * bytes.len() as u64);
+    }
+
+    #[test]
     fn earlier_windows_cannot_resolve_later_bases_and_reads_check_the_id() {
         let dir = tempfile::tempdir().unwrap();
         let spool = ObjectSpool::new(dir.path()).unwrap();

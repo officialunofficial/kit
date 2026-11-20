@@ -773,6 +773,7 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
     let store = ObjectStore::init(&layout).unwrap();
     let other = ObjectStore::init(&RepoLayout::single(b.path())).unwrap();
 
+    assert!(!store.local_packs_enabled().unwrap());
     let busy = store.prune_guard().unwrap();
     store.try_activate_local_packs().unwrap();
     assert!(!store.local_packs_active(&busy).unwrap());
@@ -782,6 +783,7 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
     store.try_activate_local_packs().unwrap();
     let guard = store.prune_guard().unwrap();
     assert!(store.local_packs_active(&guard).unwrap());
+    assert!(store.local_packs_enabled().unwrap());
     assert!(LocalPackWriter::new(&other, &guard).is_err());
     LocalPackWriter::new(&store, &guard)
         .unwrap()
@@ -801,4 +803,39 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
         ObjectStore::open(&layout).unwrap().read(&id).unwrap(),
         bytes
     );
+}
+
+#[test]
+fn the_fetch_writer_publishes_many_small_objects_in_one_pack() {
+    use super::writer::LocalPackWriter;
+
+    let (_dir, _layout, store) = fresh();
+    store.try_activate_local_packs().unwrap();
+    let guard = store.prune_guard().unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+    let objects = (0..20).map(|n| blob(&[n; 16_000])).collect::<Vec<_>>();
+    let ids: Vec<_> = objects
+        .iter()
+        .map(|bytes| writer.write(bytes).unwrap())
+        .collect();
+    writer.publish().unwrap();
+
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 2);
+    for (id, bytes) in ids.iter().zip(objects) {
+        assert_eq!(store.read(id).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn the_fetch_batch_replaces_a_same_length_damaged_loose_copy() {
+    let (_dir, _layout, store) = fresh();
+    let good = blob(b"good");
+    let bad = blob(b"torn");
+    let id = store.write(&good).unwrap();
+    fs::write(store.path_for(&id), &bad).unwrap();
+    let batch = store.batch();
+    assert_eq!(batch.write_fetched(&good).unwrap(), id);
+    assert_eq!(fs::read(store.path_for(&id)).unwrap(), bad);
+    batch.commit().unwrap();
+    assert_eq!(store.read(&id).unwrap(), good);
 }

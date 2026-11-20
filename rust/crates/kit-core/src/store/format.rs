@@ -99,7 +99,7 @@ pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult
 
 #[cfg(test)]
 mod tests {
-    use super::{LEGACY, LOST_APPEND, PACKED, activate, check};
+    use super::{LEGACY, LOST_APPEND, PACKED, activate, check, try_activate};
     use crate::layout::RepoLayout;
     use crate::store::{ObjectStore, StoreError};
     use std::fs::{self, File};
@@ -161,6 +161,33 @@ mod tests {
         drop(guard);
         activate(&marker, true).unwrap();
         assert_eq!(fs::read(&marker).unwrap(), PACKED);
+    }
+
+    #[test]
+    fn the_guard_checks_the_marker_at_and_above_its_read_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let mut marker = b"bmt-v2".to_vec();
+        marker.resize(64, b' ');
+        fs::write(layout.format_file(), &marker).unwrap();
+        let guard = store.prune_guard().unwrap();
+        assert!(!store.local_packs_active(&guard).unwrap());
+        drop(guard);
+
+        marker.push(b' ');
+        fs::write(layout.format_file(), &marker).unwrap();
+        let guard = store.prune_guard().unwrap();
+        assert!(matches!(
+            store.local_packs_active(&guard),
+            Err(StoreError::IncompatibleRepoFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn activation_propagates_io_errors_other_than_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(try_activate(dir.path()), Err(StoreError::Io(_))));
     }
 
     #[test]

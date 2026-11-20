@@ -1,11 +1,10 @@
 //! Fetching: reconstruct every remote branch from its packmap chain and
 //! publish remote-tracking refs.
 //!
-//! A fetch holds no repository lock while it downloads and applies packs.
-//! Each pack is downloaded, checked, unpacked and recorded as it arrives, in
-//! chain order, so `add`, `commit` and `checkout` run during a clone of any
-//! size. The lock a fetch takes is `worktree.lock`, and only around the
-//! tracking-ref write and the checkpoint.
+//! Fetch downloads and authenticates packs in chain order. It records
+//! completed packs as publication windows seal. Fetch takes the worktree
+//! lock only around the tracking-ref write and the checkpoint, so add,
+//! commit, and checkout can run during the transfer.
 //!
 //! What keeps gc away from the objects a fetch has written but not yet
 //! published is the [`kit_core::store::PruneGuard`] that [`fetch_objects`]
@@ -647,10 +646,8 @@ fn fetch_objects_inner(
                 nodes: resolved.nodes,
             };
 
-            // Step 2: download, unpack and record each pack as it arrives,
-            // then verify the closure. No repo lock is held. The prune guard
-            // that `fetch_objects` holds keeps gc from deleting the objects
-            // that no ref names yet.
+            // Apply the branch's chain, check the tip, and finish sealing
+            // its windows before taking the worktree lock.
             let (completed, applied_stats) = match apply_and_verify_chain(
                 store,
                 source,
@@ -706,7 +703,7 @@ fn fetch_objects_inner(
 
             stop.extend(keys);
 
-            // Step 4: publish under a repo lock acquired fresh for this
+            // Publish under a worktree lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
             // has a deadline only when `lock_wait` sets one: the work above
             // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune

@@ -305,3 +305,46 @@ impl ClosureSource for PendingView<'_> {
 fn bytes_fit_pack(blob_len: usize) -> bool {
     blob_len + 10 < PACK_OBJECT_BYTES
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NoopObserver;
+    use kit_core::layout::RepoLayout;
+    use kit_core::object::Tree;
+
+    #[test]
+    fn tiny_entries_seal_at_the_entry_limit_even_below_the_byte_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        let tree = Object::Tree(Tree {
+            entries: Vec::new(),
+        });
+        let bytes = serialize::serialize(&tree).unwrap();
+        let id = tree.id().unwrap();
+        for position in 0..65_536 {
+            spool
+                .append(position, id, ObjectType::Tree, &bytes)
+                .unwrap();
+        }
+        let key = PackKey::from_hash(kit_core::hash::hash(b"wire pack"));
+        publication
+            .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+
+        assert!(publication.pending().is_none());
+        assert_eq!(store.read(&id).unwrap(), bytes);
+        assert!(
+            AppliedPacks::load(&layout, "origin")
+                .unwrap()
+                .contains(&key)
+        );
+    }
+}

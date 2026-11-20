@@ -1,15 +1,12 @@
 //! Downloading and applying the packs of a chain.
 //!
-//! Each pack is downloaded into an unnamed spool file in the store's spool
-//! directory (`.kit/tmp/`), checked against its length, key and trailer as it
-//! arrives, unpacked from that file into the object store by window,
-//! signature-checked and recorded as applied, then dropped, in chain order.
-//! No repository lock is held, and memory does not grow with the pack: a
-//! chain of any size needs one spool on disk and one window in memory,
-//! unless the transport itself buffers the body. The
-//! caller holds a [`kit_core::store::PruneGuard`] for the whole fetch: the
-//! objects of a pack applied here are unreferenced until the fetch publishes
-//! its ref, and the guard keeps gc from deleting them.
+//! Fetch authenticates one wire spool at a time, decodes into an unnamed
+//! object spool, and checks signatures before it accepts those objects.
+//! An accepted pack can contribute to several publication windows. A window
+//! can also hold objects from other accepted packs. Fetch records a wire pack
+//! after the window that finishes it is durable.
+//! The caller holds the prune guard until the ref names the objects.
+//! Downloads and window publication run outside the worktree lock.
 
 use kit_core::protocol::{PackSink, TransportResult};
 use std::collections::HashSet;
@@ -450,8 +447,9 @@ mod tests {
         let b = upload_blob_pack(&tx, &[b"second"]);
         let c = upload_blob_pack(&tx, &[b"third"]);
         let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
         let source = TransportSource::new(&tx);
-        // `a` repeats, so its second turn is skipped as applied.
+        // The second listing of `a` arrives before its window seals.
         let chain = [a, a, b, c];
         let mut done = ChainApplied::default();
         apply(&store, &source, &chain, &mut applied, &mut done).unwrap();
