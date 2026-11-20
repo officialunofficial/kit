@@ -20,6 +20,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Keep all symlinks intact when saving a trust catalog through a dangling chain.
 - Reduce stderr writes when printing the commit summary.
 - Resolve relative clone destinations once before restoring objects.
+- Stage the new spelling and remove the old one when `add -A` sees a case-only rename.
+- Check out committed case-only file renames on case-insensitive volumes.
 
 ## [0.9.0] - 2026-11-19
 
