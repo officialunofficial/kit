@@ -312,13 +312,17 @@ impl Index {
         (0..self.count).map(|i| (*self.id(i), self.frame(i)))
     }
 
+    /// The rows whose id starts with `shard`, in id order.
+    pub(super) fn bucket_entries(&self, shard: u8) -> impl Iterator<Item = (Hash, Frame)> + '_ {
+        self.bucket(shard).map(|i| (*self.id(i), self.frame(i)))
+    }
+
     pub(super) fn ids(&self, shard: Option<u8>) -> impl Iterator<Item = Hash> + '_ {
         shard
             .map_or(0..self.count, |byte| self.bucket(byte))
             .map(|i| *self.id(i))
     }
 
-    #[cfg(test)]
     pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
         let mut range = self.bucket(id[0]);
         let mut end = range.end;

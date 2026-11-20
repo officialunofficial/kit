@@ -221,6 +221,23 @@ pub fn run(args: &[String]) -> u8 {
             report.packs_retired,
         );
     }
+    let copied = report.packs_rewritten + report.packs_merged + report.packs_retired_covered;
+    if copied != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} rewritten, {} merged and {} covered local pack(s), copying {} survivor bytes and dropping {} bytes",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            report.packs_rewritten,
+            report.packs_merged,
+            report.packs_retired_covered,
+            report.survivor_bytes_copied,
+            report.duplicate_bytes_reclaimed,
+        );
+    }
     if report.pack_leftovers_pruned != 0 {
         let _ = writeln!(
             stderr,

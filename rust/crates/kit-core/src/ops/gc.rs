@@ -800,6 +800,20 @@ pub struct GcReport {
     pub packs_scanned: usize,
     /// Whole packs retired, or eligible for retirement in a dry run.
     pub packs_retired: usize,
+    /// Packs rewritten: their surviving entries were copied to new packs, and
+    /// the old pair was retired. Counted in a dry run as well.
+    pub packs_rewritten: usize,
+    /// Small packs merged into larger ones by copy-then-retire.
+    pub packs_merged: usize,
+    /// Packs retired with no copy, because a pair that stays holds a verified
+    /// copy of every entry the pack must keep.
+    pub packs_retired_covered: usize,
+    /// Payload bytes of surviving entries copied to new packs.
+    pub survivor_bytes_copied: u64,
+    /// Payload bytes of entries dropped from retired packs: unreachable
+    /// entries past grace, and live entries held by a verified copy in a pair
+    /// that stays.
+    pub duplicate_bytes_reclaimed: u64,
     /// Abandoned staging files or lone pack and index files reclaimed.
     pub pack_leftovers_pruned: usize,
     /// Loose files reclaimed because a verified packed copy remains.

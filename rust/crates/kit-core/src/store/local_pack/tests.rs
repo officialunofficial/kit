@@ -12,14 +12,14 @@ use crate::store::{ObjectStore, StoreError};
 use super::writer::Writer;
 use super::{Pair, index};
 
-fn fresh() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
+pub(super) fn fresh() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
     let dir = tempfile::tempdir().unwrap();
     let layout = RepoLayout::single(dir.path());
     let store = ObjectStore::init(&layout).unwrap();
     (dir, layout, store)
 }
 
-fn blob(data: &[u8]) -> Vec<u8> {
+pub(super) fn blob(data: &[u8]) -> Vec<u8> {
     serialize(&Object::Blob(Blob {
         data: data.to_vec(),
     }))
@@ -1081,7 +1081,7 @@ fn the_fetch_batch_replaces_a_same_length_damaged_loose_copy() {
     assert_eq!(store.read(&id).unwrap(), good);
 }
 
-fn publish_objects(store: &ObjectStore, objects: &[&[u8]]) -> (Pair, Vec<Hash>) {
+pub(super) fn publish_objects(store: &ObjectStore, objects: &[&[u8]]) -> (Pair, Vec<Hash>) {
     let mut writer = writer(store);
     let ids = objects
         .iter()
@@ -1093,7 +1093,7 @@ fn publish_objects(store: &ObjectStore, objects: &[&[u8]]) -> (Pair, Vec<Hash>) 
     (pair, ids)
 }
 
-fn set_pack_age(path: &std::path::Path, secs: u64) {
+pub(super) fn set_pack_age(path: &std::path::Path, secs: u64) {
     fs::File::open(path)
         .unwrap()
         .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
@@ -1570,11 +1570,47 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
     assert!(store.path_for(&id).exists());
 }
 
+type AfterCopy = Box<dyn FnOnce() -> crate::store::StoreResult<()>>;
+
 thread_local! {
+    static AFTER_COPY_PUBLISH: std::cell::Cell<Option<AfterCopy>> =
+        const { std::cell::Cell::new(None) };
+    static IO_LOG: std::cell::RefCell<Option<Vec<(&'static str, std::path::PathBuf)>>> =
+        const { std::cell::RefCell::new(None) };
     static BEFORE_DUPLICATE_TRY_LOCK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::Cell::new(None) };
     static PACK_SCAN_ERROR: std::cell::Cell<Option<(Hash, std::io::ErrorKind)>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Runs after copy-then-retire published its outputs and dropped the shared
+/// guard, before the exclusive try. An error stands for a crash.
+pub(super) fn after_copy_publish() -> crate::store::StoreResult<()> {
+    match AFTER_COPY_PUBLISH.take() {
+        Some(hook) => hook(),
+        None => Ok(()),
+    }
+}
+
+pub(super) fn set_after_copy_publish(hook: impl FnOnce() -> crate::store::StoreResult<()> + 'static) {
+    AFTER_COPY_PUBLISH.set(Some(Box::new(hook)));
+}
+
+pub(super) fn record_io() {
+    IO_LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
+}
+
+pub(super) fn take_io() -> Vec<(&'static str, std::path::PathBuf)> {
+    IO_LOG.with(|log| log.borrow_mut().take().unwrap_or_default())
+}
+
+/// Record a flush or unlink of the retirement section while a test records.
+pub(super) fn note_io(kind: &'static str, path: &std::path::Path) {
+    IO_LOG.with(|log| {
+        if let Some(log) = log.borrow_mut().as_mut() {
+            log.push((kind, path.to_path_buf()));
+        }
+    });
 }
 
 pub(super) fn before_duplicate_try_lock() {
