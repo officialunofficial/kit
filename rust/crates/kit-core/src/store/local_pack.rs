@@ -68,6 +68,10 @@ struct Discovery {
     latest: Option<Arc<Locator>>,
     dir: Option<index::Stamp>,
     scanned: bool,
+    #[cfg(test)]
+    budgets: Option<(usize, usize)>,
+    #[cfg(test)]
+    retire_after_listing: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -138,6 +142,8 @@ impl LocalPacks {
             return Ok(Arc::clone(&discovery.catalog));
         }
         let settled = stamp.as_ref().is_none_or(index::Stamp::settled);
+        #[cfg(test)]
+        let retired = discovery.retire_after_listing.take();
         let old: BTreeMap<_, _> = discovery
             .catalog
             .packs
@@ -150,9 +156,18 @@ impl LocalPacks {
             Ok(())
         })?;
         pairs.sort_unstable_by_key(|pair| pair.key);
+        #[cfg(test)]
+        if let Some(pack) = retired {
+            fs::remove_file(pack)?;
+        }
 
         let mut row_budget = ROW_CACHE_BYTES;
         let mut route_budget = ROUTE_CACHE_BYTES;
+        #[cfg(test)]
+        if let Some((rows, routes)) = discovery.budgets {
+            row_budget = rows;
+            route_budget = routes;
+        }
         for locator in pairs.iter().filter_map(|pair| old.get(&pair.key)) {
             row_budget -= locator.row_charge();
             route_budget -= locator.route_charge();

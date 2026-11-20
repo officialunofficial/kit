@@ -1463,14 +1463,33 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
     use std::sync::atomic::Ordering;
 
     let (_dir, layout, store) = fresh();
-    let mut writer = Writer::new(&store, 1, MAX_TOTAL_PAYLOAD).unwrap();
+    let dir = store.pack_dir();
+    fs::create_dir(&dir).unwrap();
+    store.try_activate_local_packs().unwrap();
     let objects: Vec<_> = (0..104)
         .map(|n| {
             let bytes = blob(&[n]);
-            (writer.write(&bytes).unwrap(), bytes)
+            let id = index::canonical_id(&bytes).unwrap();
+            let len = u32::try_from(bytes.len()).unwrap();
+            let mut pack = crate::pack::MAGIC.to_vec();
+            pack.extend_from_slice(&1_u32.to_le_bytes());
+            pack.extend_from_slice(&1_u32.to_le_bytes());
+            pack.push(0);
+            pack.extend_from_slice(&len.to_le_bytes());
+            let frame = index::Frame {
+                offset: pack.len() as u64,
+                len,
+            };
+            pack.extend_from_slice(&bytes);
+            let trailer = blake3::hash(&pack);
+            pack.extend_from_slice(trailer.as_bytes());
+            let key = *blake3::hash(&pack).as_bytes();
+            let pair = Pair::new(&dir, key);
+            fs::write(&pair.pack, pack).unwrap();
+            fs::write(&pair.index, index::encode(key, &[(id, frame)])).unwrap();
+            (id, bytes)
         })
         .collect();
-    writer.finish().unwrap();
 
     let reader = ObjectStore::open(&layout).unwrap();
     let loads = || reader.packs.index_loads.load(Ordering::Relaxed);
@@ -1479,6 +1498,17 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
         Err(StoreError::ObjectNotFound(_))
     ));
     assert_eq!(loads(), objects.len());
+    {
+        let discovery = reader.packs.discovery.lock().unwrap();
+        assert_eq!(discovery.catalog.routes.len(), objects.len());
+        assert!(
+            discovery
+                .catalog
+                .packs
+                .iter()
+                .all(|pack| pack.row_charge() == index::INDEX_ROW_LEN)
+        );
+    }
 
     for (id, bytes) in objects.iter().rev() {
         assert_eq!(reader.read(id).unwrap(), *bytes);
@@ -1605,4 +1635,290 @@ fn pack_discovery_notices_publication_with_restored_directory_mtime() {
     dir.set_modified(mtime).unwrap();
     assert_eq!(dir.metadata().unwrap().modified().unwrap(), mtime);
     assert_eq!(reader.read(&id).unwrap(), bytes);
+}
+
+#[test]
+fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Route};
+
+    let (_dir, _layout, store) = fresh();
+    let mut objects: Vec<_> = (0..300_u16).map(|n| blob(&n.to_le_bytes())).collect();
+    let first_bucket = (0..=u16::MAX)
+        .map(|n| {
+            let [lo, hi] = n.to_le_bytes();
+            blob(&[lo, hi, 0])
+        })
+        .find(|bytes| index::canonical_id(bytes).unwrap()[0] == 0)
+        .unwrap();
+    objects.push(first_bucket);
+    let objects: Vec<_> = objects.iter().map(Vec::as_slice).collect();
+    let (pair, mut ids) = publish_objects(&store, &objects);
+    ids.sort_unstable();
+    let strict = index::Index::open(&pair).unwrap();
+    let row_bytes = index::INDEX_ROW_LEN * ids.len();
+    let route_bytes = (size_of::<Route>() + size_of::<u32>()) * ids.len();
+
+    for (rows, routes, expected_rows, expected_routes) in [
+        (row_bytes, route_bytes, row_bytes, ids.len()),
+        (row_bytes - 1, route_bytes, 0, ids.len()),
+        (row_bytes, route_bytes - 1, 0, 0),
+    ] {
+        let locator = Arc::new(Locator::open(&pair, rows, routes).unwrap());
+        assert_eq!(locator.row_charge(), expected_rows);
+        assert_eq!(locator.route_count(), expected_routes);
+        assert_eq!(
+            locator.route_charge(),
+            expected_routes * (size_of::<Route>() + size_of::<u32>())
+        );
+        let catalog = super::Catalog::from_packs(vec![Arc::clone(&locator)], None);
+        let handles = Handles::default();
+        for id in &ids {
+            let frames: Vec<_> = catalog
+                .candidates(id)
+                .filter_map(|(pack, row)| pack.find(&handles, id, row).unwrap())
+                .collect();
+            assert_eq!(frames, [strict.find(id).unwrap()]);
+        }
+        for first in 0..=u8::MAX {
+            for trailing in [0, u8::MAX] {
+                let mut absent = [trailing; 32];
+                absent[0] = first;
+                assert!(
+                    catalog
+                        .candidates(&absent)
+                        .all(|(pack, row)| pack.find(&handles, &absent, row).unwrap().is_none())
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cached_pack_stream_advances_and_stops_at_the_selected_frame() {
+    use std::io::Read;
+
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(b"split the selected frame into short reads");
+    let next = blob(b"following frame");
+    let (_, ids) = publish_objects(&store, &[&bytes, &next]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    let mut contents = reader
+        .packs
+        .lookup(&reader, &ids[0], true, |location| location.open())
+        .unwrap();
+    let mut buffer = [0; 7];
+    for expected in bytes.chunks(buffer.len()) {
+        let n = contents.read(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], expected);
+    }
+    assert_eq!(contents.read(&mut buffer).unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn handles_reuse_only_the_requested_member_and_close_removed_entries() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"two file handles")]);
+    let locator = Arc::new(Locator::open(&pair, 0, 0).unwrap());
+    let handles = Handles::default();
+    let pack = handles.get(&locator, Member::Pack).unwrap();
+    let index = handles.get(&locator, Member::Index).unwrap();
+    assert!(!Arc::ptr_eq(&pack, &index));
+    assert!(Arc::ptr_eq(
+        &pack,
+        &handles.get(&locator, Member::Pack).unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &index,
+        &handles.get(&locator, Member::Index).unwrap()
+    ));
+    assert_eq!(handles.cached(), 2);
+    handles.retain(|candidate| !Arc::ptr_eq(candidate, &locator));
+    assert_eq!(handles.cached(), 0);
+
+    for (path, member) in [(&pair.pack, Member::Pack), (&pair.index, Member::Index)] {
+        let bytes = fs::read(path).unwrap();
+        let replacement = tempfile::NamedTempFile::new_in(store.pack_dir()).unwrap();
+        fs::write(replacement.path(), bytes).unwrap();
+        replacement.persist(path).unwrap();
+        assert!(matches!(
+            handles.get(&locator, member),
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+}
+
+#[test]
+fn a_verified_collection_location_rechecks_the_index_version() {
+    use std::sync::Arc;
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, ids) = publish_objects(&store, &[&blob(b"verified collection location")]);
+    let index = Arc::new(index::Index::open(&pair).unwrap());
+    let frame = index.find(&ids[0]).unwrap();
+    let location = super::Location::Packed(index, frame);
+    assert!(location.open().is_ok());
+    let mut bytes = fs::read(&pair.index).unwrap();
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    fs::write(&pair.index, bytes).unwrap();
+    set_pack_age(&pair.index, 1);
+    assert!(matches!(
+        location.open(),
+        Err(StoreError::IncompatibleRepoFormat { .. })
+    ));
+}
+
+#[test]
+fn forgetting_a_pack_evicts_only_its_handles_and_invalidates_discovery() {
+    use std::sync::Arc;
+
+    use super::reader::Member;
+
+    let (_dir, _layout, store) = fresh();
+    let (first, _) = publish_objects(&store, &[&blob(b"first handle")]);
+    let (last, _) = publish_objects(&store, &[&blob(b"last handle")]);
+    let catalog = store.packs.discover(&store.pack_dir(), true).unwrap();
+    let first_locator = catalog
+        .packs
+        .iter()
+        .find(|p| p.pair.key == first.key)
+        .unwrap();
+    let last_locator = catalog
+        .packs
+        .iter()
+        .find(|p| p.pair.key == last.key)
+        .unwrap();
+    store
+        .packs
+        .handles
+        .get(first_locator, Member::Pack)
+        .unwrap();
+    let last_handle = store.packs.handles.get(last_locator, Member::Pack).unwrap();
+    store.packs.remember_publication(&last);
+    store.packs.discovery.lock().unwrap().scanned = true;
+    store.packs.forget(&first.key);
+    assert_eq!(store.packs.handles.cached(), 1);
+    let after_forget = store.packs.handles.get(last_locator, Member::Pack).unwrap();
+    assert!(Arc::ptr_eq(&last_handle, &after_forget));
+    {
+        let discovery = store.packs.discovery.lock().unwrap();
+        assert!(!discovery.scanned);
+        assert_eq!(discovery.latest.as_ref().unwrap().pair.key, last.key);
+    }
+    store.packs.forget(&last.key);
+    assert_eq!(store.packs.handles.cached(), 0);
+    assert!(store.packs.discovery.lock().unwrap().latest.is_none());
+}
+
+#[test]
+fn forced_discovery_rechecks_an_index_even_with_the_same_directory_stamp() {
+    use std::sync::Arc;
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"force a rescan")]);
+    let dir = store.pack_dir();
+    let first = store.packs.discover(&dir, true).unwrap();
+    // Model a directory whose status time has already settled.
+    store.packs.discovery.lock().unwrap().scanned = true;
+    fs::write(pair.index, b"damaged index").unwrap();
+    assert!(Arc::ptr_eq(
+        &first,
+        &store.packs.discover(&dir, false).unwrap()
+    ));
+    let second = store.packs.discover(&dir, true).unwrap();
+    assert!(second.packs.is_empty());
+    assert!(second.error.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn cached_absence_does_not_hide_filesystem_errors_in_discovery() {
+    let (dir, _, store) = fresh();
+    let path = dir.path().join("missing").join("pack");
+    assert!(store.packs.discover(&path, false).unwrap().packs.is_empty());
+    let missing = path.parent().unwrap();
+    std::os::unix::fs::symlink(missing, missing).unwrap();
+    assert!(matches!(
+        store.packs.discover(&path, false),
+        Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::NotFound
+    ));
+}
+
+#[test]
+fn a_loose_location_keeps_its_distinct_verification_policy() {
+    let (_dir, _layout, store) = fresh();
+    let id = store.write(&blob(b"loose location")).unwrap();
+    let packed = store
+        .packs
+        .lookup(&store, &id, true, |location| Ok(location.is_packed()))
+        .unwrap();
+    assert!(!packed);
+}
+
+#[test]
+fn discovery_accounts_for_new_retained_and_replaced_indexes_within_each_budget() {
+    use super::reader::Route;
+
+    let row_bytes = index::INDEX_ROW_LEN;
+    let route_bytes = size_of::<Route>() + size_of::<u32>();
+    for routed_packs in [1, 3] {
+        let (_dir, _layout, store) = fresh();
+        publish_objects(&store, &[&blob(b"first candidate")]);
+        publish_objects(&store, &[&blob(b"second candidate")]);
+        store.packs.discovery.lock().unwrap().budgets =
+            Some((row_bytes, route_bytes * routed_packs));
+        let dir = store.pack_dir();
+        let first = store.packs.discover(&dir, true).unwrap();
+        let resident = &first.packs[0];
+        assert_eq!(resident.row_charge(), row_bytes);
+        assert_eq!(resident.route_charge(), route_bytes);
+        assert_eq!(first.packs[1].row_charge(), 0);
+        assert_eq!(
+            first.packs[1].route_charge(),
+            if routed_packs == 1 { 0 } else { route_bytes }
+        );
+
+        let (extra, _) = publish_objects(&store, &[&blob(b"another candidate")]);
+        let second = store.packs.discover(&dir, true).unwrap();
+        let added = second
+            .packs
+            .iter()
+            .find(|p| p.pair.key == extra.key)
+            .unwrap();
+        assert_eq!(added.row_charge(), 0);
+        assert_eq!(
+            added.route_charge(),
+            if routed_packs == 1 { 0 } else { route_bytes }
+        );
+
+        let replacement = tempfile::NamedTempFile::new_in(&dir).unwrap();
+        fs::copy(&resident.pair.index, replacement.path()).unwrap();
+        replacement.persist(&resident.pair.index).unwrap();
+        let third = store.packs.discover(&dir, true).unwrap();
+        let reloaded = third
+            .packs
+            .iter()
+            .find(|p| p.pair.key == resident.pair.key)
+            .unwrap();
+        assert_eq!(reloaded.row_charge(), row_bytes);
+        assert_eq!(reloaded.route_charge(), route_bytes);
+    }
+}
+
+#[test]
+fn a_pack_retired_between_listing_and_open_is_absent() {
+    let (_dir, layout, store) = fresh();
+    let (pair, ids) = publish_objects(&store, &[&blob(b"retired during discovery")]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    reader.packs.discovery.lock().unwrap().retire_after_listing = Some(pair.pack);
+    assert!(matches!(
+        reader.read(&ids[0]),
+        Err(StoreError::ObjectNotFound(_))
+    ));
 }

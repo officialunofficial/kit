@@ -722,3 +722,61 @@ mod tests {
         assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD + 1).is_err());
     }
 }
+
+#[cfg(test)]
+mod reader_bounds_tests {
+    #[cfg(unix)]
+    use super::Stamp;
+    use super::{FANOUT_END, validate_fanout_bounds};
+
+    #[test]
+    fn locator_fanout_stays_monotonic_and_ends_at_the_row_count() {
+        let check = |buckets: &[u32], count| {
+            let mut bytes = [0; FANOUT_END - 12];
+            for (i, bucket) in bytes.chunks_exact_mut(4).enumerate() {
+                bucket.copy_from_slice(&buckets[i.min(buckets.len() - 1)].to_le_bytes());
+            }
+            validate_fanout_bounds(&bytes, count)
+        };
+        assert!(check(&[0], 0).is_ok());
+        assert!(check(&[0, 1, 1, 2], 2).is_ok());
+        assert!(check(&[0, 1, 0, 2], 2).is_err());
+        assert!(check(&[0, 3, 2], 2).is_err());
+        assert!(check(&[0, 1], 2).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_distinguishes_inode_and_length_but_allows_timestamp_changes() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let first = Stamp::get(&file.metadata().unwrap()).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let touched = Stamp::get(&file.metadata().unwrap()).unwrap();
+        assert_ne!(first, touched);
+        assert!(first.same_file(&touched));
+        file.set_len(1).unwrap();
+        assert!(!first.same_file(&Stamp::get(&file.metadata().unwrap()).unwrap()));
+        let other = tempfile::tempfile().unwrap();
+        assert!(!first.same_file(&Stamp::get(&other.metadata().unwrap()).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_past_directory_stamp_can_settle() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let mut stamp = Stamp::get(&file.metadata().unwrap()).unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let future = now + Duration::from_secs(15);
+        stamp.changed = (i64::try_from(future.as_secs()).unwrap(), 0);
+        assert!(!stamp.settled());
+        stamp.changed = (i64::try_from(now.as_secs() - 15).unwrap(), 0);
+        assert!(stamp.settled());
+    }
+}
