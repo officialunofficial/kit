@@ -26,10 +26,12 @@ fn a_dry_run_reports_packed_payload_bytes_and_keeps_the_files() {
         .unwrap()
     };
     let live = blob(b"retained");
+    let loose_id = store.write(&live).unwrap();
     let mixed_dead = blob(b"mixed garbage");
     let dead = blob(b"whole garbage");
     let mut mixed = LocalPackWriter::new(&store, &guard).unwrap();
     let head = mixed.write(&live).unwrap();
+    assert_eq!(loose_id, head);
     mixed.write(&mixed_dead).unwrap();
     mixed.publish().unwrap();
     let mut old = LocalPackWriter::new(&store, &guard).unwrap();
@@ -41,7 +43,6 @@ fn a_dry_run_reports_packed_payload_bytes_and_keeps_the_files() {
     let pack_dir = object_root.join("pack");
     let leftover = pack_dir.join(format!(".{}.tmp.pack", "a".repeat(32)));
     fs::write(&leftover, b"partial file").unwrap();
-    assert_eq!(store.write(&live).unwrap(), head);
     let hex = kit_core::to_hex(&head);
     let loose = object_root.join(&hex[..2]).join(&hex[2..]);
     fs::File::open(&loose)

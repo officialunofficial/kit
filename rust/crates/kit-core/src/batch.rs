@@ -2217,10 +2217,14 @@ mod tests {
         let writer = ObjectStore::open(&layout).unwrap();
         let batch = writer.batch();
         let first_id = batch.write(&first).unwrap();
+        let exclusive = File::open(layout.format_file()).unwrap();
+        assert!(exclusive.try_lock().is_err());
 
         let (second_id, second) = publish_blob(&publisher, b"published after discovery");
         assert_eq!(batch.write(&second).unwrap(), second_id);
         batch.commit().unwrap();
+        exclusive.try_lock().unwrap();
+        drop(exclusive);
         assert!(!writer.path_for(&first_id).exists());
         assert!(writer.path_for(&second_id).exists());
 
@@ -2229,6 +2233,19 @@ mod tests {
         assert_eq!(next.write(&second).unwrap(), second_id);
         next.commit().unwrap();
         assert!(!writer.path_for(&second_id).exists());
+    }
+
+    #[test]
+    fn packed_reuse_requires_exact_serialized_length() {
+        let (_dir, store) = fresh_store();
+        store.try_activate_local_packs().unwrap();
+        let (id, bytes) = publish_blob(&store, b"length match");
+        let (_guard, catalog) = store.discover_write_packs().unwrap();
+        let size = bytes.len() as u64;
+
+        assert!(store.has_packed_size(&catalog, &id, size));
+        assert!(!store.has_packed_size(&catalog, &id, size - 1));
+        assert!(!store.has_packed_size(&catalog, &id, size + 1));
     }
 
     #[test]
