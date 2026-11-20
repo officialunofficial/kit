@@ -1420,15 +1420,16 @@ spool there until the next fetch, push or gc removes it (§1.1).
 Downloads and apply hold no worktree lock. The CLI limits chain packs
 to one million and pack-list nodes to 100,000.
 
-Fetch and clone pack fetched objects whose serialized size is smaller
-than 16 KiB. Objects of 16 KiB or more stay loose. Fetch packs a blob under
-16 KiB unless a manifest decoded before the window seals names it as a
-chunk. A chunk whose manifest arrives later MAY be packed. If the writer
-cannot track chunk ids, it writes unclassified blobs loose. A server's
-object order can cause chunks to be packed, which is harmless because
-readers accept packed chunks ([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)).
-Local creation and import write loose objects. The local reader accepts
-the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
+Fetch and clone pack every fetched object whose serialized size is at
+most 262,154 bytes, whatever its kind or its use as a chunk. That is the
+largest FastCDC chunk, 262,144 bytes (SPEC-FASTCDC), plus the ten-byte
+blob prologue, so every chunk a kit writer cuts is packed. A larger object
+stays loose: a whole-file blob of more than 262,144 content bytes, a large
+tree or manifest, and a larger chunk of a fixed-size layout. The limit is
+writer policy. Readers accept any storable object in a pack
+([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)). Local creation
+and import write loose objects, and reuse an existing loose or packed copy
+instead of writing a second one (SPEC-OBJECTS §10.1).
 
 Fetch stages accepted objects in publication windows. The current writer
 seals at 64 MiB of decoded serialized bytes or 65,536 entries. These

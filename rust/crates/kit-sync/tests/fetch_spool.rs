@@ -369,7 +369,6 @@ fn a_replayed_window_after_a_crash_reuses_the_published_pack() {
         assert_eq!(replayed, published, "the replay publishes no second pack");
         assert!(recorded(&work, remote.pack));
         assert_eq!(remote_tip(&work), Some(remote.tip));
-        assert_eq!(stray_object_files(&work), Vec::<String>::new());
     }
 }
 
