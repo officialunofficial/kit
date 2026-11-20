@@ -74,6 +74,68 @@ fn restore_enables_the_next_fetch_to_repair_a_missing_chunk() {
     repair_after(&["restore", "--force", "dir/large"], false);
 }
 
+#[test]
+fn full_integrity_scan_enables_a_fetch_to_replace_a_bad_packed_copy() {
+    let source = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let client = tempfile::tempdir().unwrap();
+    init_repo(source.path());
+    init_repo(remote.path());
+    let url = format!("kit+file://{}", remote.path().display());
+    run_in(source.path(), &["remote", "add", "origin", &url]);
+    fs::write(source.path().join("file"), b"packed bytes").unwrap();
+    commit_all(source.path(), "packed file");
+    run_in(source.path(), &["push", "origin"]);
+
+    let checkout = client.path().join("checkout");
+    run_in(client.path(), &["clone", "-o", "origin", &url, "checkout"]);
+    let layout = RepoLayout::single(&checkout);
+    let store = ObjectStore::open(&layout).unwrap();
+    let pack_dir = layout.objects_dir().join("pack");
+    let mut packs = fs::read_dir(&pack_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "pack"));
+    let pack = packs.next().unwrap();
+    assert!(packs.next().is_none());
+    let mut bytes = fs::read(&pack).unwrap();
+    let content = b"packed bytes";
+    let offset = bytes
+        .windows(content.len())
+        .position(|window| window == content)
+        .unwrap();
+    bytes[offset] ^= 1;
+    fs::write(&pack, bytes).unwrap();
+
+    let records = layout.applied_packs_dir();
+    let applied = records.join("origin");
+    let attestation_record = records.join(".cursors/test.attest-fetch");
+    fs::create_dir_all(attestation_record.parent().unwrap()).unwrap();
+    fs::write(&attestation_record, b"attestation record").unwrap();
+    fs::write(records.join(".cursors").join("a".repeat(64)), b"cursor").unwrap();
+
+    let diagnostic = ["closure", "verify", "origin/main", "--show-unreferenced"];
+    let guard = store.prune_guard().unwrap();
+    let blocked = run_result(&checkout, &diagnostic);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("could not clear fetch records"));
+    assert!(applied.is_file());
+    drop(guard);
+
+    let damaged = run_result(&checkout, &diagnostic);
+    assert!(!damaged.status.success());
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("invalid pack trailer"));
+    assert!(!applied.exists());
+    assert!(!records.join(".verified").exists());
+    assert!(!records.join(".heads").exists());
+    assert_eq!(fs::read_dir(records.join(".cursors")).unwrap().count(), 1);
+    assert!(attestation_record.is_file());
+
+    run_in(&checkout, &["fetch", "origin"]);
+    assert!(applied.is_file());
+    run_in(&checkout, &diagnostic);
+}
+
 fn repair_after(diagnostic: &[&str], advance: bool) {
     let source = tempfile::tempdir().unwrap();
     let remote = tempfile::tempdir().unwrap();
