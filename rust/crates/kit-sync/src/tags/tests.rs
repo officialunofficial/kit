@@ -332,7 +332,7 @@ fn tags_over_one_history_with_a_missing_blob_share_one_walk() {
         );
 
         repo.store.write(&blob_bytes).unwrap();
-        prover.refresh_missing(&repo.store);
+        prover.refresh_missing(|id| repo.store.contains(id));
         for (name, tag) in &tips {
             assert_eq!(
                 repo.prove(&mut prover, &mut verified, name, *tag),

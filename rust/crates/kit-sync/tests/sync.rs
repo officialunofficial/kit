@@ -310,6 +310,38 @@ fn clone_into(remote: &Remote, dir: &Path) -> kit_sync::CloneReport {
 }
 
 #[test]
+fn clone_packs_small_files_and_leaves_large_files_loose() {
+    let remote = Remote::new();
+    let large = vec![42; 16 * 1024];
+    let tip = remote.publish(None, &[("small", b"short"), ("large", &large)], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, &dir.path().join("clone"));
+    let layout = RepoLayout::single(dir.path().join("clone"));
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+    assert_eq!(
+        std::fs::read_dir(layout.objects_dir().join("pack"))
+            .unwrap()
+            .count(),
+        2
+    );
+    let Object::Commit(commit) = store.read_object(&tip).unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(tree) = store.read_object(&commit.tree_hash).unwrap() else {
+        panic!("expected a tree");
+    };
+    for entry in tree.entries {
+        let path = hash::object_path(&entry.object_hash);
+        let loose = layout
+            .objects_dir()
+            .join(std::str::from_utf8(&path.dir).unwrap())
+            .join(std::str::from_utf8(&path.file).unwrap());
+        assert_eq!(loose.is_file(), entry.name == b"large");
+    }
+}
+
+#[test]
 fn clone_materialises_the_branch_worktree_and_tracking_ref() {
     let remote = Remote::new();
     let tip = remote.publish(None, &[("a.txt", b"hello\n")], true);

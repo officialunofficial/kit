@@ -62,15 +62,16 @@ impl ProgressSink<'_> {
 }
 
 use kit_core::hash::Hash;
-use kit_core::pack::{PackError, PackReader, PackSpool, VerifiedPack};
+use kit_core::pack::{ObjectSpool, PackError, PackReader, PackSpool, VerifiedPack};
 use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectStore, PruneGuard};
 
 use crate::SourceError;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::chain_label;
+use crate::publication::{PendingView, Publication};
 use crate::source::RemoteSource;
 use crate::verify::verify_new_object_signatures;
 
@@ -179,35 +180,67 @@ pub(crate) fn apply_pack_chain(
     applied: &mut AppliedPacks,
     require_signed: bool,
     done: &mut ChainApplied,
+    guard: &PruneGuard,
+    validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
+    let mut publication = Publication::new(store, guard)?;
+    let mut failure = None;
     for &pk in chain {
         if observer.cancelled() {
-            return Err(SyncError::Interrupted);
+            failure = Some(SyncError::Interrupted);
+            break;
         }
         let key = PackKey::from_hash(pk);
-        if applied.contains(&key) {
+        if applied.contains(&key) || publication.completed(&key) {
             done.skipped += 1;
             continue;
         }
-        let pack = download_verified_pack(store, source, head_ref, &key, observer)?;
-        done.objects += apply_pack(
-            store,
-            observer,
-            remote,
-            &key,
-            &pack,
-            applied,
-            require_signed,
-        )?;
+        let decoded = download_verified_pack(store, source, head_ref, &key, observer)
+            .and_then(|pack| decode_pack(store, &pack, publication.pending(), require_signed));
+        let (spool, unpacked) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        };
+        publication.accept(&spool, key, observer, remote, applied)?;
+        if unpacked > 0 {
+            observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
+        }
+        done.objects += unpacked;
         done.packs += 1;
     }
-    Ok(())
+    if let Some(error) = failure {
+        // Keep the accepted prefix when a later download is interrupted or
+        // refused. The failed pack never entered the publication window.
+        publication.seal(observer, remote, applied, &Default::default())?;
+        return Err(error);
+    }
+    let view = publication.view();
+    validate(&view)?;
+    let chunks = view.chunks();
+    publication.seal(observer, remote, applied, &chunks)
 }
 
-/// Unpack `pack`, already checked against `key`, check the signatures of the
-/// commits, remixes and tags it stored, and record it as applied. Returns the
-/// objects it wrote. A record that cannot be appended is reported and does
-/// not fail the fetch: the objects landed, and the record is a cache.
+fn decode_pack(
+    store: &ObjectStore,
+    pack: &VerifiedPack,
+    pending: Option<&ObjectSpool>,
+    require_signed: bool,
+) -> Result<(ObjectSpool, usize), SyncError> {
+    let dir = store.spool_dir();
+    let spool = ObjectSpool::new(&dir).map_err(|e| spool_error(&dir, e.kind(), &e.to_string()))?;
+    let report = PackReader::stage_verified(pack, store, pending, &spool)?;
+    verify_new_object_signatures(
+        &PendingView::new(store, Some(&spool)),
+        &report.signed,
+        require_signed,
+    )?;
+    Ok((spool, (report.raw_count + report.delta_count) as usize))
+}
+
+#[cfg(test)]
 fn apply_pack(
     store: &ObjectStore,
     observer: &dyn Observer<SyncEvent>,
@@ -217,17 +250,13 @@ fn apply_pack(
     applied: &mut AppliedPacks,
     require_signed: bool,
 ) -> Result<usize, SyncError> {
-    let report = PackReader::read_verified(pack, store)?;
-    let unpacked = (report.raw_count + report.delta_count) as usize;
+    let guard = store.prune_guard()?;
+    let mut publication = Publication::new(store, &guard)?;
+    let (spool, unpacked) = decode_pack(store, pack, None, require_signed)?;
+    publication.accept(&spool, *key, observer, remote, applied)?;
+    publication.seal(observer, remote, applied, &Default::default())?;
     if unpacked > 0 {
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
-    }
-    verify_new_object_signatures(store, &report.signed, require_signed)?;
-    if let Err(e) = applied.record_applied(key) {
-        observer.event(&SyncEvent::AppliedPacksPersistFailed {
-            remote: remote.to_owned(),
-            error: e.to_string(),
-        });
     }
     Ok(unpacked)
 }
@@ -348,6 +377,8 @@ mod tests {
             applied,
             false,
             done,
+            &store.prune_guard()?,
+            |_| Ok(()),
         )
     }
 

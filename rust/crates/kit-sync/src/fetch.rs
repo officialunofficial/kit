@@ -18,7 +18,7 @@
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::refs;
-use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectSource, ObjectStore, PruneGuard};
 
 use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
@@ -202,6 +202,8 @@ pub(crate) fn apply_and_verify_chain(
     applied: &mut AppliedPacks,
     require_signed: bool,
     anchors: &Anchors,
+    guard: &PruneGuard,
+    verified: &mut VerifiedHistory,
 ) -> Result<Applied, SyncError> {
     let ResolvedChain {
         mut chain,
@@ -220,10 +222,9 @@ pub(crate) fn apply_and_verify_chain(
         applied,
         require_signed,
         &mut done,
-    )
-    // Closure completeness. With skips this is the sole guarantee the store
-    // is whole.
-    .and_then(|()| verify_closure_above(store, observer, &tip, anchors));
+        guard,
+        |view| check_tip(view, observer, &tip, anchors, require_signed, verified),
+    );
     let skipped = done.skipped + prefix_packs;
     let stats = Applied {
         packs_downloaded: done.packs,
@@ -267,14 +268,39 @@ pub(crate) fn apply_and_verify_chain(
         applied,
         require_signed,
         &mut retry,
+        guard,
+        |view| {
+            check_tip(
+                view,
+                observer,
+                &tip,
+                &Anchors::default(),
+                require_signed,
+                verified,
+            )
+        },
     )?;
-    verify_closure_above(store, observer, &tip, &Anchors::default())?;
     // The report covers the attempt that published.
     Ok(Applied {
         packs_downloaded: retry.packs,
         packs_skipped: retry.skipped,
         objects_unpacked: retry.objects,
     })
+}
+
+fn check_tip(
+    view: &(dyn ObjectSource + Sync),
+    observer: &dyn Observer<SyncEvent>,
+    tip: &Hash,
+    anchors: &Anchors,
+    require_signed: bool,
+    verified: &mut VerifiedHistory,
+) -> Result<(), SyncError> {
+    verify_closure_above(view, observer, tip, anchors)?;
+    if require_signed {
+        verify_history_signatures(view, observer, tip, verified)?;
+    }
+    Ok(())
 }
 
 /// Flush the applied-pack record or publish its pending rewrite. A write
@@ -297,7 +323,7 @@ pub(crate) fn persist_record(
 /// Check presence down to `anchors`, or in full when there are
 /// none.
 fn verify_closure_above(
-    store: &ObjectStore,
+    store: &(dyn ObjectSource + Sync),
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     anchors: &Anchors,
@@ -432,43 +458,7 @@ pub(crate) fn fetch_objects(
     options: &SyncOptions,
     lock_wait: &LockWait,
 ) -> Result<FetchReport, SyncError> {
-    let _prune_guard = store.prune_guard()?;
-    kit_core::pack::sweep_spool_dir(&store.spool_dir());
-    let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
-    let mut report = FetchReport::default();
-    let mut verified = VerifiedHistory::default();
-    let result = fetch_objects_inner(
-        store,
-        layout,
-        source,
-        observer,
-        remote,
-        options,
-        lock_wait,
-        &mut applied,
-        &mut report,
-        &mut verified,
-    );
-    persist_record(&mut applied, observer, remote);
-    result.map(|()| report)
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn fetch_objects_inner(
-    store: &ObjectStore,
-    layout: &RepoLayout,
-    source: &dyn RemoteSource,
-    observer: &dyn Observer<SyncEvent>,
-    remote: &str,
-    options: &SyncOptions,
-    lock_wait: &LockWait,
-    applied: &mut AppliedPacks,
-    report: &mut FetchReport,
-    verified: &mut VerifiedHistory,
-) -> Result<(), SyncError> {
-    let target_branch = options.target_branch.as_deref();
-    let require_signed = options.verify_signatures;
-    // The cursor is read before the listing, so a write the listing misses
+    // The cursor must predate the listing so a write the listing misses
     // changes a later cursor.
     let cursor = source
         .repo_cursor()
@@ -481,21 +471,20 @@ fn fetch_objects_inner(
         && let Some(cursor) = &cursor
         && remote_unchanged(store, layout, source, &cursor_path, cursor, remote, options)?
     {
-        report.remote_unchanged = true;
-        return Ok(());
+        return Ok(FetchReport {
+            remote_unchanged: true,
+            ..FetchReport::default()
+        });
     }
-    // A failed full attempt must not leave a previous no-op proof usable.
+    // Take the attestation head before the branch listing so a later head
+    // cannot be mistaken for one covered by the ref snapshot.
     let _ = std::fs::remove_file(&cursor_path);
-    // A cursor hit checks the tracked tips' anchors itself. Load the full
-    // set only when a history walk may need it, including other remotes.
-    if require_signed {
-        *verified = crate::anchor::load_all(layout);
-    }
-    let snapshot = crate::fetch_attestations::snapshot(source, options, report);
+    let mut report = FetchReport::default();
+    let snapshot = crate::fetch_attestations::snapshot(source, options, &mut report);
     let mut remote_refs = source
         .list_branches()
         .map_err(|error| source.repository_error(error))?;
-    if let Some(branch) = target_branch
+    if let Some(branch) = options.target_branch.as_deref()
         && !remote_refs.iter().any(|r| r.name == branch)
     {
         // The listing may be stale (eventual): a strong read by name decides
@@ -509,6 +498,94 @@ fn fetch_objects_inner(
             None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
         }
     }
+    let tag_listing = if store.local_packs_enabled()? {
+        None
+    } else if has_new_branch_tip(layout, remote, &remote_refs)? {
+        store.try_activate_local_packs()?;
+        None
+    } else if options.tags {
+        let tags = source.list_refs(refs::TAG_REF_PREFIX);
+        if let Ok(tags) = &tags
+            && !tags.is_empty()
+            && has_new_tag(layout, tags)?
+        {
+            store.try_activate_local_packs()?;
+        }
+        Some(tags)
+    } else {
+        None
+    };
+    let guard = store.prune_guard()?;
+    kit_core::pack::sweep_spool_dir(&store.spool_dir());
+    let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
+    let result = fetch_objects_inner(
+        store,
+        layout,
+        source,
+        observer,
+        remote,
+        options,
+        lock_wait,
+        &guard,
+        &mut applied,
+        &mut report,
+        cursor,
+        cursor_path,
+        remote_refs,
+        tag_listing,
+        snapshot,
+    );
+    persist_record(&mut applied, observer, remote);
+    result.map(|()| report)
+}
+
+fn has_new_branch_tip(
+    layout: &RepoLayout,
+    remote: &str,
+    refs: &[refs::Ref],
+) -> Result<bool, SyncError> {
+    for r in refs {
+        if r.hash.is_some() && r.hash != refs::read_remote_ref(layout, remote, &r.name)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn has_new_tag(layout: &RepoLayout, tags: &[refs::Ref]) -> Result<bool, SyncError> {
+    let local: std::collections::HashSet<_> = refs::list_tags(layout)?
+        .into_iter()
+        .map(|tag| tag.name)
+        .collect();
+    Ok(tags
+        .iter()
+        .any(|tag| tag.hash.is_some() && !local.contains(&tag.name)))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn fetch_objects_inner(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    source: &dyn RemoteSource,
+    observer: &dyn Observer<SyncEvent>,
+    remote: &str,
+    options: &SyncOptions,
+    lock_wait: &LockWait,
+    guard: &PruneGuard,
+    applied: &mut AppliedPacks,
+    report: &mut FetchReport,
+    cursor: Option<kit_core::protocol::RepoCursor>,
+    cursor_path: std::path::PathBuf,
+    remote_refs: Vec<refs::Ref>,
+    tag_listing: Option<Result<Vec<refs::Ref>, crate::SourceError>>,
+    snapshot: crate::fetch_attestations::Snapshot,
+) -> Result<(), SyncError> {
+    let require_signed = options.verify_signatures;
+    let mut verified = if require_signed {
+        crate::anchor::load_all(layout)
+    } else {
+        VerifiedHistory::default()
+    };
     let listed: std::collections::HashSet<String> =
         remote_refs.iter().map(|r| r.name.clone()).collect();
     // Unidentified sources retain batched tracking writes. Checkpoints need
@@ -584,6 +661,8 @@ fn fetch_objects_inner(
                 applied,
                 require_signed,
                 &anchors,
+                guard,
+                &mut verified,
             ) {
                 Ok(stats) => (completed, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -616,19 +695,14 @@ fn fetch_objects_inner(
                         applied,
                         require_signed,
                         &anchors,
+                        guard,
+                        &mut verified,
                     )?;
                     (completed, stats)
                 }
                 Err(e) => return Err(e),
             };
 
-            // Step 3: the signatures checked so far cover only the packs this
-            // run applied. The tip can name history no such pack carried, for
-            // example objects a refused pack left in the store, so its
-            // history is checked here, whatever path it took into the store.
-            if require_signed {
-                verify_history_signatures(store, observer, &completed.tip, verified)?;
-            }
             stop.extend(keys);
 
             // Step 4: publish under a repo lock acquired fresh for this
@@ -688,14 +762,14 @@ fn fetch_objects_inner(
             remote,
             require_signed,
             lock_wait,
+            guard,
             applied: &mut *applied,
-            verified: &mut *verified,
+            verified: &mut verified,
             stop,
             report: &mut *report,
             published: &mut matched_tags,
-            packs_since_refresh: 0,
         }
-        .run()?;
+        .run(tag_listing)?;
     }
     let attestation_complete = crate::fetch_attestations::run(
         store, layout, source, observer, remote, options, lock_wait, snapshot, report,

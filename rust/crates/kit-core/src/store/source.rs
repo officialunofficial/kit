@@ -40,6 +40,29 @@ pub trait ObjectSource {
         Ok(serialize::deserialize_owned(self.read(h)?)?)
     }
 
+    /// Read the object's type. The durable store can inspect only its header.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        Ok(self.read_object(h)?.object_type())
+    }
+
+    /// Read the object's type and the content length of a blob.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        let object = self.read_object(h)?;
+        let len = match &object {
+            Object::Blob(blob) => Some(blob.data.len() as u64),
+            _ => None,
+        };
+        Ok((object.object_type(), len))
+    }
+
     /// Whether this source already verified that `h` names a canonical
     /// blob in the snapshot. Two such blobs with different ids
     /// have different content without another read.
@@ -65,6 +88,14 @@ pub trait ObjectSource {
 impl ObjectSource for ObjectStore {
     fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
         ObjectStore::read(self, h)
+    }
+
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        ObjectStore::object_type(self, h)
+    }
+
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        ObjectStore::object_head(self, h)
     }
 
     fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {

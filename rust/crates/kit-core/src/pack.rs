@@ -68,6 +68,7 @@
 pub mod window;
 
 mod file_read;
+mod object_spool;
 pub mod rewrite;
 mod spool;
 use crate::delta;
@@ -79,6 +80,8 @@ pub use file_read::{
     MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
     STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
 };
+#[doc(hidden)]
+pub use object_spool::ObjectSpool;
 pub use rewrite::{Rewritten, rewrite_excluding};
 pub use spool::{
     CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,
@@ -2767,6 +2770,29 @@ pub fn decode_entry_with<B: DeltaBaseSource>(
     Ok((id, bytes))
 }
 
+trait UnpackSink: Sync {
+    fn stage(
+        &self,
+        position: usize,
+        id: Hash,
+        ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError>;
+}
+
+impl UnpackSink for crate::batch::WriteBatch<'_> {
+    fn stage(
+        &self,
+        _position: usize,
+        id: Hash,
+        _ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError> {
+        self.write_prehashed(id, &[bytes])?;
+        Ok(())
+    }
+}
+
 /// Replay one window's staging results in pack order. Deferred admissions
 /// are strict here. `first_position` is the pack position of `window[0]`.
 #[allow(clippy::too_many_arguments)]
@@ -2778,8 +2804,8 @@ fn replay_window<'p, 'b>(
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'p, 'b>>,
     report: &mut UnpackReport,
     budget: &'b ResidentBudget<'_>,
-    bases: &mut &ObjectStore,
-    batch: &crate::batch::WriteBatch<'_>,
+    bases: &mut impl DeltaBaseSource,
+    batch: &(impl UnpackSink + ?Sized),
     keep_stored: bool,
 ) -> Result<(), PackError> {
     let mut raw_results = raw_results.into_iter();
@@ -2808,8 +2834,15 @@ fn replay_window<'p, 'b>(
             }
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
-                let staged =
-                    stage_delta_target(bases, batch, in_pack, uses, budget, base, stream.as_ref())?;
+                let staged = stage_delta_target(
+                    bases,
+                    (batch, position),
+                    in_pack,
+                    uses,
+                    budget,
+                    base,
+                    stream.as_ref(),
+                )?;
                 report.delta_count += 1;
                 report.note(staged, keep_stored);
             }
@@ -3049,7 +3082,7 @@ type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 /// Validate, hash and stage independent raw frames, preserving result order.
 /// Errors stay in the result queue until step 3 reaches that pack position.
 fn stage_raw_entries<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     frames: &[(usize, EncodedPayload<'_>)],
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
@@ -3073,7 +3106,7 @@ fn stage_raw_entries<'b>(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn stage_raw_entries_parallel<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     frames: &[(usize, EncodedPayload<'_>)],
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
@@ -3111,7 +3144,7 @@ fn stage_raw_entries_parallel<'b>(
 }
 
 fn stage_raw_in_phase_two<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3133,7 +3166,7 @@ fn stage_raw_in_phase_two<'b>(
 }
 
 fn prepare_and_stage_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3143,7 +3176,7 @@ fn prepare_and_stage_raw<'b>(
 }
 
 fn stage_decoded_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: ResidentBytes<'_, 'b>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3152,7 +3185,7 @@ fn stage_decoded_raw<'b>(
     let obj = validate_storable_object(payload.as_ref())?;
     let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
     let staged = Staged::of(stored_hash, &obj, payload.as_ref());
-    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    batch.stage(position, stored_hash, obj.object_type(), payload.as_ref())?;
     let retained = if let ResidentBytes::Owned(bytes) = payload {
         budget.record_owned(bytes.bytes.len());
         if uses
@@ -3505,7 +3538,7 @@ impl<'a> Iterator for PackEntries<'a> {
 /// which also handles identity deltas whose target hash equals their base.
 fn stage_delta_target<'b, B: DeltaBaseSource>(
     bases: &mut B,
-    batch: &crate::batch::WriteBatch<'_>,
+    (batch, position): (&(impl UnpackSink + ?Sized), usize),
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'_, 'b>>,
     uses: &mut std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
@@ -3537,7 +3570,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     let obj = validate_storable_object(&resolved.bytes)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved.bytes);
     let staged = Staged::of(stored_hash, &obj, &resolved.bytes);
-    batch.write_prehashed(stored_hash, &[&resolved.bytes])?;
+    batch.stage(position, stored_hash, obj.object_type(), &resolved.bytes)?;
     budget.record_owned(resolved.bytes.len());
     let usage = uses.get_mut(&base_hash).expect("counted delta base");
     usage.remaining -= 1;
@@ -4567,7 +4600,7 @@ mod tests {
             assert_eq!(
                 stage_delta_target(
                     &mut &store,
-                    &batch,
+                    (&batch, 0),
                     &mut in_pack,
                     &mut uses,
                     &budget,
@@ -4603,7 +4636,7 @@ mod tests {
         assert!(matches!(
             stage_delta_target(
                 &mut &store,
-                &batch,
+                (&batch, 0),
                 &mut in_pack,
                 &mut uses,
                 &budget,

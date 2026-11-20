@@ -52,6 +52,7 @@ mod pull;
 pub mod push;
 pub use push::{PushError, PushLease, PushOptions, PushReport, PushTarget, push};
 mod apply;
+mod publication;
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;

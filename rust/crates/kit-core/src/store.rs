@@ -57,6 +57,7 @@ mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
+pub use local_pack::LocalPackWriter;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};

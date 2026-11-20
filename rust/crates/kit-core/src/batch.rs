@@ -355,6 +355,22 @@ impl<'s> WriteBatch<'s> {
     /// CPU of every clone/fetch). A wrong hash here would corrupt the
     /// content addressing — never expose this publicly.
     pub(crate) fn write_prehashed(&self, h: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
+        self.stage_prehashed(h, parts, true)
+    }
+
+    /// Stage fetched bytes even if the loose path already holds a copy.
+    ///
+    /// # Errors
+    /// An oversized object or a local write error.
+    #[doc(hidden)]
+    pub fn write_fetched(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > crate::store::MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        self.stage_prehashed(crate::object::object_id_from_bytes(bytes), &[bytes], false)
+    }
+
+    fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_loose: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
         let final_path = self.store.path_for(&h);
@@ -375,7 +391,7 @@ impl<'s> WriteBatch<'s> {
             !st.created_shards.contains(&shard_dir)
         };
         let total_len: u64 = parts.iter().map(|p| p.len() as u64).sum();
-        if fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
+        if reuse_loose && fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its

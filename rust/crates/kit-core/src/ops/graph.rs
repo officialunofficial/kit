@@ -372,7 +372,7 @@ where
 /// # Errors
 /// The errors of [`check_closure_present`].
 pub fn check_closure_present_observed(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     tip: &Hash,
     progress: &dyn Fn(usize),
 ) -> Result<bool, StoreError> {
@@ -472,7 +472,7 @@ const STOP_POLL_OBJECTS: usize = 4096;
 /// As [`check_closure_present`], except that a missing object is
 /// [`Presence::Missing`].
 pub fn check_closure_present_above(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     root: &Hash,
     known: &dyn Fn(&Hash) -> Known,
     cap: usize,
@@ -569,7 +569,7 @@ where
 /// named each object with children, so a missing object ends it with the path
 /// to it; without, a missing object is [`StoreError::ObjectNotFound`].
 fn walk_closure<'a, I>(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     roots: I,
     mode: ClosureMode,
     cap: usize,
@@ -692,7 +692,7 @@ where
 /// [`StoreError::ObjectNotFound`] and the errors of
 /// [`ObjectStore::object_head`], and [`KitError::ChunkNotBlob`].
 pub(crate) fn chunk_blob_len(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     chunk: &Hash,
     index: u32,
 ) -> Result<u64, StoreError> {
@@ -724,7 +724,7 @@ impl LenCache for CheckedChunks<'_> {
 /// window of chunks run in parallel; the result and the error are those of
 /// reading them in manifest order.
 fn check_manifest_chunks(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     manifest: &ChunkedBlob,
     memory: usize,
     checked: &mut BTreeMap<Hash, u64>,

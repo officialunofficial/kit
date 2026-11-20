@@ -34,7 +34,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, KitError, Object, Tree};
 use kit_core::ops::{Known, Presence};
 use kit_core::refs;
-use kit_core::store::{ObjectStore, StoreError};
+use kit_core::store::{ObjectSource, ObjectStore, StoreError};
 
 use crate::error::SyncError;
 
@@ -111,7 +111,7 @@ pub(crate) fn check_above(
 
 /// A closure check with completed-object counts before each next object.
 pub(crate) fn check_above_observed(
-    store: &ObjectStore,
+    store: &(dyn ObjectSource + Sync),
     tip: &Hash,
     anchors: &Anchors,
     cancelled: &dyn Fn() -> bool,
@@ -206,7 +206,7 @@ const OLD: u8 = 2;
 /// [`MAX_COMMITS`] reads, stop it early, and a commit then counts as new
 /// although it is an ancestor of an anchor.
 fn split(
-    store: &ObjectStore,
+    store: &(dyn ObjectSource + Sync),
     tip: &Hash,
     anchors: &HashSet<Hash>,
     poll: &mut Poll<'_>,
@@ -262,7 +262,7 @@ fn split(
 
 /// The state of [`split`]'s walk.
 struct Paint<'a> {
-    store: &'a ObjectStore,
+    store: &'a (dyn ObjectSource + Sync),
     flags: HashMap<Hash, u8>,
     /// Commits to visit, by timestamp. Each at most once at a time.
     queue: BinaryHeap<(u64, Hash)>,
@@ -326,7 +326,7 @@ impl Paint<'_> {
 /// cannot read only means it learns less, as does reaching [`MAX_COVERED`]
 /// or [`MAX_TREE_READS`].
 fn covered(
-    store: &ObjectStore,
+    store: &(dyn ObjectSource + Sync),
     split: &Split,
     poll: &mut Poll<'_>,
 ) -> Result<HashSet<Hash>, SyncError> {

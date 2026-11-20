@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
-use kit_core::store::{ObjectStore, StoreError};
+#[cfg(test)]
+use kit_core::store::ObjectStore;
+use kit_core::store::{ObjectSource, StoreError};
 use rayon::prelude::*;
 
 use crate::error::SyncError;
@@ -113,7 +115,7 @@ fn verify_chunk_size() -> usize {
 /// §1), so fetch and `kit verify` never disagree. Only when a batch fails
 /// does [`verify_slice`] check each object on its own to name the bad one.
 pub(crate) fn verify_new_object_signatures(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     signed: &[(Hash, u32)],
     require_signed: bool,
 ) -> Result<(), SyncError> {
@@ -259,7 +261,11 @@ fn verify_batch(batch: &[BatchEntry], parallel: bool) -> bool {
 /// The signed objects are checked as a batch first. If the batch fails,
 /// each object is checked with [`verify_one_object`], in parallel iff
 /// `parallel`, so the first failure names the offending hash.
-fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), SyncError> {
+fn verify_slice(
+    store: &(impl ObjectSource + Sync + ?Sized),
+    hashes: &[Hash],
+    parallel: bool,
+) -> Result<(), SyncError> {
     // The caller lists the commits, remixes and tags an unpack stored, so
     // no blob is read here. An object of another kind is still dropped
     // right after it is read, rather than kept for the rest of the call.
@@ -412,7 +418,7 @@ pub(crate) type MissingHistory = HashMap<Hash, Hash>;
 /// decoded objects is held at a time, and `observer` is polled for
 /// cancellation after each full chunk.
 pub(crate) fn verify_history_signatures(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     verified: &mut VerifiedHistory,
@@ -454,7 +460,7 @@ impl HistoryWalk<'_> {
     /// Walk the history of `tip` as [`verify_history_signatures`] describes.
     pub(crate) fn run(
         &mut self,
-        store: &ObjectStore,
+        store: &(impl ObjectSource + Sync + ?Sized),
         observer: &dyn Observer<SyncEvent>,
         tip: &Hash,
     ) -> Result<(), SyncError> {

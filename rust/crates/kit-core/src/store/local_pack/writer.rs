@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 use crate::pack::{HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
@@ -10,7 +10,101 @@ use super::{
 };
 use crate::store::{MAX_RAW_OBJECT_SIZE, PruneGuard, StoreError};
 
-/// The store's wide test writer. Fetch has its own selection and window rules.
+/// Write a private local pack, then make it durable and discoverable.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct LocalPackWriter<'a> {
+    store: &'a ObjectStore,
+    _guard: &'a PruneGuard,
+    pack: BufWriter<tempfile::NamedTempFile>,
+    ids: HashSet<Hash>,
+    payload: u64,
+}
+
+impl<'a> LocalPackWriter<'a> {
+    /// Open one pack under the store's existing shared guard.
+    ///
+    /// # Errors
+    /// The packed marker could not be validated or synced, or staging failed.
+    pub fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> StoreResult<Self> {
+        prepare_dir(store, guard)?;
+        Ok(Self {
+            store,
+            _guard: guard,
+            pack: BufWriter::with_capacity(256 << 10, new_pack(store)?),
+            ids: HashSet::new(),
+            payload: 0,
+        })
+    }
+
+    /// Stage one canonical object, deduplicating only within this pack.
+    ///
+    /// # Errors
+    /// Invalid bytes, a full pack, or a staging write error.
+    pub fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
+        let id = checked_id(bytes)?;
+        if !self.ids.contains(&id) {
+            if self.ids.len() == MAX_ENTRIES as usize
+                || self.payload + bytes.len() as u64 > MAX_TOTAL_PAYLOAD
+            {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            #[cfg(feature = "fault-injection")]
+            crate::fault::check(crate::fault::Site::Store)?;
+            write_frame(&mut self.pack, bytes)?;
+            self.payload += bytes.len() as u64;
+            self.ids.insert(id);
+        }
+        Ok(id)
+    }
+
+    /// Sync and publish the pack and index. An empty pack needs no pair.
+    ///
+    /// # Errors
+    /// A staging or publication failure.
+    pub fn publish(self) -> StoreResult<()> {
+        if !self.ids.is_empty() {
+            let pack = self
+                .pack
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)?;
+            Staged::seal(self.store, pack, self.ids.len())?.publish(self.store)?;
+        }
+        Ok(())
+    }
+}
+
+fn prepare_dir(store: &ObjectStore, guard: &PruneGuard) -> StoreResult<()> {
+    format::sync_packed(&store.format_path(), guard)?;
+    let dir = store.pack_dir();
+    fs::create_dir_all(&dir)?;
+    if !fs::symlink_metadata(&dir)?.is_dir() {
+        return Err(index::invalid("local pack directory is not a directory").into());
+    }
+    crate::atomic::sync_dir(store.objects_root())?;
+    Ok(())
+}
+
+fn checked_id(bytes: &[u8]) -> StoreResult<Hash> {
+    if bytes.len() > MAX_RAW_OBJECT_SIZE {
+        return Err(StoreError::ObjectTooLarge);
+    }
+    index::canonical_id(bytes)
+}
+
+fn write_frame(mut writer: impl Write, bytes: &[u8]) -> StoreResult<()> {
+    let mut frame = [0; 5];
+    frame[1..].copy_from_slice(
+        &u32::try_from(bytes.len())
+            .expect("bounded object length")
+            .to_le_bytes(),
+    );
+    writer.write_all(&frame)?;
+    writer.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) struct Writer<'a> {
     store: &'a ObjectStore,
     guard: PruneGuard,
@@ -21,6 +115,7 @@ pub(super) struct Writer<'a> {
     max_payload: u64,
 }
 
+#[cfg(test)]
 impl<'a> Writer<'a> {
     pub(super) fn new(
         store: &'a ObjectStore,
@@ -29,26 +124,13 @@ impl<'a> Writer<'a> {
     ) -> StoreResult<Self> {
         assert!((1..=MAX_ENTRIES).contains(&max_entries));
         assert!((1..=MAX_TOTAL_PAYLOAD).contains(&max_payload));
-        if !format::check(&store.format_path())? {
-            // A publisher racing the first activation can try again once the
-            // other publisher releases the exclusive lock.
-            format::activate(&store.format_path())?;
-        }
+        store.try_activate_local_packs()?;
         let guard = store.prune_guard()?;
-        format::sync_packed(&store.format_path(), &guard)?;
-        let dir = store.pack_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        if !fs::symlink_metadata(&dir)?.is_dir() {
-            return Err(index::invalid("local pack directory is not a directory").into());
-        }
-        crate::atomic::sync_dir(store.objects_root())?;
-        let pack = new_pack(store)?;
+        prepare_dir(store, &guard)?;
         Ok(Self {
             store,
             guard,
-            pack,
+            pack: new_pack(store)?,
             ids: HashSet::new(),
             payload: 0,
             max_entries,
@@ -57,10 +139,10 @@ impl<'a> Writer<'a> {
     }
 
     pub(super) fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
-        if bytes.len() > MAX_RAW_OBJECT_SIZE || bytes.len() as u64 > self.max_payload {
+        if bytes.len() as u64 > self.max_payload {
             return Err(StoreError::ObjectTooLarge);
         }
-        let id = index::canonical_id(bytes)?;
+        let id = checked_id(bytes)?;
         if self.ids.contains(&id) {
             return Ok(id);
         }
@@ -73,13 +155,7 @@ impl<'a> Writer<'a> {
             self.payload = 0;
             self.ids.clear();
         }
-        self.pack.write_all(&[0])?;
-        self.pack.write_all(
-            &u32::try_from(bytes.len())
-                .expect("bounded object length")
-                .to_le_bytes(),
-        )?;
-        self.pack.write_all(bytes)?;
+        write_frame(&mut self.pack, bytes)?;
         self.payload += bytes.len() as u64;
         self.ids.insert(id);
         Ok(id)

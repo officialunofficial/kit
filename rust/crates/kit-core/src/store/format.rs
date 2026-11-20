@@ -4,7 +4,6 @@ use std::path::Path;
 
 use super::{FORMAT_MAX_BYTES, FORMAT_VALUE, StoreError, StoreResult};
 
-#[cfg(test)]
 const LEGACY: &[u8] = b"bmt-v2\n";
 pub(super) const PACKED: &[u8] = b"bmt-v2\nP";
 const LOST_APPEND: &[u8] = b"bmt-v2\n\0";
@@ -51,14 +50,24 @@ pub(super) fn check(path: &Path) -> StoreResult<bool> {
     parse(&read_marker(&file)?)
 }
 
-#[cfg(test)]
-pub(super) fn activate(path: &Path) -> StoreResult<()> {
+pub(super) fn try_activate(path: &Path) -> StoreResult<()> {
+    match activate(path, false) {
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        result => result,
+    }
+}
+
+pub(super) fn activate(path: &Path, strict: bool) -> StoreResult<()> {
     let file = open_marker(path, true)?;
     file.try_lock().map_err(io::Error::from)?;
     let bytes = read_marker(&file)?;
     if !parse(&bytes)? {
         if bytes != LEGACY && bytes != LOST_APPEND {
-            return Err(incompatible(Some("noncanonical legacy marker".into())));
+            return if strict {
+                Err(incompatible(Some("noncanonical legacy marker".into())))
+            } else {
+                Ok(())
+            };
         }
         crate::pack::write_spooled(&file, LEGACY.len() as u64, b"P")?;
     }
@@ -66,9 +75,19 @@ pub(super) fn activate(path: &Path) -> StoreResult<()> {
     Ok(())
 }
 
-#[cfg(test)]
+pub(super) fn packed_under_guard(guard: &super::PruneGuard) -> StoreResult<bool> {
+    let len = guard.format.metadata()?.len();
+    if len > FORMAT_MAX_BYTES {
+        return Err(incompatible(Some("unreadable".into())));
+    }
+    let mut bytes = [0; 64];
+    let marker = &mut bytes[..usize::try_from(len).expect("bounded marker length")];
+    crate::pack::read_spooled(&guard.format, 0, marker)?;
+    parse(marker)
+}
+
 pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult<()> {
-    if !parse(&read_marker(&guard.format)?)? {
+    if !packed_under_guard(guard)? {
         return Err(incompatible(Some(
             "local packs require capability P".into(),
         )));
@@ -116,8 +135,8 @@ mod tests {
             fs::write(&marker, state).unwrap();
             let mut original = File::open(&marker).unwrap();
 
-            activate(&marker).unwrap();
-            activate(&marker).unwrap();
+            activate(&marker, true).unwrap();
+            activate(&marker, true).unwrap();
             assert!(check(&marker).unwrap());
             let mut current = Vec::new();
             original.read_to_end(&mut current).unwrap();
@@ -136,11 +155,11 @@ mod tests {
 
         let guard = store.prune_guard().unwrap();
         assert!(
-            matches!(activate(&marker), Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock)
+            matches!(activate(&marker, true), Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock)
         );
         assert_eq!(fs::read(&marker).unwrap(), LOST_APPEND);
         drop(guard);
-        activate(&marker).unwrap();
+        activate(&marker, true).unwrap();
         assert_eq!(fs::read(&marker).unwrap(), PACKED);
     }
 
@@ -172,7 +191,7 @@ mod tests {
                 Err(StoreError::IncompatibleRepoFormat { .. })
             ));
             assert!(matches!(
-                activate(&marker),
+                activate(&marker, true),
                 Err(StoreError::IncompatibleRepoFormat { .. })
             ));
             assert_eq!(fs::read(&marker).unwrap(), malformed);
@@ -181,14 +200,14 @@ mod tests {
         fs::write(&marker, noncanonical).unwrap();
         assert!(!check(&marker).unwrap());
         assert!(matches!(
-            activate(&marker),
+            activate(&marker, true),
             Err(StoreError::IncompatibleRepoFormat { .. })
         ));
         assert_eq!(fs::read(&marker).unwrap(), noncanonical);
 
         fs::remove_file(&marker).unwrap();
         assert!(matches!(
-            activate(&marker),
+            activate(&marker, true),
             Err(StoreError::IncompatibleRepoFormat { found: None })
         ));
         assert!(!marker.exists());
