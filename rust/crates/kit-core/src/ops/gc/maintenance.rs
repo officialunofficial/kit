@@ -6,14 +6,13 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits, PackedGcReport, collect_root_sets,
-    mark_live_checked, reject_symlink,
+    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits, PackedGcReport,
+    collect_root_sets, mark_live_checked, reject_symlink,
 };
 use crate::layout::{RepoLayout, all_state_layouts};
 use crate::repo_lock::{LockError, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK, acquire};
 use crate::store::{ObjectStore, StoreError};
 
-const LOCK_NAME: &str = "gc-auto";
 const MIN_PAIRS: usize = 32;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;
@@ -141,7 +140,7 @@ impl Stamp {
 }
 
 fn lock_stamp(dir: &Path) -> io::Result<File> {
-    let path = dir.join(LOCK_NAME);
+    let path = dir.join(AUTO_MAINTENANCE_STAMP);
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

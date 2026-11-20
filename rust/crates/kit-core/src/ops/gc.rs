@@ -36,6 +36,10 @@ mod soft;
 pub use maintenance::fuzz_maintenance_stamp;
 pub use maintenance::{Collection, MaintenanceReport, maintain_packs};
 
+/// Basename of the advisory stamp and lock for automatic maintenance.
+#[doc(hidden)]
+pub const AUTO_MAINTENANCE_STAMP: &str = "gc-auto";
+
 /// Default grace before an unreachable object or pack leftover can be removed.
 pub const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 

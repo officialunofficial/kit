@@ -236,6 +236,24 @@ fn a_stopped_clone_holding_anything_a_clone_does_not_write_is_refused() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn clone_resume_refuses_a_symlink_in_place_of_the_maintenance_stamp() {
+    let (_td, bare, url, _tip) = upstream();
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("clone");
+    stopped_clone(bare.path(), &url, dest.path(), &target);
+
+    let data = dest.path().join("data");
+    fs::write(&data, b"keep").unwrap();
+    std::os::unix::fs::symlink(&data, target.join(".kit/gc-auto")).unwrap();
+
+    let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(73), "{out:?}");
+    assert_eq!(fs::read(data).unwrap(), b"keep");
+    assert_eq!(read_ref(&target, "refs/heads/main"), None);
+}
+
 #[test]
 fn resumed_clone_discards_tags_before_fetching_them_again() {
     let (_td, bare, url, tip) = upstream();
@@ -294,6 +312,7 @@ fn a_clone_stopped_after_publishing_a_tag_resumes() {
         &kit_sync::NoopObserver,
     )
     .unwrap();
+    assert!(target.join(".kit/gc-auto").is_file());
     assert_eq!(read_ref(&target, "refs/heads/main"), None);
     assert!(read_ref(&target, "refs/tags/v1").is_some());
     let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);
