@@ -751,3 +751,71 @@ impl<'a> Rolling<'a> {
         Ok((self.pairs, self.ids, self.copied))
     }
 }
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+    use crate::store::local_pack::tests::{blob, fresh, publish_objects};
+
+    fn pair(store: &crate::store::ObjectStore, label: &str) -> Pair {
+        publish_objects(store, &[blob(label.as_bytes()).as_slice()]).0
+    }
+
+    fn relied(pair: &Pair, covering: &[&Pair], outputs: &[&Pair]) -> Relied {
+        let dep = Dep::of(pair).unwrap();
+        Relied {
+            key: pair.key,
+            pack: dep.pack,
+            locator: dep.locator,
+            class: Class::Mixed,
+            duplicate_bytes: 0,
+            covering: covering.iter().map(|p| Dep::of(p).unwrap()).collect(),
+            outputs: outputs.iter().map(|p| Dep::of(p).unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn an_input_that_relies_on_a_pair_the_run_retires_or_also_copies_stays() {
+        let (_dir, _layout, store) = fresh();
+        let (input, covering, other, output, spare) = (
+            pair(&store, "input"),
+            pair(&store, "covering"),
+            pair(&store, "other"),
+            pair(&store, "output"),
+            pair(&store, "spare"),
+        );
+        let dir = store.pack_dir();
+        let output_dep = || vec![Dep::of(&output).unwrap()];
+
+        // Control: nothing blocks it.
+        let copied = Copied {
+            outputs: output_dep(),
+            inputs: vec![relied(&input, &[&covering], &[&output])],
+        };
+        assert_eq!(copied.select(&dir, &|_| false).len(), 1);
+
+        // The covering pair is a wholly dead retirement of this run.
+        let retiring = covering.key;
+        assert!(copied.select(&dir, &|key| *key == retiring).is_empty());
+
+        // The covering pair is itself an input of this run. Only that input,
+        // which relies on a pair that stays, may go.
+        let copied = Copied {
+            outputs: output_dep(),
+            inputs: vec![
+                relied(&input, &[&covering], &[&output]),
+                relied(&covering, &[&other], &[&output]),
+            ],
+        };
+        let selected = copied.select(&dir, &|_| false);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pair.key, covering.key);
+
+        // An output that carries an input's key leaves that input in place.
+        let copied = Copied {
+            outputs: vec![Dep::of(&spare).unwrap()],
+            inputs: vec![relied(&spare, &[&covering], &[&spare])],
+        };
+        assert!(copied.select(&dir, &|_| false).is_empty());
+    }
+}
