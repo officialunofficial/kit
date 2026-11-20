@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::{Index, read_pack_dir, scan_pair, visit_pairs};
+use super::{Index, Location, read_pack_dir, scan_pair, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet, PackedGcReport};
@@ -75,6 +76,7 @@ impl ObjectStore {
         }
         let dir = self.pack_dir();
         visit_pairs(&dir, |pair| {
+            report.packs_scanned += 1;
             let pack = Stamp::read(&pair.pack);
             let locator = Stamp::read(&pair.index);
             let index = Index::open(&pair)?;
@@ -125,11 +127,99 @@ impl ObjectStore {
         }
         Ok(plan)
     }
+    pub(crate) fn sweep_loose_duplicates(
+        &self,
+        retirements: &PackSweep,
+        live: &LiveSet,
+        now: u64,
+        grace: u64,
+        report: &mut GcReport,
+        packed: &mut PackedGcReport,
+    ) -> StoreResult<()> {
+        let mut loose_shards = [false; 256];
+        for shard in 0..=u8::MAX {
+            loose_shards[usize::from(shard)] = !self.list_loose_shard(shard)?.is_empty();
+        }
+        if !loose_shards.contains(&true) {
+            return Ok(());
+        }
+        let dir = self.pack_dir();
+        let mut previewed = BTreeSet::new();
+        visit_pairs(&dir, |pair| {
+            let (Some(pack), Some(locator)) = (Stamp::read(&pair.pack), Stamp::read(&pair.index))
+            else {
+                return Ok(());
+            };
+            // Dry run leaves its retirement candidates on disk.
+            if report.dry_run && retirements.pairs.contains_key(&pair.key) {
+                return Ok(());
+            }
+            let index = Arc::new(Index::open(&pair)?);
+            let mut duplicates = Vec::new();
+            for (id, frame) in index.entries() {
+                if !loose_shards[usize::from(id[0])] || previewed.contains(&id) {
+                    continue;
+                }
+                let path = self.path_for(&id);
+                let Some(loose) = Stamp::read(&path) else {
+                    continue;
+                };
+                let old = loose.old_enough(now, grace);
+                if (!old && pack.modified < loose.modified) || (old && !live.contains(&id)) {
+                    continue;
+                }
+                duplicates.push((id, frame, loose));
+            }
+            if duplicates.is_empty() {
+                return Ok(());
+            }
+
+            let _guard = if report.dry_run {
+                None
+            } else {
+                let file = fs::File::open(self.format_path())?;
+                if file.try_lock().is_err() {
+                    return Ok(());
+                }
+                Some(file)
+            };
+            if !pack.unchanged(&pair.pack) || !locator.unchanged(&pair.index) {
+                return Ok(());
+            }
+            let mut durable = false;
+            for (id, frame, loose) in duplicates {
+                let path = self.path_for(&id);
+                let location = Location::Packed(Arc::clone(&index), frame);
+                if !loose.unchanged(&path)
+                    || ObjectStore::raw_at(&location)
+                        .and_then(|bytes| ObjectStore::verify_at(&location, &id, &bytes))
+                        .is_err()
+                {
+                    continue;
+                }
+                if report.dry_run {
+                    previewed.insert(id);
+                } else {
+                    if !durable {
+                        crate::store::sync_reused_file(&pair.pack)?;
+                        crate::store::sync_reused_file(&pair.index)?;
+                        sync_dir(self.objects_root())?;
+                        sync_dir(&dir)?;
+                        durable = true;
+                    }
+                    fs::remove_file(path)?;
+                }
+                report.bytes_reclaimed += loose.len;
+                packed.loose_duplicates_pruned += 1;
+            }
+            Ok(())
+        })
+    }
 }
 
 impl PackSweep {
     pub(crate) fn run(
-        self,
+        &self,
         store: &ObjectStore,
         report: &mut GcReport,
         packed: &mut PackedGcReport,
@@ -138,7 +228,7 @@ impl PackSweep {
     }
 
     pub(super) fn run_with(
-        self,
+        &self,
         store: &ObjectStore,
         report: &mut GcReport,
         packed: &mut PackedGcReport,
@@ -146,7 +236,7 @@ impl PackSweep {
     ) -> StoreResult<()> {
         if report.dry_run {
             packed.packs_retired = self.pairs.len();
-            report.temp_files_pruned += self.leftovers.len();
+            packed.pack_leftovers_pruned = self.leftovers.len();
             report.bytes_reclaimed += self
                 .pairs
                 .values()
@@ -172,8 +262,6 @@ impl PackSweep {
                 && r.index.unchanged(&pair.index)
             {
                 retire.push((pair, r));
-            } else {
-                Index::open(&pair)?;
             }
             Ok(())
         })?;
@@ -202,7 +290,7 @@ impl PackSweep {
         }
         for (path, stamp) in &leftovers {
             fs::remove_file(path)?;
-            report.temp_files_pruned += 1;
+            packed.pack_leftovers_pruned += 1;
             report.bytes_reclaimed += stamp.len;
         }
         if !retire.is_empty() || !leftovers.is_empty() {

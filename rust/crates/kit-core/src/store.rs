@@ -701,6 +701,41 @@ impl ObjectStore {
         })
     }
 
+    /// Verify a packed leaf before letting its type end a retention walk.
+    /// An index can locate bytes of a different object. Non-leaf types are
+    /// followed by a verified read of the object before their edges are used.
+    pub(crate) fn gc_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        use crate::object::ObjectType;
+
+        self.packs.lookup(self, h, true, |location| {
+            let mut contents = location.open()?;
+            let mut header = [0; serialize::BLOB_PROLOGUE_LEN];
+            contents
+                .read_exact(&mut header[..6])
+                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
+            let ty = parse_type(&header[..6])?;
+            if !location.is_packed() {
+                return Ok(ty);
+            }
+            match ty {
+                ObjectType::Blob => {
+                    contents.read_exact(&mut header[6..])?;
+                    let payload_len = raw_capacity(contents.len)? - header.len();
+                    if header != serialize::blob_prologue(payload_len)? {
+                        return Err(local_pack::invalid("invalid packed blob header").into());
+                    }
+                    let mut hash = blake3::Hasher::new();
+                    hash.update(&header);
+                    hash.update_reader(contents)?;
+                    check_hash(h, hash.finalize().as_bytes())?;
+                    Ok(ty)
+                }
+                ObjectType::Delta => Err(local_pack::invalid("delta object in local pack").into()),
+                _ => Ok(ty),
+            }
+        })
+    }
+
     /// The object's type tag and, for a `Blob`, its content length, from the
     /// first 10 bytes — without reading or hash-verifying the body. The
     /// chunk check of [`crate::ops::graph::check_closure_present`] uses it:

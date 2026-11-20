@@ -394,6 +394,9 @@ fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
         incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
         incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
         incompatible(&still_open.check_local_packs(true).unwrap_err(), kind);
+        let mut retry = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        retry.write(&bytes).unwrap();
+        incompatible(&retry.finish().unwrap_err(), kind);
         assert_eq!(fs::read(path).unwrap(), newer);
 
         let counterpart = if unknown_index {
@@ -875,9 +878,10 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
     let (young, young_ids) = publish_objects(&store, &[&recent]);
     crate::refs::write_ref(&layout, "live", &live_ids[0]).unwrap();
     crate::refs::write_ref(&layout, "mixed", &mixed_ids[0]).unwrap();
-    for pair in [&live, &mixed, &old] {
+    for pair in [&live, &mixed] {
         set_pack_age(&pair.pack, 1);
     }
+    set_pack_age(&old.pack, 5);
     set_pack_age(&young.pack, 8);
     set_pack_age(&old.index, 8);
 
@@ -958,7 +962,7 @@ fn gc_keeps_pack_files_while_a_fetch_holds_the_prune_guard() {
 
 #[test]
 fn gc_sweeps_only_aged_recognized_pack_leftovers() {
-    use crate::ops::gc::run_gc;
+    use crate::ops::gc::run_gc_with_pack_report;
 
     let (_dir, layout, store) = fresh();
     let (retired, ids) = publish_objects(&store, &[&blob(b"no pack after interruption")]);
@@ -974,23 +978,40 @@ fn gc_sweeps_only_aged_recognized_pack_leftovers() {
     let sidecar = store
         .pack_dir()
         .join(format!(".{}.tmp.idx", "C".repeat(32)));
-    for path in [&staging, &recent, &sidecar] {
+    let non_hex = store
+        .pack_dir()
+        .join(format!(".{}.tmp.pack", "g".repeat(32)));
+    let directory = store
+        .pack_dir()
+        .join(format!(".{}.tmp.pack", "d".repeat(32)));
+    fs::create_dir(&directory).unwrap();
+    for path in [&staging, &recent, &sidecar, &non_hex] {
         fs::write(path, b"leftover").unwrap();
     }
-    for path in [&retired.index, &unpublished.pack, &staging, &sidecar] {
+    for path in [
+        &retired.index,
+        &unpublished.pack,
+        &staging,
+        &sidecar,
+        &non_hex,
+    ] {
         set_pack_age(path, 1);
     }
     set_pack_age(&recent, 8);
+    #[cfg(unix)]
+    set_pack_age(&directory, 1);
     assert!(!ObjectStore::open(&layout).unwrap().contains(&ids[0]));
     assert_eq!(store.check_local_packs(true).unwrap(), 0);
 
-    let preview = run_gc(&store, &layout, 10, 5, true).unwrap();
-    assert_eq!(preview.temp_files_pruned, 3);
+    let (_, preview) =
+        run_gc_with_pack_report(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+    assert_eq!(preview.pack_leftovers_pruned, 3);
     assert!(retired.index.exists());
-    let report = run_gc(&store, &layout, 10, 5, false).unwrap();
-    assert_eq!(report.temp_files_pruned, 3);
+    let (_, report) =
+        run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.pack_leftovers_pruned, 3);
     assert!(!retired.index.exists() && !unpublished.pack.exists() && !staging.exists());
-    assert!(recent.exists() && sidecar.exists());
+    assert!(recent.exists() && sidecar.exists() && non_hex.exists() && directory.is_dir());
 }
 
 #[test]
@@ -1033,4 +1054,163 @@ fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
     assert_eq!(reopened.check_local_packs(true).unwrap(), 0);
     run_gc(&reopened, &layout, u64::MAX, 0, false).unwrap();
     assert!(!pair.pack.exists() && !pair.index.exists());
+}
+
+#[test]
+fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    for (label, loose_age, pack_age, corrupt, keep) in [
+        ("old-loose", 1, 1, false, false),
+        ("newer-pack", 8, 9, false, false),
+        ("older-pack", 8, 1, false, true),
+        ("bad-pack", 1, 1, true, true),
+    ] {
+        let bytes = blob(label.as_bytes());
+        let h = store.write(&bytes).unwrap();
+        let loose = store.path_for(&h);
+        let (pair, _) = publish_objects(&store, &[&bytes]);
+        crate::refs::write_ref(&layout, label, &h).unwrap();
+        if corrupt {
+            let mut data = fs::read(&pair.pack).unwrap();
+            let payload = crate::pack::HEADER_LEN + crate::pack::ENTRY_FRAME_LEN;
+            data[payload + bytes.len() - 1] ^= 1;
+            fs::write(&pair.pack, data).unwrap();
+        }
+        set_pack_age(&pair.pack, pack_age);
+        set_pack_age(&loose, loose_age);
+
+        let (_, preview) =
+            run_gc_with_pack_report(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+        assert_eq!(
+            preview.loose_duplicates_pruned,
+            usize::from(!keep),
+            "{label}"
+        );
+        assert!(loose.is_file());
+        let guard = store.prune_guard().unwrap();
+        let (_, blocked) =
+            run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        assert_eq!(blocked.loose_duplicates_pruned, 0);
+        assert!(loose.is_file());
+        drop(guard);
+        let (_, packed) =
+            run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        assert_eq!(
+            packed.loose_duplicates_pruned,
+            usize::from(!keep),
+            "{label}"
+        );
+        assert_eq!(loose.is_file(), keep, "{label}");
+        assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn a_packed_leaf_probe_cannot_hide_edges_of_a_live_tree() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store) = fresh();
+    let (child_pack, children) = publish_objects(&store, &[&blob(b"tree child")]);
+    let tree = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"child".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: children[0],
+        }],
+    }))
+    .unwrap();
+    let root = store.write(&tree).unwrap();
+    crate::refs::write_ref(&layout, "live", &root).unwrap();
+
+    let (decoy, ids) = publish_objects(&store, &[&blob(b"incorrect leaf")]);
+    let index = super::Index::open(&decoy).unwrap();
+    let frame = index.find(&ids[0]).unwrap();
+    fs::write(&decoy.index, index::encode(decoy.key, &[(root, frame)])).unwrap();
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    gc.iter_object_hashes().unwrap(); // Put the incorrect locator in the cache.
+    run_gc(&gc, &layout, u64::MAX, 0, false).unwrap();
+    assert!(child_pack.pack.is_file());
+    assert!(gc.read(&children[0]).is_ok());
+}
+
+#[test]
+fn gc_preserves_a_pair_whose_missing_member_reappears_before_the_try_lock() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(b"same-key publication");
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    fs::remove_file(&pair.pack).unwrap();
+    let mut republished = false;
+    let (_, packed) = run_gc_with_pack_report(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        false,
+        &mut |phase, done, _| {
+            if phase == "gc" && done == 0 && !republished {
+                publish_objects(&store, &[&bytes]);
+                republished = true;
+            }
+        },
+    )
+    .unwrap();
+    assert!(republished);
+    assert_eq!(packed.pack_leftovers_pruned, 0);
+    assert_eq!(packed.packs_retired, 0);
+    assert!(pair.pack.is_file() && pair.index.is_file());
+    assert_eq!(store.read(&ids[0]).unwrap(), bytes);
+}
+
+#[test]
+fn gc_preserves_a_candidate_whose_index_inode_changes_at_the_same_mtime() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"changed index inode")]);
+    set_pack_age(&pair.index, 1);
+    let mut replaced = false;
+    let (_, packed) = run_gc_with_pack_report(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        false,
+        &mut |phase, done, _| {
+            if phase == "gc" && done == 0 && !replaced {
+                let stage = tempfile::NamedTempFile::new_in(store.pack_dir()).unwrap();
+                fs::write(stage.path(), fs::read(&pair.index).unwrap()).unwrap();
+                set_pack_age(stage.path(), 1);
+                stage.persist(&pair.index).unwrap();
+                replaced = true;
+            }
+        },
+    )
+    .unwrap();
+    assert!(replaced);
+    assert_eq!(packed.packs_retired, 0);
+    assert!(pair.pack.is_file() && pair.index.is_file());
+}
+
+#[test]
+fn same_key_publication_replaces_a_damaged_index_with_the_verified_index() {
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"verified by the new publisher");
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    let index = fs::read(&pair.index).unwrap();
+    let mut corrupt = index.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    fs::write(&pair.index, corrupt).unwrap();
+    assert!(store.check_local_packs(false).is_err());
+
+    let (published, _) = publish_objects(&store, &[&bytes]);
+    assert_eq!(pair.key, published.key);
+    assert_eq!(fs::read(&pair.index).unwrap(), index);
+    assert_eq!(store.check_local_packs(false).unwrap(), 0);
+    assert_eq!(store.read(&ids[0]).unwrap(), bytes);
 }

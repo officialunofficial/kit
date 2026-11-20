@@ -96,6 +96,10 @@ chunked blob.
   chunks are live.
 - An object is live when it is in `objects` or in `chunks`.
 
+Before a packed blob can end a walk, gc verifies its canonical bytes
+and id. A bad locator cannot hide the edges of a tree or manifest.
+Loose leaf probes read the object type as before.
+
 The walk keeps the chunk ids in a buffer that it sorts and deduplicates
 whenever the buffer would grow past the larger of twice its length after the
 last compaction and 1,048,576 ids, so the buffer stays near twice the number
@@ -404,14 +408,17 @@ clearing them when their coverage is unknown, so refetch can obtain
 verified copies. Use the exclusive `format` try-lock and the
 fetch-shortcut invalidation rules in SPEC-TRANSPORT §1.2 to exclude fetch
 while clearing records. An integrity repair does not advance refs or
-create applied-pack records. Unresolved corruption remains an error.
+create applied-pack records. A fetch that verifies and stages the exact
+same pack key can replace a damaged member with the staged copy. It makes
+the pack name durable before publishing the index. Unresolved corruption
+remains an error.
 
 
 ## Invariants
 
 | Invariant | Enforced by |
 |---|---|
-| No live object loses its last copy | loose pruning uses the complete retention mark. Duplicate and merge retirement require durable replacement coverage. A whole pack can also retire if every entry is unreachable ("Local pack maintenance") |
+| No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and merge retirement require durable replacement coverage. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

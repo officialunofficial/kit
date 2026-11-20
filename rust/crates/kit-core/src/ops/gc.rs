@@ -573,7 +573,7 @@ fn mark_live_observed(
         // Skipped ids must still leave the queue so every window progresses.
         debug_assert!(queue.len() < queued, "each probe window drains the queue");
         super::chunk_heads::try_each_in_order(&window, |(h, slot)| {
-            let _ = slot.set(store.object_type(h));
+            let _ = slot.set(store.gc_object_type(h));
             Ok::<(), GcRootsError>(())
         })?;
         for (h, slot) in window {
@@ -588,8 +588,8 @@ fn mark_live_observed(
                 return Err(GcRootsError::Truncated);
             }
             objects.insert(h);
-            // A blob or delta is a leaf. Its type is all gc needs, so its
-            // content is not read or verified (see `live_objects_with`).
+            // A blob or delta is a leaf. Packed leaf probes verify the id
+            // before letting the reported type end the walk.
             if matches!(
                 slot.into_inner().expect("each probe ran")?,
                 ObjectType::Blob | ObjectType::Delta
@@ -614,7 +614,7 @@ fn mark_live_observed(
     // Each check opens a chunk and reads its type, so on a cold disk the
     // checks wait on the disk, and run many at a time.
     let checked =
-        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.object_type(chunk) {
+        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.gc_object_type(chunk) {
             Ok(ObjectType::Blob) => Ok(()),
             Ok(_) => Err((*chunk, None)),
             Err(error) => Err((*chunk, Some(error))),
@@ -674,12 +674,8 @@ pub(crate) fn live_objects(
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
-/// Does not verify leaf (blob/delta) content integrity as part of the
-/// walk — see [`super::graph::reachable_objects`]'s "Content integrity
-/// of leaves" doc section. `gc` is therefore no longer an incidental
-/// corruption-detection pass over blob content the way it was before the
-/// object-type short-circuit; it still fails closed on a *missing* object, just not on a
-/// present-but-corrupted one.
+/// Loose leaves are probed by type. For packed leaves, verify the payload
+/// before trusting where the index points.
 ///
 /// # Errors
 ///
@@ -760,8 +756,14 @@ pub struct PackedGcReport {
     pub eligible_dead_bytes: u64,
     /// Live payload bytes in mixed packs with eligible dead entries.
     pub survivor_bytes: u64,
+    /// Published packs examined after the mark.
+    pub packs_scanned: usize,
     /// Whole packs retired, or eligible for retirement in a dry run.
     pub packs_retired: usize,
+    /// Abandoned staging files or lone pack and index files reclaimed.
+    pub pack_leftovers_pruned: usize,
+    /// Loose files reclaimed because a verified packed copy remains.
+    pub loose_duplicates_pruned: usize,
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
@@ -945,6 +947,16 @@ fn run_gc_with_progress_hook(
             report.bytes_reclaimed += len;
         }
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
+    }
+    if packed.packs_scanned != 0 {
+        store.sweep_loose_duplicates(
+            &pack_sweep,
+            &live,
+            now_secs,
+            grace_secs,
+            &mut report,
+            &mut packed,
+        )?;
     }
     progress("gc", report.scanned, report.bytes_reclaimed);
     Ok((report, packed))

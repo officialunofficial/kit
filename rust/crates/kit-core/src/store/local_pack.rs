@@ -10,10 +10,10 @@ use super::{ObjectStore, StoreError, StoreResult, format};
 
 mod gc;
 mod index;
-pub(super) use index::canonical_id;
 #[cfg(feature = "fuzzing")]
 pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
+pub(super) use index::{canonical_id, invalid};
 
 #[cfg(test)]
 mod tests;

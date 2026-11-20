@@ -218,7 +218,21 @@ pub fn run(args: &[String]) -> u8 {
             packed.packs_retired,
         );
     }
-    if report.dry_run {
+    if packed.pack_leftovers_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} local pack leftover(s)",
+            packed.pack_leftovers_pruned,
+        );
+    }
+    if packed.loose_duplicates_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} loose duplicate(s)",
+            packed.loose_duplicates_pruned,
+        );
+    }
+    if report.dry_run && packed.packs_scanned != 0 {
         let _ = writeln!(
             stderr,
             "gc: packed payload: {} wholly dead bytes, {} mixed dead bytes, {} grace-eligible dead bytes, {} predicted survivor bytes",

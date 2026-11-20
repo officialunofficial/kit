@@ -396,7 +396,9 @@ fn le_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().expect("u32 width"))
 }
 
-pub(super) fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+pub(in crate::store) fn invalid(
+    message: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
