@@ -825,4 +825,210 @@ mod tests {
             assert_eq!(counts, expected.into_iter().collect::<Vec<_>>());
         }
     }
+
+    /// A source that delivers a pack in two parts, as a transport that
+    /// resumes does, and says how: it asks the sink what it holds, continues
+    /// or begins again, and reports the outcome.
+    struct Interrupted {
+        bytes: Vec<u8>,
+        cut: usize,
+        restart: Option<kit_core::protocol::RestartReason>,
+    }
+
+    impl RemoteSource for Interrupted {
+        fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, crate::SourceError> {
+            Ok(Vec::new())
+        }
+        fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, crate::SourceError> {
+            Ok(Vec::new())
+        }
+        fn read_ref(&self, _: &str) -> Result<Option<Hash>, crate::SourceError> {
+            Ok(None)
+        }
+        fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, crate::SourceError> {
+            Err(crate::SourceError::ProtocolError)
+        }
+        fn download_pack(
+            &self,
+            _: &PackKey,
+            _: &str,
+            sink: &mut dyn PackSink,
+        ) -> Result<(), crate::SourceError> {
+            use kit_core::protocol::ResumeOutcome;
+            let total = self.bytes.len() as u64;
+            sink.begin(Some(total))?;
+            sink.write(&self.bytes[..self.cut])?;
+            assert_eq!(sink.retained(), self.cut as u64);
+            match self.restart {
+                None => {
+                    sink.resume(total, self.cut as u64)?;
+                    sink.note_resume(ResumeOutcome::Resumed {
+                        bytes: self.cut as u64,
+                    });
+                    sink.write(&self.bytes[self.cut..])?;
+                }
+                Some(reason) => {
+                    sink.note_resume(ResumeOutcome::Restarted { reason });
+                    sink.begin(Some(total))?;
+                    sink.write(&self.bytes)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn two_blob_pack() -> (Vec<u8>, PackKey) {
+        let mut writer = pack::PackWriter::new();
+        for data in [&b"first"[..], b"second"] {
+            let blob = blob(data);
+            writer
+                .push_raw(
+                    blob.id().unwrap(),
+                    &kit_core::serialize::serialize(&blob).unwrap(),
+                )
+                .unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let key = PackKey::from_hash(pack::pack_key(&bytes));
+        (bytes, key)
+    }
+
+    #[test]
+    fn a_resumed_download_counts_the_bytes_it_did_not_fetch_again() {
+        let (_td, _layout, store, _applied) = store_and_record();
+        let (bytes, key) = two_blob_pack();
+        let source = Interrupted {
+            bytes,
+            cut: 30,
+            restart: None,
+        };
+        let events = Events::default();
+        let mut savings = DownloadSavings::default();
+
+        let (pack, origin) = verified_pack(
+            &store,
+            &source,
+            "refs/heads/main",
+            &key,
+            &events,
+            &mut savings,
+        )
+        .unwrap();
+
+        assert!(origin == Origin::Remote);
+        assert_eq!(pack.len(), source.bytes.len() as u64);
+        assert_eq!(savings.bytes_resumed, 30);
+        assert_eq!(savings.resumes_restarted, 0);
+        assert_eq!(savings.bytes_reused, 0);
+        let events = events.0.lock().unwrap();
+        assert!(events.contains(&SyncEvent::DownloadResumed { bytes: 30 }));
+        // The progress shows the whole pack after the resume.
+        assert_eq!(
+            events.last(),
+            Some(&SyncEvent::DownloadProgress {
+                bytes: source.bytes.len() as u64,
+                bytes_total: Some(source.bytes.len() as u64)
+            })
+        );
+    }
+
+    #[test]
+    fn a_restarted_download_is_counted_with_its_reason() {
+        use kit_core::protocol::RestartReason;
+        let (_td, _layout, store, _applied) = store_and_record();
+        let (bytes, key) = two_blob_pack();
+        for (reason, name) in [
+            (RestartReason::Status, "status"),
+            (RestartReason::Validator, "validator"),
+            (RestartReason::Range, "range"),
+        ] {
+            let source = Interrupted {
+                bytes: bytes.clone(),
+                cut: 30,
+                restart: Some(reason),
+            };
+            let events = Events::default();
+            let mut savings = DownloadSavings::default();
+            verified_pack(
+                &store,
+                &source,
+                "refs/heads/main",
+                &key,
+                &events,
+                &mut savings,
+            )
+            .unwrap();
+            assert_eq!(savings.bytes_resumed, 0);
+            assert_eq!(savings.resumes_restarted, 1);
+            assert!(
+                events
+                    .0
+                    .lock()
+                    .unwrap()
+                    .contains(&SyncEvent::DownloadRestarted { reason: name })
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumed_body_that_is_not_the_pack_is_an_invalid_response() {
+        let (_td, _layout, store, _applied) = store_and_record();
+        let (mut bytes, key) = two_blob_pack();
+        let wrong = bytes.len() / 2;
+        bytes[wrong] ^= 1;
+        let source = Interrupted {
+            bytes,
+            cut: 30,
+            restart: None,
+        };
+        let error = verified_pack(
+            &store,
+            &source,
+            "refs/heads/main",
+            &key,
+            &NoopObserver,
+            &mut DownloadSavings::default(),
+        )
+        .map(drop)
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SyncError::Source(crate::SourceError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn a_kept_pack_comes_from_disk_and_is_counted() {
+        let (_td, _layout, store, _applied) = store_and_record();
+        let (bytes, key) = two_blob_pack();
+        let mut spool = PackSpool::create(&store.spool_dir(), PACK_BODY_LIMIT).unwrap();
+        kit_core::protocol::write_body(&mut spool, &bytes).unwrap();
+        let kept = spool.finish(&key).unwrap();
+        RetainedPacks::new(&store.spool_dir())
+            .keep(&key, &kept)
+            .unwrap();
+        let events = Events::default();
+        let mut savings = DownloadSavings::default();
+
+        // A source that fails the test if it is asked for the pack.
+        let (pack, origin) = verified_pack(
+            &store,
+            &ZeroPacks { len: u64::MAX },
+            "refs/heads/main",
+            &key,
+            &events,
+            &mut savings,
+        )
+        .unwrap();
+
+        assert!(origin == Origin::Kept);
+        assert_eq!(pack.len(), bytes.len() as u64);
+        assert_eq!(savings.bytes_reused, bytes.len() as u64);
+        assert_eq!(
+            *events.0.lock().unwrap(),
+            [SyncEvent::PackReused {
+                bytes: bytes.len() as u64
+            }]
+        );
+    }
 }

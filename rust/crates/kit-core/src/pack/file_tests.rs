@@ -1006,3 +1006,141 @@ fn the_file_reader_refuses_a_bad_header() {
         assert!(from_file.is_err());
     }
 }
+
+/// A pack of `len` bytes that do not compress.
+fn noise_pack(len: usize) -> (Vec<u8>, PackKey) {
+    let pack = build_pack(&[Gen::Raw {
+        seed: 9,
+        len,
+        repeat: false,
+    }]);
+    let key = PackKey::new(pack_key(&pack));
+    (pack, key)
+}
+
+#[test]
+fn a_spool_continues_an_interrupted_body_and_verifies_the_whole_pack() {
+    let (pack, key) = noise_pack(3 << 20);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    // Cuts in the buffer, on the buffer edge, past it, and at the last byte.
+    for cut in [
+        1,
+        100,
+        SPOOL_BUFFER - 1,
+        SPOOL_BUFFER,
+        SPOOL_BUFFER + 1,
+        5 << 19,
+        pack.len() - 1,
+    ] {
+        let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+        assert_eq!(s.retained(), 0, "before a body");
+        s.begin(Some(len)).unwrap();
+        assert_eq!(s.retained(), 0, "no byte yet");
+        s.write(&pack[..cut]).unwrap();
+        assert_eq!(s.retained(), cut as u64, "cut at {cut}");
+        s.resume(len, cut as u64).unwrap();
+        assert_eq!(s.retained(), cut as u64, "resuming keeps the prefix");
+        s.write(&pack[cut..]).unwrap();
+        let done = s.finish(&key).unwrap();
+        assert_eq!(done.len(), len);
+        let mut read = vec![0u8; pack.len()];
+        done.read_at(0, &mut read).unwrap();
+        assert!(read == pack, "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_prefix_of_another_body_fails_the_pack_check_after_a_resume() {
+    let (pack, key) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let mut damaged = pack.clone();
+    damaged[1000] ^= 1;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    s.begin(Some(len)).unwrap();
+    s.write(&damaged[..5000]).unwrap();
+    s.resume(len, 5000).unwrap();
+    s.write(&pack[5000..]).unwrap();
+    assert!(matches!(s.finish(&key), Err(PackError::KeyMismatch)));
+}
+
+#[test]
+fn a_spool_refuses_to_continue_what_it_does_not_hold() {
+    let (pack, _) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let begun = |declared: Option<u64>, taken: usize| {
+        let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+        s.begin(declared).unwrap();
+        s.write(&pack[..taken]).unwrap();
+        s
+    };
+
+    // No body begun.
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    assert!(matches!(s.resume(len, 0), Err(PackError::UnexpectedEof)));
+    // No byte taken.
+    assert!(begun(Some(len), 0).resume(len, 0).is_err());
+    // No declared length: the end of the body is not known.
+    let mut s = begun(None, 100);
+    assert_eq!(s.retained(), 0);
+    assert!(s.resume(len, 100).is_err());
+    // An offset that is not the prefix held, or a total that is not declared.
+    let mut s = begun(Some(len), 100);
+    assert!(s.resume(len, 99).is_err());
+    assert!(s.resume(len, 101).is_err());
+    assert!(s.resume(len + 1, 100).is_err());
+    assert!(s.resume(len - 1, 100).is_err());
+    s.resume(len, 100).unwrap();
+    // A prefix that already is the whole body has nothing to continue.
+    let mut s = begun(Some(100), 100);
+    assert_eq!(s.retained(), 100);
+    assert!(s.resume(100, 100).is_err());
+    // A body that ended past its length keeps nothing.
+    let mut s = begun(Some(100), 50);
+    assert!(s.write(&pack[..100]).is_err());
+    assert_eq!(s.retained(), 0);
+    assert!(s.resume(100, 50).is_err());
+    // A new body starts over.
+    let mut s = begun(Some(len), 100);
+    s.begin(Some(len)).unwrap();
+    assert_eq!(s.retained(), 0);
+}
+
+#[test]
+fn a_sink_view_of_a_spool_resumes_and_maps_refusals() {
+    let (pack, key) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    let sink: &mut dyn PackSink = &mut s;
+    sink.begin(Some(len)).unwrap();
+    sink.write(&pack[..200]).unwrap();
+    assert_eq!(sink.retained(), 200);
+    assert!(matches!(
+        sink.resume(len, 199),
+        Err(crate::protocol::TransportError::ProtocolError)
+    ));
+    sink.resume(len, 200).unwrap();
+    sink.write(&pack[200..]).unwrap();
+    assert!(s.finish(&key).is_ok());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_spool_that_failed_to_write_keeps_nothing_to_continue() {
+    let (pack, _) = noise_pack(3 << 20);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    s.begin(Some(len)).unwrap();
+    s.write(&pack[..100]).unwrap();
+    {
+        let _full = crate::fault::fail_writes(crate::fault::Site::Spool);
+        assert!(s.write(&pack[100..(2 << 20)]).is_err());
+    }
+    assert!(s.failed().is_some());
+    assert_eq!(s.retained(), 0);
+    assert!(matches!(s.resume(len, 100), Err(PackError::Io(_))));
+}
