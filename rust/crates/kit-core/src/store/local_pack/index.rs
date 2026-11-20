@@ -569,6 +569,38 @@ mod tests {
     }
 
     #[test]
+    fn index_decode_refuses_truncated_and_extended_indexes() {
+        let pair = Pair::new(Path::new(""), [0; 32]);
+        let mut short = encode(pair.key, &[]);
+        short.pop();
+        let mut long = encode(pair.key, &[]);
+        long.push(0);
+        for bytes in [Vec::new(), short, long] {
+            let error = Index::decode(pair.clone(), bytes, 0, HEADER_LEN as u64).unwrap_err();
+            assert!(
+                error.to_string().contains("length does not match"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_validation_rejects_bad_magic_versions_and_unindexed_bytes() {
+        let pair = Pair::new(Path::new(""), [0; 32]);
+        let bytes = encode(pair.key, &[]);
+        let end = HEADER_LEN as u64;
+        assert!(Index::decode(pair.clone(), bytes.clone(), 0, end + 1).is_err());
+        for offset in [0, 4] {
+            let mut invalid = bytes.clone();
+            invalid[offset] ^= 1;
+            let checksum_at = invalid.len() - 32;
+            let checksum = blake3::hash(&invalid[..checksum_at]);
+            invalid[checksum_at..].copy_from_slice(checksum.as_bytes());
+            assert!(Index::decode(pair.clone(), invalid, 0, end).is_err());
+        }
+    }
+
+    #[test]
     fn index_lookup_requires_distinct_sorted_ids_in_each_fanout_bucket() {
         let mut first = [0x40; 32];
         let mut last = first;

@@ -98,6 +98,41 @@ fn rescans_from_legacy_open_and_covers_the_object_accessors() {
 }
 
 #[test]
+fn bulk_reuse_reports_children_and_refreshes_a_packed_tree_once() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    let (_dir, _layout, store) = fresh();
+    let child = store.write(&blob(b"child")).unwrap();
+    let tree = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"entry".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: child,
+        }],
+    }))
+    .unwrap();
+    let id = store.write(&tree).unwrap();
+    assert_eq!(store.bulk_writer().reuse_object(&id).unwrap(), [child]);
+
+    let mut writer = writer(&store);
+    assert_eq!(writer.write(&tree).unwrap(), id);
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    fs::remove_file(store.path_for(&id)).unwrap();
+
+    let file = fs::File::open(pair.pack).unwrap();
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    let mut bulk = store.bulk_writer();
+    file.set_modified(old).unwrap();
+    assert_eq!(bulk.reuse_object(&id).unwrap(), [child]);
+    assert!(file.metadata().unwrap().modified().unwrap() > old);
+    file.set_modified(old).unwrap();
+    assert_eq!(bulk.reuse_object(&id).unwrap(), [child]);
+    assert_eq!(file.metadata().unwrap().modified().unwrap(), old);
+}
+
+#[test]
 fn write_sink_presence_checks_use_staged_loose_and_known_pack_objects() {
     use crate::store::ObjectSink;
 
@@ -171,6 +206,10 @@ fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
     ));
     assert!(matches!(
         store.read_unverified(&id),
+        Err(StoreError::HashMismatch { .. })
+    ));
+    assert!(matches!(
+        store.bulk_writer().reuse_object(&id),
         Err(StoreError::HashMismatch { .. })
     ));
     assert_ne!(store.read_raw_for_verification(&id).unwrap(), bytes);
@@ -253,6 +292,35 @@ fn malformed_packed_objects_keep_mismatch_classification() {
         assert!(store.check_local_packs(true).is_err());
         assert_eq!(fs::read(&pair.index).unwrap(), index);
     }
+}
+
+#[test]
+fn verifier_does_not_treat_invalid_encoding_as_a_hash_mismatch() {
+    let (_dir, layout, store) = fresh();
+    let mut bytes = blob(b"encoded object");
+    let mut writer = writer(&store);
+    writer.write(&bytes).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+
+    bytes[0] = u8::MAX;
+    let id = *blake3::hash(&bytes).as_bytes();
+    let offset = (crate::pack::HEADER_LEN + crate::pack::ENTRY_FRAME_LEN) as u64;
+    let frame = index::Frame {
+        offset,
+        len: u32::try_from(bytes.len()).unwrap(),
+    };
+    let mut pack = fs::OpenOptions::new().write(true).open(pair.pack).unwrap();
+    pack.seek(SeekFrom::Start(offset)).unwrap();
+    pack.write_all(&bytes).unwrap();
+    fs::write(pair.index, index::encode(pair.key, &[(id, frame)])).unwrap();
+
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(matches!(
+        reader.read_raw_for_verification(&id),
+        Err(StoreError::Decode(_))
+    ));
 }
 
 #[test]

@@ -542,10 +542,7 @@ impl ObjectStore {
     fn raw_at(location: &local_pack::Location) -> StoreResult<Vec<u8>> {
         let contents = location.open()?;
         let len = contents.len;
-        if len > MAX_RAW_OBJECT_SIZE as u64 {
-            return Err(StoreError::ObjectTooLarge);
-        }
-        let capacity = usize::try_from(len).map_err(|_| StoreError::ObjectTooLarge)?;
+        let capacity = raw_capacity(len)?;
         let bytes = read_to_end_capped(contents, capacity, MAX_RAW_OBJECT_SIZE)?;
         if location.is_packed() && bytes.len() as u64 != len {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
@@ -623,10 +620,7 @@ impl ObjectStore {
         let mut allocation_error = None;
         let result = self.read_with(h, |location| {
             let mut contents = location.open()?;
-            if contents.len > MAX_RAW_OBJECT_SIZE as u64 {
-                return Err(StoreError::ObjectTooLarge);
-            }
-            let len = usize::try_from(contents.len).map_err(|_| StoreError::ObjectTooLarge)?;
+            let len = raw_capacity(contents.len)?;
             let mut bytes = match allocate(len) {
                 Ok(bytes) => bytes,
                 Err(e) => {
@@ -1306,6 +1300,14 @@ pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn raw_capacity(len: u64) -> StoreResult<usize> {
+    let len = usize::try_from(len).map_err(|_| StoreError::ObjectTooLarge)?;
+    if len > MAX_RAW_OBJECT_SIZE {
+        return Err(StoreError::ObjectTooLarge);
+    }
+    Ok(len)
+}
+
 /// Read `reader` to its end into a buffer pre-sized for `size` bytes.
 /// The read stops after `limit + 1` bytes, so a file that grew after
 /// the size check cannot grow the buffer past the limit.
@@ -1816,6 +1818,17 @@ mod tests {
         drop(f);
         let err = store.read(&h).unwrap_err();
         assert!(matches!(err, StoreError::ObjectTooLarge));
+    }
+
+    #[test]
+    fn raw_capacity_accepts_the_limit_and_refuses_larger_objects() {
+        assert_eq!(
+            raw_capacity(MAX_RAW_OBJECT_SIZE as u64).unwrap(),
+            MAX_RAW_OBJECT_SIZE
+        );
+        for len in [MAX_RAW_OBJECT_SIZE as u64 + 1, u64::MAX] {
+            assert!(matches!(raw_capacity(len), Err(StoreError::ObjectTooLarge)));
+        }
     }
 
     #[test]
