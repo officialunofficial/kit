@@ -10,6 +10,7 @@
 //! per-endpoint credential gate applies to named remotes too —
 //! trust is keyed on the resolved ENDPOINT, never the remote name.
 
+use std::cell::RefCell;
 use std::io::Write;
 
 use clap::{Parser, ValueEnum};
@@ -216,6 +217,7 @@ fn push_tags(
         Err(e) => return emit_err_json(&format!("open remote: {e}"), exit::PROTOCOL_ERROR, json),
     };
     let tx = remote.tx;
+    let published = RefCell::new(Vec::new());
     let outcome = {
         let outcome = tx
             .with_source(|source| {
@@ -231,22 +233,30 @@ fn push_tags(
                         &resolved.endpoint,
                     ),
                     progress.terminal(),
+                    &published,
                 )
             })
             .and_then(|result| result);
         drop(progress);
         outcome
     };
-    let results = match outcome {
-        Ok(results) => results,
-        Err(libkit::transfer::Error::Interrupted) => {
-            return emit_err_json(
-                interrupted_hint(&resolved.endpoint, tx.upload_limits()),
-                exit::TEMPFAIL,
-                json,
-            );
+    let (results, failure) = match outcome {
+        Ok(results) => (results, None),
+        Err(error) => {
+            let (message, code) = match error {
+                libkit::transfer::Error::Interrupted => (
+                    interrupted_hint(&resolved.endpoint, tx.upload_limits()).to_owned(),
+                    exit::TEMPFAIL,
+                ),
+                other => push_error_details(other, None),
+            };
+            let mut published = published.into_inner();
+            if published.is_empty() {
+                return emit_err_json(&message, code, json);
+            }
+            published.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            (published, Some((message, code)))
         }
-        Err(e) => return emit_push_error(e, None, json),
     };
     let mut stderr = std::io::stderr().lock();
     let (mut pushed, mut rejected) = (0u64, 0u64);
@@ -281,12 +291,19 @@ fn push_tags(
     drop(stderr);
     if json {
         let mut obj = JsonObject::new();
-        obj.field_bool("ok", rejected == 0)
+        obj.field_bool("ok", failure.is_none() && rejected == 0)
             .field_str("remote", &resolved.name)
             .field_str("endpoint", &resolved.endpoint)
-            .field_u64("tags_pushed", pushed)
-            .field_u64("tags_rejected", rejected);
+            .field_u64("tags_pushed", pushed);
+        if let Some((message, code)) = &failure {
+            set_json_error(&mut obj, message, *code);
+        } else {
+            obj.field_u64("tags_rejected", rejected);
+        }
         emit_json_stdout(obj);
+    }
+    if let Some((message, code)) = failure {
+        return emit_err(&message, code);
     }
     if rejected > 0 {
         return exit::GENERAL_ERROR;
@@ -786,13 +803,18 @@ fn emit_json_stdout(obj: JsonObject) {
 fn emit_err_json(msg: &str, code: u8, json: bool) -> u8 {
     if json {
         let mut obj = JsonObject::new();
-        obj.field_bool("ok", false).field_str("error", msg);
-        if code == exit::NOPERM {
-            obj.field_bool("admission_required", true);
-        }
+        obj.field_bool("ok", false);
+        set_json_error(&mut obj, msg, code);
         emit_json_stdout(obj);
     }
     emit_err(msg, code)
+}
+
+fn set_json_error(obj: &mut JsonObject, msg: &str, code: u8) {
+    obj.field_str("error", msg);
+    if code == exit::NOPERM {
+        obj.field_bool("admission_required", true);
+    }
 }
 
 /// `msg`, followed by the published prefix a split push left behind, if any.
@@ -808,6 +830,14 @@ fn emit_push_error(
     prefix: Option<&libkit::transfer::PublishedPrefix>,
     json: bool,
 ) -> u8 {
+    let (message, code) = push_error_details(error, prefix);
+    emit_err_json(&message, code, json)
+}
+
+fn push_error_details(
+    error: libkit::transfer::Error,
+    prefix: Option<&libkit::transfer::PublishedPrefix>,
+) -> (String, u8) {
     match error {
         libkit::transfer::Error::Transport(
             kit_core::protocol::TransportError::AdmissionRequired(required),
@@ -819,19 +849,17 @@ fn emit_push_error(
             } else {
                 ""
             };
-            emit_err_json(&format!("push: {required}{hint}"), exit::NOPERM, json)
+            (format!("push: {required}{hint}"), exit::NOPERM)
         }
         libkit::transfer::Error::Transport(
             kit_core::protocol::TransportError::AdmissionConfiguration(message),
-        ) => emit_err_json(
-            &format!("push: admission configuration: {message}"),
+        ) => (
+            format!("push: admission configuration: {message}"),
             exit::CONFIG_ERROR,
-            json,
         ),
-        other => emit_err_json(
-            &with_prefix(format!("push: {other}"), prefix),
+        other => (
+            with_prefix(format!("push: {other}"), prefix),
             exit::GENERAL_ERROR,
-            json,
         ),
     }
 }

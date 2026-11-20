@@ -192,6 +192,17 @@ filter = '(binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branche
 threads-required = "num-test-threads"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# Publishing 5,001 tags and their maps takes thousands of filesystem barriers.
+[[profile.default.overrides]]
+filter = 'binary(ssh_tag_push) and test(=a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+[[profile.ci.overrides]]
+filter = 'binary(ssh_tag_push) and test(=a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
 # These closure and pack checks build and remove many small files. Run them
 # alone on APFS with the same five-minute ceiling as the history fixtures.
 [[profile.default.overrides]]

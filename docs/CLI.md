@@ -2220,18 +2220,18 @@ that kit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 
-- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** stop a local command at once.
-  Every write is a temp file renamed into place, so a stopped command
-  leaves no half-written ref or index. `checkout` and `reset --hard`
-  write the files first and then the branch, HEAD and the index
-  together, as git does: a stopped one leaves its branch, HEAD and the
-  index where they were, the files it wrote show as local changes (new
-  files as untracked), and the same command run again with `-f`
-  finishes it.
-  `kit gc` sweeps the object temp files a stopped command leaves, the
-  next restore that writes into a directory (a checkout, `kit reset
-  --hard`, a pull) removes the worktree temp files left there, and a temp
-  file left beside a ref is never read as one.
+- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** usually stop a local command
+  at once. `reset --hard` writes the files first, then updates the branch,
+  HEAD, and index together. If it stops during the file writes, the files it
+  wrote show as local changes. Rerun it with `-f` to finish.
+- When `checkout` or `switch` starts restoring files for a branch or detached
+  HEAD, the first signal lets it finish updating the worktree, HEAD, and
+  index. A second signal stops it immediately. Rerun with `-f` to finish an
+  interrupted switch.
+- `kit gc` sweeps object temporary files. The next restore that writes into
+  a directory removes stale regular restore temporary files there. Status
+  and add skip untracked restore temporary files and symlinks. Ref reads
+  skip temporary files.
 - `push`, `pull`, `fetch`, `clone`, `log`, `reflog`, `grant`, `epoch` and
   `visibility` instead set a graceful-shutdown flag on the first signal.
   They poll it at natural checkpoints and exit with `tempfail` (75) so the
