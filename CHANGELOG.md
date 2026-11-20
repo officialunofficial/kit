@@ -16,6 +16,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit push --delete <remote> <name>` deletes a tag whose name is too long for a branch.
 - Let checkout finish switching branches after the first Ctrl-C during a restore. A second Ctrl-C stops it immediately.
 - Keep untracked restore temporary files out of status and add.
+- Keep all symlinks intact when saving a trust catalog through a dangling chain.
+- Reduce stderr writes when printing the commit summary.
+- Resolve relative clone destinations once before restoring objects.
 
 ## [0.9.0] - 2026-11-19
 
