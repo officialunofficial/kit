@@ -1370,7 +1370,7 @@ impl LocationAttempt {
     }
 }
 
-fn header_text<'a>(headers: &'a HeaderMap, name: http::header::HeaderName) -> Option<&'a str> {
+fn header_text(headers: &HeaderMap, name: http::header::HeaderName) -> Option<&str> {
     headers.get(name)?.to_str().ok()
 }
 
@@ -1412,52 +1412,19 @@ impl NativeHttp {
         progress.mark();
         let status = response.status().as_u16();
         let headers = response.headers();
-        let length = |headers: &HeaderMap| match headers.get(CONTENT_LENGTH) {
-            None => Ok(None),
-            Some(value) => value
-                .to_str()
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .map(Some)
-                .ok_or("pack location length is invalid"),
-        };
         let mut from = None;
         if let Some((held, offset)) = &resume {
-            match status {
-                206 => {
-                    let accepted =
-                        length(headers)
-                            .map_err(|_| RestartReason::Range)
-                            .and_then(|length| {
-                                held.accepts(
-                                    *offset,
-                                    status,
-                                    header_text(headers, ETAG),
-                                    header_text(headers, CONTENT_RANGE),
-                                    length,
-                                )
-                            });
-                    if let Err(reason) = accepted {
-                        sink.note_resume(ResumeOutcome::Restarted { reason });
-                        *validator = None;
-                        return LocationAttempt::Restart;
-                    }
-                    from = Some((held.total(), *offset));
-                }
-                412 | 416 => {
-                    let reason = if status == 412 {
-                        RestartReason::Validator
-                    } else {
-                        RestartReason::Range
-                    };
+            match resumed_answer(held, *offset, status, headers) {
+                Answer::Rest => from = Some((held.total(), *offset)),
+                Answer::Restart(reason) => {
                     sink.note_resume(ResumeOutcome::Restarted { reason });
                     *validator = None;
                     return LocationAttempt::Restart;
                 }
-                200 => sink.note_resume(ResumeOutcome::Restarted {
+                Answer::Full => sink.note_resume(ResumeOutcome::Restarted {
                     reason: RestartReason::Status,
                 }),
-                _ => {}
+                Answer::Other => {}
             }
         }
         if from.is_none() && status != 200 {
@@ -1483,7 +1450,7 @@ impl NativeHttp {
                 offset
             }
             None => {
-                let declared = match length(headers) {
+                let declared = match declared_length(headers) {
                     Ok(declared) => declared,
                     Err(cause) => return LocationAttempt::refused(cause),
                 };
@@ -1499,27 +1466,94 @@ impl NativeHttp {
                 0
             }
         };
-        let mut body = response.into_body();
-        while let Some(frame) = body.frame().await {
-            progress.mark();
-            let Ok(frame) = frame else {
-                return LocationAttempt::interrupted("pack location body failed");
-            };
-            if let Some(data) = frame.data_ref() {
-                received = received.saturating_add(data.len() as u64);
-                if received > response_limit {
-                    return LocationAttempt::refused("pack location body exceeded the size limit");
-                }
-                if let Err(error) = sink.write(data) {
-                    return LocationAttempt::refused(format!(
-                        "pack location body refused: {error}"
-                    ));
-                }
-                progress.mark();
+        stream_location_body(
+            response.into_body(),
+            sink,
+            received,
+            response_limit,
+            progress,
+        )
+        .await
+    }
+}
+
+/// How a response to a ranged request relates to the prefix held.
+enum Answer {
+    /// Exactly the rest of the body.
+    Rest,
+    /// A reply that cannot be used; read the location again from the start.
+    Restart(RestartReason),
+    /// The whole body, as if no range was asked.
+    Full,
+    /// Anything else; the caller decides.
+    Other,
+}
+
+fn resumed_answer(held: &Validator, offset: u64, status: u16, headers: &HeaderMap) -> Answer {
+    match status {
+        206 => {
+            let accepted = declared_length(headers)
+                .map_err(|_| RestartReason::Range)
+                .and_then(|length| {
+                    held.accepts(
+                        offset,
+                        status,
+                        header_text(headers, ETAG),
+                        header_text(headers, CONTENT_RANGE),
+                        length,
+                    )
+                });
+            match accepted {
+                Ok(()) => Answer::Rest,
+                Err(reason) => Answer::Restart(reason),
             }
         }
-        LocationAttempt::Done
+        412 => Answer::Restart(RestartReason::Validator),
+        416 => Answer::Restart(RestartReason::Range),
+        200 => Answer::Full,
+        _ => Answer::Other,
     }
+}
+
+/// The `Content-Length` of a response, if it has one.
+fn declared_length(headers: &HeaderMap) -> Result<Option<u64>, &'static str> {
+    match headers.get(CONTENT_LENGTH) {
+        None => Ok(None),
+        Some(value) => value
+            .to_str()
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Some)
+            .ok_or("pack location length is invalid"),
+    }
+}
+
+/// Write the frames of a location body into the sink. `received` counts the
+/// bytes already in it.
+async fn stream_location_body(
+    mut body: hyper::body::Incoming,
+    sink: &mut dyn PackSink,
+    mut received: u64,
+    response_limit: u64,
+    progress: &Progress,
+) -> LocationAttempt {
+    while let Some(frame) = body.frame().await {
+        progress.mark();
+        let Ok(frame) = frame else {
+            return LocationAttempt::interrupted("pack location body failed");
+        };
+        if let Some(data) = frame.data_ref() {
+            received = received.saturating_add(data.len() as u64);
+            if received > response_limit {
+                return LocationAttempt::refused("pack location body exceeded the size limit");
+            }
+            if let Err(error) = sink.write(data) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
+            }
+            progress.mark();
+        }
+    }
+    LocationAttempt::Done
 }
 
 impl HttpTransport for NativeHttp {
