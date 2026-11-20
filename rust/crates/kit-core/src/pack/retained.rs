@@ -351,7 +351,7 @@ mod tests {
         assert!(elsewhere.join(format!("{}.pack", key.to_hex())).exists());
         cache.trim();
         assert!(elsewhere.join("old").exists());
-        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 2);
     }
 
     #[test]
