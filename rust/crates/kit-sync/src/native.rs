@@ -1439,32 +1439,25 @@ impl NativeHttp {
                     .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")) => {}
             _ => return LocationAttempt::refused("encoded pack location body refused"),
         }
-        let mut received = match from {
-            Some((total, offset)) => {
-                if let Err(error) = sink.resume(total, offset) {
-                    return LocationAttempt::refused(format!(
-                        "pack location body refused: {error}"
-                    ));
-                }
-                sink.note_resume(ResumeOutcome::Resumed { bytes: offset });
-                offset
+        let received = if let Some((total, offset)) = from {
+            if let Err(error) = sink.resume(total, offset) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
             }
-            None => {
-                let declared = match declared_length(headers) {
-                    Ok(declared) => declared,
-                    Err(cause) => return LocationAttempt::refused(cause),
-                };
-                if declared.is_some_and(|declared| declared > response_limit) {
-                    return LocationAttempt::refused("pack location body exceeded the size limit");
-                }
-                *validator = Validator::new(header_text(headers, ETAG), declared);
-                if let Err(error) = sink.begin(declared) {
-                    return LocationAttempt::refused(format!(
-                        "pack location body refused: {error}"
-                    ));
-                }
-                0
+            sink.note_resume(ResumeOutcome::Resumed { bytes: offset });
+            offset
+        } else {
+            let declared = match declared_length(headers) {
+                Ok(declared) => declared,
+                Err(cause) => return LocationAttempt::refused(cause),
+            };
+            if declared.is_some_and(|declared| declared > response_limit) {
+                return LocationAttempt::refused("pack location body exceeded the size limit");
             }
+            *validator = Validator::new(header_text(headers, ETAG), declared);
+            if let Err(error) = sink.begin(declared) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
+            }
+            0
         };
         stream_location_body(
             response.into_body(),
