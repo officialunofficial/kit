@@ -905,9 +905,10 @@ starting `W/`) and a `Content-Length`. The request is the same credential-free
 with that `ETag`; these are the only headers a continuation adds. The client MUST
 take the body only from a `206` whose `ETag` is the first answer's, whose
 `Content-Range` is `bytes <n>-<total-1>/<total>` for the first answer's length,
-and whose `Content-Length` is `total - n`. It MUST treat any other answer,
-including `200`, `412`, `416` and a `206` that fails a check, as a request to read
-the location again from its start, and MUST NOT append its body to the prefix.
+whose `Content-Length` is `total - n`, and that has no content coding. It MUST
+treat a `200`, a `412`, a `416` and a `206` that fails a check as a request to read
+the location again from its start, and MUST NOT append such a body to the prefix.
+Any other status ends the fetch as it does for a first request.
 A prefix does not authenticate itself: the client verifies the whole pack's
 length and key, as for any location bytes, and on a mismatch falls back as above.
 A client SHOULD bound the number of continuations of one location, and ends the

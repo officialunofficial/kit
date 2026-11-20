@@ -259,8 +259,8 @@ pub(crate) fn apply_pack_chain(
         // a window that did not land. Keep them for a retry. A pack that came
         // from the disk is still there.
         for held in &unsettled {
-            if held.origin == Origin::Remote {
-                let _ = retained.keep(&held.key, &held.pack);
+            if let (Origin::Remote, Some(pack)) = (held.origin, &held.pack) {
+                let _ = retained.keep(&held.key, pack);
             }
         }
     }
@@ -268,10 +268,21 @@ pub(crate) fn apply_pack_chain(
 }
 
 /// A verified pack that no window has made durable yet.
+///
+/// Only the newest few keep their pack open: more would hold a file each
+/// until a window lands, and a retry cannot use more than the cache holds.
 struct Unsettled {
     key: PackKey,
-    pack: VerifiedPack,
+    pack: Option<VerifiedPack>,
     origin: Origin,
+}
+
+/// Close all but the newest [`RetainedPacks::LIMIT`] packs of `unsettled`.
+fn release_older(unsettled: &mut [Unsettled]) {
+    let older = unsettled.len().saturating_sub(RetainedPacks::LIMIT);
+    for held in &mut unsettled[..older] {
+        held.pack = None;
+    }
 }
 
 /// Drop the packs `applied` records: their objects are in the store. A kept
@@ -313,6 +324,8 @@ fn apply_chain(
         }
         let key = PackKey::from_hash(pk);
         if applied.contains(&key) || publication.completed(&key) {
+            // Applied meanwhile, so a copy kept for it is of no use.
+            retained.discard(&key);
             done.skipped += 1;
             continue;
         }
@@ -324,9 +337,14 @@ fn apply_chain(
                     break;
                 }
             };
-        unsettled.push(Unsettled { key, pack, origin });
+        unsettled.push(Unsettled {
+            key,
+            pack: Some(pack),
+            origin,
+        });
         let held = unsettled.last().expect("pushed a pack");
-        let decoded = decode_pack(store, &held.pack, publication.pending(), require_signed);
+        let pack = held.pack.as_ref().expect("the newest pack is open");
+        let decoded = decode_pack(store, pack, publication.pending(), require_signed);
         let (spool, unpacked) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
@@ -336,6 +354,7 @@ fn apply_chain(
         };
         publication.accept(&spool, key, observer, remote, applied)?;
         settle(unsettled, applied, retained);
+        release_older(unsettled);
         if unpacked > 0 {
             observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
         }
@@ -1043,5 +1062,63 @@ mod tests {
                 bytes: bytes.len() as u64
             }]
         );
+    }
+
+    fn unsettled_pack(store: &ObjectStore, origin: Origin) -> Unsettled {
+        let (bytes, key) = two_blob_pack();
+        let mut spool = PackSpool::create(&store.spool_dir(), PACK_BODY_LIMIT).unwrap();
+        kit_core::protocol::write_body(&mut spool, &bytes).unwrap();
+        Unsettled {
+            key,
+            pack: Some(spool.finish(&key).unwrap()),
+            origin,
+        }
+    }
+
+    #[test]
+    fn only_the_newest_unsettled_packs_stay_open() {
+        let (_td, _layout, store, _applied) = store_and_record();
+        let mut unsettled: Vec<Unsettled> = (0..RetainedPacks::LIMIT + 3)
+            .map(|_| unsettled_pack(&store, Origin::Remote))
+            .collect();
+        release_older(&mut unsettled);
+        let open: Vec<bool> = unsettled.iter().map(|held| held.pack.is_some()).collect();
+        let mut expected = vec![false; 3];
+        expected.extend(vec![true; RetainedPacks::LIMIT]);
+        assert_eq!(open, expected);
+        // Releasing again, or with few packs, changes nothing.
+        release_older(&mut unsettled);
+        assert_eq!(
+            unsettled.iter().filter(|held| held.pack.is_some()).count(),
+            RetainedPacks::LIMIT
+        );
+        unsettled.truncate(2);
+        release_older(&mut unsettled);
+        assert_eq!(
+            unsettled.iter().filter(|held| held.pack.is_some()).count(),
+            0
+        );
+    }
+
+    #[test]
+    fn settling_drops_recorded_packs_and_removes_a_kept_one_from_disk() {
+        let (_td, _layout, store, mut applied) = store_and_record();
+        let retained = RetainedPacks::new(&store.spool_dir());
+        let mut remote = unsettled_pack(&store, Origin::Remote);
+        remote.key = PackKey::from_hash(hash::hash(b"another pack"));
+        let kept = unsettled_pack(&store, Origin::Kept);
+        let kept_key = kept.key;
+        retained
+            .keep(&kept_key, kept.pack.as_ref().unwrap())
+            .unwrap();
+        applied.record_applied(&kept_key).unwrap();
+        let mut unsettled = vec![remote, kept];
+
+        // Only the kept pack is recorded: it leaves the list and the disk.
+        settle(&mut unsettled, &applied, &retained);
+
+        assert_eq!(unsettled.len(), 1);
+        assert!(unsettled[0].origin == Origin::Remote);
+        assert!(retained.take(&kept_key).is_none(), "the kept copy is gone");
     }
 }

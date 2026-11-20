@@ -553,13 +553,18 @@ impl S3Transport {
                 if let Some((held, offset)) = &resume {
                     match status {
                         206 => {
-                            let accepted = held.accepts(
-                                *offset,
-                                status,
-                                header(&resp, "etag"),
-                                header(&resp, "content-range"),
-                                resp.content_length(),
-                            );
+                            let accepted = if identity_coded(&resp) {
+                                held.accepts(
+                                    *offset,
+                                    status,
+                                    header(&resp, "etag"),
+                                    header(&resp, "content-range"),
+                                    resp.content_length(),
+                                )
+                            } else {
+                                // Encoded bytes are not the bytes of the pack.
+                                Err(RestartReason::Range)
+                            };
                             if let Err(reason) = accepted {
                                 sink.note_resume(ResumeOutcome::Restarted { reason });
                                 resume = None;
@@ -610,6 +615,18 @@ impl S3Transport {
 /// The value of response header `name`, when it is text.
 fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
     resp.headers().get(name)?.to_str().ok()
+}
+
+/// Whether the body of `resp` is sent as it is, with no content coding.
+fn identity_coded(resp: &Response) -> bool {
+    resp.headers()
+        .get_all("content-encoding")
+        .iter()
+        .all(|value| {
+            value
+                .to_str()
+                .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity"))
+        })
 }
 
 /// The lowercase hex SHA-256 of `pack`'s `len()` bytes, read once from

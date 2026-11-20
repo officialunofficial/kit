@@ -508,6 +508,11 @@ mod resume {
                 Box::new(|a| a.without("content-range")),
             ),
             (
+                "coded",
+                RestartReason::Range,
+                Box::new(|a| a.header("content-encoding", "gzip")),
+            ),
+            (
                 "wrong length",
                 RestartReason::Range,
                 Box::new(|mut a| {

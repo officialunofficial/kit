@@ -1430,14 +1430,8 @@ impl NativeHttp {
         if from.is_none() && status != 200 {
             return LocationAttempt::refused("pack location response was not OK");
         }
-        let mut codings = headers.get_all(CONTENT_ENCODING).iter();
-        match (codings.next(), codings.next()) {
-            (None, _) => {}
-            (Some(coding), None)
-                if coding
-                    .to_str()
-                    .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")) => {}
-            _ => return LocationAttempt::refused("encoded pack location body refused"),
+        if !identity_coded(headers) {
+            return LocationAttempt::refused("encoded pack location body refused");
         }
         let received = if let Some((total, offset)) = from {
             if let Err(error) = sink.resume(total, offset) {
@@ -1484,6 +1478,7 @@ enum Answer {
 
 fn resumed_answer(held: &Validator, offset: u64, status: u16, headers: &HeaderMap) -> Answer {
     match status {
+        206 if !identity_coded(headers) => Answer::Restart(RestartReason::Range),
         206 => {
             let accepted = declared_length(headers)
                 .map_err(|_| RestartReason::Range)
@@ -1505,6 +1500,18 @@ fn resumed_answer(held: &Validator, offset: u64, status: u16, headers: &HeaderMa
         416 => Answer::Restart(RestartReason::Range),
         200 => Answer::Full,
         _ => Answer::Other,
+    }
+}
+
+/// Whether a body is sent as it is: no `Content-Encoding`, or only `identity`.
+fn identity_coded(headers: &HeaderMap) -> bool {
+    let mut codings = headers.get_all(CONTENT_ENCODING).iter();
+    match (codings.next(), codings.next()) {
+        (None, _) => true,
+        (Some(coding), None) => coding
+            .to_str()
+            .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")),
+        _ => false,
     }
 }
 

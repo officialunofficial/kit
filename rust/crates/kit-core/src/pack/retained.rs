@@ -11,7 +11,7 @@
 //!
 //! [`take`]: RetainedPacks::take
 
-use super::{EMPTY_PACK_LEN, PackSpool, SPOOL_BUFFER, VerifiedPack};
+use super::{PackSpool, SPOOL_BUFFER, VerifiedPack};
 use crate::protocol::{PACK_BODY_LIMIT, PackKey};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
@@ -24,6 +24,12 @@ const MAX_RETAINED_PACKS: usize = 4;
 /// How long a pack stays in the cache.
 const MAX_RETAINED_AGE: Duration = Duration::from_hours(7 * 24);
 
+/// The prefix of a copy that is still being written.
+const TMP_PREFIX: &str = ".tmp";
+
+/// How long a copy being written may take before it counts as left behind.
+const MAX_TMP_AGE: Duration = Duration::from_hours(1);
+
 /// The directory under the spool directory that holds the cache.
 const DIR_NAME: &str = "retained";
 
@@ -35,6 +41,9 @@ pub struct RetainedPacks {
 }
 
 impl RetainedPacks {
+    /// The most packs the cache keeps.
+    pub const LIMIT: usize = MAX_RETAINED_PACKS;
+
     /// The cache under `spool_dir`. Nothing is created until a pack is kept.
     #[must_use]
     pub fn new(spool_dir: &Path) -> Self {
@@ -58,7 +67,7 @@ impl RetainedPacks {
     pub fn keep(&self, key: &PackKey, pack: &VerifiedPack) -> io::Result<()> {
         ensure_dir(&self.dir)?;
         let mut copy = tempfile::Builder::new()
-            .prefix(".tmp")
+            .prefix(TMP_PREFIX)
             .tempfile_in(&self.dir)?;
         let mut buf = vec![0u8; SPOOL_BUFFER];
         let mut offset = 0;
@@ -80,16 +89,13 @@ impl RetainedPacks {
     #[must_use]
     pub fn take(&self, key: &PackKey) -> Option<VerifiedPack> {
         let path = self.path(key);
-        let meta = std::fs::symlink_metadata(&path).ok()?;
-        let readable =
-            meta.is_file() && (EMPTY_PACK_LEN as u64..=PACK_BODY_LIMIT).contains(&meta.len());
-        let pack = readable.then(|| read_verified(&path, meta.len(), &self.spool_dir, key));
-        if let Some(Ok(pack)) = pack {
-            Some(pack)
-        } else {
+        let pack = open_regular(&path)
+            .and_then(|file| read_verified(file, &self.spool_dir, key))
+            .ok();
+        if pack.is_none() {
             let _ = std::fs::remove_file(&path);
-            None
         }
+        pack
     }
 
     /// Delete the pack kept for `key`, if any.
@@ -116,16 +122,29 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// Read `len` bytes of the file at `path` into a new spool in `spool_dir`
-/// and verify them against `key`.
-fn read_verified(
-    path: &Path,
-    len: u64,
-    spool_dir: &Path,
-    key: &PackKey,
-) -> io::Result<VerifiedPack> {
+/// Open the regular file at `path` for reading. A symlink, a pipe or any
+/// other kind of file is refused without blocking.
+fn open_regular(path: &Path) -> io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::from(io::ErrorKind::InvalidInput))
+    }
+}
+
+/// Read all of `file` into a new spool in `spool_dir` and verify it against
+/// `key`.
+fn read_verified(mut file: File, spool_dir: &Path, key: &PackKey) -> io::Result<VerifiedPack> {
     let invalid = |_| io::Error::from(io::ErrorKind::InvalidData);
-    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
     let mut spool = PackSpool::create(spool_dir, PACK_BODY_LIMIT).map_err(invalid)?;
     spool.begin(Some(len)).map_err(invalid)?;
     let mut buf = vec![0u8; SPOOL_BUFFER];
@@ -157,7 +176,12 @@ pub(super) fn trim_dir(dir: &Path, now: SystemTime) {
         }
         let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let age = now.duration_since(modified).unwrap_or_default();
-        if age > MAX_RETAINED_AGE {
+        if entry.file_name().to_string_lossy().starts_with(TMP_PREFIX) {
+            // A copy that a crash left half written. It is not a pack.
+            if age > MAX_TMP_AGE {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        } else if age > MAX_RETAINED_AGE {
             let _ = std::fs::remove_file(entry.path());
         } else {
             kept.push((modified, entry.path()));
@@ -335,6 +359,38 @@ mod tests {
         assert_eq!(names.len(), MAX_RETAINED_PACKS);
         assert!(!names.contains(&format!("{}.pack", keys[0].to_hex())));
         assert!(names.contains(&format!("{}.pack", keys[MAX_RETAINED_PACKS].to_hex())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_the_cache_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        let (key, _) = verified(&pack_bytes(5), dir.path());
+        ensure_dir(&cache.dir).unwrap();
+        let path = std::ffi::CString::new(cache.path(&key).to_str().unwrap()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated string for the call.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        assert!(cache.take(&key).is_none());
+        assert!(files(&cache).is_empty());
+    }
+
+    #[test]
+    fn a_copy_left_half_written_does_not_count_and_goes_when_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        ensure_dir(&cache.dir).unwrap();
+        for (name, minutes) in [(".tmpfresh", 5), (".tmpold", 120)] {
+            let path = cache.dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            set_age(&path, Duration::from_secs(minutes * 60));
+        }
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(cache.dir.join(name), b"x").unwrap();
+        }
+        cache.trim();
+        // The fresh copy may still be written; it takes no pack's place.
+        assert_eq!(files(&cache), [".tmpfresh", "a", "b", "c", "d"]);
     }
 
     #[test]

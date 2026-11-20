@@ -245,6 +245,11 @@ fn an_answer_that_is_not_the_rest_reads_the_pack_again() {
             Box::new(|a| a.without("content-range")),
         ),
         (
+            "coded",
+            RestartReason::Range,
+            Box::new(|a| a.header("content-encoding", "gzip")),
+        ),
+        (
             "wrong length",
             RestartReason::Range,
             Box::new(|mut a| {

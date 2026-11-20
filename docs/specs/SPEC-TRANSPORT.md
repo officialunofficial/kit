@@ -1051,10 +1051,11 @@ strong `ETag` (not starting `W/`) and a `Content-Length`. The retry is a
 `GET` with `Range: bytes=<n>-` for the `n` bytes held and `If-Match` with that
 `ETag`. The client MUST take the body only from a `206` whose `ETag` is the
 first answer's, whose `Content-Range` is `bytes <n>-<total-1>/<total>` for the
-first answer's length, and whose `Content-Length` is `total - n`. Any other
-answer reads the pack again from its start: a `200` is taken whole and begins
-the sink again, and a `412`, a `416` or a `206` that fails a check is followed at
-once by a `GET` with neither header. The sink keeps the prefix and its hash, and
+first answer's length, whose `Content-Length` is `total - n`, and that has no
+content coding. A `200`, a `412`, a `416` or a `206` that fails a check reads the
+pack again from its start: a `200` is taken whole and begins the sink again, and
+the others are followed at once by a `GET` with neither header. Any other status
+is handled as for a first request, and a retry may continue again. The sink keeps the prefix and its hash, and
 the caller still checks the whole pack against its key, so a prefix that was not
 the pack's own fails there. A transport reports a continuation, and why it read
 again from the start, to the sink (`PackSink::note_resume`).
