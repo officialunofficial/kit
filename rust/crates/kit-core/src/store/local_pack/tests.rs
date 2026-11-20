@@ -2351,6 +2351,9 @@ fn a_pack_cut_short_after_its_handle_is_cached_is_damage_and_a_read_error_is_not
                 Err(std::io::Error::from(kind).into())
             })
             .unwrap_err();
-        assert!(matches!(&error, StoreError::Io(e) if e.kind() == kind), "{error:?}");
+        assert!(
+            matches!(&error, StoreError::Io(e) if e.kind() == kind),
+            "{error:?}"
+        );
     }
 }
