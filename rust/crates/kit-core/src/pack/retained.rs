@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 const MAX_RETAINED_PACKS: usize = 4;
 
 /// How long a pack stays in the cache.
-const MAX_RETAINED_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const MAX_RETAINED_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// The directory under the spool directory that holds the cache.
 const DIR_NAME: &str = "retained";
@@ -84,12 +84,11 @@ impl RetainedPacks {
         let readable =
             meta.is_file() && (EMPTY_PACK_LEN as u64..=PACK_BODY_LIMIT).contains(&meta.len());
         let pack = readable.then(|| read_verified(&path, meta.len(), &self.spool_dir, key));
-        match pack {
-            Some(Ok(pack)) => Some(pack),
-            _ => {
-                let _ = std::fs::remove_file(&path);
-                None
-            }
+        if let Some(Ok(pack)) = pack {
+            Some(pack)
+        } else {
+            let _ = std::fs::remove_file(&path);
+            None
         }
     }
 
@@ -98,8 +97,8 @@ impl RetainedPacks {
         let _ = std::fs::remove_file(self.path(key));
     }
 
-    /// Delete every file older than [`MAX_RETAINED_AGE`], then the oldest
-    /// packs past [`MAX_RETAINED_PACKS`]. A missing or symlinked directory is
+    /// Delete every file older than a week, then the oldest packs past the
+    /// count of four. A missing or symlinked directory is
     /// left alone, so the sweep never deletes outside the repository.
     pub fn trim(&self) {
         trim_dir(&self.dir, SystemTime::now());
@@ -322,7 +321,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = RetainedPacks::new(dir.path());
         let mut keys = Vec::new();
-        for seed in 0..=MAX_RETAINED_PACKS as u8 {
+        for seed in 0..=u8::try_from(MAX_RETAINED_PACKS).unwrap() {
             let (key, pack) = verified(&pack_bytes(seed), dir.path());
             cache.keep(&key, &pack).unwrap();
             set_age(

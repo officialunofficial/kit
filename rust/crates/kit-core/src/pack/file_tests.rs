@@ -1009,11 +1009,16 @@ fn the_file_reader_refuses_a_bad_header() {
 
 /// A pack of `len` bytes that do not compress.
 fn noise_pack(len: usize) -> (Vec<u8>, PackKey) {
-    let pack = build_pack(&[Gen::Raw {
-        seed: 9,
-        len,
-        repeat: false,
-    }]);
+    // Hash output does not compress, so the pack is about `len` bytes.
+    let mut data = vec![0u8; len];
+    blake3::Hasher::new()
+        .update(b"noise")
+        .finalize_xof()
+        .fill(&mut data);
+    let (id, bytes) = blob(&data);
+    let mut w = PackWriter::new();
+    w.push_raw(id, &bytes).unwrap();
+    let pack = w.finish().unwrap();
     let key = PackKey::new(pack_key(&pack));
     (pack, key)
 }
