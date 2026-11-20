@@ -991,22 +991,19 @@ fn copy_to_sink(
     sink: &mut dyn PackSink,
     resume: Option<(u64, u64)>,
 ) -> TransportResult<()> {
-    let mut taken = match resume {
-        Some((total, offset)) => {
-            if total > PACK_BODY_LIMIT {
-                return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
-            }
-            sink.resume(total, offset)?;
-            offset
+    let mut taken = if let Some((total, offset)) = resume {
+        if total > PACK_BODY_LIMIT {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
         }
-        None => {
-            let declared = resp.content_length();
-            if let Some(len) = declared.filter(|&len| len > PACK_BODY_LIMIT) {
-                return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
-            }
-            sink.begin(declared)?;
-            0
+        sink.resume(total, offset)?;
+        offset
+    } else {
+        let declared = resp.content_length();
+        if let Some(len) = declared.filter(|&len| len > PACK_BODY_LIMIT) {
+            return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
         }
+        sink.begin(declared)?;
+        0
     };
     let mut buf = vec![0u8; PACK_IO_CHUNK];
     loop {
