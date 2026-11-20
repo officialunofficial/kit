@@ -7,22 +7,23 @@
 //! `worktree`, `remote`, `git pull`) do not poll it: the first signal lets
 //! them finish, so their state on disk is never cut between two writes. In
 //! all of them a second signal takes the default action and ends the
-//! process.
+//! process. Checkout installs the same handlers when it begins restoring
+//! the worktree for a switch.
 //!
-//! Every other command keeps the default action, so a `Ctrl-C` stops it at
+//! Other local commands keep the default action, so a `Ctrl-C` stops them at
 //! once. Each of its writes is a temp file renamed into place, so a stopped
-//! command leaves the repository as it was after its last finished write: a
-//! checkout and a reset write the files first and then their refs and the
-//! index together, so a stopped one leaves the files it wrote as local
-//! changes. `gc` sweeps the object temp files a stopped command leaves, the
+//! command leaves the repository as it was after its last finished write.
+//! A reset writes the files first and then its ref and index together,
+//! so a stopped reset leaves the files it wrote as local changes.
+//! `gc` sweeps the object temp files a stopped command leaves, the
 //! next restore that writes into a directory removes the worktree temp files
 //! there, and a temp file beside a ref is never read.
 //!
 //! While an editor runs ([`while_editor_runs`]), kit ignores SIGINT and
 //! SIGQUIT, as git does: the editor gets the terminal's `Ctrl-C`, and kit
 //! waits for it to exit; SIGTERM still ends kit. [`defer`] holds SIGINT and
-//! SIGTERM across writes that must not be split, such as HEAD and the index
-//! of a checkout.
+//! SIGTERM across writes that must not be split, such as the ref and index
+//! writes of a reset.
 //!
 //! Only the `kit` binary handles signals: `main` calls [`enable`] before
 //! [`crate::dispatch`]. A process that drives `dispatch` as a library and
@@ -120,8 +121,8 @@ fn flag(cell: &'static OnceLock<Arc<AtomicBool>>, initial: bool) -> Arc<AtomicBo
     Arc::clone(cell.get_or_init(|| Arc::new(AtomicBool::new(initial))))
 }
 
-/// Install SIGINT/SIGTERM handlers that flip the shared shutdown flag, for a
-/// command that [`defers_interrupt`]. A signal that arrives once a first one
+/// Install SIGINT/SIGTERM handlers that flip the shared shutdown flag.
+/// A signal that arrives once a first one
 /// was taken runs the signal's default action, which ends the process, so a
 /// second `Ctrl-C` always stops it.
 ///
@@ -133,11 +134,10 @@ pub fn install() {
         use signal_hook::consts::{SIGINT, SIGTERM};
         use signal_hook::flag::{register, register_conditional_default};
 
-        if !enabled() {
+        if !enabled() || INSTALLED.swap(true, Ordering::Relaxed) {
             return;
         }
 
-        INSTALLED.store(true, Ordering::Relaxed);
         // Errors here are effectively unreachable (they only fail if
         // the OS refuses to install a handler, e.g. for SIGKILL).
         // Silently fall back to the default disposition in that case.

@@ -1847,7 +1847,7 @@ exit cleanly without a "Broken pipe" message.
 .Dv SIGINT
 and
 .Dv SIGTERM
-stop a local command at once.
+usually stop a local command at once.
 In
 .Cm push ,
 .Cm pull ,
@@ -1882,11 +1882,13 @@ and
 and waits for the editor to exit;
 .Dv SIGTERM
 still ends it.
+When
 .Cm checkout
-and
-.Cm reset --hard
-write the files first and then the branch, HEAD and the index, as git
-does, so a stopped one leaves them where they were.
+or
+.Cm switch
+starts restoring files for a branch or detached HEAD, the first signal
+lets it finish updating the worktree, HEAD, and index.
+A second signal stops it immediately.
 .Sh SEE ALSO
 .Xr git 1 ,
 .Xr ssh 1 ,
