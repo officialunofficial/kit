@@ -68,6 +68,18 @@ fn damage(pair: &Pair, id: &Hash, age: u64) {
     set_pack_age(&pair.pack, age);
 }
 
+/// Flip one byte of the frame length that precedes `id`, keeping the pack's
+/// age. The index then disagrees with the pack about the frame.
+fn damage_header(pair: &Pair, id: &Hash, age: u64) {
+    let frame = Index::open(pair).unwrap().find(id).unwrap();
+    let mut file = fs::OpenOptions::new().write(true).open(&pair.pack).unwrap();
+    file.seek(SeekFrom::Start(frame.offset - 4)).unwrap();
+    file.write_all(&[0xff]).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    set_pack_age(&pair.pack, age);
+}
+
 fn sizes(objects: &[&Vec<u8>]) -> u64 {
     objects.iter().map(|bytes| bytes.len() as u64).sum()
 }
@@ -165,6 +177,25 @@ fn two_packs_with_the_same_ids_retire_one_as_covered_and_the_same_one_every_time
     };
     assert!(exists(home));
     assert!(!gone.pack.exists() && !gone.index.exists());
+    assert_eq!(store.read(&ids[0]).unwrap(), a);
+    assert_eq!(store.read(&ids[1]).unwrap(), b);
+}
+
+#[test]
+fn a_young_pack_with_no_dead_entry_that_another_pack_covers_is_retired_as_covered() {
+    let (_dir, layout, store) = fresh();
+    let a = obj("a", 500);
+    let b = obj("b", 500);
+    let (older, ids) = publish(&store, &[&a, &b], YOUNG - 1);
+    let (younger, _) = publish(&store, &[&b, &a], YOUNG);
+    keep(&layout, "a", &ids[0]);
+    keep(&layout, "b", &ids[1]);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired_covered, 1, "{report:?}");
+    assert_eq!(report.survivor_bytes_copied, 0);
+    assert!(!exists(&older), "the older pack goes");
+    assert!(exists(&younger), "the younger pack is the home");
     assert_eq!(store.read(&ids[0]).unwrap(), a);
     assert_eq!(store.read(&ids[1]).unwrap(), b);
 }
@@ -271,6 +302,26 @@ fn a_damaged_input_frame_keeps_that_input_and_the_others_proceed() {
     }
     for ((_, ids), bytes) in pairs.iter().zip(&objects).skip(1) {
         assert_eq!(&store.read(&ids[0]).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn a_frame_the_index_and_the_pack_disagree_on_keeps_that_input_and_the_others_proceed() {
+    let (_dir, layout, store) = fresh();
+    let objects: Vec<_> = (0..9).map(|n| obj(&format!("young{n}"), 2000)).collect();
+    let pairs: Vec<_> = objects
+        .iter()
+        .map(|bytes| publish(&store, &[bytes], YOUNG))
+        .collect();
+    damage_header(&pairs[0].0, &pairs[0].1[0], YOUNG);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.pack_copy_error, None);
+    assert_eq!(report.skipped_pack_errors.len(), 1);
+    assert_eq!(report.packs_merged, 8);
+    assert!(exists(&pairs[0].0), "the damaged input stays");
+    for (pair, _) in &pairs[1..] {
+        assert!(!exists(pair));
     }
 }
 
