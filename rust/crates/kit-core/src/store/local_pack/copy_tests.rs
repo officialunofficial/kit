@@ -541,55 +541,28 @@ fn a_reader_with_a_cached_locator_finds_the_object_in_the_output() {
 }
 
 #[test]
-fn outputs_roll_over_at_the_entry_cap() {
-    // Eight young small packs of 8,750 unreachable entries: 70,000 survivors,
-    // so two outputs.
-    let (_dir, layout, store) = fresh();
-    for pack in 0..8 {
-        let objects: Vec<_> = (0..8_750)
-            .map(|n| blob(format!("entry {pack} {n}").as_bytes()))
-            .collect();
-        let bodies: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
-        let (pair, _) = publish_objects(&store, &bodies);
-        set_pack_age(&pair.pack, YOUNG);
-    }
-    let report = run(&store, &layout, false);
-    assert_eq!(report.packs_merged, 8);
-    let mut counts: Vec<usize> = packs(&store)
-        .iter()
-        .map(|pack| {
-            let key = pack.file_stem().unwrap().to_str().unwrap();
-            let pair = Pair::new(&store.pack_dir(), crate::hash::from_hex(key).unwrap());
-            Index::open(&pair).unwrap().entries().count()
-        })
-        .collect();
-    counts.sort_unstable();
-    assert_eq!(counts, [70_000 - 65_536, 65_536]);
-}
+fn outputs_roll_over_at_the_entry_cap_and_the_payload_cap() {
+    use super::copy::{OUTPUT_ENTRIES, OUTPUT_PAYLOAD, Rolling};
 
-#[test]
-fn outputs_roll_over_at_the_payload_cap() {
-    // Eight young packs of 9 MiB stay under the small bound and total 72 MiB.
-    let (_dir, layout, store) = fresh();
-    let mut total = 0;
-    for pack in 0..8 {
-        let objects: Vec<_> = (0..9)
-            .map(|n| obj(&format!("{pack}-{n}"), 1 << 20))
-            .collect();
-        let refs: Vec<&Vec<u8>> = objects.iter().collect();
-        let (pair, _) = publish(&store, &refs, YOUNG);
-        total += sizes(&refs);
-        assert!(exists(&pair));
-    }
-    let report = run(&store, &layout, false);
-    // The last output holds the last input's nine entries in the input's own
-    // order: the same bytes, so the same key. That input stays in place.
-    assert_eq!(report.packs_merged, 7);
-    assert_eq!(report.survivor_bytes_copied, total);
-    let outputs = packs(&store);
-    assert_eq!(outputs.len(), 2);
-    for pack in outputs {
-        assert!(fs::metadata(pack).unwrap().len() <= (64 << 20) + (1 << 20));
+    assert_eq!(OUTPUT_ENTRIES, 65_536);
+    assert_eq!(OUTPUT_PAYLOAD, 64 << 20);
+    for (entries, payload, expected) in [(3, u64::MAX, [3, 3, 1]), (100, 2_500, [2, 2, 2])] {
+        let (_dir, _layout, store) = fresh();
+        store.try_activate_local_packs().unwrap();
+        let guard = store.prune_guard().unwrap();
+        let mut rolling = Rolling::capped(&store, &guard, entries, payload);
+        for n in 0..expected.iter().sum::<usize>() {
+            let bytes = obj(&format!("object {n}"), 1000);
+            let id = crate::object::object_id_from_bytes(&bytes);
+            assert!(rolling.write(&id, &bytes).unwrap().is_some());
+        }
+        let (pairs, ids, _) = rolling.finish().unwrap();
+        drop(guard);
+        assert_eq!(pairs.iter().flatten().count(), expected.len());
+        assert_eq!(ids.iter().map(Vec::len).collect::<Vec<_>>(), expected);
+        for pair in pairs.iter().flatten() {
+            assert!(exists(pair));
+        }
     }
 }
 

@@ -34,8 +34,8 @@ const SMALL_PAIRS: usize = 8;
 /// A pack is rewritten when a quarter of its payload is reclaimable.
 const RECLAIM_FRACTION: u64 = 4;
 /// Output caps, the same as the fetch window seals.
-const OUTPUT_PAYLOAD: u64 = 64 << 20;
-const OUTPUT_ENTRIES: usize = 65_536;
+pub(super) const OUTPUT_PAYLOAD: u64 = 64 << 20;
+pub(super) const OUTPUT_ENTRIES: usize = 65_536;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -652,10 +652,12 @@ fn is_damage(error: &StoreError) -> bool {
 }
 
 /// Output packs that roll over at the caps.
-struct Rolling<'a> {
+pub(super) struct Rolling<'a> {
     store: &'a ObjectStore,
     guard: &'a PruneGuard,
     writer: Option<LocalPackWriter<'a>>,
+    max_entries: usize,
+    max_payload: u64,
     entries: usize,
     payload: u64,
     /// By writer number: the published pair, none for an empty writer.
@@ -668,10 +670,21 @@ struct Rolling<'a> {
 
 impl<'a> Rolling<'a> {
     fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> Self {
+        Self::capped(store, guard, OUTPUT_ENTRIES, OUTPUT_PAYLOAD)
+    }
+
+    pub(super) fn capped(
+        store: &'a ObjectStore,
+        guard: &'a PruneGuard,
+        max_entries: usize,
+        max_payload: u64,
+    ) -> Self {
         Self {
             store,
             guard,
             writer: None,
+            max_entries,
+            max_payload,
             entries: 0,
             payload: 0,
             pairs: Vec::new(),
@@ -688,10 +701,10 @@ impl<'a> Rolling<'a> {
 
     /// Write one object. `None` if the writer derives another id than the
     /// index gave. An id counts once per run.
-    fn write(&mut self, id: &Hash, bytes: &[u8]) -> StoreResult<Option<usize>> {
+    pub(super) fn write(&mut self, id: &Hash, bytes: &[u8]) -> StoreResult<Option<usize>> {
         let len = bytes.len() as u64;
         if self.writer.is_some()
-            && (self.entries == OUTPUT_ENTRIES || self.payload + len > OUTPUT_PAYLOAD)
+            && (self.entries == self.max_entries || self.payload + len > self.max_payload)
         {
             self.seal()?;
         }
@@ -721,7 +734,7 @@ impl<'a> Rolling<'a> {
         Ok(())
     }
 
-    fn finish(mut self) -> StoreResult<(Vec<Option<Pair>>, Vec<Vec<Hash>>, u64)> {
+    pub(super) fn finish(mut self) -> StoreResult<(Vec<Option<Pair>>, Vec<Vec<Hash>>, u64)> {
         self.seal()?;
         Ok((self.pairs, self.ids, self.copied))
     }
