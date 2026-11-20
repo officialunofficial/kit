@@ -58,7 +58,7 @@ mod memory;
 mod memory_overlay;
 mod source;
 pub(crate) use local_pack::Catalog as PackCatalog;
-pub use local_pack::LocalPackWriter;
+pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{ClosureSource, DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
@@ -321,6 +321,9 @@ struct PackWrites {
     /// threads wait on the lock, so none takes a shared guard that would make
     /// the first try miss.
     activation: Mutex<bool>,
+    /// The marker and the parents of `pack/` were synced and `pack/` exists,
+    /// so a later pack writer only checks the marker under its own guard.
+    pack_dir_prepared: std::sync::atomic::AtomicBool,
 }
 
 /// Local content-addressed object store backed by the filesystem.

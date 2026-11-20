@@ -9,18 +9,13 @@ use kit_core::pack::{ObjectSpool, PackError};
 use kit_core::protocol::PackKey;
 use kit_core::serialize;
 use kit_core::store::{
-    ClosureSource, LocalPackWriter, ObjectSource, ObjectStore, PruneGuard, StoreError, StoreResult,
+    ClosureSource, LocalPackWriter, ObjectSource, ObjectStore, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES,
+    PruneGuard, StoreError, StoreResult,
 };
 
 use crate::applied_packs::AppliedPacks;
 use crate::observer::{Observer, SyncEvent};
 
-const WINDOW_BYTES: usize = 64 << 20;
-// A minimum-size blob is ten bytes. The byte limit alone would allow more
-// than six million tiny objects. Stop at 65,536 entries, which bounds the
-// locators, batch paths and pack index workspace to the same entry count as
-// the decoder's normal window.
-const WINDOW_ENTRIES: usize = 1 << 16;
 // The largest object a kit writer cuts as a chunk, with its blob prologue.
 // Every object of at most this size is packed, whatever its kind.
 const PACK_OBJECT_BYTES: usize = chunker::MAX_SIZE + serialize::BLOB_PROLOGUE_LEN;
@@ -93,7 +88,7 @@ impl<'a> Publication<'a> {
         for (_, id, len, ty) in order {
             let size = len as usize;
             if self.window.as_ref().is_some_and(|window| {
-                window.bytes + size > WINDOW_BYTES || window.entries == WINDOW_ENTRIES
+                window.bytes + size > PACK_SEAL_BYTES || window.entries == PACK_SEAL_ENTRIES
             }) {
                 self.adopt(spool, &mut loose)?;
                 self.seal(observer, remote, applied)?;
@@ -118,8 +113,8 @@ impl<'a> Publication<'a> {
         window.completed.push(key);
         window.completed_set.insert(key);
         if !packed
-            || window.bytes >= WINDOW_BYTES
-            || window.entries == WINDOW_ENTRIES
+            || window.bytes >= PACK_SEAL_BYTES
+            || window.entries == PACK_SEAL_ENTRIES
             || window.adopted_packs >= WINDOW_ADOPTED_PACKS
         {
             self.seal(observer, remote, applied)?;

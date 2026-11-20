@@ -117,12 +117,18 @@ pub(super) fn packed_under_guard(guard: &super::PruneGuard) -> StoreResult<bool>
     parse(marker)
 }
 
-pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult<()> {
+/// Refuse unless the marker under `guard` carries capability `P`.
+pub(super) fn require_packed(guard: &super::PruneGuard) -> StoreResult<()> {
     if !packed_under_guard(guard)? {
         return Err(incompatible(Some(
             "local packs require capability P".into(),
         )));
     }
+    Ok(())
+}
+
+pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult<()> {
+    require_packed(guard)?;
     guard.format.sync_all()?;
     crate::atomic::sync_dir(path.parent().expect("format marker has a parent"))?;
     Ok(())

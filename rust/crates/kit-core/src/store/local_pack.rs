@@ -23,6 +23,16 @@ mod writer;
 use reader::{Handles, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix};
 pub use writer::LocalPackWriter;
 
+/// Payload bytes at which a local pack is sealed and a new one begins.
+pub const PACK_SEAL_BYTES: usize = 64 << 20;
+
+/// Entries at which a local pack is sealed and a new one begins. A
+/// minimum-size blob is ten bytes, so the byte limit alone would allow more
+/// than six million tiny objects. This bounds the locators, batch paths and
+/// index workspace of one pack to the same entry count as the decoder's
+/// normal window.
+pub const PACK_SEAL_ENTRIES: usize = 1 << 16;
+
 #[derive(Debug, Default)]
 pub(crate) struct Catalog {
     error: Option<Arc<StoreError>>,
