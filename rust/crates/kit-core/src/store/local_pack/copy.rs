@@ -253,7 +253,10 @@ impl CopyPlan {
         for input in &self.inputs {
             let member = &self.members[input.member];
             freed += member.pack.len + member.locator.len;
-            count(report, final_class(input.class, !input.survivors.is_empty()));
+            count(
+                report,
+                final_class(input.class, !input.survivors.is_empty()),
+            );
             report.duplicate_bytes_reclaimed += input.dropped_bytes();
             entries += input.survivors.len() as u64;
             payload += input
@@ -268,7 +271,11 @@ impl CopyPlan {
 
     /// Verify coverage, copy the survivors and publish them. The shared
     /// `format` guard lives only inside this call.
-    pub(super) fn execute(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<Copied> {
+    pub(super) fn execute(
+        &self,
+        store: &ObjectStore,
+        report: &mut GcReport,
+    ) -> StoreResult<Copied> {
         let mut work: Vec<Work> = self
             .inputs
             .iter()
@@ -645,11 +652,18 @@ fn is_damage(error: &StoreError) -> bool {
         | StoreError::HashMismatch { .. }
         | StoreError::Decode(_) => true,
         StoreError::Io(error) => {
-            matches!(error.kind(), ErrorKind::UnexpectedEof | ErrorKind::InvalidData)
+            matches!(
+                error.kind(),
+                ErrorKind::UnexpectedEof | ErrorKind::InvalidData
+            )
         }
         _ => false,
     }
 }
+
+/// The pairs published by writer number, the ids assigned to each, and the
+/// payload bytes copied.
+pub(super) type Finished = (Vec<Option<Pair>>, Vec<Vec<Hash>>, u64);
 
 /// Output packs that roll over at the caps.
 pub(super) struct Rolling<'a> {
@@ -734,7 +748,7 @@ impl<'a> Rolling<'a> {
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> StoreResult<(Vec<Option<Pair>>, Vec<Vec<Hash>>, u64)> {
+    pub(super) fn finish(mut self) -> StoreResult<Finished> {
         self.seal()?;
         Ok((self.pairs, self.ids, self.copied))
     }

@@ -1595,7 +1595,9 @@ pub(super) fn after_copy_publish() -> crate::store::StoreResult<()> {
     }
 }
 
-pub(super) fn set_after_copy_publish(hook: impl FnOnce() -> crate::store::StoreResult<()> + 'static) {
+pub(super) fn set_after_copy_publish(
+    hook: impl FnOnce() -> crate::store::StoreResult<()> + 'static,
+) {
     AFTER_COPY_PUBLISH.set(Some(Box::new(hook)));
 }
 

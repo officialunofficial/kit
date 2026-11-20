@@ -98,7 +98,10 @@ fn a_mostly_dead_pack_past_grace_is_rewritten_and_retirement_survives_its_own_gu
     assert_eq!(report.packs_rewritten, 1);
     assert_eq!(report.packs_merged + report.packs_retired_covered, 0);
     assert_eq!(report.survivor_bytes_copied, live.len() as u64);
-    assert_eq!(report.duplicate_bytes_reclaimed, preview.duplicate_bytes_reclaimed);
+    assert_eq!(
+        report.duplicate_bytes_reclaimed,
+        preview.duplicate_bytes_reclaimed
+    );
     assert_eq!(report.bytes_reclaimed, preview.bytes_reclaimed);
     assert!(report.bytes_reclaimed > 0);
     assert!(!pair.pack.exists() && !pair.index.exists());
@@ -215,7 +218,9 @@ fn a_damaged_covering_copy_is_not_relied_on_and_the_entry_is_copied() {
 fn small_packs_merge_only_from_eight_and_a_large_pack_is_never_an_input() {
     for count in [7, 12] {
         let (_dir, layout, store) = fresh();
-        let objects: Vec<_> = (0..count).map(|n| obj(&format!("small{n}"), 1000)).collect();
+        let objects: Vec<_> = (0..count)
+            .map(|n| obj(&format!("small{n}"), 1000))
+            .collect();
         let pairs: Vec<_> = objects
             .iter()
             .enumerate()
@@ -357,7 +362,10 @@ fn an_unreachable_entry_inside_grace_survives_whatever_older_copies_exist() {
 
     let report = run(&store, &layout, false);
     assert_eq!(report.packs_merged, 8);
-    assert!(exists(&older_pair), "the older pack stays below the threshold");
+    assert!(
+        exists(&older_pair),
+        "the older pack stays below the threshold"
+    );
     // Drop the older copy by hand. The merged output still holds `e`.
     fs::remove_file(&older_pair.pack).unwrap();
     fs::remove_file(&older_pair.index).unwrap();
@@ -387,7 +395,10 @@ fn an_unreachable_entry_in_a_pack_inside_grace_outlives_an_older_copy_that_goes(
         let (young_pair, _) = publish(&store, &[&e], YOUNG);
 
         let report = run(&store, &layout, false);
-        assert!(!exists(&older_pair), "the older pack is retired or rewritten");
+        assert!(
+            !exists(&older_pair),
+            "the older pack is retired or rewritten"
+        );
         assert_eq!(
             report.packs_retired + report.packs_rewritten,
             1,
@@ -422,13 +433,17 @@ fn every_covering_pair_is_flushed_before_the_first_unlink() {
     let before = &log[..first_unlink];
     for member in [&stays.pack, &stays.index] {
         assert!(
-            before.iter().any(|(kind, path)| *kind == "sync" && path == member),
+            before
+                .iter()
+                .any(|(kind, path)| *kind == "sync" && path == member),
             "{member:?} is flushed first"
         );
     }
     for dir in [store.objects_root().to_path_buf(), store.pack_dir()] {
         assert!(
-            before.iter().any(|(kind, path)| *kind == "sync-dir" && path == &dir),
+            before
+                .iter()
+                .any(|(kind, path)| *kind == "sync-dir" && path == &dir),
             "{dir:?} is flushed first"
         );
     }

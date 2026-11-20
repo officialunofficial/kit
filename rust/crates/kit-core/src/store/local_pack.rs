@@ -17,9 +17,9 @@ pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
 pub(super) use index::{canonical_id, invalid_at, named};
 
-mod reader;
 #[cfg(test)]
 mod copy_tests;
+mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
