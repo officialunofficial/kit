@@ -226,7 +226,7 @@ assumptions apply.
 Automatic maintenance never waits for a lock. The leftover sweep tries
 the exclusive `format` lock only when it finds an eligible old leftover.
 A fetch or push arriving during the hold can wait for the recheck,
-unlinks and directory flushes. During collection, when there is a
+unlinks and both directory flushes. During collection, when there is a
 verified pair to retire, automatic maintenance first tries the registry
 and worktree locks in gc's order. It holds them for the second root read
 and the retirement of the verified names. See SPEC-GC, "Automatic

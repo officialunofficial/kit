@@ -445,6 +445,58 @@ fn a_due_collection_backs_off_when_the_orphan_sweep_cannot_lock() {
 }
 
 #[test]
+fn an_empty_sweep_leaves_the_format_lock_to_the_publisher() {
+    let repo = Repo::new();
+    repo.due();
+    let _publisher = repo.store.prune_guard().unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.leftovers_removed, 0);
+    assert_eq!(report.packs_retired, 0);
+}
+
+#[test]
+fn an_io_failure_in_the_sweep_stops_an_attempt_before_collection() {
+    for (due, expected) in [(false, Collection::NotDue), (true, Collection::Failed)] {
+        let repo = Repo::new();
+        if due {
+            repo.due();
+        }
+        let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+        let marker = repo.layout.common_dir().join("format");
+        let planning = std::cell::Cell::new(true);
+        let report = maintain_packs(&repo.layout, &repo.store, &|| {
+            if !planning.replace(false) {
+                // The sweep will fail to open the format lock after planning.
+                fs::remove_file(&marker).unwrap();
+            }
+            false
+        });
+
+        assert_eq!(report.collection, expected);
+        assert_eq!(report.leftovers_removed, 0);
+        assert!(old.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_place_of_the_stamp_is_never_followed() {
+    let repo = Repo::new();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    let target = repo.layout.worktree_root().join("outside-stamp");
+    fs::remove_file(&stamp).unwrap();
+    fs::write(&target, b"keep").unwrap();
+    std::os::unix::fs::symlink(&target, &stamp).unwrap();
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_eq!(fs::read(target).unwrap(), b"keep");
+    assert!(old.exists());
+}
+
+#[test]
 fn cancellation_before_the_sweep_keeps_the_old_leftover() {
     let repo = Repo::new();
     let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);

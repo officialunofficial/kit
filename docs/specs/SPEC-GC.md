@@ -410,12 +410,13 @@ The stamp is advisory and never authorizes deletion.
 find recognized staging files and lone final members. Apply the manual
 orphan rule above at the default grace. Under the exclusive `format`
 try-lock, recheck the candidate's name, counterpart, file identity and
-age, unlink it, then flush the directory. The sweep reads no object
+age. Keep the manual sweep's directory flush before unlinking the
+leftovers and its second flush after the unlinks. The sweep reads no object
 and takes no `format` lock unless it finds an eligible leftover. A
 publisher holds the shared guard from staging through its final flush.
 A fetch or push that requests the shared guard during the sweep can
 wait for the rest of the exclusive hold, including the recheck,
-unlinks and directory flushes. The sweep remains effective if the
+unlinks and both directory flushes. The sweep remains effective if the
 collection that follows stops without retiring any pack.
 
 **Collection.** The listing must show at least 32 published pairs.

@@ -148,6 +148,7 @@ fn lock_stamp(dir: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    #[cfg(not(unix))]
     reject_symlink(&path).map_err(io::Error::other)?;
     let file = options.open(&path)?;
     let metadata = file.metadata()?;
