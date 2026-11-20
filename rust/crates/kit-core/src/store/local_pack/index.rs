@@ -63,6 +63,17 @@ impl Pair {
         invalid(format!("local pack {}: {error}", self.pack.display())).into()
     }
 
+    pub(super) fn index_error(&self, error: impl std::fmt::Display) -> StoreError {
+        self.error(format_args!("{error}. Run `kit closure repair-indexes`"))
+    }
+
+    pub(super) fn index_context(&self, error: StoreError) -> StoreError {
+        match error {
+            StoreError::IncompatibleRepoFormat { .. } => self.context(error),
+            other => self.index_error(other),
+        }
+    }
+
     pub(super) fn context(&self, error: StoreError) -> StoreError {
         match error {
             StoreError::IncompatibleRepoFormat { found } => StoreError::IncompatibleRepoFormat {
@@ -157,7 +168,7 @@ impl Index {
             if !matches!(error, StoreError::IncompatibleRepoFormat { .. }) {
                 pair.check_versions()?;
             }
-            Err(pair.context(error))
+            Err(pair.index_context(error))
         })
     }
 
@@ -305,12 +316,12 @@ impl Index {
     pub(super) fn check_index_version(&self) -> StoreResult<()> {
         let metadata = fs::symlink_metadata(&self.pair.index)?;
         if !metadata.is_file() {
-            return Err(self.pair.error("index is not a regular file"));
+            return Err(self.pair.index_error("index is not a regular file"));
         }
         if self.stamp.is_none() || Stamp::get(&metadata).ok() != self.stamp {
             let mut file = open_regular(&self.pair.index)?;
             read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
-                .map_err(|e| self.pair.context(e))?;
+                .map_err(|e| self.pair.index_context(e))?;
         }
         Ok(())
     }

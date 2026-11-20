@@ -658,7 +658,7 @@ impl ObjectStore {
                 return Ok(());
             }
             if !repair {
-                return Err(pair.error("index does not match verified pack"));
+                return Err(pair.index_error("index does not match verified pack"));
             }
 
             drop(rows);
