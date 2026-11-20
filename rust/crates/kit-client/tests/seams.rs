@@ -1851,7 +1851,13 @@ fn an_append_past_the_fetch_pack_bound_is_refused_before_the_node_uploads() {
             .filter(|request| method(request) == "AdvanceRefs")
             .count();
         if refused {
-            assert!(matches!(result, Err(Error::Limit(_))), "{result:?}");
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Limit("packmap chain past the fetch bounds"))
+                ),
+                "{result:?}"
+            );
             assert_eq!((node_uploads, advances), (0, 0));
         } else {
             assert_eq!(result.unwrap(), kit_client::Outcome::Committed);
