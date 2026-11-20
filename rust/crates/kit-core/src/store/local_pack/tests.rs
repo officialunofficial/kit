@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 
+use crate::hash::Hash;
 use crate::layout::RepoLayout;
 use crate::object::{Blob, Object, ObjectType};
 use crate::pack::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
@@ -838,4 +839,198 @@ fn the_fetch_batch_replaces_a_same_length_damaged_loose_copy() {
     assert_eq!(fs::read(store.path_for(&id)).unwrap(), bad);
     batch.commit().unwrap();
     assert_eq!(store.read(&id).unwrap(), good);
+}
+
+fn publish_objects(store: &ObjectStore, objects: &[&[u8]]) -> (Pair, Vec<Hash>) {
+    let mut writer = writer(store);
+    let ids = objects
+        .iter()
+        .map(|bytes| writer.write(bytes).unwrap())
+        .collect();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(store).unwrap();
+    (pair, ids)
+}
+
+fn set_pack_age(path: &std::path::Path, secs: u64) {
+    fs::File::open(path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let (live, live_ids) = publish_objects(&store, &[&blob(b"live pack")]);
+    let mixed_live = blob(b"mixed live entry");
+    let mixed_dead = blob(b"mixed dead entry");
+    let (mixed, mixed_ids) = publish_objects(&store, &[&mixed_live, &mixed_dead]);
+    let dead = blob(b"all old dead entries");
+    let recent = blob(b"grace protected entry");
+    let (old, old_ids) = publish_objects(&store, &[&dead]);
+    let (young, young_ids) = publish_objects(&store, &[&recent]);
+    crate::refs::write_ref(&layout, "live", &live_ids[0]).unwrap();
+    crate::refs::write_ref(&layout, "mixed", &mixed_ids[0]).unwrap();
+    for pair in [&live, &mixed, &old] {
+        set_pack_age(&pair.pack, 1);
+    }
+    set_pack_age(&young.pack, 8);
+    set_pack_age(&old.index, 8);
+
+    let (preview, packed) =
+        run_gc_with_pack_report(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+    assert_eq!(packed.wholly_dead_bytes, (dead.len() + recent.len()) as u64);
+    assert_eq!(packed.mixed_dead_bytes, mixed_dead.len() as u64);
+    assert_eq!(
+        packed.eligible_dead_bytes,
+        (dead.len() + mixed_dead.len()) as u64
+    );
+    assert_eq!(packed.survivor_bytes, mixed_live.len() as u64);
+    assert_eq!(packed.packs_retired, 1);
+    assert!(old.pack.exists() && old.index.exists());
+
+    let (report, packed) =
+        run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(packed.packs_retired, 1);
+    assert_eq!(report.bytes_reclaimed, preview.bytes_reclaimed);
+    assert!(report.bytes_reclaimed > dead.len() as u64);
+    assert!(!old.pack.exists() && !old.index.exists());
+    assert!(!store.contains(&old_ids[0]));
+    for id in live_ids.iter().chain(&mixed_ids).chain(&young_ids) {
+        assert!(store.read(id).is_ok());
+    }
+}
+
+#[test]
+fn gc_rechecks_pack_mtime_and_leaves_a_concurrent_publication() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let (old, ids) = publish_objects(&store, &[&blob(b"reused object")]);
+    set_pack_age(&old.pack, 1);
+    let h = ids[0];
+    let mut fresh_pack = None;
+    let (_, packed) = run_gc_with_pack_report(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        false,
+        &mut |phase, done, _| {
+            if phase == "gc" && done == 0 && fresh_pack.is_none() {
+                fresh_pack = Some(std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let writer = ObjectStore::open(&layout).unwrap();
+                            writer.bulk_writer().reuse_object(&h).unwrap();
+                            let (new, _) = publish_objects(&writer, &[&blob(b"fetch publication")]);
+                            new
+                        })
+                        .join()
+                        .unwrap()
+                }));
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(packed.packs_retired, 0);
+    assert!(old.pack.exists() && old.index.exists());
+    assert!(fresh_pack.unwrap().pack.exists());
+}
+
+#[test]
+fn gc_keeps_pack_files_while_a_fetch_holds_the_prune_guard() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"fetch is using this pack")]);
+    let guard = store.prune_guard().unwrap();
+    run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    assert!(pair.pack.exists() && pair.index.exists());
+    drop(guard);
+    run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    assert!(!pair.pack.exists() && !pair.index.exists());
+}
+
+#[test]
+fn gc_sweeps_only_aged_recognized_pack_leftovers() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store) = fresh();
+    let (retired, ids) = publish_objects(&store, &[&blob(b"no pack after interruption")]);
+    fs::remove_file(&retired.pack).unwrap();
+    let (unpublished, _) = publish_objects(&store, &[&blob(b"no index after interruption")]);
+    fs::remove_file(&unpublished.index).unwrap();
+    let staging = store
+        .pack_dir()
+        .join(format!(".{}.tmp.idx", "a".repeat(32)));
+    let recent = store
+        .pack_dir()
+        .join(format!(".{}.tmp.pack", "b".repeat(32)));
+    let sidecar = store
+        .pack_dir()
+        .join(format!(".{}.tmp.idx", "C".repeat(32)));
+    for path in [&staging, &recent, &sidecar] {
+        fs::write(path, b"leftover").unwrap();
+    }
+    for path in [&retired.index, &unpublished.pack, &staging, &sidecar] {
+        set_pack_age(path, 1);
+    }
+    set_pack_age(&recent, 8);
+    assert!(!ObjectStore::open(&layout).unwrap().contains(&ids[0]));
+    assert_eq!(store.check_local_packs(true).unwrap(), 0);
+
+    let preview = run_gc(&store, &layout, 10, 5, true).unwrap();
+    assert_eq!(preview.temp_files_pruned, 3);
+    assert!(retired.index.exists());
+    let report = run_gc(&store, &layout, 10, 5, false).unwrap();
+    assert_eq!(report.temp_files_pruned, 3);
+    assert!(!retired.index.exists() && !unpublished.pack.exists() && !staging.exists());
+    assert!(recent.exists() && sidecar.exists());
+}
+
+#[test]
+fn gc_refuses_a_corrupt_index_before_pruning_loose_objects() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store) = fresh();
+    let loose = store.write(&blob(b"loose orphan")).unwrap();
+    let (pair, _) = publish_objects(&store, &[&blob(b"damaged index")]);
+    let mut data = fs::read(&pair.index).unwrap();
+    *data.last_mut().unwrap() ^= 1;
+    fs::write(&pair.index, data).unwrap();
+
+    for dry_run in [true, false] {
+        assert!(run_gc(&store, &layout, u64::MAX, 0, dry_run).is_err());
+        assert!(store.path_for(&loose).exists());
+        assert!(pair.pack.exists() && pair.index.exists());
+    }
+}
+
+#[test]
+fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
+    use crate::ops::gc::{GcReport, LiveSet, PackedGcReport, run_gc};
+
+    let (_dir, layout, store) = fresh();
+    let (pair, ids) = publish_objects(&store, &[&blob(b"retirement crash point")]);
+    let mut packed = PackedGcReport::default();
+    let sweep = store
+        .plan_pack_sweep(&LiveSet::default(), u64::MAX, 0, &mut packed)
+        .unwrap();
+    let result = sweep.run_with(&store, &mut GcReport::default(), &mut packed, || {
+        assert!(!pair.pack.exists());
+        assert!(pair.index.is_file());
+        Err(std::io::Error::other("interrupted between pack and index removal").into())
+    });
+    assert!(result.is_err());
+
+    let reopened = ObjectStore::open(&layout).unwrap();
+    assert!(!reopened.contains(&ids[0]));
+    assert_eq!(reopened.check_local_packs(true).unwrap(), 0);
+    run_gc(&reopened, &layout, u64::MAX, 0, false).unwrap();
+    assert!(!pair.pack.exists() && !pair.index.exists());
 }

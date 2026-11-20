@@ -260,6 +260,10 @@ impl Index {
         }
     }
 
+    pub(super) fn entries(&self) -> impl Iterator<Item = (Hash, Frame)> + '_ {
+        (0..self.count).map(|i| (*self.id(i), self.frame(i)))
+    }
+
     pub(super) fn ids(&self, shard: Option<u8>) -> impl Iterator<Item = Hash> + '_ {
         shard
             .map_or(0..self.count, |byte| self.bucket(byte))

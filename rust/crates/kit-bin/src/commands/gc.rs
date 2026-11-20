@@ -31,7 +31,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::{GcRootsError, run_gc_observed};
+use kit_core::ops::gc::{GcRootsError, run_gc_with_pack_report};
 use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -147,7 +147,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
-    let report = match run_gc_observed(
+    let (report, packed) = match run_gc_with_pack_report(
         &store,
         &layout,
         now,
@@ -206,6 +206,28 @@ pub fn run(args: &[String]) -> u8 {
         expired,
         if expired == 1 { "y" } else { "ies" },
     );
+    if packed.packs_retired != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} wholly dead local pack(s)",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            packed.packs_retired,
+        );
+    }
+    if report.dry_run {
+        let _ = writeln!(
+            stderr,
+            "gc: packed payload: {} wholly dead bytes, {} mixed dead bytes, {} grace-eligible dead bytes, {} predicted survivor bytes",
+            packed.wholly_dead_bytes,
+            packed.mixed_dead_bytes,
+            packed.eligible_dead_bytes,
+            packed.survivor_bytes,
+        );
+    }
     exit::OK
 }
 

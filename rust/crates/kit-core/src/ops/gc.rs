@@ -747,6 +747,23 @@ pub struct GcReport {
     pub skipped_state_files: Vec<PathBuf>,
 }
 
+/// Physical pack accounting for the command-line collector.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct PackedGcReport {
+    /// Unreachable payload bytes in packs with no live entries.
+    pub wholly_dead_bytes: u64,
+    /// Unreachable payload bytes in packs with at least one live entry.
+    pub mixed_dead_bytes: u64,
+    /// Unreachable payload bytes whose pack passes grace.
+    pub eligible_dead_bytes: u64,
+    /// Live payload bytes in mixed packs with eligible dead entries.
+    pub survivor_bytes: u64,
+    /// Whole packs retired, or eligible for retirement in a dry run.
+    pub packs_retired: usize,
+}
+
 /// Mark-and-sweep prune: keep every object reachable from the retention
 /// roots (`live_objects_with`) plus every unreachable object younger than
 /// `grace_secs` (relative to `now_secs`); delete the rest. With
@@ -808,6 +825,7 @@ fn run_gc_with_hook(
         before_prune,
         &mut |_, _, _| {},
     )
+    .map(|(report, _)| report)
 }
 
 /// Run garbage collection with completed object and reclaimed byte counts.
@@ -820,6 +838,20 @@ pub fn run_gc_observed(
     dry_run: bool,
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<GcReport, GcRootsError> {
+    run_gc_with_pack_report(store, layout, now_secs, grace_secs, dry_run, progress)
+        .map(|(report, _)| report)
+}
+
+/// Run the collector and return pack accounting for the command-line report.
+#[doc(hidden)]
+pub fn run_gc_with_pack_report(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+) -> Result<(GcReport, PackedGcReport), GcRootsError> {
     run_gc_with_progress_hook(
         store,
         layout,
@@ -842,7 +874,7 @@ fn run_gc_with_progress_hook(
     limits: MarkLimits,
     mut before_prune: impl FnMut(&Hash),
     progress: &mut dyn FnMut(&'static str, usize, u64),
-) -> Result<GcReport, GcRootsError> {
+) -> Result<(GcReport, PackedGcReport), GcRootsError> {
     // Refuse to delete through a symlinked store: if `.kit` or
     // `.kit/objects` is a symlink, `remove_object` would unlink the
     // link target's files — potentially outside the repo. (Dry runs are
@@ -862,9 +894,8 @@ fn run_gc_with_progress_hook(
                 empty_attestations.push(path);
             }
         })?;
-    for path in empty_attestations {
-        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
-    }
+    let mut packed = PackedGcReport::default();
+    let pack_sweep = store.plan_pack_sweep(&live, now_secs, grace_secs, &mut packed)?;
     progress("gc", 0, 0);
     let mut last_progress = std::time::Instant::now();
 
@@ -873,6 +904,10 @@ fn run_gc_with_progress_hook(
         skipped_state_files,
         ..GcReport::default()
     };
+    pack_sweep.run(store, &mut report, &mut packed)?;
+    for path in empty_attestations {
+        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
+    }
     for shard in 0..=u8::MAX {
         for h in store.list_loose_shard(shard)? {
             report.scanned += 1;
@@ -912,7 +947,7 @@ fn run_gc_with_progress_hook(
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
     progress("gc", report.scanned, report.bytes_reclaimed);
-    Ok(report)
+    Ok((report, packed))
 }
 
 /// Delete the temp files in shard `shard` that a dead writer left and that are

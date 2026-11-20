@@ -346,10 +346,16 @@ whose coverage cannot be verified stays in place. If a merge cannot
 write some entries under its writer limits, it keeps packs containing
 those entries. An input key also used as an output key stays in place.
 
-Retirement takes the exclusive `format` try-lock and rechecks input
+Gc also retires a pack when every verified entry is unreachable and the
+pack has passed grace. Gc records the pack's mtime after the retention mark
+and before acquiring the exclusive `format` try-lock. Under the lock, it
+rescans the pack directory and keeps any pair whose identity or pack mtime
+changed. Live and mixed packs stay in place.
+
+Retirement after a merge takes the same try-lock and rechecks input
 identity and durable coverage by the verified replacement packs.
 Keep an input when its replacements cannot be read independently of it.
-Remove the pack name first.
+In either case, remove the pack name first.
 Make all such removals durable in the pack directory before removing
 their index names. Flush the directory after those index unlinks.
 Directory syncs can cover a batch of removals under the same lock.
@@ -376,8 +382,8 @@ with both live and dead entries, and unreachable bytes old enough to
 pass grace. It also reports the live payload bytes in mixed packs
 with eligible dead bytes as the predicted survivor writes for
 rewriting those packs. These estimates exclude framing and index
-overhead. They do not imply that the current sweep reclaims packed
-garbage. The dry run changes no files.
+overhead. The sweep reclaims whole eligible packs. The dry run changes
+no files.
 
 ### Integrity checks and repair
 
@@ -405,7 +411,7 @@ create applied-pack records. Unresolved corruption remains an error.
 
 | Invariant | Enforced by |
 |---|---|
-| No live object loses its last copy | loose pruning uses the complete retention mark. Duplicate removal and pack retirement require durable replacement coverage ("Local pack maintenance") |
+| No live object loses its last copy | loose pruning uses the complete retention mark. Duplicate and merge retirement require durable replacement coverage. A whole pack can also retire if every entry is unreachable ("Local pack maintenance") |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

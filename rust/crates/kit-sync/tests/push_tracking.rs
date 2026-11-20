@@ -173,6 +173,19 @@ fn successful_push_records_only_packs_with_verified_signatures() {
         for pack in packs {
             assert_eq!(applied.contains(&PackKey::from_hash(pack)), signed);
         }
+        if signed {
+            let report = kit_sync::fetch(
+                &work.path,
+                &TransportSource::new(&tx),
+                REMOTE,
+                &kit_sync::SyncOptions::default(),
+                &kit_sync::NoopObserver,
+            )
+            .unwrap();
+            assert!(report.packs_already_applied > 0);
+            assert_eq!(report.packs_downloaded, 0);
+            assert_eq!(report.objects_unpacked, 0);
+        }
     }
 }
 
