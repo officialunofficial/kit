@@ -247,30 +247,26 @@ fn small_packs_merge_only_from_eight_and_a_large_pack_is_never_an_input() {
 
 #[test]
 fn a_damaged_input_frame_keeps_that_input_and_the_others_proceed() {
+    // The mark refuses a damaged live blob, so the damage sits in an
+    // unreachable entry that survives inside grace.
     let (_dir, layout, store) = fresh();
-    let make = |label: &str| {
-        let live = obj(&format!("{label} live"), 2000);
-        let dead: Vec<_> = (0..4).map(|n| obj(&format!("{label}{n}"), 2000)).collect();
-        (live, dead)
-    };
-    let (a_live, a_dead) = make("a");
-    let (b_live, b_dead) = make("b");
-    let mut a = vec![&a_live];
-    a.extend(a_dead.iter());
-    let mut b = vec![&b_live];
-    b.extend(b_dead.iter());
-    let (a_pair, a_ids) = publish(&store, &a, OLD);
-    let (b_pair, b_ids) = publish(&store, &b, OLD);
-    keep(&layout, "a", &a_ids[0]);
-    keep(&layout, "b", &b_ids[0]);
-    damage(&a_pair, &a_ids[0], OLD);
+    let objects: Vec<_> = (0..9).map(|n| obj(&format!("young{n}"), 2000)).collect();
+    let pairs: Vec<_> = objects
+        .iter()
+        .map(|bytes| publish(&store, &[bytes], YOUNG))
+        .collect();
+    damage(&pairs[0].0, &pairs[0].1[0], YOUNG);
 
     let report = run(&store, &layout, false);
     assert_eq!(report.skipped_pack_errors.len(), 1);
-    assert!(exists(&a_pair), "the damaged input stays");
-    assert!(!exists(&b_pair));
-    assert_eq!(report.packs_rewritten, 1);
-    assert_eq!(store.read(&b_ids[0]).unwrap(), b_live);
+    assert_eq!(report.packs_merged, 8);
+    assert!(exists(&pairs[0].0), "the damaged input stays");
+    for (pair, _) in &pairs[1..] {
+        assert!(!exists(pair));
+    }
+    for ((_, ids), bytes) in pairs.iter().zip(&objects).skip(1) {
+        assert_eq!(&store.read(&ids[0]).unwrap(), bytes);
+    }
 }
 
 #[test]
