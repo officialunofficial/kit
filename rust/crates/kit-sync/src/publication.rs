@@ -307,44 +307,56 @@ mod tests {
 
     #[test]
     fn manifest_tracking_uses_the_serialized_size_of_each_chunk_span() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = RepoLayout::single(dir.path());
-        let store = ObjectStore::init(&layout).unwrap();
-        let guard = store.prune_guard().unwrap();
-        let mut publication = Publication::new(&store, &guard).unwrap();
-        std::fs::create_dir_all(store.spool_dir()).unwrap();
-        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        for packed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(dir.path());
+            let store = ObjectStore::init(&layout).unwrap();
+            if packed {
+                store.try_activate_local_packs().unwrap();
+            }
+            let guard = store.prune_guard().unwrap();
+            let mut publication = Publication::new(&store, &guard).unwrap();
+            std::fs::create_dir_all(store.spool_dir()).unwrap();
+            let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
 
-        let first = [1; 32];
-        let short = [2; 32];
-        let at_limit = [3; 32];
-        let full_chunk = 65_536;
-        for (position, (id, len)) in [(short, 16_373), (at_limit, 16_374)]
-            .into_iter()
-            .enumerate()
-        {
-            let end = full_chunk + len;
-            let manifest = kit_core::object::ChunkedBlob::new(
-                end,
-                u32::try_from(full_chunk).unwrap(),
-                [(first, full_chunk), (id, end)],
-            )
-            .unwrap();
-            let object = Object::ChunkedBlob(manifest);
-            spool
-                .append(
-                    position,
-                    object.id().unwrap(),
-                    ObjectType::ChunkedBlob,
-                    &serialize::serialize(&object).unwrap(),
+            let first = [1; 32];
+            let short = [2; 32];
+            let at_limit = [3; 32];
+            let full_chunk = 65_536;
+            for (position, (id, len)) in [(short, 16_373), (at_limit, 16_374)]
+                .into_iter()
+                .enumerate()
+            {
+                let end = full_chunk + len;
+                let manifest = kit_core::object::ChunkedBlob::new(
+                    end,
+                    u32::try_from(full_chunk).unwrap(),
+                    [(first, full_chunk), (id, end)],
                 )
                 .unwrap();
-        }
+                let object = Object::ChunkedBlob(manifest);
+                spool
+                    .append(
+                        position,
+                        object.id().unwrap(),
+                        ObjectType::ChunkedBlob,
+                        &serialize::serialize(&object).unwrap(),
+                    )
+                    .unwrap();
+            }
 
-        publication
-            .note_chunk_ids(&spool, &spool.take_order())
-            .unwrap();
-        assert_eq!(publication.short_chunks.unwrap(), HashSet::from([short]));
+            let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+            let key = PackKey::from_hash(kit_core::hash::hash(b"manifest spans"));
+            publication
+                .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+            let expected = if packed {
+                HashSet::from([short])
+            } else {
+                HashSet::new()
+            };
+            assert_eq!(publication.short_chunks.unwrap(), expected);
+        }
     }
 
     #[test]
@@ -361,6 +373,88 @@ mod tests {
         assert_eq!(tracked.as_ref().unwrap().len(), 262_144);
         remember_chunk(&mut tracked, new_id);
         assert!(tracked.is_none());
+    }
+
+    #[test]
+    fn an_exactly_full_byte_window_seals_as_one_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        let guard = store.prune_guard().unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let blob = |byte| {
+            let object = Object::Blob(kit_core::object::Blob {
+                data: vec![byte; 8192 - serialize::BLOB_PROLOGUE_LEN],
+            });
+            (object.id().unwrap(), serialize::serialize(&object).unwrap())
+        };
+        let (first_id, first) = blob(1);
+        let (last_id, last) = blob(2);
+
+        for position in 0..8191 {
+            spool
+                .append(position, first_id, ObjectType::Blob, &first)
+                .unwrap();
+        }
+        spool
+            .append(8191, last_id, ObjectType::Blob, &last)
+            .unwrap();
+        let key = PackKey::from_hash(kit_core::hash::hash(b"exact byte window"));
+        publication
+            .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+
+        assert!(publication.pending().is_none());
+        assert!(applied.contains(&key));
+        assert_eq!(store.read(&first_id).unwrap(), first);
+        assert_eq!(store.read(&last_id).unwrap(), last);
+        assert_eq!(
+            std::fs::read_dir(layout.objects_dir().join("pack"))
+                .unwrap()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn pending_view_checks_both_sources_and_refuses_a_corrupt_spool_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        let durable = serialize::serialize(&Object::Blob(kit_core::object::Blob {
+            data: b"durable".to_vec(),
+        }))
+        .unwrap();
+        let pending = serialize::serialize(&Object::Blob(kit_core::object::Blob {
+            data: b"pending".to_vec(),
+        }))
+        .unwrap();
+        let durable_id = store.write(&durable).unwrap();
+        let pending_id = kit_core::hash::hash(&pending);
+        spool
+            .append(0, pending_id, ObjectType::Blob, &pending)
+            .unwrap();
+        let view = PendingView::new(&store, Some(&spool));
+
+        assert!(view.contains(&durable_id));
+        assert!(view.contains(&pending_id));
+        assert!(!view.contains(&[0; 32]));
+        assert_eq!(view.read(&durable_id).unwrap(), durable);
+        assert_eq!(view.read(&pending_id).unwrap(), pending);
+
+        spool
+            .append(1, durable_id, ObjectType::Blob, &pending)
+            .unwrap();
+        assert!(matches!(
+            view.read(&durable_id),
+            Err(StoreError::HashMismatch { .. })
+        ));
     }
 
     #[test]

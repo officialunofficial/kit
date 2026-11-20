@@ -4117,6 +4117,13 @@ mod tests {
     }
 
     #[test]
+    fn staging_a_small_window_uses_the_callers_thread() {
+        let caller = std::thread::current().id();
+        let workers = stage_independent(&[()], |()| std::thread::current().id());
+        assert_eq!(workers, vec![caller]);
+    }
+
+    #[test]
     #[cfg(all(feature = "pack-zstd", not(target_arch = "wasm32")))]
     fn phase_two_budget_contention_retries_sequentially() {
         let bytes = write_blob_via_serialize(&vec![b'a'; 256 * 1024]);

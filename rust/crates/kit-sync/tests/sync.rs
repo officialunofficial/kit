@@ -319,7 +319,7 @@ fn clone_loose_into(remote: &Remote, dir: &Path) {
 #[test]
 fn clone_packs_small_files_and_leaves_large_files_loose() {
     let remote = Remote::new();
-    let large = vec![42; 16 * 1024];
+    let large = vec![42; 16 * 1024 - kit_core::serialize::BLOB_PROLOGUE_LEN];
     let tip = remote.publish(None, &[("small", b"short"), ("large", &large)], true);
     let dir = tempfile::tempdir().unwrap();
     clone_into(&remote, &dir.path().join("clone"));
@@ -386,6 +386,46 @@ fn a_manifest_in_a_later_wire_pack_keeps_its_blob_loose() {
     assert_eq!(
         std::fs::read(target.join("manifest")).unwrap(),
         b"shared bytes"
+    );
+}
+
+#[test]
+fn an_existing_manifest_keeps_a_pending_chunk_loose() {
+    let remote = Remote::new();
+    let data = b"last chunk";
+    let (mut objects, _) = remote.build(None, &[("chunked", data)], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(mut tree) = objects.pop().unwrap() else {
+        panic!("expected a tree");
+    };
+    let chunk = tree.entries[0].object_hash;
+    let len = data.len() as u64;
+    let manifest = Object::ChunkedBlob(ChunkedBlob::new(len, 16 * 1024, [(chunk, len)]).unwrap());
+    tree.entries[0].object_hash = manifest.id().unwrap();
+    let tree = Object::Tree(tree);
+    commit.tree_hash = tree.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+    objects.extend([tree, commit]);
+    remote.publish_objects(&objects, tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("fetch");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    store
+        .write(&kit_core::serialize::serialize(&manifest).unwrap())
+        .unwrap();
+
+    signed_fetch(&target, &remote).unwrap();
+
+    assert!(loose_object_path(&layout, &chunk).is_file());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
     );
 }
 
