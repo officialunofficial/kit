@@ -1114,7 +1114,7 @@ fn a_sink_view_of_a_spool_resumes_and_maps_refusals() {
     let len = pack.len() as u64;
     let dir = TempDir::new().unwrap();
     let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
-    let sink: &mut dyn PackSink = &mut s;
+    let sink: &mut dyn crate::protocol::PackSink = &mut s;
     sink.begin(Some(len)).unwrap();
     sink.write(&pack[..200]).unwrap();
     assert_eq!(sink.retained(), 200);
