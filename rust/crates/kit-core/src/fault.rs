@@ -1,4 +1,6 @@
-//! Injected write failures, for tests of how a full disk ends a transfer.
+//! Injected write failures, for tests of how a full disk ends a transfer, and a
+//! hook on the store's dirent flushes, for tests of what is durable before a
+//! ref names it.
 //!
 //! Built with the `fault-injection` feature,
 //! which only test builds turn on. A failure applies to every thread of the
@@ -42,5 +44,95 @@ pub(crate) fn check(site: Site) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::from(io::ErrorKind::StorageFull))
+    }
+}
+
+/// A step that makes the store's directory entries durable, as
+/// [`on_sync`] reports it once the step has completed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncStep {
+    /// The dirents of one shard directory were barriered.
+    DirBarrier(std::path::PathBuf),
+    /// The terminal device flush that makes the barriers durable, anchored
+    /// at the store's `objects/` directory.
+    DeviceFlush(std::path::PathBuf),
+}
+
+type SyncHook = Box<dyn Fn(&SyncStep) + Send + Sync>;
+
+static SYNC_HOOK: std::sync::Mutex<Option<SyncHook>> = std::sync::Mutex::new(None);
+
+/// Call `hook` after every dirent barrier and device flush of every store in
+/// the process, until the guard drops. A test keeps only the steps under its
+/// own objects directory. One hook is set at a time, so tests that set one
+/// run one per process, as nextest runs them, or not concurrently. The hook
+/// must not flush a store: it runs under the hook's lock.
+#[must_use = "the hook ends when the guard drops"]
+pub fn on_sync(hook: impl Fn(&SyncStep) + Send + Sync + 'static) -> SyncHookGuard {
+    *SYNC_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(hook));
+    SyncHookGuard(())
+}
+
+/// Ends a hook set by [`on_sync`] when dropped.
+#[derive(Debug)]
+pub struct SyncHookGuard(());
+
+impl Drop for SyncHookGuard {
+    fn drop(&mut self) {
+        *SYNC_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+/// Report a completed step to the hook, if one is set.
+pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
+    let hook = SYNC_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(hook) = hook.as_ref() {
+        hook(&step());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{SyncStep, on_sync};
+    use crate::layout::RepoLayout;
+    use crate::store::ObjectStore;
+
+    #[test]
+    fn the_hook_sees_each_dirent_flush_until_its_guard_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let root = store.objects_root().to_path_buf();
+        let seen: Arc<Mutex<Vec<SyncStep>>> = Arc::default();
+        {
+            let seen = Arc::clone(&seen);
+            let root = root.clone();
+            let _hook = on_sync(move |step| {
+                let ours = match step {
+                    SyncStep::DirBarrier(dir) => dir.starts_with(&root),
+                    SyncStep::DeviceFlush(at) => *at == root,
+                };
+                if ours {
+                    seen.lock().unwrap().push(step.clone());
+                }
+            });
+            store.sync_shards([0x01]).unwrap();
+        }
+        store.sync_shards([0x02]).unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                SyncStep::DirBarrier(root.join("01")),
+                SyncStep::DeviceFlush(root.clone()),
+            ]
+        );
     }
 }

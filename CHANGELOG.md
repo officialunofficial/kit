@@ -15,6 +15,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.
+- Add `ObjectStore::sync_shards`, which makes the directory entries of object shards durable
+  with one device flush.
+- Fetch makes the objects a new tag reaches durable before it writes the tag, also when another
+  process stored them and has not yet flushed them.
 - Let checkout finish switching branches after the first Ctrl-C during a restore. A second Ctrl-C stops it immediately.
 - Keep untracked restore temporary files out of status and add.
 - Keep all symlinks intact when saving a trust catalog through a dangling chain.
