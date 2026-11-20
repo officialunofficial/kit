@@ -326,8 +326,8 @@ impl PackSweep {
         &self,
         store: &ObjectStore,
         report: &mut GcReport,
-    ) -> StoreResult<Option<Copied>> {
-        let copied = match &self.copy {
+    ) -> Option<Copied> {
+        match &self.copy {
             Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
                 Ok(copied) => Some(copied),
                 Err(error) => {
@@ -336,10 +336,7 @@ impl PackSweep {
                 }
             },
             _ => None,
-        };
-        #[cfg(test)]
-        super::tests::after_copy_publish()?;
-        Ok(copied)
+        }
     }
 
     pub(crate) fn run_with(
@@ -365,7 +362,9 @@ impl PackSweep {
         if self.is_empty() {
             return Ok(true);
         }
-        let copied = self.copy_survivors(store, report)?;
+        let copied = self.copy_survivors(store, report);
+        #[cfg(test)]
+        super::tests::after_copy_publish()?;
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
             return Ok(false);
