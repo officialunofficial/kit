@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::copy::CopyPlan;
+use super::copy::{Copied, CopyPlan};
 use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
@@ -318,6 +318,30 @@ impl PackSweep {
         self.run_with(store, report, || Ok(())).map(|_| ())
     }
 
+    /// Copy under the shared guard, which the copy releases before the
+    /// exclusive try that follows: the process would otherwise fail its own
+    /// try. A failed copy, such as a full disk, keeps every copy input and
+    /// still lets the wholly dead retirement free space.
+    fn copy_survivors(
+        &self,
+        store: &ObjectStore,
+        report: &mut GcReport,
+    ) -> StoreResult<Option<Copied>> {
+        let copied = match &self.copy {
+            Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
+                Ok(copied) => Some(copied),
+                Err(error) => {
+                    report.pack_copy_error = Some(error.to_string());
+                    None
+                }
+            },
+            _ => None,
+        };
+        #[cfg(test)]
+        super::tests::after_copy_publish()?;
+        Ok(copied)
+    }
+
     pub(crate) fn run_with(
         &self,
         store: &ObjectStore,
@@ -341,22 +365,7 @@ impl PackSweep {
         if self.is_empty() {
             return Ok(true);
         }
-        // Copy under the shared guard, which `execute` releases before the
-        // exclusive try below: the process would otherwise fail its own try.
-        // A failed copy, such as a full disk, keeps every copy input and still
-        // lets the wholly dead retirement below free space.
-        let copied = match &self.copy {
-            Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
-                Ok(copied) => Some(copied),
-                Err(error) => {
-                    report.pack_copy_error = Some(error.to_string());
-                    None
-                }
-            },
-            _ => None,
-        };
-        #[cfg(test)]
-        super::tests::after_copy_publish()?;
+        let copied = self.copy_survivors(store, report)?;
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
             return Ok(false);
