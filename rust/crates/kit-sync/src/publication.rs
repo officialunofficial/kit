@@ -306,6 +306,64 @@ mod tests {
     use kit_core::object::Tree;
 
     #[test]
+    fn manifest_tracking_uses_the_serialized_size_of_each_chunk_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+
+        let first = [1; 32];
+        let short = [2; 32];
+        let at_limit = [3; 32];
+        let full_chunk = 65_536;
+        for (position, (id, len)) in [(short, 16_373), (at_limit, 16_374)]
+            .into_iter()
+            .enumerate()
+        {
+            let end = full_chunk + len;
+            let manifest = kit_core::object::ChunkedBlob::new(
+                end,
+                u32::try_from(full_chunk).unwrap(),
+                [(first, full_chunk), (id, end)],
+            )
+            .unwrap();
+            let object = Object::ChunkedBlob(manifest);
+            spool
+                .append(
+                    position,
+                    object.id().unwrap(),
+                    ObjectType::ChunkedBlob,
+                    &serialize::serialize(&object).unwrap(),
+                )
+                .unwrap();
+        }
+
+        publication
+            .note_chunk_ids(&spool, &spool.take_order())
+            .unwrap();
+        assert_eq!(publication.short_chunks.unwrap(), HashSet::from([short]));
+    }
+
+    #[test]
+    fn repeated_chunk_at_capacity_preserves_tracking_until_a_new_id_arrives() {
+        let mut tracked = Some(
+            (0u32..262_144)
+                .map(|n| kit_core::hash::hash(&n.to_le_bytes()))
+                .collect(),
+        );
+        let duplicate = kit_core::hash::hash(&0u32.to_le_bytes());
+        let new_id = kit_core::hash::hash(&262_144u32.to_le_bytes());
+
+        remember_chunk(&mut tracked, duplicate);
+        assert_eq!(tracked.as_ref().unwrap().len(), 262_144);
+        remember_chunk(&mut tracked, new_id);
+        assert!(tracked.is_none());
+    }
+
+    #[test]
     fn tiny_entries_seal_at_the_entry_limit_even_below_the_byte_limit() {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
