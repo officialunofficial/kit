@@ -368,9 +368,14 @@ mod tests {
         let cache = RetainedPacks::new(dir.path());
         let (key, _) = verified(&pack_bytes(5), dir.path());
         ensure_dir(&cache.dir).unwrap();
-        let path = std::ffi::CString::new(cache.path(&key).to_str().unwrap()).unwrap();
-        // SAFETY: `path` is a valid NUL-terminated string for the call.
-        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            cache.path(&key),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .unwrap();
         assert!(cache.take(&key).is_none());
         assert!(files(&cache).is_empty());
     }
