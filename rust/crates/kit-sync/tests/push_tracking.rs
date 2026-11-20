@@ -330,3 +330,21 @@ fn a_gc_during_a_push_keeps_the_tip_its_tracking_ref_names() {
     kit_core::ops::gc::run_gc(&store, &work.layout, now + 3600, 0, false).unwrap();
     assert!(store.contains(&tip));
 }
+
+/// A push of every branch counts one published advance per new branch and
+/// writes each tracking ref.
+#[test]
+fn a_push_of_every_branch_counts_each_advance() {
+    let tx = MemoryTransport::new();
+    let work = Work::new();
+    let c1 = work.commit(None);
+    let c2 = work.commit(Some(c1));
+    work.branch("main", c1);
+    work.branch("topic", c2);
+    let mut options = PushOptions::default();
+    options.target = PushTarget::All { force: false };
+    let report = kit_sync::push(&work.path, &TransportSource::new(&tx), &options).unwrap();
+    assert_eq!((report.refs, report.steps), (2, 2));
+    assert_eq!(work.tracking("main"), Some(c1));
+    assert_eq!(work.tracking("topic"), Some(c2));
+}
