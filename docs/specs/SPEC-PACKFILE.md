@@ -135,7 +135,7 @@ size, or use as a chunk. It enforces the §5 format caps of 10,000,000
 entries and 4 GiB of payload. The transport's whole-body and decode
 budgets apply to wire packs. Frame overhead can place local payload
 offsets above 4 GiB. The 64 MiB fetch publication target and the
-16 KiB fetch selection limit are writer rules in
+262,154-byte fetch selection limit are writer rules in
 [SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch).
 
 The pair lives in the common object directory under

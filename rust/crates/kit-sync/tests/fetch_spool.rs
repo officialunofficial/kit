@@ -10,10 +10,10 @@ use std::cell::Cell;
 use std::io::ErrorKind;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use kit_core::fault::{self, Site};
+use kit_core::fault::{self, Site, SyncStep};
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
@@ -313,6 +313,62 @@ fn a_full_disk_ends_the_fetch_as_an_io_error_without_a_retry_or_a_file() {
 
         run_fetch(&work, &source).unwrap();
         assert_eq!(remote_tip(&work), Some(remote.tip), "{site:?}");
+    }
+}
+
+/// A crash after the pack of a window is published, whether before or after
+/// its loose batch is complete, leaves no record. The replay of the same
+/// window gives the same pack key: the one pack pair stays, with no second
+/// copy of its objects, and the clone ends complete.
+#[test]
+fn a_replayed_window_after_a_crash_reuses_the_published_pack() {
+    let _guard = serial();
+    let remote = remote();
+    for crash_at_device_flush in [false, true] {
+        let (_dir, work) = target();
+        let objects = work.join(".kit").join("objects");
+        let pack_dir = objects.join("pack");
+        let fired = Arc::new(Mutex::new(false));
+
+        let killed = {
+            let (objects, fired) = (objects.clone(), Arc::clone(&fired));
+            let _hook = fault::on_sync(move |step| {
+                let crash = match step {
+                    // The loose shards of the window, flushed after the pack.
+                    SyncStep::DirBarrier(dir) => {
+                        !crash_at_device_flush
+                            && dir.starts_with(&objects)
+                            && !dir.ends_with("pack")
+                    }
+                    // Every loose shard is durable; only the record is missing.
+                    SyncStep::DeviceFlush(at) => crash_at_device_flush && *at == objects,
+                };
+                if crash {
+                    *fired.lock().unwrap_or_else(PoisonError::into_inner) = true;
+                    panic!("the fetch is killed after its pack is published");
+                }
+            });
+            catch_unwind(AssertUnwindSafe(|| {
+                run_fetch(&work, &TransportSource::new(&remote.tx))
+            }))
+        };
+
+        assert!(killed.is_err(), "{crash_at_device_flush}");
+        assert!(*fired.lock().unwrap(), "{crash_at_device_flush}");
+        let published = entries(&pack_dir);
+        assert_eq!(published.len(), 2, "one pack and its index");
+        assert!(!recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), None);
+
+        run_fetch(&work, &TransportSource::new(&remote.tx)).unwrap();
+
+        let mut replayed = entries(&pack_dir);
+        replayed.sort();
+        let mut published = published;
+        published.sort();
+        assert_eq!(replayed, published, "the replay publishes no second pack");
+        assert!(recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), Some(remote.tip));
     }
 }
 

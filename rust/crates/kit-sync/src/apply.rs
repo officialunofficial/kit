@@ -9,7 +9,6 @@
 //! Downloads and window publication run outside the worktree lock.
 
 use kit_core::protocol::{PackSink, TransportResult};
-use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -212,13 +211,12 @@ pub(crate) fn apply_pack_chain(
     if let Some(error) = failure {
         // Keep the accepted prefix when a later download is interrupted or
         // refused. The failed pack never entered the publication window.
-        publication.seal(observer, remote, applied, &HashSet::new())?;
+        publication.seal(observer, remote, applied)?;
         return Err(error);
     }
     let view = publication.view();
     let checked = validate(&view);
-    let chunks = view.chunks();
-    publication.seal(observer, remote, applied, &chunks)?;
+    publication.seal(observer, remote, applied)?;
     checked
 }
 
@@ -253,7 +251,7 @@ fn apply_pack(
     let mut publication = Publication::new(store, &guard)?;
     let (spool, unpacked) = decode_pack(store, pack, None, require_signed)?;
     publication.accept(&spool, *key, observer, remote, applied)?;
-    publication.seal(observer, remote, applied, &HashSet::new())?;
+    publication.seal(observer, remote, applied)?;
     if unpacked > 0 {
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
     }
