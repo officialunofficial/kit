@@ -119,7 +119,7 @@ pub enum StoreError {
     #[error(".kit already exists in this directory")]
     AlreadyInitialized,
     #[error(
-        "repository object-addressing format is {found:?}, expected \"{}\". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.",
+        "repository object-addressing format is {found:?}, expected \"{}\". This kit cannot read the repository. Update kit for newer capabilities or local pack versions. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.",
         FORMAT_VALUE
     )]
     IncompatibleRepoFormat { found: Option<String> },
@@ -340,6 +340,9 @@ impl ObjectStore {
             return Err(StoreError::NotAKitRepository);
         }
         let packed = format::check(&layout.format_file())?;
+        if packed {
+            local_pack::check_live_pack_versions(&objects_root)?;
+        }
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(packed)),
@@ -573,9 +576,14 @@ impl ObjectStore {
             }
             Ok(bytes)
         })
-        .or_else(|e| match rejected {
-            Some(location) => Self::raw_at(&location),
-            None => Err(e),
+        .or_else(|e| {
+            if matches!(e, StoreError::IncompatibleRepoFormat { .. }) {
+                return Err(e);
+            }
+            match rejected {
+                Some(location) => Self::raw_at(&location),
+                None => Err(e),
+            }
         })
     }
 
@@ -642,7 +650,10 @@ impl ObjectStore {
             Self::verify_at(&location, h, &bytes)?;
             Ok(bytes)
         });
-        result.map_err(|e| allocation_error.unwrap_or_else(|| E::from(e)))
+        result.map_err(|e| match e {
+            StoreError::IncompatibleRepoFormat { .. } => E::from(e),
+            other => allocation_error.unwrap_or_else(|| E::from(other)),
+        })
     }
 
     /// Read a loose object's bytes without the BLAKE3 check that

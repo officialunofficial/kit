@@ -145,6 +145,20 @@ mod tests {
     }
 
     #[test]
+    fn unknown_required_capabilities_refuse_open_with_an_update_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+
+        for bytes in [b"bmt-v2\nX".as_slice(), b"bmt-v2\nPX"] {
+            fs::write(layout.format_file(), bytes).unwrap();
+            let error = ObjectStore::open(&layout).unwrap_err();
+            assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
+            assert!(error.to_string().contains("Update kit"));
+        }
+    }
+
+    #[test]
     fn activation_refuses_other_tails_and_missing_markers() {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());

@@ -96,15 +96,16 @@ impl LocalPacks {
         let mut error = None;
         let mut mismatch = None;
         let mut attempt = |location| match use_location(location) {
-            Ok(value) => Some(value),
-            Err(e) if is_disappeared(&e) => None,
+            Ok(value) => Ok(Some(value)),
+            Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
+            Err(e) if is_disappeared(&e) => Ok(None),
             Err(e @ StoreError::HashMismatch { .. }) => {
                 mismatch.get_or_insert(e);
-                None
+                Ok(None)
             }
             Err(e) => {
                 error.get_or_insert(e);
-                None
+                Ok(None)
             }
         };
         let known = self.known.lock().expect("local pack cache mutex").clone();
@@ -112,12 +113,12 @@ impl LocalPacks {
             let Some(frame) = index.find(id) else {
                 continue;
             };
-            if let Some(value) = attempt(Location::Packed(Arc::clone(index), frame)) {
+            if let Some(value) = attempt(Location::Packed(Arc::clone(index), frame))? {
                 return Ok(value);
             }
         }
         let loose = store.path_for(id);
-        if let Some(value) = attempt(Location::Loose(loose)) {
+        if let Some(value) = attempt(Location::Loose(loose))? {
             return Ok(value);
         }
         let mut found = None;
@@ -133,6 +134,7 @@ impl LocalPacks {
                 }
                 let index = match Index::open(&pair) {
                     Ok(index) => Arc::new(index),
+                    Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
                     Err(e) => {
                         pair_error.get_or_insert(e);
                         return Ok(false);
@@ -140,7 +142,9 @@ impl LocalPacks {
                 };
                 let frame = index.find(id);
                 self.remember(Arc::clone(&index));
-                found = frame.and_then(|frame| attempt(Location::Packed(index, frame)));
+                if let Some(frame) = frame {
+                    found = attempt(Location::Packed(index, frame))?;
+                }
                 Ok(found.is_some())
             })?;
         }
@@ -188,9 +192,7 @@ impl Location {
             }
             Self::Packed(index, frame) => {
                 // A disappeared member invalidates the cached location.
-                if !fs::symlink_metadata(&index.pair.index)?.is_file() {
-                    return Err(index.pair.error("index is not a regular file"));
-                }
+                index.check_index_version()?;
                 let file = index.open_frame(*frame)?;
                 let len = u64::from(frame.len);
                 Ok(Contents {
@@ -282,8 +284,20 @@ fn visit_pairs_until(
     Ok(())
 }
 
+pub(super) fn check_live_pack_versions(objects: &Path) -> StoreResult<()> {
+    visit_pairs(&objects.join("pack"), |pair| pair.check_versions())
+}
+
+fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
+    match Index::open(pair) {
+        Ok(index) => Ok(index.matches(rows)),
+        Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
+        Err(_) => Ok(false),
+    }
+}
+
 fn scan_pair(pair: &Pair) -> StoreResult<Vec<(Hash, Frame)>> {
-    let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.error(e))?;
+    let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.context(e))?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));
     }
@@ -359,8 +373,9 @@ impl ObjectStore {
         let dir = self.pack_dir();
         let mut rebuilt = 0;
         visit_pairs(&dir, |pair| {
+            pair.check_versions()?;
             let rows = scan_pair(&pair)?;
-            if Index::open(&pair).is_ok_and(|i| i.matches(&rows)) {
+            if matching_index(&pair, &rows)? {
                 return Ok(());
             }
             if !repair {
@@ -377,8 +392,9 @@ impl ObjectStore {
             if !regular(&pair.pack)? || !regular(&pair.index)? {
                 return Ok(());
             }
+            pair.check_versions()?;
             let rows = scan_pair(&pair)?;
-            if Index::open(&pair).is_ok_and(|i| i.matches(&rows)) {
+            if matching_index(&pair, &rows)? {
                 return Ok(());
             }
             let tmp = stage_index(&dir, &pair, &pair.pack, &rows)?;

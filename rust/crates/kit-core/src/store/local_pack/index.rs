@@ -9,7 +9,7 @@ use crate::pack::{
 };
 use crate::serialize;
 
-use super::super::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult};
+use super::super::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult, read_header_prefix};
 
 const MAGIC_INDEX: &[u8; 4] = b"KITX";
 const FANOUT_END: usize = 12 + 256 * 4;
@@ -62,6 +62,30 @@ impl Pair {
     pub(super) fn error(&self, error: impl std::fmt::Display) -> StoreError {
         invalid(format!("local pack {}: {error}", self.pack.display())).into()
     }
+
+    pub(super) fn context(&self, error: StoreError) -> StoreError {
+        match error {
+            StoreError::IncompatibleRepoFormat { found } => StoreError::IncompatibleRepoFormat {
+                found: found.map(|format| format!("{format} in {}", self.pack.display())),
+            },
+            other => self.error(other),
+        }
+    }
+
+    pub(super) fn check_versions(&self) -> StoreResult<()> {
+        for (path, magic, kind) in [
+            (&self.pack, MAGIC, "local pack"),
+            (&self.index, MAGIC_INDEX, "local index"),
+        ] {
+            if let Err(error @ StoreError::IncompatibleRepoFormat { .. }) = open_regular(path)
+                .map_err(StoreError::from)
+                .and_then(|mut file| read_version::<8>(&mut file, magic, kind))
+            {
+                return Err(self.context(error));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -97,22 +121,24 @@ impl IndexStamp {
 
 impl Index {
     pub(super) fn open(pair: &Pair) -> StoreResult<Self> {
-        Self::load(pair).map_err(|e| pair.error(e))
+        Self::load(pair).map_err(|e| pair.context(e))
     }
 
-    fn load(pair: &Pair) -> io::Result<Self> {
+    fn load(pair: &Pair) -> StoreResult<Self> {
         let mut pack = open_regular(&pair.pack)?;
         let (count, trailer, _) = read_header(&mut pack)?;
-        let file = open_regular(&pair.index)?;
+        let mut file = open_regular(&pair.index)?;
+        let prefix = read_version::<8>(&mut file, MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;
         let metadata = file.metadata()?;
         if metadata.len() != size as u64 {
-            return Err(invalid("index length does not match frame count"));
+            return Err(invalid("index length does not match frame count").into());
         }
         let mut bytes = vec![0; size];
-        (&file).read_exact(&mut bytes)?;
-        if (&file).read(&mut [0])? != 0 {
-            return Err(invalid("trailing index bytes"));
+        bytes[..prefix.len()].copy_from_slice(&prefix);
+        file.read_exact(&mut bytes[prefix.len()..])?;
+        if file.read(&mut [0])? != 0 {
+            return Err(invalid("trailing index bytes").into());
         }
         let mut index = Self::decode(pair.clone(), bytes, count, trailer)?;
         index.stamp = IndexStamp::get(&metadata).ok();
@@ -247,9 +273,22 @@ impl Index {
         None
     }
 
+    pub(super) fn check_index_version(&self) -> StoreResult<()> {
+        let metadata = fs::symlink_metadata(&self.pair.index)?;
+        if !metadata.is_file() {
+            return Err(self.pair.error("index is not a regular file"));
+        }
+        if self.stamp.is_none() || IndexStamp::get(&metadata).ok() != self.stamp {
+            let mut file = open_regular(&self.pair.index)?;
+            read_version::<8>(&mut file, MAGIC_INDEX, "local index")
+                .map_err(|e| self.pair.context(e))?;
+        }
+        Ok(())
+    }
+
     pub(super) fn open_frame(&self, frame: Frame) -> StoreResult<File> {
         let mut file = open_regular(&self.pair.pack)?;
-        let (count, trailer, _) = read_header(&mut file).map_err(|e| self.pair.error(e))?;
+        let (count, trailer, _) = read_header(&mut file).map_err(|e| self.pair.context(e))?;
         if count != self.count || trailer != self.trailer {
             return Err(self.pair.error("pack size or count changed"));
         }
@@ -284,15 +323,36 @@ pub(super) fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_header(file: &mut File) -> io::Result<(usize, u64, [u8; HEADER_LEN])> {
-    let mut header = [0; HEADER_LEN];
-    file.read_exact(&mut header)?;
-    if &header[..4] != MAGIC || le_u32(&header[4..8]) != 1 {
-        return Err(invalid("invalid local pack magic or version"));
+fn read_version<const N: usize>(
+    reader: &mut impl Read,
+    magic: &[u8; 4],
+    kind: &str,
+) -> StoreResult<[u8; N]> {
+    let mut header = [0; N];
+    let read = read_header_prefix(reader, &mut header)?;
+    if read < 8 {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
     }
+    if &header[..4] != magic {
+        return Err(invalid(format!("invalid {kind} magic")).into());
+    }
+    let version = le_u32(&header[4..8]);
+    if version != 1 {
+        return Err(StoreError::IncompatibleRepoFormat {
+            found: Some(format!("{kind} version {version}")),
+        });
+    }
+    if read != N {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+    }
+    Ok(header)
+}
+
+fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+    let header = read_version::<HEADER_LEN>(file, MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if count > MAX_ENTRIES {
-        return Err(invalid("local pack frame count exceeds the limit"));
+        return Err(invalid("local pack frame count exceeds the limit").into());
     }
     let trailer = file
         .metadata()?
@@ -303,9 +363,7 @@ fn read_header(file: &mut File) -> io::Result<(usize, u64, [u8; HEADER_LEN])> {
     if trailer < HEADER_LEN as u64 + frames
         || trailer > HEADER_LEN as u64 + frames + MAX_TOTAL_PAYLOAD
     {
-        return Err(invalid(
-            "local pack size disagrees with frame count or payload limit",
-        ));
+        return Err(invalid("local pack size disagrees with frame count or payload limit").into());
     }
     Ok((count as usize, trailer, header))
 }

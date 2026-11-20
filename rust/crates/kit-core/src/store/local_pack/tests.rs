@@ -256,6 +256,60 @@ fn malformed_packed_objects_keep_mismatch_classification() {
 }
 
 #[test]
+fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
+    fn incompatible(error: StoreError, member: &str) {
+        assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
+        let text = error.to_string();
+        assert!(text.contains("Update kit"), "{text}");
+        assert!(text.contains(member), "{text}");
+    }
+
+    for unknown_index in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let bytes = blob(b"object with a newer pack format");
+        let mut writer = writer(&store);
+        let id = writer.write(&bytes).unwrap();
+        let (staged, guard) = writer.stage().unwrap();
+        let pair = staged.pair.clone();
+        staged.publish(&store).unwrap();
+        drop(guard);
+        let still_open = ObjectStore::open(&layout).unwrap();
+        store.write(&bytes).unwrap(); // The publisher has the cached pack and a loose copy.
+
+        let (path, kind) = if unknown_index {
+            (&pair.index, "local index version 2")
+        } else {
+            (&pair.pack, "local pack version 2")
+        };
+        let mut newer = fs::read(path).unwrap();
+        newer[4..8].copy_from_slice(&2_u32.to_le_bytes());
+        let replacement = tempfile::NamedTempFile::new_in(store.pack_dir()).unwrap();
+        fs::write(replacement.path(), &newer).unwrap();
+        replacement.persist(path).unwrap();
+
+        incompatible(ObjectStore::open(&layout).unwrap_err(), kind);
+        incompatible(store.read(&id).unwrap_err(), kind);
+        incompatible(still_open.read(&[0; 32]).unwrap_err(), kind);
+        incompatible(still_open.iter_object_hashes().unwrap_err(), kind);
+        incompatible(still_open.check_local_packs(true).unwrap_err(), kind);
+        assert_eq!(fs::read(path).unwrap(), newer);
+    }
+}
+
+#[test]
+fn unknown_version_on_an_unpublished_pack_does_not_block_open() {
+    let (_dir, layout, store) = fresh();
+    let mut writer = writer(&store);
+    writer.write(&blob(b"unpublished version")).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let mut pack = fs::read(staged.pack.path()).unwrap();
+    pack[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    fs::write(&staged.pair.pack, pack).unwrap();
+    let reopened = ObjectStore::open(&layout).unwrap();
+    assert!(reopened.iter_object_hashes().unwrap().is_empty());
+}
+
+#[test]
 fn rejects_invalid_index_rows_even_with_a_valid_checksum() {
     let (_dir, layout, store) = fresh();
     let mut writer = writer(&store);
@@ -267,7 +321,6 @@ fn rejects_invalid_index_rows_even_with_a_valid_checksum() {
     let original = fs::read(&pair.index).unwrap();
     for (offset, bad_value) in [
         (0, b'X'),                                                // magic
-        (4, 2),                                                   // version
         (8, 0),                                                   // count
         (12, 9),                                                  // fanout
         (12 + 1024 + 64 + 7, 0xff),                               // offset outside pack

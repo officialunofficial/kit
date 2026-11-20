@@ -156,7 +156,13 @@ rebuildable locator. All integer fields are unsigned little-endian.
 | Pack key | 32 bytes | Binary key encoded by both filenames |
 | Index checksum | 32 bytes | BLAKE3 of all preceding index bytes |
 
-The exact index size is `1,100 + 44 × N` bytes. Reject unknown magic or
+An unknown pack header version or index version on a live pair MUST
+raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
+check the version before using its declared layout. Repair MUST preserve
+a pair with an unknown version. The repository capabilities that govern
+discovery are in [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
+
+The exact version-1 index size is `1,100 + 44 × N` bytes. Reject unknown magic or
 version, trailing or truncated bytes, a bad checksum, a mismatched
 key or frame count, duplicate or unsorted ids, and fanout inconsistent
 with the ids. Before allocating or following an offset, check the count,
