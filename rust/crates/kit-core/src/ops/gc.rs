@@ -688,6 +688,15 @@ fn manifest_listing(
     Ok(hash::ZERO)
 }
 
+/// Classify one soft root as the soft mark does.
+#[cfg(test)]
+pub(crate) fn classify_soft_root(
+    store: &ObjectStore,
+    root: Hash,
+) -> Result<Option<Hash>, GcRootsError> {
+    soft::SoftGraph::new(store, MarkLimits::DEFAULT).classify(root)
+}
+
 /// `live_objects_with` at the default limits.
 #[cfg(test)]
 pub(crate) fn live_objects(

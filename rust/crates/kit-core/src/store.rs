@@ -827,8 +827,9 @@ impl ObjectStore {
     /// names the frame length. It does not read or hash the payload. Every
     /// step that deletes or replaces a copy in reliance on a packed copy
     /// verifies that copy itself, and an integrity scan reports a bad
-    /// payload. An id that the walk reaches as a file goes through
-    /// [`Self::gc_object_type`] instead.
+    /// payload. The local writer's reuse of a packed copy by id and length
+    /// does not verify it either. An id that the walk reaches as a file goes
+    /// through [`Self::gc_object_type`] instead.
     pub(crate) fn gc_chunk_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
         self.gc_probe(h, false)
     }

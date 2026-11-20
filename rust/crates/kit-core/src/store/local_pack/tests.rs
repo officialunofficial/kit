@@ -2174,6 +2174,7 @@ fn the_mark_checks_a_packed_chunk_by_its_head_and_hashes_none_of_it() {
     let root = manifest_root(&store, &layout, "live", &chunks);
 
     let gc = ObjectStore::open(&layout).unwrap();
+    assert!(chunks.iter().all(|c| !gc.path_for(c).exists()), "chunks are packed");
     let live = crate::ops::gc::live_objects(&gc, &layout).unwrap();
     assert!(live.contains(&root) && chunks.iter().all(|c| live.contains(c)));
     assert_eq!(gc.gc_hashed_byte_count(), 0);
@@ -2354,6 +2355,69 @@ fn a_pack_cut_short_after_its_handle_is_cached_is_damage_and_a_read_error_is_not
         assert!(
             matches!(&error, StoreError::Io(e) if e.kind() == kind),
             "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_good_loose_chunk_survives_gc_when_its_packed_copy_has_a_bad_payload() {
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[9; 4096]);
+    let (pair, chunks) = publish_objects(&store, &[&bytes]);
+    manifest_root(&store, &layout, "live", &chunks);
+    // The mark accepts the packed copy by its head, so only the duplicate
+    // check protects the loose copy.
+    let loose = store.path_for(&chunks[0]);
+    fs::create_dir_all(loose.parent().unwrap()).unwrap();
+    fs::write(&loose, &bytes).unwrap();
+    damage_frame(&pair, &chunks[0], 10, |byte| *byte ^= 1);
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    let report =
+        crate::ops::gc::run_gc(&gc, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.loose_duplicates_pruned, 0);
+    assert_eq!(fs::read(&loose).unwrap(), bytes);
+    assert!(pair.pack.is_file());
+}
+
+#[test]
+fn the_soft_classification_hashes_an_id_it_reached_as_a_chunk_and_as_a_node() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    let bytes = blob(&[10; 4096]);
+    // The tree lists the manifest before and after the blob in turn, so the
+    // blob is seen first as a chunk in one run and first as a node in the other.
+    for (manifest_name, blob_name) in [("a", "b"), ("b", "a")] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&bytes]);
+        let manifest = serialize(&Object::ChunkedBlob(
+            crate::object::testing::spread(1, 0, ids.clone()).unwrap(),
+        ))
+        .unwrap();
+        let manifest = store.write(&manifest).unwrap();
+        let mut entries = vec![
+            TreeEntry {
+                name: manifest_name.into(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            },
+            TreeEntry {
+                name: blob_name.into(),
+                mode: EntryMode::Blob,
+                object_hash: ids[0],
+            },
+        ];
+        entries.sort_by(|x, y| x.name.cmp(&y.name));
+        let tree = store
+            .write(&serialize(&Object::Tree(Tree { entries })).unwrap())
+            .unwrap();
+        damage_frame(&pair, &ids[0], 10, |byte| *byte ^= 1);
+
+        let gc = ObjectStore::open(&layout).unwrap();
+        let result = crate::ops::gc::classify_soft_root(&gc, tree);
+        assert!(
+            matches!(result, Err(crate::ops::gc::GcRootsError::Store(StoreError::HashMismatch { .. }))),
+            "{manifest_name}/{blob_name}: {result:?}"
         );
     }
 }
