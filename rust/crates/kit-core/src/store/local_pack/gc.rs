@@ -230,7 +230,7 @@ impl ObjectStore {
                 return Ok(());
             };
             // Dry run leaves its retirement candidates on disk.
-            if report.dry_run && retirements.retires(&pair.key) {
+            if report.dry_run && retirements.pairs.contains_key(&pair.key) {
                 return Ok(());
             }
             let index = Arc::new(Index::open(&pair)?);
@@ -312,11 +312,6 @@ impl PackSweep {
         self.pairs.is_empty()
             && self.leftovers.is_empty()
             && self.copy.as_ref().is_none_or(CopyPlan::is_empty)
-    }
-
-    /// Whether a real run would retire this pair.
-    fn retires(&self, key: &Hash) -> bool {
-        self.pairs.contains_key(key) || self.copy.as_ref().is_some_and(|copy| copy.has_input(key))
     }
 
     pub(crate) fn run(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<()> {

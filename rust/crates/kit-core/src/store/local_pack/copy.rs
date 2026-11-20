@@ -246,12 +246,6 @@ impl CopyPlan {
         self.inputs.is_empty()
     }
 
-    pub(super) fn has_input(&self, key: &Hash) -> bool {
-        self.inputs
-            .iter()
-            .any(|input| &self.members[input.member].pair.key == key)
-    }
-
     /// Dry run: report what a real run would do, assuming every covering copy
     /// verifies.
     pub(super) fn preview(&self, report: &mut GcReport) {
