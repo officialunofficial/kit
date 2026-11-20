@@ -172,3 +172,40 @@ fn forget_cursors(directory: &Path) -> io::Result<()> {
     }
     kit_transport_file::sync_dir(directory)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn cache_paths_require_a_real_directory_and_distinguish_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let file = dir.path().join("file");
+        fs::write(&file, b"regular file").unwrap();
+
+        assert!(check_cache_dir(dir.path()).unwrap());
+        assert!(!check_cache_dir(&missing).unwrap());
+        remove_dir_if_present(&missing).unwrap();
+        assert!(remove_dir_if_present(&file).is_err());
+        assert!(file.is_file());
+        assert_eq!(
+            check_cache_dir(&file).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                check_cache_dir(&file.join("child")).unwrap_err().kind(),
+                io::ErrorKind::NotADirectory
+            );
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            assert_eq!(
+                check_cache_dir(&link).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+}

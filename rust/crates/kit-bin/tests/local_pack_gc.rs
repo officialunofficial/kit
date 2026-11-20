@@ -37,7 +37,17 @@ fn a_dry_run_reports_packed_payload_bytes_and_keeps_the_files() {
     old.publish().unwrap();
     drop(guard);
     refs::write_ref(&layout, "retained", &head).unwrap();
-    let pack_dir = layout.objects_dir().join("pack");
+    let object_root = layout.objects_dir();
+    let pack_dir = object_root.join("pack");
+    let leftover = pack_dir.join(format!(".{}.tmp.pack", "a".repeat(32)));
+    fs::write(&leftover, b"partial file").unwrap();
+    assert_eq!(store.write(&live).unwrap(), head);
+    let hex = kit_core::to_hex(&head);
+    let loose = object_root.join(&hex[..2]).join(&hex[2..]);
+    fs::File::open(&loose)
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
     for entry in fs::read_dir(&pack_dir).unwrap() {
         fs::File::open(entry.unwrap().path())
             .unwrap()
@@ -66,7 +76,13 @@ fn a_dry_run_reports_packed_payload_bytes_and_keeps_the_files() {
         )),
         "{stderr}"
     );
-    assert_eq!(fs::read_dir(&pack_dir).unwrap().count(), 4);
+    assert!(
+        stderr.contains("would prune 1 local pack leftover"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("would prune 1 loose duplicate"), "{stderr}");
+    assert_eq!(fs::read_dir(&pack_dir).unwrap().count(), 5);
+    assert!(loose.is_file());
 }
 
 #[test]
@@ -111,6 +127,9 @@ fn a_damaged_pack_warns_in_dry_run_and_clears_fetch_records_on_collection() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{stderr}");
         assert!(stderr.contains("kept damaged local pack"), "{stderr}");
+        assert_eq!(stderr.contains("packed payload"), dry_run, "{stderr}");
+        assert!(!stderr.contains("local pack leftover"), "{stderr}");
+        assert!(!stderr.contains("loose duplicate"), "{stderr}");
         assert!(pack.is_file());
         assert_eq!(applied.is_file(), dry_run);
     }

@@ -109,6 +109,10 @@ fn full_integrity_scan_enables_a_fetch_to_replace_a_bad_packed_copy() {
 
     let records = layout.applied_packs_dir();
     let applied = records.join("origin");
+    let non_record = records.join(".sidecar");
+    let directory = records.join("other");
+    fs::write(&non_record, b"sidecar").unwrap();
+    fs::create_dir(&directory).unwrap();
     let attestation_record = records.join(".cursors/test.attest-fetch");
     fs::create_dir_all(attestation_record.parent().unwrap()).unwrap();
     fs::write(&attestation_record, b"attestation record").unwrap();
@@ -126,6 +130,8 @@ fn full_integrity_scan_enables_a_fetch_to_replace_a_bad_packed_copy() {
     assert!(!damaged.status.success());
     assert!(String::from_utf8_lossy(&damaged.stderr).contains("invalid pack trailer"));
     assert!(!applied.exists());
+    assert!(directory.is_dir());
+    assert_eq!(fs::read(&non_record).unwrap(), b"sidecar");
     assert!(!records.join(".verified").exists());
     assert!(!records.join(".heads").exists());
     assert_eq!(fs::read_dir(records.join(".cursors")).unwrap().count(), 1);
