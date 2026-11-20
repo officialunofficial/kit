@@ -67,14 +67,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread::JoinHandle;
 
 use tempfile::TempPath;
 
 use crate::hash::Hash;
 use crate::store::{
-    MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, sync_parent_dir,
+    MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog, PruneGuard, StoreError, StoreResult,
+    sync_parent_dir,
 };
 
 /// When object writes become durable.
@@ -277,6 +278,7 @@ struct BatchState {
     /// may not have a durable dirent yet, and our commit is about to
     /// reference it.
     touched_shards: HashSet<PathBuf>,
+    reused_pack: bool,
     /// Shard directories this batch has already `create_dir_all`'d —
     /// at most 256 exist, so memoizing saves ~one mkdir syscall per
     /// object on large ingests.
@@ -296,6 +298,10 @@ pub struct WriteBatch<'s> {
     // Interior mutability so `&self` writes work and a future parallel
     // ingest can share one batch across worker threads.
     inner: Mutex<BatchState>,
+    // The shared guard keeps the discovered pairs in place until their
+    // directory has been flushed. Callers hold the worktree lock through
+    // publication, as with loose reuse.
+    pack_catalog: OnceLock<Option<(PruneGuard, Arc<PackCatalog>)>>,
     // Every write holds the read side while it stages an object. A
     // checkpoint holds the write side, so it sees no half-staged object.
     gate: RwLock<()>,
@@ -312,6 +318,7 @@ impl<'s> WriteBatch<'s> {
             policy,
             early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
+            pack_catalog: OnceLock::new(),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
         }
@@ -389,7 +396,7 @@ impl<'s> WriteBatch<'s> {
         .collect()
     }
 
-    fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_loose: bool) -> StoreResult<Hash> {
+    fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_existing: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
         let final_path = self.store.path_for(&h);
@@ -410,7 +417,7 @@ impl<'s> WriteBatch<'s> {
             !st.created_shards.contains(&shard_dir)
         };
         let total_len: u64 = parts.iter().map(|p| p.len() as u64).sum();
-        if reuse_loose && fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
+        if reuse_existing && fs::metadata(&final_path).is_ok_and(|m| m.len() == total_len) {
             // Dedup hit: the object is visible, but if another process
             // renamed it and has not yet flushed the dirent, it may not
             // be durable. We are about to reference it, so flush its
@@ -422,6 +429,18 @@ impl<'s> WriteBatch<'s> {
                 .expect("batch state mutex poisoned")
                 .touched_shards
                 .insert(shard_dir);
+            return Ok(h);
+        }
+        if reuse_existing
+            && let Some((_, catalog)) = self
+                .pack_catalog
+                .get_or_init(|| self.store.discover_write_packs())
+            && self.store.has_packed_size(catalog, &h, total_len)
+        {
+            self.inner
+                .lock()
+                .expect("batch state mutex poisoned")
+                .reused_pack = true;
             return Ok(h);
         }
         if need_mkdir {
@@ -561,19 +580,27 @@ impl<'s> WriteBatch<'s> {
         // reached (none could be spawned) come back to be barriered
         // here.
         let leftover = self.early.quiesce()?;
-        let (staged, small_staged, touched_shards) = {
+        let (staged, small_staged, mut touched_shards, reused_pack) = {
             let mut st = self.inner.lock().expect("batch state mutex poisoned");
             (
                 std::mem::take(&mut st.staged),
                 std::mem::take(&mut st.small_staged),
                 std::mem::take(&mut st.touched_shards),
+                std::mem::take(&mut st.reused_pack),
             )
         };
         let store = self.store;
         let syncer = store.syncer();
+        let sync_pack_parent = reused_pack && store.pack_parent_needs_sync();
+        if reused_pack {
+            touched_shards.insert(store.pack_dir());
+        }
+        if sync_pack_parent {
+            touched_shards.insert(store.objects_root().to_path_buf());
+        }
         match self.policy {
-            // Every write was already made durable and visible.
-            SyncPolicy::PerObject => Ok(()),
+            // New loose objects are already durable.
+            SyncPolicy::PerObject => {}
             SyncPolicy::Batch => {
                 let staged: Vec<(Hash, TempPath)> = staged.into_iter().collect();
                 // 1. Barrier every staged file. Each barrier initiates
@@ -611,11 +638,17 @@ impl<'s> WriteBatch<'s> {
                         syncer.rename(tmp, &store.path_for(&h))?;
                     }
                 }
-                // 4-5. Dirent barriers, then the terminal device flush.
-                flush_dirents(store, touched_shards)?;
-                Ok(())
             }
         }
+        // 4-5. Dirent barriers, then the terminal device flush. Per-object
+        // batches only need this for packed reuse.
+        if self.policy == SyncPolicy::Batch || reused_pack {
+            flush_dirents(store, touched_shards)?;
+        }
+        if sync_pack_parent {
+            store.mark_pack_parent_synced();
+        }
+        Ok(())
     }
 }
 
@@ -2135,6 +2168,104 @@ mod tests {
                 Ev::DirBarrier(root.join("pack")),
             ]
         );
+    }
+
+    fn publish_blob(store: &ObjectStore, data: &[u8]) -> (Hash, Vec<u8>) {
+        let bytes =
+            crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
+                data: data.to_vec(),
+            }))
+            .unwrap();
+        let guard = store.prune_guard().unwrap();
+        let mut pack = crate::store::LocalPackWriter::new(store, &guard).unwrap();
+        let id = pack.write(&bytes).unwrap();
+        pack.publish().unwrap();
+        (id, bytes)
+    }
+
+    #[test]
+    fn packed_reuse_flushes_the_pack_directory_before_publishing_a_ref() {
+        for policy in [SyncPolicy::Batch, SyncPolicy::PerObject] {
+            let (dir, publisher) = fresh_store();
+            let layout = crate::layout::RepoLayout::single(dir.path());
+            publisher.try_activate_local_packs().unwrap();
+            let mut writer = ObjectStore::open(&layout).unwrap();
+            let recorder = Arc::new(RecordingSyncer::default());
+            writer.set_syncer(recorder.clone());
+
+            let (id, bytes) = publish_blob(&publisher, b"published from another store");
+            let batch = writer.batch_with_policy(policy);
+            assert_eq!(batch.write(&bytes).unwrap(), id);
+            batch.commit().unwrap();
+
+            let root = writer.objects_root();
+            let mut events = recorder.events();
+            assert_eq!(events.pop(), Some(Ev::Full(root.to_path_buf())));
+            assert!(events.contains(&Ev::DirBarrier(root.join("pack"))));
+            assert!(events.contains(&Ev::DirBarrier(root.to_path_buf())));
+            assert!(!writer.path_for(&id).exists());
+            crate::refs::write_ref(&layout, "main", &id).unwrap();
+        }
+    }
+
+    #[test]
+    fn packed_reuse_discovers_once_per_batch() {
+        let (dir, publisher) = fresh_store();
+        let layout = crate::layout::RepoLayout::single(dir.path());
+        publisher.try_activate_local_packs().unwrap();
+        let (_, first) = publish_blob(&publisher, b"present for discovery");
+        let writer = ObjectStore::open(&layout).unwrap();
+        let batch = writer.batch();
+        let first_id = batch.write(&first).unwrap();
+
+        let (second_id, second) = publish_blob(&publisher, b"published after discovery");
+        assert_eq!(batch.write(&second).unwrap(), second_id);
+        batch.commit().unwrap();
+        assert!(!writer.path_for(&first_id).exists());
+        assert!(writer.path_for(&second_id).exists());
+
+        fs::remove_file(writer.path_for(&second_id)).unwrap();
+        let next = writer.batch();
+        assert_eq!(next.write(&second).unwrap(), second_id);
+        next.commit().unwrap();
+        assert!(!writer.path_for(&second_id).exists());
+    }
+
+    #[test]
+    fn direct_packed_writes_flush_the_discovered_catalog_once() {
+        let (dir, publisher) = fresh_store();
+        let layout = crate::layout::RepoLayout::single(dir.path());
+        publisher.try_activate_local_packs().unwrap();
+        let (first_id, first) = publish_blob(&publisher, b"first pack");
+        let (second_id, second) = publish_blob(&publisher, b"second pack");
+        let mut writer = ObjectStore::open(&layout).unwrap();
+        let recorder = Arc::new(RecordingSyncer::default());
+        writer.set_syncer(recorder.clone());
+
+        assert_eq!(writer.write(&first).unwrap(), first_id);
+        assert_eq!(writer.clone().write(&second).unwrap(), second_id);
+        assert!(!writer.path_for(&first_id).exists());
+        assert!(!writer.path_for(&second_id).exists());
+        let root = writer.objects_root();
+        assert_eq!(
+            recorder.events(),
+            [
+                Ev::DirSync(root.join("pack")),
+                Ev::DirSync(root.to_path_buf())
+            ]
+        );
+    }
+
+    #[test]
+    fn fetched_loose_objects_are_written_even_with_a_packed_copy() {
+        let (_dir, store) = fresh_store();
+        store.try_activate_local_packs().unwrap();
+        let (id, bytes) = publish_blob(&store, b"fetched loose");
+        assert_eq!(store.object_size(&id).unwrap(), bytes.len() as u64);
+        let batch = store.batch();
+        assert_eq!(batch.write_fetched(&bytes).unwrap(), id);
+        batch.commit().unwrap();
+        assert_eq!(fs::read(store.path_for(&id)).unwrap(), bytes);
     }
 
     #[test]

@@ -41,9 +41,9 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
@@ -57,6 +57,7 @@ mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
+pub(crate) use local_pack::Catalog as PackCatalog;
 pub use local_pack::LocalPackWriter;
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
@@ -297,12 +298,20 @@ pub struct PruneGuard {
 /// Result alias used throughout this module.
 pub type StoreResult<T> = Result<T, StoreError>;
 
+#[derive(Debug, Default)]
+struct PackWrites {
+    direct_catalog: OnceLock<Option<Arc<PackCatalog>>>,
+    direct_synced: Mutex<bool>,
+    root_synced: std::sync::atomic::AtomicBool,
+}
+
 /// Local content-addressed object store backed by the filesystem.
 #[derive(Debug, Clone)]
 pub struct ObjectStore {
     /// Absolute path to `<root>/.kit/objects`.
     objects_root: PathBuf,
     packs: Arc<local_pack::LocalPacks>,
+    pack_writes: Arc<PackWrites>,
     /// Flush/rename primitive seam. Production code always uses
     /// [`RealSyncer`]; unit tests inject a recording double to assert
     /// flush ordering and counts (the O(1)-flushes-per-batch contract).
@@ -336,6 +345,7 @@ impl ObjectStore {
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(packed)),
+            pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
@@ -358,6 +368,7 @@ impl ObjectStore {
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(false)),
+            pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
@@ -493,12 +504,69 @@ impl ObjectStore {
                 .dir_sync(final_path.parent().expect("object path has parent"))?;
             return Ok(h);
         }
+        if self.reuse_direct_pack(&h, bytes.len() as u64)? {
+            return Ok(h);
+        }
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
         fs::create_dir_all(shard_dir)?;
         write_atomic(&final_path, bytes, &**self.syncer())?;
         Ok(h)
+    }
+
+    fn reuse_direct_pack(&self, h: &Hash, size: u64) -> StoreResult<bool> {
+        let Some(catalog) = self
+            .pack_writes
+            .direct_catalog
+            .get_or_init(|| self.discover_write_packs().map(|(_, catalog)| catalog))
+        else {
+            return Ok(false);
+        };
+        let _guard = self.prune_guard()?;
+        if !self.has_packed_size(catalog, h, size) {
+            return Ok(false);
+        }
+        let mut synced = self
+            .pack_writes
+            .direct_synced
+            .lock()
+            .expect("pack sync mutex");
+        if !*synced {
+            self.syncer().dir_sync(&self.pack_dir())?;
+            if self.pack_parent_needs_sync() {
+                self.syncer().dir_sync(self.objects_root())?;
+                self.mark_pack_parent_synced();
+            }
+            *synced = true;
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn discover_write_packs(&self) -> Option<(PruneGuard, Arc<PackCatalog>)> {
+        if !self.local_packs_enabled().unwrap_or(false) {
+            return None;
+        }
+        let guard = self.prune_guard().ok()?;
+        let catalog = self.packs.write_catalog(self).ok()?;
+        Some((guard, catalog))
+    }
+
+    pub(crate) fn has_packed_size(&self, catalog: &PackCatalog, h: &Hash, size: u64) -> bool {
+        self.packs.has_packed_size(catalog, h, size)
+    }
+
+    pub(crate) fn pack_parent_needs_sync(&self) -> bool {
+        !self
+            .pack_writes
+            .root_synced
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_pack_parent_synced(&self) {
+        self.pack_writes
+            .root_synced
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Begin a bulk-write session: each new object is written
