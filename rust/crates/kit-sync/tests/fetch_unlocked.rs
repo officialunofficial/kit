@@ -237,7 +237,7 @@ fn tracking_tip(layout: &RepoLayout) -> Option<Hash> {
 /// that had to wait for the worktree lock is the caller's concern.
 fn gc_now(layout: &RepoLayout) -> kit_core::ops::GcReport {
     let store = ObjectStore::open(layout).unwrap();
-    run_gc(&store, layout, u64::MAX, 0, false).unwrap()
+    run_gc(&store, layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap()
 }
 
 fn assert_closure_complete(layout: &RepoLayout, tip: Hash) {

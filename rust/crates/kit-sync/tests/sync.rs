@@ -532,7 +532,7 @@ fn a_packed_chunk_can_read_restore_and_mark() {
     )
     .unwrap();
     let mut marked = 0;
-    kit_core::ops::gc::run_gc_observed(
+    kit_core::ops::gc::run_gc(
         &store,
         &layout,
         u64::MAX,
@@ -1826,7 +1826,7 @@ fn history_gc_pruned_after_a_forced_update_is_checked_again() {
     );
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
     assert!(
-        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false)
+        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {})
             .unwrap()
             .pruned
             > 0

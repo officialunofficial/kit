@@ -269,7 +269,8 @@ fn corrupted_index_stops_collection_and_preserves_the_completed_sweep() {
             &repo.layout,
             now_secs(),
             DEFAULT_GRACE_SECS,
-            true
+            true,
+            &mut |_, _, _| {},
         )
         .is_err()
     );

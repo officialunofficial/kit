@@ -78,7 +78,7 @@ impl<'a> SoftGraph<'a> {
                             cap: self.limits.chunk_cap,
                         });
                     }
-                    let kind = match self.store.gc_object_type(chunk) {
+                    let kind = match self.store.gc_chunk_type(chunk) {
                         Ok(kind) => Some(kind),
                         Err(StoreError::ObjectNotFound(_)) => None,
                         Err(e) => return Err(e.into()),

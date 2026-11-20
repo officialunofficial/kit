@@ -940,7 +940,7 @@ fn a_deleted_and_collected_tag_is_restored_through_self_heal() {
         let layout = RepoLayout::single(&target);
         refs::delete_tag(&layout, "v1").unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false).unwrap();
+        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(!store.contains(&v1), "gc removed the tag object");
 
         let report = fetch_from(&remote, &target);

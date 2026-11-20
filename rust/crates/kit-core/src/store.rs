@@ -347,6 +347,9 @@ pub struct ObjectStore {
     /// object rather than once per reference to it.
     #[cfg(test)]
     read_calls: Arc<AtomicU64>,
+    /// Test-only: bytes of packed blobs that a gc type probe hashed.
+    #[cfg(test)]
+    gc_hashed_bytes: Arc<AtomicU64>,
 }
 
 impl ObjectStore {
@@ -368,6 +371,8 @@ impl ObjectStore {
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -394,6 +399,8 @@ impl ObjectStore {
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -433,6 +440,12 @@ impl ObjectStore {
     #[cfg(test)]
     pub(crate) fn read_call_count(&self) -> u64 {
         self.read_calls.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: bytes of packed blobs hashed by gc type probes so far.
+    #[cfg(test)]
+    pub(crate) fn gc_hashed_byte_count(&self) -> u64 {
+        self.gc_hashed_bytes.load(Ordering::Relaxed)
     }
 
     /// Start a batched write with the store's configured policy
@@ -803,6 +816,24 @@ impl ObjectStore {
     /// An index can locate bytes of a different object. Non-leaf types are
     /// followed by a verified read of the object before their edges are used.
     pub(crate) fn gc_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.gc_probe(h, true)
+    }
+
+    /// The type of an id that a manifest lists, for the mark's chunk pass.
+    ///
+    /// A chunk is a leaf by rule: gc follows no edge from it, so what a copy
+    /// holds past its head cannot change what the mark keeps. For a packed
+    /// copy this reads the 10-byte head and checks that a blob's prologue
+    /// names the frame length. It does not read or hash the payload. Every
+    /// step that deletes or replaces a copy in reliance on a packed copy
+    /// verifies that copy itself, and an integrity scan reports a bad
+    /// payload. An id that the walk reaches as a file goes through
+    /// [`Self::gc_object_type`] instead.
+    pub(crate) fn gc_chunk_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.gc_probe(h, false)
+    }
+
+    fn gc_probe(&self, h: &Hash, verify: bool) -> StoreResult<crate::object::ObjectType> {
         use crate::object::ObjectType;
 
         self.packs.lookup(self, h, true, |location| {
@@ -825,10 +856,15 @@ impl ObjectStore {
                             "invalid packed blob header",
                         ));
                     }
-                    let mut hash = blake3::Hasher::new();
-                    hash.update(&header);
-                    hash.update_reader(contents)?;
-                    check_hash(h, hash.finalize().as_bytes())?;
+                    if verify {
+                        #[cfg(test)]
+                        self.gc_hashed_bytes
+                            .fetch_add(contents.len, Ordering::Relaxed);
+                        let mut hash = blake3::Hasher::new();
+                        hash.update(&header);
+                        hash.update_reader(contents)?;
+                        check_hash(h, hash.finalize().as_bytes())?;
+                    }
                     Ok(ty)
                 }
                 ObjectType::Delta => Err(local_pack::invalid_at(
@@ -2289,6 +2325,7 @@ mod dedup_mtime_tests {
             now_secs(),
             GRACE,
             false,
+            &mut |_, _, _| {},
         )
         .unwrap();
         assert!(store.contains(&h), "re-written object pruned: {report:?}");
@@ -2403,7 +2440,7 @@ mod sweep_crash_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false).unwrap();
+        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false, &mut |_, _, _| {}).unwrap();
         assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
         assert!(!reopened.contains(&control));
         assert_eq!(report.pruned, 1);
