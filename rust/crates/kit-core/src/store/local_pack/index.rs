@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::hash::{Hash, from_hex, to_hex};
@@ -94,6 +94,7 @@ pub(in crate::store) struct Index {
     bytes: Vec<u8>,
     count: usize,
     trailer: u64,
+    stamp: Option<Stamp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -166,7 +167,8 @@ impl Index {
         let mut file = open_regular(&pair.index)?;
         let prefix = read_version::<8>(&mut file, *MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;
-        if file.metadata()?.len() != size as u64 {
+        let metadata = file.metadata()?;
+        if metadata.len() != size as u64 {
             return Err(invalid("index length does not match frame count").into());
         }
         let mut bytes = vec![0; size];
@@ -175,7 +177,9 @@ impl Index {
         if file.read(&mut [0])? != 0 {
             return Err(invalid("trailing index bytes").into());
         }
-        Ok(Self::decode(pair.clone(), bytes, count, trailer)?)
+        let mut index = Self::decode(pair.clone(), bytes, count, trailer)?;
+        index.stamp = Stamp::get(&metadata).ok();
+        Ok(index)
     }
 
     fn decode(pair: Pair, bytes: Vec<u8>, count: usize, trailer: u64) -> io::Result<Self> {
@@ -188,6 +192,7 @@ impl Index {
             bytes,
             count,
             trailer,
+            stamp: None,
         };
         index.validate()?;
         Ok(index)
@@ -283,7 +288,7 @@ impl Index {
     }
 
     #[cfg(test)]
-    fn find(&self, id: &Hash) -> Option<Frame> {
+    pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
         let mut range = self.bucket(id[0]);
         let mut end = range.end;
         while range.start < end {
@@ -295,6 +300,36 @@ impl Index {
             }
         }
         None
+    }
+
+    pub(super) fn check_index_version(&self) -> StoreResult<()> {
+        let metadata = fs::symlink_metadata(&self.pair.index)?;
+        if !metadata.is_file() {
+            return Err(self.pair.error("index is not a regular file"));
+        }
+        if self.stamp.is_none() || Stamp::get(&metadata).ok() != self.stamp {
+            let mut file = open_regular(&self.pair.index)?;
+            read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
+                .map_err(|e| self.pair.context(e))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn open_frame(&self, frame: Frame) -> StoreResult<File> {
+        let mut file = open_regular(&self.pair.pack)?;
+        let (count, trailer, _) = read_header(&mut file).map_err(|e| self.pair.context(e))?;
+        if count != self.count || trailer != self.trailer {
+            return Err(self.pair.error("pack size or count changed"));
+        }
+        let (start, _) = frame
+            .extent(trailer)
+            .ok_or_else(|| self.pair.error("invalid frame extent"))?;
+        file.seek(SeekFrom::Start(start))?;
+        let len = read_frame_header(&mut file).map_err(|e| self.pair.error(e))?;
+        if len != frame.len {
+            return Err(self.pair.error("index and pack disagree on frame length"));
+        }
+        Ok(file)
     }
 
     pub(super) fn matches(&self, rows: &[(Hash, Frame)]) -> bool {

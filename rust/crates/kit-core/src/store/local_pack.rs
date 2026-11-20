@@ -304,7 +304,7 @@ impl LocalPacks {
                 return Ok(None);
             };
             let file = self.handles.get(locator, Member::Pack)?;
-            use_location(Location::Packed(Arc::clone(locator), frame, file)).map(Some)
+            use_location(Location::Cached(Arc::clone(locator), frame, file)).map(Some)
         })();
         if value.as_ref().is_err_and(is_disappeared) {
             errors.stale = true;
@@ -345,19 +345,21 @@ fn is_disappeared(err: &StoreError) -> bool {
 #[derive(Debug)]
 pub(super) enum Location {
     Loose(PathBuf),
-    Packed(Arc<Locator>, Frame, Arc<File>),
+    Packed(Arc<Index>, Frame),
+    Cached(Arc<Locator>, Frame, Arc<File>),
 }
 
 impl Location {
     pub(super) fn path(&self) -> &Path {
         match self {
             Self::Loose(path) => path,
-            Self::Packed(index, ..) => &index.pair.pack,
+            Self::Packed(index, _) => &index.pair.pack,
+            Self::Cached(index, ..) => &index.pair.pack,
         }
     }
 
     pub(super) fn is_packed(&self) -> bool {
-        matches!(self, Self::Packed(..))
+        matches!(self, Self::Packed(..) | Self::Cached(..))
     }
 
     pub(super) fn open(&self) -> StoreResult<Contents> {
@@ -370,16 +372,14 @@ impl Location {
                     len,
                 })
             }
-            Self::Packed(index, frame, file) => {
+            Self::Packed(index, frame) => {
+                index.check_index_version()?;
+                let file = Arc::new(index.open_frame(*frame)?);
+                Ok(Contents::packed(file, *frame))
+            }
+            Self::Cached(index, frame, file) => {
                 index.open_frame(file, *frame)?;
-                Ok(Contents {
-                    source: Source::Packed {
-                        file: Arc::clone(file),
-                        offset: frame.offset,
-                        remaining: usize::try_from(frame.len).expect("bounded frame length"),
-                    },
-                    len: u64::from(frame.len),
-                })
+                Ok(Contents::packed(Arc::clone(file), *frame))
             }
         }
     }
@@ -387,7 +387,7 @@ impl Location {
     pub(super) fn size(&self) -> StoreResult<u64> {
         match self {
             Self::Loose(path) => Ok(fs::metadata(path)?.len()),
-            Self::Packed(..) => Ok(self.open()?.len),
+            Self::Packed(..) | Self::Cached(..) => Ok(self.open()?.len),
         }
     }
 
@@ -406,6 +406,19 @@ impl Location {
 pub(super) struct Contents {
     source: Source,
     pub(super) len: u64,
+}
+
+impl Contents {
+    fn packed(file: Arc<File>, frame: Frame) -> Self {
+        Self {
+            source: Source::Packed {
+                file,
+                offset: frame.offset,
+                remaining: usize::try_from(frame.len).expect("bounded frame length"),
+            },
+            len: u64::from(frame.len),
+        }
+    }
 }
 
 enum Source {
