@@ -25,6 +25,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Resolve relative clone destinations once before restoring objects.
 - Stage the new spelling and remove the old one when `add -A` sees a case-only rename.
 - Check out committed case-only file renames on case-insensitive volumes.
+- A plain push leases the tracking ref it checked, so a fetch during the push can no longer let it replace a remote head without `--force`.
+- A gc during a push no longer prunes the tip of the tracking ref the push writes.
+- Ctrl-C during the attestation phase of fetch or push exits 75 instead of reporting success.
 
 ## [0.9.0] - 2026-11-19
 

@@ -1039,6 +1039,9 @@ A pack is recorded as applied only after its objects are committed and its
 signatures are checked, and the record is appended as each pack lands. When a
 run that skipped a recorded pack finds a delta base or a closure object
 missing, it clears the record and applies the whole chain again, once.
+A push holds the same guard from before it plans until after its last
+remote-tracking ref write, and writes each of those refs under
+`worktree.lock`.
 
 **Because:** one large file is many packs, so a clone can take hours. A lock
 held that long stops `add`, `commit` and `checkout`. Staging the packs first
@@ -1057,7 +1060,8 @@ lock would wait as long as the longest fetch.
 (the lock free mid-download and mid-apply, the publish wait and its interrupt,
 gc during a fetch with and without a reused old object, a fetch killed in each
 download, gc after a killed fetch then a fetch, two fetches at once, a resumed
-clone equal to an uninterrupted one); `kit-bin` `fetch_pull_lock_scope`
+clone equal to an uninterrupted one); `kit-sync` `push_tracking` (gc during a
+push); `kit-bin` `fetch_pull_lock_scope`
 (`add` and `commit` during a paused fetch); and `stage::tests`.
 
 ## A fetch closure check counts no chunk

@@ -699,7 +699,7 @@ fn fetch_objects_inner(
     }
     let attestation_complete = crate::fetch_attestations::run(
         store, layout, source, observer, remote, options, lock_wait, snapshot, report,
-    );
+    )?;
     if !attestation_complete || report.tags_incomplete() {
         // A refused tag is tried and reported again by the next fetch.
         return Ok(());
