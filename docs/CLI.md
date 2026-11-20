@@ -512,9 +512,10 @@ History / commits:
   diagnostics). A line that never survives a step stays on `<start>`
   (git marks such lines with a leading `^`; kit's tab format carries no
   `^`, consistent with its existing boundary-marker omission). `-w` and
-  `-L` compose with `--reverse`. A range whose first-parent walk from
-  `<end>` holds more than 1,000,000 commits fails with an error that names
-  the limit and blames nothing. Default emits
+  `-L` compose with `--reverse`. If the first-parent walk from `<end>`
+  cannot read a commit or finds another object type, the error names that
+  object. If the walk exceeds 1,000,000 commits, the error names the limit.
+  In either case, blame prints no attribution. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `kit verify <rev> [--trusted] [--trust-roots <path>]` &mdash; verify the
