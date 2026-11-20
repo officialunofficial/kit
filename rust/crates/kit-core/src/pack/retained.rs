@@ -375,7 +375,8 @@ mod tests {
         assert!(bytes.len() > 2 * SPOOL_BUFFER);
         let (key, pack) = verified(&bytes, dir.path());
         cache.keep(&key, &pack).unwrap();
-        assert!(read_all(&cache.take(&key).unwrap()) == bytes);
+        let back = read_all(&cache.take(&key).unwrap());
+        assert_eq!(blake3::hash(&back), blake3::hash(&bytes));
     }
 
     #[test]
