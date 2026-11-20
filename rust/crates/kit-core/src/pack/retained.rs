@@ -368,14 +368,11 @@ mod tests {
         let cache = RetainedPacks::new(dir.path());
         let (key, _) = verified(&pack_bytes(5), dir.path());
         ensure_dir(&cache.dir).unwrap();
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            cache.path(&key),
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-            0,
-        )
-        .unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(cache.path(&key))
+            .status()
+            .unwrap();
+        assert!(made.success());
         assert!(cache.take(&key).is_none());
         assert!(files(&cache).is_empty());
     }
