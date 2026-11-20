@@ -511,6 +511,15 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn packed_blob_identity_rejects_a_short_object_header() {
+        let bytes = serialize::blob_prologue(0).unwrap();
+        assert!(matches!(
+            super::canonical_id(&bytes[..1]),
+            Err(StoreError::Decode(KitError::EmptyData))
+        ));
+    }
+
+    #[test]
     fn packed_blob_identity_rejects_a_truncated_payload() {
         let bytes = serialize::blob_prologue(20).unwrap();
         assert!(matches!(
