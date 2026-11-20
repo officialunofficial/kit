@@ -166,7 +166,13 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     drop(progress);
+    if !report.dry_run && !packed.skipped_pack_errors.is_empty() {
+        super::fetch_repair::note_bad_pack(&layout);
+    }
     let mut stderr = std::io::stderr().lock();
+    for error in &packed.skipped_pack_errors {
+        let _ = writeln!(stderr, "warning: kept damaged local pack: {error}");
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(

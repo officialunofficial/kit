@@ -1214,3 +1214,66 @@ fn same_key_publication_replaces_a_damaged_index_with_the_verified_index() {
     assert_eq!(store.check_local_packs(false).unwrap(), 0);
     assert_eq!(store.read(&ids[0]).unwrap(), bytes);
 }
+
+#[test]
+fn a_damaged_dead_pack_does_not_block_collection_of_verified_garbage() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let (damaged, _) = publish_objects(&store, &[&blob(b"damaged dead pack")]);
+    let (good, _) = publish_objects(&store, &[&blob(b"verified dead pack")]);
+    let loose = store.write(&blob(b"unrelated loose garbage")).unwrap();
+    let mut bytes = fs::read(&damaged.pack).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(&damaged.pack, bytes).unwrap();
+
+    for dry_run in [true, false] {
+        let (report, packed) =
+            run_gc_with_pack_report(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {})
+                .unwrap();
+        assert_eq!(packed.skipped_pack_errors.len(), 1);
+        assert!(packed.skipped_pack_errors[0].contains("invalid pack trailer"));
+        assert_eq!(packed.packs_retired, 1);
+        assert_eq!(report.pruned, 1);
+        assert!(damaged.pack.is_file() && damaged.index.is_file());
+        assert_eq!(good.pack.is_file(), dry_run);
+        assert_eq!(store.path_for(&loose).is_file(), dry_run);
+    }
+}
+
+#[test]
+fn publishing_an_existing_pack_refreshes_its_mtime() {
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"reuse on publication");
+    let (pair, _) = publish_objects(&store, &[&bytes]);
+    set_pack_age(&pair.pack, 1);
+
+    let (republished, _) = publish_objects(&store, &[&bytes]);
+    assert_eq!(pair.key, republished.key);
+    assert!(
+        fs::metadata(&pair.pack).unwrap().modified().unwrap()
+            > std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)
+    );
+}
+
+#[test]
+fn a_recent_loose_copy_replaced_by_a_newer_pack_is_not_counted_as_kept() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(b"recent dead duplicate");
+    let h = store.write(&bytes).unwrap();
+    let loose = store.path_for(&h);
+    let (pair, _) = publish_objects(&store, &[&bytes]);
+    set_pack_age(&loose, 8);
+    set_pack_age(&pair.pack, 9);
+
+    for dry_run in [true, false] {
+        let (report, packed) =
+            run_gc_with_pack_report(&store, &layout, 10, 5, dry_run, &mut |_, _, _| {}).unwrap();
+        assert_eq!(report.kept_recent, 0);
+        assert_eq!(packed.loose_duplicates_pruned, 1);
+        assert_eq!(loose.exists(), dry_run);
+        assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+}

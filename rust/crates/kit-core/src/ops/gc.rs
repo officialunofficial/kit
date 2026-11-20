@@ -764,6 +764,8 @@ pub struct PackedGcReport {
     pub pack_leftovers_pruned: usize,
     /// Loose files reclaimed because a verified packed copy remains.
     pub loose_duplicates_pruned: usize,
+    /// Integrity errors for aged packs left in place because their body failed verification.
+    pub skipped_pack_errors: Vec<String>,
 }
 
 /// Mark-and-sweep prune: keep every object reachable from the retention
@@ -910,8 +912,23 @@ fn run_gc_with_progress_hook(
     for path in empty_attestations {
         remove_old_empty_attestation(&path, now_secs, grace_secs)?;
     }
+    let previewed_duplicates = if packed.packs_scanned == 0 {
+        BTreeSet::new()
+    } else {
+        store.sweep_loose_duplicates(
+            &pack_sweep,
+            &live,
+            now_secs,
+            grace_secs,
+            &mut report,
+            &mut packed,
+        )?
+    };
     for shard in 0..=u8::MAX {
         for h in store.list_loose_shard(shard)? {
+            if previewed_duplicates.contains(&h) {
+                continue;
+            }
             report.scanned += 1;
             if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
                 progress("gc", report.scanned - 1, report.bytes_reclaimed);
@@ -947,16 +964,6 @@ fn run_gc_with_progress_hook(
             report.bytes_reclaimed += len;
         }
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
-    }
-    if packed.packs_scanned != 0 {
-        store.sweep_loose_duplicates(
-            &pack_sweep,
-            &live,
-            now_secs,
-            grace_secs,
-            &mut report,
-            &mut packed,
-        )?;
     }
     progress("gc", report.scanned, report.bytes_reclaimed);
     Ok((report, packed))

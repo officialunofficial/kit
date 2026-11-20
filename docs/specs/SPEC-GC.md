@@ -354,7 +354,9 @@ Gc also retires a pack when every verified entry is unreachable and the
 pack has passed grace. Gc records the pack's mtime after the retention mark
 and before acquiring the exclusive `format` try-lock. Under the lock, it
 rescans the pack directory and keeps any pair whose identity or pack mtime
-changed. Live and mixed packs stay in place.
+changed. Live and mixed packs stay in place. If a candidate's body
+fails integrity verification, gc reports the damage, keeps the pair,
+and continues collecting other eligible objects.
 
 Retirement after a merge takes the same try-lock and rechecks input
 identity and durable coverage by the verified replacement packs.

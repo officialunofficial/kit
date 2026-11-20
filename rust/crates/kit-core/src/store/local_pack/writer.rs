@@ -241,7 +241,10 @@ impl Staged {
             let existing = open_regular(&pair.pack)?;
             pair.check_versions()?;
             match scan_pair(&pair) {
-                Ok(_) => existing.sync_all()?,
+                Ok(_) => {
+                    crate::store::refresh_mtime(&pair.pack)?;
+                    existing.sync_all()?;
+                }
                 // The staged copy was fully verified and has this exact key.
                 // Replace a damaged member without making the pair disappear.
                 Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {

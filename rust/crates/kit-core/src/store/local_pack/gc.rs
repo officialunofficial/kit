@@ -9,7 +9,7 @@ use super::{Index, Location, read_pack_dir, scan_pair, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet, PackedGcReport};
-use crate::store::{ObjectStore, StoreResult};
+use crate::store::{ObjectStore, StoreError, StoreResult};
 
 #[derive(Default)]
 pub(crate) struct PackSweep {
@@ -101,7 +101,15 @@ impl ObjectStore {
             {
                 // An index checksum alone does not prove which ids the pack
                 // holds. Verify the body before authorizing any deletion.
-                if !index.matches(&scan_pair(&pair)?) {
+                let rows = match scan_pair(&pair) {
+                    Ok(rows) => rows,
+                    Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
+                        report.skipped_pack_errors.push(error.to_string());
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+                if !index.matches(&rows) {
                     return Err(pair.error("index does not match verified pack"));
                 }
                 plan.pairs.insert(
@@ -135,13 +143,13 @@ impl ObjectStore {
         grace: u64,
         report: &mut GcReport,
         packed: &mut PackedGcReport,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<BTreeSet<Hash>> {
         let mut loose_shards = [false; 256];
         for shard in 0..=u8::MAX {
             loose_shards[usize::from(shard)] = !self.list_loose_shard(shard)?.is_empty();
         }
         if !loose_shards.contains(&true) {
-            return Ok(());
+            return Ok(BTreeSet::new());
         }
         let dir = self.pack_dir();
         let mut previewed = BTreeSet::new();
@@ -213,7 +221,8 @@ impl ObjectStore {
                 packed.loose_duplicates_pruned += 1;
             }
             Ok(())
-        })
+        })?;
+        Ok(previewed)
     }
 }
 
