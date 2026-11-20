@@ -74,8 +74,8 @@ impl Pair {
 
     pub(super) fn check_versions(&self) -> StoreResult<()> {
         for (path, magic, kind) in [
-            (&self.pack, MAGIC, "local pack"),
-            (&self.index, MAGIC_INDEX, "local index"),
+            (&self.pack, *MAGIC, "local pack"),
+            (&self.index, *MAGIC_INDEX, "local index"),
         ] {
             if let Err(error @ StoreError::IncompatibleRepoFormat { .. }) = open_regular(path)
                 .map_err(StoreError::from)
@@ -134,7 +134,7 @@ impl Index {
         let mut pack = open_regular(&pair.pack)?;
         let (count, trailer, _) = read_header(&mut pack)?;
         let mut file = open_regular(&pair.index)?;
-        let prefix = read_version::<8>(&mut file, MAGIC_INDEX, "local index")?;
+        let prefix = read_version::<8>(&mut file, *MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;
         let metadata = file.metadata()?;
         if metadata.len() != size as u64 {
@@ -286,7 +286,7 @@ impl Index {
         }
         if self.stamp.is_none() || IndexStamp::get(&metadata).ok() != self.stamp {
             let mut file = open_regular(&self.pair.index)?;
-            read_version::<8>(&mut file, MAGIC_INDEX, "local index")
+            read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
                 .map_err(|e| self.pair.context(e))?;
         }
         Ok(())
@@ -331,7 +331,7 @@ pub(super) fn open_regular(path: &Path) -> io::Result<File> {
 
 fn read_version<const N: usize>(
     reader: &mut impl Read,
-    magic: &[u8; 4],
+    magic: [u8; 4],
     kind: &str,
 ) -> StoreResult<[u8; N]> {
     let mut header = [0; N];
@@ -339,7 +339,7 @@ fn read_version<const N: usize>(
     if read < 8 {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
     }
-    if &header[..4] != magic {
+    if header[..4] != magic {
         return Err(invalid(format!("invalid {kind} magic")).into());
     }
     let version = le_u32(&header[4..8]);
@@ -355,7 +355,7 @@ fn read_version<const N: usize>(
 }
 
 fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
-    let header = read_version::<HEADER_LEN>(file, MAGIC, "local pack")?;
+    let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if count > MAX_ENTRIES {
         return Err(invalid("local pack frame count exceeds the limit").into());
