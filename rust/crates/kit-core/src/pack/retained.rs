@@ -355,6 +355,48 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_of_several_buffers_is_kept_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        let mut data = vec![0u8; 2 * SPOOL_BUFFER + 12_345];
+        blake3::Hasher::new()
+            .update(b"retained")
+            .finalize_xof()
+            .fill(&mut data);
+        let blob = crate::object::Object::Blob(crate::object::Blob { data });
+        let mut writer = PackWriter::new();
+        writer
+            .push_raw(
+                blob.id().unwrap(),
+                &crate::serialize::serialize(&blob).unwrap(),
+            )
+            .unwrap();
+        let bytes = writer.finish().unwrap();
+        assert!(bytes.len() > 2 * SPOOL_BUFFER);
+        let (key, pack) = verified(&bytes, dir.path());
+        cache.keep(&key, &pack).unwrap();
+        assert!(read_all(&cache.take(&key).unwrap()) == bytes);
+    }
+
+    #[test]
+    fn a_file_of_a_few_days_stays_and_one_of_a_week_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        ensure_dir(&cache.dir).unwrap();
+        for (name, hours) in [
+            ("three_days", 72),
+            ("six_days", 6 * 24),
+            ("eight_days", 8 * 24),
+        ] {
+            let path = cache.dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            set_age(&path, Duration::from_hours(hours));
+        }
+        cache.trim();
+        assert_eq!(files(&cache), ["six_days", "three_days"]);
+    }
+
+    #[test]
     fn trim_drops_files_past_the_age_then_the_oldest_past_the_count() {
         let dir = tempfile::tempdir().unwrap();
         let cache = RetainedPacks::new(dir.path());

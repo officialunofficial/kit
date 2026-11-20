@@ -633,9 +633,7 @@ pub trait PackSink: Send {
 
     /// Learn how a transport answered the sink's request to continue a body.
     /// Called at most once per attempt that held a prefix.
-    fn note_resume(&mut self, outcome: ResumeOutcome) {
-        let _ = outcome;
-    }
+    fn note_resume(&mut self, _outcome: ResumeOutcome) {}
 }
 
 pub mod resume;
@@ -1181,6 +1179,22 @@ pub struct UploadLimits {
 mod tests {
     use super::*;
     use std::io::Read as _;
+
+    #[test]
+    fn a_sink_that_does_not_continue_holds_nothing_and_refuses_to_resume() {
+        let mut sink = MemorySink::new(64);
+        sink.begin(Some(8)).unwrap();
+        sink.write(b"abcd").unwrap();
+        assert_eq!(sink.retained(), 0);
+        assert!(matches!(
+            sink.resume(8, 4),
+            Err(TransportError::ProtocolError)
+        ));
+        sink.note_resume(ResumeOutcome::Resumed { bytes: 4 });
+        // Nothing about the body changed.
+        sink.write(b"efgh").unwrap();
+        assert_eq!(sink.into_bytes().unwrap(), b"abcdefgh");
+    }
 
     #[test]
     fn a_repo_cursor_holds_its_bytes_within_the_bound_and_hides_them_in_debug() {
