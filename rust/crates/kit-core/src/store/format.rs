@@ -193,4 +193,17 @@ mod tests {
         ));
         assert!(!marker.exists());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_open_preserves_filesystem_errors_other_than_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        let marker = layout.format_file();
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink(&marker, &marker).unwrap();
+
+        assert!(matches!(ObjectStore::open(&layout), Err(StoreError::Io(_))));
+    }
 }

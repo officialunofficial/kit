@@ -258,6 +258,10 @@ fn regular(path: &Path) -> io::Result<bool> {
     }
 }
 
+fn pair_is_live(pair: &Pair) -> io::Result<bool> {
+    Ok(regular(&pair.pack)? && regular(&pair.index)?)
+}
+
 fn visit_pairs_until(
     dir: &Path,
     mut visit: impl FnMut(Pair) -> StoreResult<bool>,
@@ -277,7 +281,7 @@ fn visit_pairs_until(
         else {
             continue;
         };
-        if regular(&pair.pack)? && regular(&pair.index)? && visit(pair)? {
+        if pair_is_live(&pair)? && visit(pair)? {
             break;
         }
     }
@@ -389,7 +393,7 @@ impl ObjectStore {
                 .open(self.format_path())?;
             lock.try_lock().map_err(io::Error::from)?;
             // Reopen under the lock so a retired pack cannot be resurrected.
-            if !regular(&pair.pack)? || !regular(&pair.index)? {
+            if !pair_is_live(&pair)? {
                 return Ok(());
             }
             pair.check_versions()?;

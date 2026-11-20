@@ -256,6 +256,39 @@ fn malformed_packed_objects_keep_mismatch_classification() {
 }
 
 #[test]
+fn pack_scan_checks_the_trailer_before_returning_the_key() {
+    let (_dir, _layout, store) = fresh();
+    let mut writer = writer(&store);
+    writer.write(&blob(b"pack trailer")).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let mut bytes = fs::read(staged.pack.path()).unwrap();
+    *bytes.last_mut().unwrap() ^= 1;
+    fs::write(staged.pack.path(), bytes).unwrap();
+
+    let error = index::scan(&mut fs::File::open(staged.pack.path()).unwrap()).unwrap_err();
+    assert!(error.to_string().contains("pack trailer"), "{error}");
+}
+
+#[test]
+fn a_cached_location_refuses_a_pack_with_a_changed_count() {
+    let (_dir, _layout, store) = fresh();
+    let mut writer = writer(&store);
+    let id = writer.write(&blob(b"cached frame")).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    let mut bytes = fs::read(&pair.pack).unwrap();
+    bytes[8..12].copy_from_slice(&0_u32.to_le_bytes());
+    fs::write(&pair.pack, bytes).unwrap();
+
+    let error = store.object_size(&id).unwrap_err();
+    assert!(
+        error.to_string().contains("pack size or count changed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
     fn incompatible(error: &StoreError, member: &str) {
         assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
@@ -315,6 +348,63 @@ fn unknown_version_on_an_unpublished_pack_does_not_block_open() {
     fs::write(&staged.pair.pack, pack).unwrap();
     let reopened = ObjectStore::open(&layout).unwrap();
     assert!(reopened.iter_object_hashes().unwrap().is_empty());
+}
+
+#[test]
+fn a_loose_store_skips_pack_discovery_on_a_miss() {
+    let (_dir, _layout, store) = fresh();
+    fs::write(store.pack_dir(), b"unrelated file").unwrap();
+
+    assert!(matches!(
+        store.read(&[0; 32]),
+        Err(StoreError::ObjectNotFound(_))
+    ));
+    assert!(store.iter_object_hashes().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_cannot_supply_the_pack_directory() {
+    let (_dir, layout, store) = fresh();
+    crate::store::format::activate(&store.format_path()).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), store.pack_dir()).unwrap();
+
+    assert!(matches!(
+        ObjectStore::open(&layout),
+        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_scan_reports_filesystem_errors_other_than_absence() {
+    let (_dir, layout, store) = fresh();
+    crate::store::format::activate(&store.format_path()).unwrap();
+    let objects = layout.objects_dir();
+    fs::remove_dir(&objects).unwrap();
+    std::os::unix::fs::symlink(&objects, &objects).unwrap();
+
+    assert!(matches!(
+        store.check_local_packs(false),
+        Err(StoreError::Io(_))
+    ));
+}
+
+#[test]
+fn staging_stops_on_a_noncollision_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = super::stage_file(&dir.path().join("missing"), ".tmp.pack");
+        let _ = result_tx.send(result);
+    });
+    let error = result_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap()
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[test]
@@ -409,11 +499,14 @@ fn a_reader_refreshes_a_rebuilt_index_with_the_same_key() {
     fs::write(&pair.index, idx).unwrap();
 
     let reader = ObjectStore::open(&layout).unwrap();
+    let cached = index::Index::open(&pair).unwrap();
+    assert!(cached.unchanged());
     assert!(matches!(
         reader.read(&id),
         Err(StoreError::HashMismatch { .. })
     ));
     assert_eq!(store.check_local_packs(true).unwrap(), 1);
+    assert!(!cached.unchanged());
     assert_eq!(reader.read(&id).unwrap(), first);
 }
 

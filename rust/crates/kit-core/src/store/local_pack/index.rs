@@ -152,7 +152,8 @@ impl Index {
     }
 
     fn decode(pair: Pair, bytes: Vec<u8>, count: usize, trailer: u64) -> io::Result<Self> {
-        if count > MAX_ENTRIES as usize || bytes.len() != INDEX_BASE_LEN + INDEX_ROW_LEN * count {
+        if !frame_count_is_supported(count) || bytes.len() != INDEX_BASE_LEN + INDEX_ROW_LEN * count
+        {
             return Err(invalid("index length does not match frame count"));
         }
         let index = Self {
@@ -354,10 +355,14 @@ fn read_version<const N: usize>(
     Ok(header)
 }
 
+fn frame_count_is_supported(count: usize) -> bool {
+    count <= MAX_ENTRIES as usize
+}
+
 fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
-    if count > MAX_ENTRIES {
+    if !frame_count_is_supported(count as usize) {
         return Err(invalid("local pack frame count exceeds the limit").into());
     }
     let trailer = file
@@ -493,4 +498,145 @@ pub(in crate::store) fn fuzz_index(bytes: &[u8]) {
         .unwrap_or_default();
     let pair = Pair::new(Path::new(""), key);
     let _ = Index::decode(pair, index, count, HEADER_LEN as u64 + 64 * 1024);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FRAME_LEN, Frame, HEADER_LEN, Index, Pair, encode};
+    use crate::store::local_pack::LocalPacks;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    #[test]
+    fn cache_evicts_the_oldest_index_at_its_byte_and_entry_limits() {
+        fn index(tag: u8, size: usize) -> Arc<Index> {
+            Arc::new(Index {
+                pair: Pair::new(Path::new(""), [tag; 32]),
+                bytes: vec![0; size],
+                count: 0,
+                trailer: 0,
+                stamp: None,
+            })
+        }
+
+        let cache = LocalPacks::new(true);
+        let mib = 1024 * 1024;
+        cache.remember(index(1, 32 * mib));
+        cache.remember(index(2, 32 * mib));
+        assert_eq!(cache.known.lock().unwrap().len(), 2);
+        cache.remember(index(3, mib));
+        cache.remember(index(4, 64 * mib + 1));
+        {
+            let known = cache.known.lock().unwrap();
+            assert_eq!(known.len(), 2);
+            assert_eq!(known[0].pair.key, [3; 32]);
+            assert_eq!(known[1].pair.key, [2; 32]);
+        }
+        cache.forget(&[3; 32]);
+        {
+            let known = cache.known.lock().unwrap();
+            assert_eq!(known.len(), 1);
+            assert_eq!(known[0].pair.key, [2; 32]);
+        }
+
+        let cache = LocalPacks::new(true);
+        for tag in 0..65 {
+            cache.remember(index(tag, 1_100));
+        }
+        let known = cache.known.lock().unwrap();
+        assert_eq!(known.len(), 64);
+        assert_eq!(known.last().unwrap().pair.key, [1; 32]);
+    }
+
+    #[test]
+    fn frame_extent_requires_a_complete_payload_after_the_header() {
+        let offset = HEADER_LEN as u64 + FRAME_LEN;
+        let frame = Frame { offset, len: 6 };
+        assert_eq!(
+            frame.extent(offset + 6),
+            Some((HEADER_LEN as u64, offset + 6))
+        );
+        assert_eq!(frame.extent(offset + 5), None);
+        assert_eq!(Frame { offset, len: 5 }.extent(offset + 6), None);
+        let too_early = Frame {
+            offset: offset - 1,
+            ..frame
+        };
+        assert_eq!(too_early.extent(offset + 6), None);
+    }
+
+    #[test]
+    fn index_lookup_requires_distinct_sorted_ids_in_each_fanout_bucket() {
+        let mut first = [0x40; 32];
+        let mut last = first;
+        last[31] = 2;
+        first[31] = 0;
+        let ids = [[0; 32], first, last];
+        let len = 6;
+        let mut next = HEADER_LEN as u64;
+        let rows = ids.map(|id| {
+            let offset = next + FRAME_LEN;
+            next = offset + u64::from(len);
+            (id, Frame { offset, len })
+        });
+        let pair = Pair::new(Path::new(""), [0; 32]);
+        let bytes = encode(pair.key, &rows);
+        let index = Index::decode(pair.clone(), bytes, rows.len(), next).unwrap();
+
+        for (id, frame) in rows {
+            assert_eq!(index.find(&id), Some(frame));
+        }
+        let mut missing = first;
+        missing[31] = 1;
+        assert_eq!(index.find(&missing), None);
+
+        let mut unsorted = rows;
+        unsorted.swap(1, 2);
+        let mut duplicate = rows;
+        duplicate[2].0 = duplicate[1].0;
+        for invalid in [unsorted, duplicate] {
+            let bytes = encode(pair.key, &invalid);
+            let error = Index::decode(pair.clone(), bytes, rows.len(), next).unwrap_err();
+            assert!(error.to_string().contains("strictly increasing"), "{error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_headers_enforce_the_frame_count_and_body_size_limits() {
+        use super::{
+            File, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD, StoreResult, TRAILER_LEN, read_header,
+        };
+        use std::io::{Seek, Write};
+
+        fn read(
+            file: &mut File,
+            count: u32,
+            body_len: u64,
+        ) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+            file.rewind().unwrap();
+            file.write_all(MAGIC).unwrap();
+            file.write_all(&1_u32.to_le_bytes()).unwrap();
+            file.write_all(&count.to_le_bytes()).unwrap();
+            // Set the logical length without writing the potentially large body.
+            file.set_len(HEADER_LEN as u64 + body_len + TRAILER_LEN as u64)
+                .unwrap();
+            file.rewind().unwrap();
+            read_header(file)
+        }
+
+        let mut file = tempfile::tempfile().unwrap();
+        let frames = u64::from(MAX_ENTRIES) * FRAME_LEN;
+        let (count, _, _) = read(&mut file, MAX_ENTRIES, frames).unwrap();
+        assert_eq!(count, MAX_ENTRIES as usize);
+        let over_limit = MAX_ENTRIES + 1;
+        let error = read(&mut file, over_limit, frames + FRAME_LEN).unwrap_err();
+        assert!(error.to_string().contains("frame count exceeds"));
+
+        let frames = 2 * FRAME_LEN;
+        assert!(read(&mut file, 2, frames - 1).is_err());
+        assert!(read(&mut file, 2, frames).is_ok());
+        assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD).is_ok());
+        assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD + 1).is_err());
+    }
 }
