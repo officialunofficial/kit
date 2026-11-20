@@ -5,7 +5,7 @@
 
 use super::{GcRootsError, LiveSet, MarkLimits, SoftRoot, mark_live_observed};
 use crate::hash::{self, Hash};
-use crate::object::ObjectType;
+use crate::object::{Object, ObjectType};
 use crate::ops::graph::{ClosureMode, children};
 use crate::store::{ObjectStore, StoreError};
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,7 +44,7 @@ impl<'a> SoftGraph<'a> {
         let kind = match self.chunks.get(&h).copied() {
             Some(Some(kind)) => Ok(kind),
             Some(None) => Err(StoreError::ObjectNotFound(hash::to_hex(&h))),
-            None => self.store.object_type(&h),
+            None => self.store.gc_object_type(&h),
         };
         let kind = match kind {
             Ok(kind) => kind,
@@ -64,7 +64,7 @@ impl<'a> SoftGraph<'a> {
         }
         let object = self.store.read_object(&h)?;
         let edges = children(&object, ClosureMode::History);
-        let chunks = kind == ObjectType::ChunkedBlob;
+        let chunks = matches!(object, Object::ChunkedBlob(_));
         let mut status = Status::Visiting;
         if chunks {
             status = Status::Complete;
@@ -78,7 +78,7 @@ impl<'a> SoftGraph<'a> {
                             cap: self.limits.chunk_cap,
                         });
                     }
-                    let kind = match self.store.object_type(chunk) {
+                    let kind = match self.store.gc_object_type(chunk) {
                         Ok(kind) => Some(kind),
                         Err(StoreError::ObjectNotFound(_)) => None,
                         Err(e) => return Err(e.into()),

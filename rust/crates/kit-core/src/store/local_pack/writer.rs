@@ -5,7 +5,7 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use crate::pack::{HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
 use super::{
-    Arc, Hash, Index, ObjectStore, Pair, StoreResult, format, index, open_regular, regular,
+    Arc, Hash, Index, ObjectStore, Pair, StoreResult, format, index, matching_index, open_regular,
     scan_pair, stage_file, stage_index,
 };
 use crate::store::{MAX_RAW_OBJECT_SIZE, PruneGuard, StoreError};
@@ -237,22 +237,34 @@ impl Staged {
         let dir = store.pack_dir();
         // A publisher may leave a valid pack without its index. A later
         // writer of the same key can complete the pair under the guard.
-        let existing_pack = persist_unique(pack, &pair.pack)?;
-        if existing_pack {
-            scan_pair(&pair)?;
-            open_regular(&pair.pack)?.sync_all()?;
+        if let Some(staged) = persist_unique(pack, &pair.pack)? {
+            let existing = open_regular(&pair.pack)?;
+            pair.check_versions()?;
+            match scan_pair(&pair) {
+                Ok(_) => {
+                    crate::store::refresh_mtime(&pair.pack)?;
+                    existing.sync_all()?;
+                }
+                // The staged copy was fully verified and has this exact key.
+                // Replace a damaged member without making the pair disappear.
+                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                    staged.persist(&pair.pack).map_err(|e| e.error)?;
+                }
+                Err(e) => return Err(e),
+            }
         }
         crate::atomic::sync_dir(&dir)?;
         after_pack_sync()?;
-        let existing_index = persist_unique(idx, &pair.index)?;
-        let checked = Index::open(&pair)?;
-        if existing_pack || existing_index {
+        if let Some(staged) = persist_unique(idx, &pair.index)? {
+            let existing = open_regular(&pair.index)?;
             let rows = scan_pair(&pair)?;
-            if !checked.matches(&rows) || !regular(&pair.pack)? || !regular(&pair.index)? {
-                return Err(pair.error("existing pack and index disagree"));
+            if matching_index(&pair, &rows)? {
+                existing.sync_all()?;
+            } else {
+                staged.persist(&pair.index).map_err(|e| e.error)?;
             }
-            open_regular(&pair.index)?.sync_all()?;
         }
+        let checked = Index::open(&pair)?;
         crate::atomic::sync_dir(&dir)?;
         store
             .packs
@@ -263,10 +275,31 @@ impl Staged {
     }
 }
 
-fn persist_unique(tmp: tempfile::NamedTempFile, path: &std::path::Path) -> StoreResult<bool> {
+// Return the staged copy on collision so the caller can compare it with the
+// existing member or replace a damaged copy of the same content.
+fn persist_unique(
+    tmp: tempfile::NamedTempFile,
+    path: &std::path::Path,
+) -> StoreResult<Option<tempfile::NamedTempFile>> {
     match tmp.persist_noclobber(path) {
-        Ok(_) => Ok(false),
-        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(true),
+        Ok(_) => Ok(None),
+        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(Some(e.file)),
         Err(e) => Err(e.error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publishing_to_a_missing_directory_is_not_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let target = dir.path().join("missing").join("pack");
+        assert!(matches!(
+            persist_unique(staged, &target),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
     }
 }

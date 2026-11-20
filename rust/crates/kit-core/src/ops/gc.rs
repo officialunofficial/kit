@@ -573,7 +573,7 @@ fn mark_live_observed(
         // Skipped ids must still leave the queue so every window progresses.
         debug_assert!(queue.len() < queued, "each probe window drains the queue");
         super::chunk_heads::try_each_in_order(&window, |(h, slot)| {
-            let _ = slot.set(store.object_type(h));
+            let _ = slot.set(store.gc_object_type(h));
             Ok::<(), GcRootsError>(())
         })?;
         for (h, slot) in window {
@@ -588,8 +588,8 @@ fn mark_live_observed(
                 return Err(GcRootsError::Truncated);
             }
             objects.insert(h);
-            // A blob or delta is a leaf. Its type is all gc needs, so its
-            // content is not read or verified (see `live_objects_with`).
+            // A blob or delta is a leaf. Packed leaf probes verify the id
+            // before letting the reported type end the walk.
             if matches!(
                 slot.into_inner().expect("each probe ran")?,
                 ObjectType::Blob | ObjectType::Delta
@@ -614,7 +614,7 @@ fn mark_live_observed(
     // Each check opens a chunk and reads its type, so on a cold disk the
     // checks wait on the disk, and run many at a time.
     let checked =
-        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.object_type(chunk) {
+        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.gc_object_type(chunk) {
             Ok(ObjectType::Blob) => Ok(()),
             Ok(_) => Err((*chunk, None)),
             Err(error) => Err((*chunk, Some(error))),
@@ -674,12 +674,8 @@ pub(crate) fn live_objects(
 /// [`super::graph::reachable_objects`]. The chunks of a manifest count toward
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
-/// Does not verify leaf (blob/delta) content integrity as part of the
-/// walk — see [`super::graph::reachable_objects`]'s "Content integrity
-/// of leaves" doc section. `gc` is therefore no longer an incidental
-/// corruption-detection pass over blob content the way it was before the
-/// object-type short-circuit; it still fails closed on a *missing* object, just not on a
-/// present-but-corrupted one.
+/// Loose leaves are probed by type. For packed leaves, verify the payload
+/// before trusting where the index points.
 ///
 /// # Errors
 ///
@@ -747,6 +743,31 @@ pub struct GcReport {
     pub skipped_state_files: Vec<PathBuf>,
 }
 
+/// Physical pack accounting for the command-line collector.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct PackedGcReport {
+    /// Unreachable payload bytes in packs with no live entries.
+    pub wholly_dead_bytes: u64,
+    /// Unreachable payload bytes in packs with at least one live entry.
+    pub mixed_dead_bytes: u64,
+    /// Unreachable payload bytes whose pack passes grace.
+    pub eligible_dead_bytes: u64,
+    /// Live payload bytes in mixed packs with eligible dead entries.
+    pub survivor_bytes: u64,
+    /// Published packs examined after the mark.
+    pub packs_scanned: usize,
+    /// Whole packs retired, or eligible for retirement in a dry run.
+    pub packs_retired: usize,
+    /// Abandoned staging files or lone pack and index files reclaimed.
+    pub pack_leftovers_pruned: usize,
+    /// Loose files reclaimed because a verified packed copy remains.
+    pub loose_duplicates_pruned: usize,
+    /// Integrity errors for aged packs left in place because their body failed verification.
+    pub skipped_pack_errors: Vec<String>,
+}
+
 /// Mark-and-sweep prune: keep every object reachable from the retention
 /// roots (`live_objects_with`) plus every unreachable object younger than
 /// `grace_secs` (relative to `now_secs`); delete the rest. With
@@ -808,6 +829,7 @@ fn run_gc_with_hook(
         before_prune,
         &mut |_, _, _| {},
     )
+    .map(|(report, _)| report)
 }
 
 /// Run garbage collection with completed object and reclaimed byte counts.
@@ -820,6 +842,20 @@ pub fn run_gc_observed(
     dry_run: bool,
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<GcReport, GcRootsError> {
+    run_gc_with_pack_report(store, layout, now_secs, grace_secs, dry_run, progress)
+        .map(|(report, _)| report)
+}
+
+/// Run the collector and return pack accounting for the command-line report.
+#[doc(hidden)]
+pub fn run_gc_with_pack_report(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    now_secs: u64,
+    grace_secs: u64,
+    dry_run: bool,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+) -> Result<(GcReport, PackedGcReport), GcRootsError> {
     run_gc_with_progress_hook(
         store,
         layout,
@@ -842,7 +878,7 @@ fn run_gc_with_progress_hook(
     limits: MarkLimits,
     mut before_prune: impl FnMut(&Hash),
     progress: &mut dyn FnMut(&'static str, usize, u64),
-) -> Result<GcReport, GcRootsError> {
+) -> Result<(GcReport, PackedGcReport), GcRootsError> {
     // Refuse to delete through a symlinked store: if `.kit` or
     // `.kit/objects` is a symlink, `remove_object` would unlink the
     // link target's files — potentially outside the repo. (Dry runs are
@@ -862,9 +898,8 @@ fn run_gc_with_progress_hook(
                 empty_attestations.push(path);
             }
         })?;
-    for path in empty_attestations {
-        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
-    }
+    let mut packed = PackedGcReport::default();
+    let pack_sweep = store.plan_pack_sweep(&live, now_secs, grace_secs, &mut packed)?;
     progress("gc", 0, 0);
     let mut last_progress = std::time::Instant::now();
 
@@ -873,8 +908,27 @@ fn run_gc_with_progress_hook(
         skipped_state_files,
         ..GcReport::default()
     };
+    pack_sweep.run(store, &mut report, &mut packed)?;
+    for path in empty_attestations {
+        remove_old_empty_attestation(&path, now_secs, grace_secs)?;
+    }
+    let previewed_duplicates = if packed.packs_scanned == 0 {
+        BTreeSet::new()
+    } else {
+        store.sweep_loose_duplicates(
+            &pack_sweep,
+            &live,
+            now_secs,
+            grace_secs,
+            &mut report,
+            &mut packed,
+        )?
+    };
     for shard in 0..=u8::MAX {
         for h in store.list_loose_shard(shard)? {
+            if previewed_duplicates.contains(&h) {
+                continue;
+            }
             report.scanned += 1;
             if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
                 progress("gc", report.scanned - 1, report.bytes_reclaimed);
@@ -912,7 +966,7 @@ fn run_gc_with_progress_hook(
         sweep_temp_files(store, shard, now_secs, grace_secs, dry_run, &mut report)?;
     }
     progress("gc", report.scanned, report.bytes_reclaimed);
-    Ok(report)
+    Ok((report, packed))
 }
 
 /// Delete the temp files in shard `shard` that a dead writer left and that are

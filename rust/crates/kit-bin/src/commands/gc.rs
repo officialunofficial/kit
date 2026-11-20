@@ -31,7 +31,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::{GcRootsError, run_gc_observed};
+use kit_core::ops::gc::{GcRootsError, run_gc_with_pack_report};
 use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -147,7 +147,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
-    let report = match run_gc_observed(
+    let (report, packed) = match run_gc_with_pack_report(
         &store,
         &layout,
         now,
@@ -166,7 +166,13 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     drop(progress);
+    if !report.dry_run && !packed.skipped_pack_errors.is_empty() {
+        super::fetch_repair::note_bad_pack(&layout);
+    }
     let mut stderr = std::io::stderr().lock();
+    for error in &packed.skipped_pack_errors {
+        let _ = writeln!(stderr, "warning: kept damaged local pack: {error}");
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(
@@ -206,6 +212,42 @@ pub fn run(args: &[String]) -> u8 {
         expired,
         if expired == 1 { "y" } else { "ies" },
     );
+    if packed.packs_retired != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} wholly dead local pack(s)",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            packed.packs_retired,
+        );
+    }
+    if packed.pack_leftovers_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} local pack leftover(s)",
+            packed.pack_leftovers_pruned,
+        );
+    }
+    if packed.loose_duplicates_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} loose duplicate(s)",
+            packed.loose_duplicates_pruned,
+        );
+    }
+    if report.dry_run && packed.packs_scanned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: packed payload: {} wholly dead bytes, {} mixed dead bytes, {} grace-eligible dead bytes, {} predicted survivor bytes",
+            packed.wholly_dead_bytes,
+            packed.mixed_dead_bytes,
+            packed.eligible_dead_bytes,
+            packed.survivor_bytes,
+        );
+    }
     exit::OK
 }
 

@@ -96,6 +96,10 @@ chunked blob.
   chunks are live.
 - An object is live when it is in `objects` or in `chunks`.
 
+Before a packed blob can end a walk, gc verifies its canonical bytes
+and id. A bad locator cannot hide the edges of a tree or manifest.
+Loose leaf probes read the object type as before.
+
 The walk keeps the chunk ids in a buffer that it sorts and deduplicates
 whenever the buffer would grow past the larger of twice its length after the
 last compaction and 1,048,576 ids, so the buffer stays near twice the number
@@ -346,10 +350,18 @@ whose coverage cannot be verified stays in place. If a merge cannot
 write some entries under its writer limits, it keeps packs containing
 those entries. An input key also used as an output key stays in place.
 
-Retirement takes the exclusive `format` try-lock and rechecks input
+Gc also retires a pack when every verified entry is unreachable and the
+pack has passed grace. Gc records the pack's mtime after the retention mark
+and before acquiring the exclusive `format` try-lock. Under the lock, it
+rescans the pack directory and keeps any pair whose identity or pack mtime
+changed. Live and mixed packs stay in place. If a candidate's body
+fails integrity verification, gc reports the damage, keeps the pair,
+and continues collecting other eligible objects.
+
+Retirement after a merge takes the same try-lock and rechecks input
 identity and durable coverage by the verified replacement packs.
 Keep an input when its replacements cannot be read independently of it.
-Remove the pack name first.
+In either case, remove the pack name first.
 Make all such removals durable in the pack directory before removing
 their index names. Flush the directory after those index unlinks.
 Directory syncs can cover a batch of removals under the same lock.
@@ -376,8 +388,8 @@ with both live and dead entries, and unreachable bytes old enough to
 pass grace. It also reports the live payload bytes in mixed packs
 with eligible dead bytes as the predicted survivor writes for
 rewriting those packs. These estimates exclude framing and index
-overhead. They do not imply that the current sweep reclaims packed
-garbage. The dry run changes no files.
+overhead. The sweep reclaims whole eligible packs. The dry run changes
+no files.
 
 ### Integrity checks and repair
 
@@ -398,14 +410,17 @@ clearing them when their coverage is unknown, so refetch can obtain
 verified copies. Use the exclusive `format` try-lock and the
 fetch-shortcut invalidation rules in SPEC-TRANSPORT §1.2 to exclude fetch
 while clearing records. An integrity repair does not advance refs or
-create applied-pack records. Unresolved corruption remains an error.
+create applied-pack records. A fetch that verifies and stages the exact
+same pack key can replace a damaged member with the staged copy. It makes
+the pack name durable before publishing the index. Unresolved corruption
+remains an error.
 
 
 ## Invariants
 
 | Invariant | Enforced by |
 |---|---|
-| No live object loses its last copy | loose pruning uses the complete retention mark. Duplicate removal and pack retirement require durable replacement coverage ("Local pack maintenance") |
+| No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and merge retirement require durable replacement coverage. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

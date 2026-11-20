@@ -8,11 +8,12 @@ use crate::hash::{Hash, to_hex};
 
 use super::{ObjectStore, StoreError, StoreResult, format};
 
+mod gc;
 mod index;
-pub(super) use index::canonical_id;
 #[cfg(feature = "fuzzing")]
 pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
+pub(super) use index::{canonical_id, invalid};
 
 #[cfg(test)]
 mod tests;
@@ -262,17 +263,23 @@ fn pair_is_live(pair: &Pair) -> io::Result<bool> {
     Ok(regular(&pair.pack)? && regular(&pair.index)?)
 }
 
+fn read_pack_dir(dir: &Path) -> io::Result<Option<fs::ReadDir>> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => fs::read_dir(dir).map(Some),
+        Ok(_) => Err(index::invalid("local pack directory is not a directory")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn visit_pairs_until(
     dir: &Path,
     mut visit: impl FnMut(Pair) -> StoreResult<bool>,
 ) -> StoreResult<()> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(index::invalid("local pack directory is not a directory").into()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    }
-    for entry in fs::read_dir(dir)? {
+    let Some(entries) = read_pack_dir(dir)? else {
+        return Ok(());
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let Some(pair) = name
@@ -301,6 +308,8 @@ fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
 }
 
 fn scan_pair(pair: &Pair) -> StoreResult<Vec<(Hash, Frame)>> {
+    #[cfg(test)]
+    tests::pack_scan_error(pair.key)?;
     let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.context(e))?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));
