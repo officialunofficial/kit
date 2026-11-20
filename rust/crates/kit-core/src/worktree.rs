@@ -173,7 +173,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, None, dir, index, observations)
+    build_tree_snapshot(sink, None, dir, index, observations, false)
 }
 
 /// Build a snapshot with read access to newly written and indexed objects.
@@ -189,15 +189,18 @@ pub fn build_tree_filtered_observed_with_source<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, Some(source), dir, index, observations)
+    build_tree_snapshot(sink, Some(source), dir, index, observations, false)
 }
 
-fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
+// Status hides interrupted restore artifacts. Restore safety checks use
+// the complete snapshot so they can still protect a conflicting entry.
+pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
+    skip_restore_temps: bool,
 ) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
@@ -228,7 +231,17 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
     let mut misses = Vec::new();
-    let pending = build_tree_inner(sink, dir, "", &ignores, index, &by_path, false, &mut misses)?;
+    let pending = build_tree_inner(
+        sink,
+        dir,
+        "",
+        &ignores,
+        index,
+        &by_path,
+        false,
+        skip_restore_temps,
+        &mut misses,
+    )?;
     let mut hashed = vec![
         TreeEntry {
             name: Vec::new(),
@@ -291,6 +304,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     index: &Index,
     by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
     parent_ignored: bool,
+    skip_restore_temps: bool,
     misses: &mut Vec<PendingFileHash<'e>>,
 ) -> WorktreeResult<PendingTree> {
     let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
@@ -314,6 +328,15 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         } else {
             format!("{rel_dir}/{name_str}")
         };
+        // A historical entry, including a staged deletion, still has a path
+        // of its own. A scratch file cannot take the place of a tracked directory.
+        if skip_restore_temps
+            && !is_dir
+            && crate::ops::restore::is_restore_temp_name(&name_str)
+            && !by_path.contains_key(rel_path.as_str())
+        {
+            continue;
+        }
         // Exclude ignored content, but only when it is UNTRACKED — a tracked
         // path (or a dir holding tracked content) is always kept so status/
         // diff see it. An ignored dir with tracked content is descended into
@@ -382,6 +405,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                 index,
                 by_path,
                 entry_ignored,
+                skip_restore_temps,
                 misses,
             )?;
             children.push((entries.len(), h));
