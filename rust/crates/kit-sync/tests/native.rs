@@ -360,8 +360,15 @@ mod resume {
         }
     }
 
+    /// A name, the reason it must give, and how it spoils the honest answer.
+    type Case = (
+        &'static str,
+        RestartReason,
+        Box<dyn Fn(Response) -> Response + Send + Sync>,
+    );
+
     struct Fetched {
-        fetched: Result<(), String>,
+        result: Result<(), String>,
         verified: Result<(), PackError>,
         outcomes: Vec<ResumeOutcome>,
         begins: usize,
@@ -395,7 +402,7 @@ mod resume {
         ));
         let verified = sink.spool.take().unwrap().finish(key).map(drop);
         Fetched {
-            fetched,
+            result: fetched,
             verified,
             outcomes: sink.outcomes,
             begins: sink.begins,
@@ -425,7 +432,7 @@ mod resume {
                     answer
                 }
             });
-            got.fetched.unwrap();
+            got.result.unwrap();
             got.verified.unwrap();
             assert_eq!(got.requests.len(), 2, "cut at {cut}");
             assert_eq!(
@@ -453,7 +460,7 @@ mod resume {
                 answer
             }
         });
-        got.fetched.unwrap();
+        got.result.unwrap();
         got.verified.unwrap();
         assert_eq!(got.outcomes, [ResumeOutcome::Resumed { bytes: 3000 }]);
     }
@@ -462,11 +469,7 @@ mod resume {
     fn an_answer_that_is_not_the_rest_reads_the_location_again() {
         let (object, key) = pack();
         let total = object.len();
-        let cases: Vec<(
-            &str,
-            RestartReason,
-            Box<dyn Fn(Response) -> Response + Send + Sync>,
-        )> = vec![
+        let cases: Vec<Case> = vec![
             (
                 "weak tag",
                 RestartReason::Validator,
@@ -535,8 +538,7 @@ mod resume {
                     _ => answer,
                 },
             );
-            got.fetched
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            got.result.unwrap_or_else(|error| panic!("{name}: {error}"));
             got.verified
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"));
             assert_eq!(
@@ -568,7 +570,7 @@ mod resume {
                 _ => answer,
             },
         );
-        got.fetched.unwrap();
+        got.result.unwrap();
         got.verified.unwrap();
         assert_eq!(got.requests.len(), 2);
         assert_eq!(
@@ -595,7 +597,7 @@ mod resume {
                     answer
                 }
             });
-            assert!(got.fetched.is_err(), "{tag:?}");
+            assert!(got.result.is_err(), "{tag:?}");
             assert_eq!(got.requests.len(), 1, "{tag:?}");
             assert!(got.outcomes.is_empty(), "{tag:?}");
         }
@@ -615,7 +617,7 @@ mod resume {
                 answer
             }
         });
-        got.fetched.unwrap();
+        got.result.unwrap();
         assert!(
             matches!(got.verified, Err(PackError::KeyMismatch)),
             "{:?}",
@@ -629,7 +631,7 @@ mod resume {
         let got = fetch(&transport(), &object, &key, None, |_, _, answer| {
             answer.cut_after(10)
         });
-        assert!(got.fetched.is_err());
+        assert!(got.result.is_err());
         // The first request and three resumes.
         assert_eq!(got.requests.len(), 4);
         assert_eq!(got.outcomes.len(), 3);
@@ -645,7 +647,7 @@ mod resume {
             Some(Duration::from_millis(300)),
             |_, _, answer| answer.cut_after(10).hold_for(Duration::from_millis(200)),
         );
-        assert_eq!(got.fetched.unwrap_err(), "pack location deadline exceeded");
+        assert_eq!(got.result.unwrap_err(), "pack location deadline exceeded");
         assert!(got.requests.len() <= 3);
     }
 }
