@@ -441,7 +441,7 @@ fn a_store_without_local_packs_writes_every_object_loose() {
     clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
-    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n\n");
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n");
     assert!(!layout.objects_dir().join("pack").exists());
     for id in store.iter_object_hashes().unwrap() {
         assert!(loose_object_path(&layout, &id).is_file());
