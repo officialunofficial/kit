@@ -173,7 +173,9 @@ ancestry.
 The common-dir `format` inode MUST NOT be replaced or unlinked while
 the repository is in use. Independently opened handles take shared locks
 for bulk writes, cached reuse, and format validation. The only marker
-update is the append described in SPEC-OBJECTS §10. A publisher tries
+update writes the capability byte as described in SPEC-OBJECTS §10.
+Readers treat an exact zero tail as loose storage under the shared lock.
+A publisher tries
 the exclusive lock for activation before taking a shared prune guard.
 After activation it releases the exclusive lock, takes the shared guard,
 and validates the marker again before publishing.

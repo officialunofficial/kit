@@ -517,34 +517,40 @@ both locations.
 
 The common directory MUST contain a `format` file. Loose-only stores
 start with the legacy marker `bmt-v2` (canonical bytes `bmt-v2\n`).
-The packed form is exactly `bmt-v2\nP` with no final newline. `P`
-requires support for the raw local pack and its index, including the full
-range of storable objects. The required-capability field currently admits
-only the single byte `P`. Any extension needs an explicit grammar.
+The bytes after the canonical prefix `bmt-v2\n` are a required set of
+ASCII capability letters. Each letter occurs once. A reader MUST refuse
+the store with `IncompatibleRepoFormat` and tell the user to update kit
+if the set contains a letter the reader does not know. `P` is the only
+currently defined letter. It requires support for the raw local pack
+and its index, including the full range of storable objects. The current
+packed marker is exactly `bmt-v2\nP` with no final newline.
 Bound marker reads. Accept the legacy marker under its whitespace-trimming
-rule. Refuse all other marker bytes and an absent marker with
+rule. Treat exactly `bmt-v2\n\0` as a lost activation and open it as a
+loose store. Refuse all other marker bytes and an absent marker with
 `IncompatibleRepoFormat`. A legacy reader refuses the packed form.
-Readers enable local-pack discovery only with `P`.
+Readers check the marker under the shared lock and enable local-pack
+discovery only with `P`.
 
 Try activation before a fetch acquires its shared prune guard, once
 advertised work indicates the fetch may apply new data packs. An
 up-to-date fetch requires no activation. Under the exclusive `format`
-try-lock, validate the marker, append the single ASCII byte `P` after
-the canonical legacy bytes on the same inode, and make the file durable.
-The inode MUST survive activation, including on error. If the try-lock
-is busy and `P` is still absent when the shared guard is acquired, use
-loose writes for that fetch. A noncanonical legacy marker continues to
-serve loose storage. If an I/O error leaves the marker or its durability
-uncertain, fail rather than publish until it can be validated and made
-durable.
+try-lock, validate the marker. For the canonical legacy marker or the
+exact zero-tail form, write only the ASCII byte `P` at offset 7 with a
+positional write through the locked handle, then sync the file. Preserve
+the seven-byte prefix and the inode, including on error. A noncanonical
+legacy marker continues to serve loose storage without activation. If the
+try-lock is busy and the marker still selects loose storage when the
+shared guard is acquired, use loose writes for that fetch.
 Lock details are in [SPEC-CONCURRENCY §3.4](SPEC-CONCURRENCY.md#34-object-refresh-versus-local-gc).
 
-A crash can leave a legacy store or a packed marker with only loose objects.
-Both are valid. Refuse malformed bytes and require marker recovery before
-opening the store. The marker is permanent once activated, including when
-no local packs remain. Before activation, upgrade every client sharing
-the common directory and drain legacy sessions that already opened it.
-The marker fences subsequent opens.
+An interrupted activation can leave the canonical legacy marker, the
+eight-byte marker with a zero tail, or the packed marker. Readers need
+only the shared lock in each case. A publisher must sync and validate
+the packed marker before publishing any pack, including on retry after
+an uncertain sync. Once activated durably, the packed marker is
+permanent even when no local packs remain. Upgrade all clients sharing
+the common directory and drain sessions opened by legacy clients before
+activation. The packed marker fences subsequent legacy opens.
 
 ### Object lookup
 
@@ -555,6 +561,13 @@ and serialized size. Push uses logical headers and sizes for planning,
 split limits, and delta budgeting. The packed serialized size is the raw
 payload length. Physical loose-file metadata remains available for a
 loose-file sweep.
+
+With `P` set, a reader checks the version headers of live pack and index
+pairs when opening the store. An unknown local pack header or index
+version is `IncompatibleRepoFormat`, with an instruction to update kit.
+The same error applies when a reader discovers an unknown version later.
+This error stops lookup and repair on that pair. See
+[SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
 Try known published packs, then the loose path. Skip an unusable index
 when looking for another copy. On a miss, including a stale location that
@@ -602,7 +615,9 @@ shared `format` guard or its exclusive lock from staging through the
 final directory flush. This prevents the orphan sweep from removing
 files of a live publisher.
 
-1. Ensure the marker with `P` and its directory entry are durable.
+1. Ensure the marker with `P` is durable. Sync
+   the common directory before publishing, including on retry after an
+   uncertain directory sync.
    Create `objects/pack/` if needed and make its entry durable in
    `objects/` before acknowledging the pair.
 2. Stage and verify the sealed pack and its index in

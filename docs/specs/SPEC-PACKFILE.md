@@ -156,7 +156,19 @@ rebuildable locator. All integer fields are unsigned little-endian.
 | Pack key | 32 bytes | Binary key encoded by both filenames |
 | Index checksum | 32 bytes | BLAKE3 of all preceding index bytes |
 
-The exact index size is `1,100 + 44 × N` bytes. Reject unknown magic or
+The letters after `bmt-v2\n` in the repository marker form a set of
+required capabilities. If a reader encounters an unknown letter, it
+MUST refuse to open the store with `IncompatibleRepoFormat` and tell the
+user to update kit. The exact marker `bmt-v2\n\0` represents a lost
+activation and selects loose storage. See
+[SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
+
+On a live pair, an unknown pack header version or index version MUST
+raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
+check the version before using its declared layout. Repair MUST preserve
+a pair with an unknown version.
+
+The exact version-1 index size is `1,100 + 44 × N` bytes. Reject unknown magic or
 version, trailing or truncated bytes, a bad checksum, a mismatched
 key or frame count, duplicate or unsorted ids, and fanout inconsistent
 with the ids. Before allocating or following an offset, check the count,

@@ -1011,8 +1011,8 @@ fn estimate_pack_sizes_with(
         .iter()
         .map(|hash| {
             store
-                .object_metadata(hash)
-                .map(|meta| Incoming::raw(meta.len(), meta.len()))
+                .object_size(hash)
+                .map(|size| Incoming::raw(size, size))
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
@@ -1220,7 +1220,7 @@ fn build_packs<W: std::io::Write>(
     // *before* any object's content is actually read into memory.
     let raw_sizes: Vec<u64> = raw
         .iter()
-        .map(|h| Ok(store.object_metadata(h)?.len()))
+        .map(|h| Ok(store.object_size(h)?))
         .collect::<Result<_, PushError>>()?;
     let mut start = 0;
     for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {
@@ -1643,12 +1643,8 @@ mod tests {
     fn the_pack_estimate_splits_at_the_payload_and_serialized_limits() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
-        let size = store.object_metadata(&hashes[0]).unwrap().len();
-        assert!(
-            hashes
-                .iter()
-                .all(|h| store.object_metadata(h).unwrap().len() == size)
-        );
+        let size = store.object_size(&hashes[0]).unwrap();
+        assert!(hashes.iter().all(|h| store.object_size(h).unwrap() == size));
         let plan = transfer::PackPlan {
             raw: hashes,
             deltas: Vec::new(),
@@ -2224,11 +2220,13 @@ mod tests {
                 uses,
             ));
         }
-        // Only one of the two repeated 128-byte bases fits. The 1 KiB
-        // base exceeds the budget and the 64-byte base is used only once.
-        let cache = super::cache_delta_bases(&store, &candidates, 192).unwrap();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        // One repeated base fits, including when it fills the entire budget.
+        // The 1 KiB base exceeds either budget and the 64-byte base is used once.
+        for byte_budget in [128, 192] {
+            let cache = super::cache_delta_bases(&store, &candidates, byte_budget).unwrap();
+            assert_eq!(cache.len(), 1);
+            assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        }
     }
 
     #[test]

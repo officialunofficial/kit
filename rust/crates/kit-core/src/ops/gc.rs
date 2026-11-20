@@ -874,7 +874,7 @@ fn run_gc_with_progress_hook(
         ..GcReport::default()
     };
     for shard in 0..=u8::MAX {
-        for h in store.list_shard(shard)? {
+        for h in store.list_loose_shard(shard)? {
             report.scanned += 1;
             if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
                 progress("gc", report.scanned - 1, report.bytes_reclaimed);

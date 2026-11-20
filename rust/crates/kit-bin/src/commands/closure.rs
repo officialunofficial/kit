@@ -249,6 +249,9 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
         ClosureMode::Snapshot
     };
     let report = if opts.show_unreferenced {
+        if let Err(e) = store.check_local_packs(false) {
+            return emit_err(&format!("check local packs: {e}"), exit::DATAERR);
+        }
         let hashes = match store.iter_object_hashes() {
             Ok(h) => h,
             Err(e) => return emit_err(&format!("enumerate objects: {e}"), exit::GENERAL_ERROR),
