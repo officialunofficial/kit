@@ -27,6 +27,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
 
 - Continue SSH transfers in a fresh session after 10,000 requests.
