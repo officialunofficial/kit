@@ -362,6 +362,24 @@ fn a_loose_store_skips_pack_discovery_on_a_miss() {
     assert!(store.iter_object_hashes().unwrap().is_empty());
 }
 
+#[test]
+fn a_known_pack_does_not_hide_a_newly_published_pair() {
+    let (_dir, layout, store) = fresh();
+    let mut first = writer(&store);
+    let known = blob(b"known pack");
+    let known_id = first.write(&known).unwrap();
+    first.finish().unwrap();
+    assert_eq!(store.read(&known_id).unwrap(), known);
+
+    let other = ObjectStore::open(&layout).unwrap();
+    let mut second = writer(&other);
+    let new = blob(b"new pack");
+    let new_id = second.write(&new).unwrap();
+    second.finish().unwrap();
+
+    assert_eq!(store.read(&new_id).unwrap(), new);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_symlink_cannot_supply_the_pack_directory() {

@@ -521,22 +521,25 @@ mod tests {
 
         let cache = LocalPacks::new(true);
         let mib = 1024 * 1024;
-        cache.remember(index(1, 32 * mib));
-        cache.remember(index(2, 32 * mib));
-        assert_eq!(cache.known.lock().unwrap().len(), 2);
-        cache.remember(index(3, mib));
-        cache.remember(index(4, 64 * mib + 1));
+        for tag in 1..=4 {
+            cache.remember(index(tag, 16 * mib));
+        }
+        assert_eq!(cache.known.lock().unwrap().len(), 4);
+        cache.remember(index(5, 32 * mib));
+        cache.remember(index(6, 64 * mib + 1));
+        {
+            let known = cache.known.lock().unwrap();
+            assert_eq!(known.len(), 3);
+            assert_eq!(known[0].pair.key, [5; 32]);
+            assert_eq!(known[1].pair.key, [4; 32]);
+            assert_eq!(known[2].pair.key, [3; 32]);
+        }
+        cache.forget(&[5; 32]);
         {
             let known = cache.known.lock().unwrap();
             assert_eq!(known.len(), 2);
-            assert_eq!(known[0].pair.key, [3; 32]);
-            assert_eq!(known[1].pair.key, [2; 32]);
-        }
-        cache.forget(&[3; 32]);
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 1);
-            assert_eq!(known[0].pair.key, [2; 32]);
+            assert_eq!(known[0].pair.key, [4; 32]);
+            assert_eq!(known[1].pair.key, [3; 32]);
         }
 
         let cache = LocalPacks::new(true);
