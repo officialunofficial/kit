@@ -58,6 +58,62 @@ fn staged_pair_and_lone_pack_are_invisible_until_index_publication() {
 }
 
 #[test]
+fn pack_scan_preserves_cancellation_and_deadlines_and_labels_other_errors() {
+    use std::io::{Error, ErrorKind};
+
+    let (_dir, _layout, store) = fresh();
+    let mut writer = writer(&store);
+    writer.write(&blob(b"checkpoint")).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+
+    for (input, expected) in [
+        (ErrorKind::Interrupted, ErrorKind::Interrupted),
+        (ErrorKind::TimedOut, ErrorKind::TimedOut),
+        (ErrorKind::PermissionDenied, ErrorKind::InvalidData),
+    ] {
+        let result = super::scan_pair_checked(&pair, &|| Err(Error::from(input).into()));
+        let Err(StoreError::Io(error)) = result else {
+            panic!("expected an I/O error from the pack scan");
+        };
+        assert_eq!(error.kind(), expected);
+        if expected == ErrorKind::InvalidData {
+            assert!(error.to_string().contains(&pair.pack.display().to_string()));
+        }
+    }
+}
+
+#[test]
+fn an_orphan_plan_keeps_a_pack_whose_index_is_published_before_the_lock() {
+    let (_dir, _layout, store) = fresh();
+    let mut writer = writer(&store);
+    let bytes = blob(b"publication finished after orphan planning");
+    let id = writer.write(&bytes).unwrap();
+    let (staged, guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+
+    let index = fs::read(&pair.index).unwrap();
+    fs::remove_file(&pair.index).unwrap();
+    let (plan, pairs) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
+    assert_eq!(pairs, 0);
+    assert!(!plan.is_empty());
+    fs::write(&pair.index, index).unwrap();
+    drop(guard);
+
+    let mut report = crate::ops::gc::GcReport::default();
+    let mut packed = crate::ops::gc::PackedGcReport::default();
+    assert!(
+        plan.run_with(&store, &mut report, &mut packed, || Ok(()))
+            .unwrap()
+    );
+    assert_eq!(packed.pack_leftovers_pruned, 0);
+    assert!(pair.pack.is_file() && pair.index.is_file());
+    assert_eq!(store.read(&id).unwrap(), bytes);
+}
+
+#[test]
 fn rescans_from_legacy_open_and_covers_the_object_accessors() {
     let (_dir, layout, store) = fresh();
     let stale = ObjectStore::open(&layout).unwrap();

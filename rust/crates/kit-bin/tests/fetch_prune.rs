@@ -1,5 +1,4 @@
-//! `kit fetch --prune` over a `kit+file://` remote: it deletes the
-//! remote-tracking refs of branches the remote lost, and nothing else.
+//! Fetch pruning and post-publish maintenance over a `kit+file://` remote.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -158,4 +157,41 @@ fn prune_reports_maintenance_and_honors_the_repo_switch() {
         stderr.lines().last(),
         Some("maintenance: retired 0 dead local pack(s), removed 1 leftover, 1.3 MiB"),
     );
+}
+
+#[test]
+fn fast_forward_pull_reports_maintenance_after_updating_the_worktree() {
+    let (publisher, remote) = pushed_repo();
+    let destination = tempfile::tempdir().unwrap();
+    let clone = destination.path().join("clone");
+    let url = format!("kit+file://{}", remote.path().display());
+    ok(publisher.path(), &["clone", &url, clone.to_str().unwrap()]);
+    let leftover = clone.join(".kit/objects/pack/.11111111111111111111111111111111.tmp.idx");
+    fs::write(&leftover, b"old stage").unwrap();
+    fs::File::open(&leftover)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+
+    fs::write(publisher.path().join("a.txt"), b"two").unwrap();
+    ok(publisher.path(), &["add", "a.txt"]);
+    ok(publisher.path(), &["commit", "-m", "c2"]);
+    ok(publisher.path(), &["push", "origin", "main:main"]);
+
+    let output = ok(&clone, &["pull", "--format=json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["up_to_date"], false);
+    assert_eq!(report["maintenance"]["leftovers_removed"], 1);
+    assert_eq!(report["maintenance"]["packs_retired"], 0);
+    assert_eq!(report["maintenance"]["bytes_reclaimed"], 9);
+    assert_eq!(report["maintenance"]["collection"], "not_due");
+    assert!(report["maintenance"]["elapsed"].as_u64().is_some());
+    assert_eq!(fs::read(clone.join("a.txt")).unwrap(), b"two");
+    assert!(!leftover.exists());
+
+    let no_op = ok(&clone, &["pull", "--format=json"]);
+    let report: serde_json::Value = serde_json::from_slice(&no_op.stdout).unwrap();
+    assert_eq!(report["up_to_date"], true);
+    assert!(report.get("maintenance").is_none());
 }

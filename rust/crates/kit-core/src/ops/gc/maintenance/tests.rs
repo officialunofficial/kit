@@ -110,14 +110,18 @@ fn age_file(path: &Path, age: u64) {
 
 #[test]
 fn sweep_keeps_young_files_and_yields_to_a_publisher() {
+    TEST_NOW.set(Some(now_secs()));
+    let fourteen_days = 1_209_600;
     let repo = Repo::new();
-    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    let old = repo.leftover(1, fourteen_days);
     let old_index = repo.pack_dir().join(format!("{:064x}.idx", 7));
     fs::write(&old_index, b"orphan").unwrap();
-    age_file(&old_index, DEFAULT_GRACE_SECS + 86_400);
-    let young = repo.leftover(2, 0);
+    age_file(&old_index, fourteen_days + 86_400);
+    let young = repo.leftover(2, fourteen_days - 1);
     let guard = repo.store.prune_guard().unwrap();
-    assert_eq!(repo.run().leftovers_removed, 0);
+    let blocked = repo.run();
+    assert_eq!(blocked.collection, Collection::NotDue);
+    assert_eq!(blocked.leftovers_removed, 0);
     assert!(old.exists());
     drop(guard);
     crate::atomic::testing::reset_dir_sync_calls();
@@ -156,6 +160,10 @@ fn collection_retires_only_wholly_dead_packs_past_grace() {
     }
     assert!(repo.store.read(&live_ids[0]).is_ok());
     assert!(repo.store.read(&mixed_ids[0]).is_ok());
+
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    let stamp = Stamp::read(&mut file).unwrap();
+    assert_eq!(stamp.complete_pairs, (MIN_PAIRS + 3) as u64);
 }
 
 #[test]
@@ -363,4 +371,142 @@ fn a_soft_root_published_after_the_mark_keeps_the_pair() {
     assert_eq!(report.collection, Collection::RootsChanged);
     assert!(dead.exists());
     assert!(repo.store.read(&ids[0]).is_ok());
+}
+
+#[test]
+fn an_old_stamp_does_not_lower_the_collection_floor() {
+    let repo = Repo::new();
+    let (dead, _) = repo.old_pack(&[b"dead below collection floor"]);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    Stamp {
+        attempted: 1,
+        outcome: Collection::Complete,
+        complete_pairs: MIN_PAIRS as u64,
+    }
+    .write(&mut file)
+    .unwrap();
+    drop(file);
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert!(dead.exists());
+}
+
+#[test]
+fn a_store_from_another_repository_cannot_be_swept() {
+    let roots = Repo::new();
+    let objects = Repo::new();
+    let old = objects.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+
+    let report = maintain_packs(&roots.layout, &objects.store, &|| false);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(old.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_store_cannot_be_swept() {
+    let repo = Repo::new();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    let external = repo.layout.worktree_root().join("external");
+    fs::rename(repo.store.objects_root(), &external).unwrap();
+    std::os::unix::fs::symlink(&external, repo.store.objects_root()).unwrap();
+
+    assert_eq!(repo.run().leftovers_removed, 0);
+    assert!(old.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hard_link_to_the_stamp_is_never_rewritten() {
+    let repo = Repo::new();
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    let target = repo.layout.worktree_root().join("outside-stamp");
+    fs::remove_file(&stamp).unwrap();
+    fs::write(&target, b"keep").unwrap();
+    fs::hard_link(&target, &stamp).unwrap();
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_eq!(fs::read(target).unwrap(), b"keep");
+}
+
+#[test]
+fn a_due_collection_backs_off_when_the_orphan_sweep_cannot_lock() {
+    let repo = Repo::new();
+    repo.due();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    let (dead, _) = repo.old_pack(&[b"dead during a busy sweep"]);
+    let _publisher = repo.store.prune_guard().unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Busy);
+    assert_eq!(report.leftovers_removed, 0);
+    assert_eq!(report.packs_retired, 0);
+    assert!(old.exists() && dead.exists());
+}
+
+#[test]
+fn cancellation_before_the_sweep_keeps_the_old_leftover() {
+    let repo = Repo::new();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+
+    let report = maintain_packs(&repo.layout, &repo.store, &|| true);
+    assert_eq!(report.collection, Collection::NotDue);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(old.exists());
+}
+
+#[test]
+fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
+    let repo = Repo::new();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    let mut bytes = fs::read(&stamp).unwrap();
+    bytes.push(0);
+    fs::write(stamp, bytes).unwrap();
+
+    assert_eq!(repo.run().leftovers_removed, 0);
+    assert!(old.exists());
+    assert_eq!(repo.run().leftovers_removed, 1);
+    assert!(!old.exists());
+}
+
+#[test]
+fn a_loose_only_repository_keeps_files_named_like_pack_leftovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    let repo = Repo {
+        _dir: dir,
+        layout,
+        store,
+    };
+    let _ = repo.run();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+
+    assert_eq!(repo.run().leftovers_removed, 0);
+    assert!(old.exists());
+}
+
+#[test]
+fn stamp_intervals_and_report_names_match_the_collection_outcomes() {
+    for (outcome, interval, name) in [
+        (Collection::NotDue, 7 * 24 * HOUR, "not_due"),
+        (Collection::Complete, 7 * 24 * HOUR, "complete"),
+        (Collection::Busy, HOUR, "busy"),
+        (Collection::RootsChanged, HOUR, "roots_changed"),
+        (Collection::OverBudget, 30 * 24 * HOUR, "over_budget"),
+        (Collection::Failed, 7 * 24 * HOUR, "failed"),
+    ] {
+        let stamp = Stamp {
+            attempted: 100,
+            outcome,
+            complete_pairs: 0,
+        };
+        assert_eq!(outcome.as_str(), name);
+        assert!(!stamp.due(stamp.attempted + interval - 1, MIN_PAIRS));
+        assert!(stamp.due(stamp.attempted + interval, MIN_PAIRS));
+        assert!(!stamp.due(stamp.attempted, MIN_PAIRS));
+        assert!(stamp.due(stamp.attempted - 1, MIN_PAIRS));
+        assert_eq!(Stamp::decode(&stamp.encode()).unwrap().outcome, outcome);
+    }
 }
