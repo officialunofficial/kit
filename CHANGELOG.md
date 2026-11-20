@@ -13,6 +13,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Read and verify raw local object packs in repositories that declare capability `P`, and rebuild damaged pack indexes.
 
+### Changed
+
+- **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
+
 ### Fixed
 
 - Push records its verified data packs locally so the next fetch can skip them.
