@@ -1,5 +1,8 @@
 use super::{PushContext, PushError};
-use crate::packmap::{branch_head_ref, flatten_oldest_first, packmap_ref, walk_pack_chain};
+use crate::packmap::{
+    MAX_FETCH_PACKS, MAX_PACK_CHAIN_DEPTH, branch_head_ref, flatten_oldest_first, packmap_ref,
+    walk_pack_chain,
+};
 use crate::{SourceError, SyncError};
 use kit_core::{
     hash::Hash,
@@ -7,7 +10,7 @@ use kit_core::{
     protocol::{AdvanceOutcome, CommitOutcome, PackKey},
     refs,
     transfer::{
-        encode_packlist,
+        decode_packlist, encode_packlist,
         packmap::{ChainState, Node, PlanError, plan_advance},
     },
 };
@@ -22,6 +25,36 @@ pub(crate) fn probe_chain(
 ) -> Result<(usize, Vec<Hash>), PushError> {
     let nodes = walk_pack_chain(tx.source, tx.observer, &branch_head_ref(branch), head_key)?;
     Ok((nodes.len(), flatten_oldest_first(nodes)))
+}
+
+/// The size of a chain as a fetch counts it: its nodes, and the packs they
+/// list, a pack listed twice counted twice.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ChainSize {
+    pub(super) nodes: usize,
+    pub(super) packs: usize,
+}
+
+/// Refuse `node` when it links onto a chain of `chain`'s size and the two
+/// together are more than a fetch walks: [`MAX_PACK_CHAIN_DEPTH`] nodes or
+/// [`MAX_FETCH_PACKS`] listed packs. Publishing it would leave the branch
+/// that no client without its tip can fetch. A node with no predecessor
+/// starts a new chain and is never refused.
+pub(super) fn check_fetchable(
+    branch: &str,
+    chain: ChainSize,
+    node: &Node,
+) -> Result<(), PushError> {
+    let planned = decode_packlist(&node.bytes)?;
+    if planned.prev.is_some()
+        && (chain.nodes >= MAX_PACK_CHAIN_DEPTH
+            || chain.packs.saturating_add(planned.packs.len()) > MAX_FETCH_PACKS)
+    {
+        return Err(PushError::PackChainTooLong {
+            branch: branch.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Advertise new packs in apply order and then move the branch head.
@@ -69,7 +102,7 @@ pub(crate) fn advance_packmap(
             return Err(PushError::Sync(SyncError::Interrupted));
         }
         let prior = tx.read_ref(&packmap_name)?;
-        let state = match prior {
+        let (state, chain) = match prior {
             // A delete may remove the base chain between CAS attempts.
             // Dependent packs cannot serve as a new root, even if the
             // head CAS would refuse the push after writing that root.
@@ -78,16 +111,27 @@ pub(crate) fn advance_packmap(
                     branch: branch.to_owned(),
                 });
             }
-            None => ChainState::Missing,
+            None => (ChainState::Missing, ChainSize::default()),
             Some(head) => match probe_chain(tx, branch, head) {
                 Ok((depth, packs)) => {
-                    ChainState::validated(head, depth, packs, pack_keys.len(), rollover_threshold)
+                    let chain = ChainSize {
+                        nodes: depth,
+                        packs: packs.len(),
+                    };
+                    let state = ChainState::validated(
+                        head,
+                        depth,
+                        packs,
+                        pack_keys.len(),
+                        rollover_threshold,
+                    );
+                    (state, chain)
                 }
                 // Broken chain: a self-contained pack can reset to escape it;
                 // a delta push must block (its bases live in the broken tail).
                 // Transient transport errors propagate (don't reset on a blip).
                 Err(PushError::Sync(SyncError::PackChainInvalid { .. })) if self_contained => {
-                    ChainState::Reset { prior }
+                    (ChainState::Reset { prior }, ChainSize::default())
                 }
                 Err(e) => return Err(e),
             },
@@ -101,6 +145,7 @@ pub(crate) fn advance_packmap(
         let Some(node) = node else {
             return commit_head(tx, &head_name, head_condition, &tip, branch);
         };
+        check_fetchable(branch, chain, &node)?;
         tx.upload_blob(&node.bytes, &PackKey::from_hash(node.key), &head_name)
             .map_err(|error| super::repository_operation_error(tx, error))?;
         let commit_keys: Vec<PackKey> = pack_keys

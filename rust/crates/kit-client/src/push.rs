@@ -1,4 +1,5 @@
 const MAX_CHAIN_PACKS: usize = crate::read::MAX_CHAIN_PACKS;
+const MAX_CHAIN_DEPTH: usize = crate::read::MAX_CHAIN_DEPTH;
 use crate::calls;
 use crate::connect::{Built, Opts, RESPONSE_LIMIT, Rpc, membership_lag, pending_delay};
 use crate::seams::{NoObserver, Observer, RequestPolicy};
@@ -167,12 +168,17 @@ impl Push {
         let keys: Vec<_> = self.plan.pack_ids().copied().collect();
         for _ in 0..8 {
             let prior = read_ref(&rpc, &self.packmap_ref).await?;
+            // The nodes and listed packs of the chain an appended node links to.
+            let mut linked = None;
             let state = match self.mode {
                 PackmapMode::ResetSelfContained => ChainState::Reset { prior },
                 PackmapMode::Append { self_contained } => match prior {
                     None => ChainState::Missing,
                     Some(root) => match walk_chain(&rpc, root, &self.head_ref).await {
-                        Ok(packs) => ChainState::Append { head: root, packs },
+                        Ok((packs, nodes, listed)) => {
+                            linked = Some((nodes, listed));
+                            ChainState::Append { head: root, packs }
+                        }
                         Err(Error::Packlist(_) | Error::Invalid(_)) if self_contained => {
                             ChainState::Reset { prior }
                         }
@@ -194,6 +200,13 @@ impl Push {
             let Some(node) = node else {
                 return commit_head(&rpc, &self.head_ref, self.condition, self.tip).await;
             };
+            // An appended node lists every key. Refuse a chain a reader would
+            // refuse to walk before the node is uploaded.
+            if let Some((nodes, listed)) = linked
+                && (nodes >= MAX_CHAIN_DEPTH || listed.saturating_add(keys.len()) > MAX_CHAIN_PACKS)
+            {
+                return Err(Error::Limit("packmap chain past the fetch bounds"));
+            }
             let node_ticket = upload(
                 &mut rpc,
                 &self.head_ref,
@@ -530,9 +543,12 @@ async fn walk_chain<
     rpc: &Rpc<'_, T, S, C, O, P>,
     root: Hash,
     head_ref: &str,
-) -> Result<HashSet<Hash>, Error> {
+) -> Result<(HashSet<Hash>, usize, usize), Error> {
     let mut packs = HashSet::new();
+    let (mut nodes, mut listed) = (0_usize, 0_usize);
     crate::read::walk_nodes(rpc, root, head_ref, |node| {
+        nodes += 1;
+        listed = listed.saturating_add(node.packs.len());
         packs.extend(node.packs.iter().copied());
         if packs.len() > MAX_CHAIN_PACKS {
             return Err(Error::Limit("packmap pack count"));
@@ -540,7 +556,7 @@ async fn walk_chain<
         Ok(node.prev)
     })
     .await?;
-    Ok(packs)
+    Ok((packs, nodes, listed))
 }
 
 /// One `AdvanceRefs` with the whole-push waits: poll a definitive pending or
