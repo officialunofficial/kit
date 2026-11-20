@@ -135,6 +135,15 @@ pub enum StoreError {
     OperationLimitExceeded(&'static str),
     #[error("on-disk bytes hash to {actual}, expected {expected}")]
     HashMismatch { expected: String, actual: String },
+    /// A local pack or its index failed a check: a bad header, size,
+    /// checksum, frame, extent or key. A failed read stays [`Self::Io`].
+    #[error("local pack {pack}: {reason}")]
+    LocalPackDamaged {
+        /// The path of the damaged pack or index file.
+        pack: Box<str>,
+        /// What the check found.
+        reason: Box<str>,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -662,7 +671,7 @@ impl ObjectStore {
                 Ok(id) => id,
                 Err(e) => {
                     check_hash(h, blake3::hash(bytes).as_bytes())?;
-                    return Err(e);
+                    return Err(local_pack::named(location.path(), e));
                 }
             }
         } else {
@@ -791,7 +800,10 @@ impl ObjectStore {
                     contents.read_exact(&mut header[6..])?;
                     let payload_len = raw_capacity(contents.len)? - header.len();
                     if header != serialize::blob_prologue(payload_len)? {
-                        return Err(local_pack::invalid("invalid packed blob header").into());
+                        return Err(local_pack::invalid_at(
+                            location.path(),
+                            "invalid packed blob header",
+                        ));
                     }
                     let mut hash = blake3::Hasher::new();
                     hash.update(&header);
@@ -799,7 +811,10 @@ impl ObjectStore {
                     check_hash(h, hash.finalize().as_bytes())?;
                     Ok(ty)
                 }
-                ObjectType::Delta => Err(local_pack::invalid("delta object in local pack").into()),
+                ObjectType::Delta => Err(local_pack::invalid_at(
+                    location.path(),
+                    "delta object in local pack",
+                )),
                 _ => Ok(ty),
             }
         })
@@ -846,11 +861,10 @@ impl ObjectStore {
                 None => serialize::deserialize_owned(bytes)?,
             };
             if location.is_packed() && matches!(object, Object::Delta(_)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(local_pack::invalid_at(
+                    location.path(),
                     "delta object in local pack",
-                )
-                .into());
+                ));
             }
             Ok(object)
         })

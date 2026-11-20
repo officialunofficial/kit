@@ -14,7 +14,7 @@ mod index;
 #[cfg(feature = "fuzzing")]
 pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
-pub(super) use index::{canonical_id, invalid};
+pub(super) use index::{canonical_id, invalid_at, named};
 
 mod reader;
 #[cfg(test)]
@@ -136,7 +136,7 @@ impl LocalPacks {
         let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
         let stamp = match fs::symlink_metadata(dir) {
             Ok(meta) if meta.is_dir() => Some(index::Stamp::get(&meta)?),
-            Ok(_) => return Err(index::invalid("local pack directory is not a directory").into()),
+            Ok(_) => return Err(index::invalid_at(dir, "not a directory")),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
@@ -294,12 +294,7 @@ impl LocalPacks {
         let mut pair_error = None;
         if refresh && self.refresh_enabled(store)? {
             let fresh = self.discover(&store.pack_dir(), errors.stale)?;
-            pair_error = fresh.error.as_ref().map(|error| {
-                StoreError::Io(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    Arc::clone(error),
-                ))
-            });
+            pair_error = fresh.error.as_deref().map(replay);
             if !Arc::ptr_eq(&known, &fresh)
                 && let Some(value) =
                     self.try_catalog(&fresh, id, Some(&known), &mut errors, &mut use_location)?
@@ -377,6 +372,18 @@ impl LookupErrors {
                 Ok(None)
             }
         }
+    }
+}
+
+// A catalog keeps the first error it met. Give each lookup its own copy.
+fn replay(error: &StoreError) -> StoreError {
+    match error {
+        StoreError::LocalPackDamaged { pack, reason } => StoreError::LocalPackDamaged {
+            pack: pack.clone(),
+            reason: reason.clone(),
+        },
+        StoreError::Io(error) => StoreError::Io(io::Error::new(error.kind(), error.to_string())),
+        other => StoreError::Io(io::Error::other(other.to_string())),
     }
 }
 
@@ -510,12 +517,12 @@ fn pair_is_live(pair: &Pair) -> io::Result<bool> {
     Ok(regular(&pair.pack)? && regular(&pair.index)?)
 }
 
-fn read_pack_dir(dir: &Path) -> io::Result<Option<fs::ReadDir>> {
+fn read_pack_dir(dir: &Path) -> StoreResult<Option<fs::ReadDir>> {
     match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => fs::read_dir(dir).map(Some),
-        Ok(_) => Err(index::invalid("local pack directory is not a directory")),
+        Ok(meta) if meta.is_dir() => Ok(Some(fs::read_dir(dir)?)),
+        Ok(_) => Err(index::invalid_at(dir, "not a directory")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -545,8 +552,9 @@ fn visit_pairs_until(
 fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
     match Index::open(pair) {
         Ok(index) => Ok(index.matches(rows)),
-        Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
-        Err(_) => Ok(false),
+        Err(StoreError::LocalPackDamaged { .. }) => Ok(false),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -560,19 +568,8 @@ fn scan_pair_checked(
 ) -> StoreResult<Vec<(Hash, Frame)>> {
     #[cfg(test)]
     tests::pack_scan_error(pair.key)?;
-    let (key, rows) = index::scan_checked(&mut open_regular(&pair.pack)?, checkpoint).map_err(
-        |error| match error {
-            StoreError::Io(ref io)
-                if matches!(
-                    io.kind(),
-                    io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-                ) =>
-            {
-                error
-            }
-            other => pair.context(other),
-        },
-    )?;
+    let (key, rows) = index::scan_checked(&mut open_regular(&pair.pack)?, checkpoint)
+        .map_err(|error| pair.context(error))?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));
     }

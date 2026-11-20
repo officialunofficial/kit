@@ -361,6 +361,7 @@ thread_local! {
 /// Result of an unpack: which entries were stored, plus a count of
 /// delta resolutions vs raw writes. Useful for transport/CLI summaries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnpackReport {
     pub raw_count: u32,
     pub delta_count: u32,

@@ -113,7 +113,7 @@ impl Locator {
         let row_bytes = INDEX_ROW_LEN * count;
         let size = INDEX_BASE_LEN + row_bytes;
         if metadata.len() != size as u64 {
-            return Err(invalid("index length does not match frame count").into());
+            return Err(invalid("index length does not match frame count"));
         }
         let fanout = Box::new(read_version::<FANOUT_END>(
             &mut index,
@@ -121,13 +121,13 @@ impl Locator {
             "local index",
         )?);
         if le_u32(&fanout[8..12]) as usize != count {
-            return Err(invalid("index count differs from pack count").into());
+            return Err(invalid("index count differs from pack count"));
         }
         super::index::validate_fanout_bounds(&fanout[12..], count)?;
         let mut key = [0; 32];
         read_spooled(&index, (size - 64) as u64, &mut key)?;
         if key != pair.key {
-            return Err(invalid("index key differs from filename").into());
+            return Err(invalid("index key differs from filename"));
         }
         let mut rows = Vec::new();
         let mut prefixes = Vec::new();
@@ -259,21 +259,21 @@ impl Locator {
         let row = if let Some(row) = row {
             let candidate: Hash = self
                 .read_column(file.as_deref(), row * 32)
-                .map_err(|e| self.pair.error(e))?;
+                .map_err(|e| self.pair.context(e))?;
             if candidate != *id {
                 return Ok(None);
             }
             row
         } else {
             let file = file.as_deref().expect("unrouted rows are on disk");
-            let Some(row) = self.find_row(file, id).map_err(|e| self.pair.error(e))? else {
+            let Some(row) = self.find_row(file, id).map_err(|e| self.pair.context(e))? else {
                 return Ok(None);
             };
             row
         };
         let frame = self
             .frame_from_row(file.as_deref(), row)
-            .map_err(|e| self.pair.error(e))?;
+            .map_err(|e| self.pair.context(e))?;
         if frame.extent(self.trailer).is_none() {
             self.check_current()?;
             return Err(self.pair.index_error("invalid index extent"));
@@ -306,7 +306,7 @@ impl Locator {
         if !self.check_current()? {
             // Reuse can touch a pack's timestamps without replacing it.
             let mut header = [0; HEADER_LEN];
-            read_spooled(file, 0, &mut header).map_err(|e| self.pair.error(e))?;
+            read_spooled(file, 0, &mut header).map_err(|e| self.pair.context(e))?;
             let header = read_version::<HEADER_LEN>(&mut header.as_slice(), *MAGIC, "local pack")
                 .map_err(|e| self.pair.context(e))?;
             if le_u32(&header[8..]) as usize != self.count {
@@ -317,8 +317,8 @@ impl Locator {
             .extent(self.trailer)
             .ok_or_else(|| self.pair.error("invalid frame extent"))?;
         let mut header = [0; crate::pack::ENTRY_FRAME_LEN];
-        read_spooled(file, start, &mut header).map_err(|e| self.pair.error(e))?;
-        let len = read_frame_header(&mut header.as_slice()).map_err(|e| self.pair.error(e))?;
+        read_spooled(file, start, &mut header).map_err(|e| self.pair.context(e))?;
+        let len = read_frame_header(&mut header.as_slice()).map_err(|e| self.pair.context(e))?;
         if len != frame.len {
             return Err(self.pair.error("index and pack disagree on frame length"));
         }

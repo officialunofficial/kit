@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits, PackedGcReport,
+    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits,
     collect_root_sets, mark_live_checked, reject_symlink,
 };
 use crate::layout::{RepoLayout, all_state_layouts};
@@ -199,7 +199,6 @@ fn maintain_with(
     before_collection_locks: impl FnOnce(),
 ) -> MaintenanceReport {
     let start = Instant::now();
-    let mut pack_report = PackedGcReport::default();
     let mut gc_report = GcReport::default();
     let collection = run(
         layout,
@@ -208,11 +207,10 @@ fn maintain_with(
         budget,
         before_collection_locks,
         &mut gc_report,
-        &mut pack_report,
     );
     MaintenanceReport {
-        leftovers_removed: pack_report.pack_leftovers_pruned,
-        packs_retired: pack_report.packs_retired,
+        leftovers_removed: gc_report.pack_leftovers_pruned,
+        packs_retired: gc_report.packs_retired,
         bytes_reclaimed: gc_report.bytes_reclaimed,
         collection,
         elapsed: start.elapsed(),
@@ -226,7 +224,6 @@ fn run(
     budget: Duration,
     before_collection_locks: impl FnOnce(),
     gc: &mut GcReport,
-    packed: &mut PackedGcReport,
 ) -> Collection {
     if cancelled()
         || layout.objects_dir() != store.objects_root()
@@ -258,23 +255,23 @@ fn run(
         return Collection::NotDue;
     }
     let due = stamp.due(now, pairs);
-    let collection = match sweep.run_with(store, gc, packed, || Ok(())) {
+    let collection = match sweep.run_with(store, gc, || Ok(())) {
         Ok(true) if due => {
             let clock = Budget {
                 start: Instant::now(),
                 limit: budget,
                 cancelled,
             };
-            collect(layout, store, &clock, before_collection_locks, gc, packed).unwrap_or_else(
-                |error| match error {
+            collect(layout, store, &clock, before_collection_locks, gc).unwrap_or_else(|error| {
+                match error {
                     GcRootsError::Io(error) | GcRootsError::Store(StoreError::Io(error))
                         if error.kind() == io::ErrorKind::TimedOut =>
                     {
                         Collection::OverBudget
                     }
                     _ => Collection::Failed,
-                },
-            )
+                }
+            })
         }
         Ok(false) if due => Collection::Busy,
         Err(_) if due => Collection::Failed,
@@ -284,7 +281,7 @@ fn run(
         attempted: now,
         outcome: collection,
         complete_pairs: if collection == Collection::Complete {
-            pairs.saturating_sub(packed.packs_retired) as u64
+            pairs.saturating_sub(gc.packs_retired) as u64
         } else {
             stamp.complete_pairs
         },
@@ -326,7 +323,6 @@ fn collect(
     budget: &Budget<'_>,
     before_locks: impl FnOnce(),
     gc: &mut GcReport,
-    packed: &mut PackedGcReport,
 ) -> Result<Collection, GcRootsError> {
     let now = now_secs();
     budget.check()?;
@@ -345,11 +341,10 @@ fn collect(
         &|| Ok(budget.check()?),
         &|| Ok(check_deadline(start, limit)?),
     )?;
-    let retire = store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, packed, &|| {
-        Ok(budget.check()?)
-    })?;
+    let retire =
+        store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, gc, &|| Ok(budget.check()?))?;
     budget.check()?;
-    if !packed.skipped_pack_errors.is_empty() {
+    if !gc.skipped_pack_errors.is_empty() {
         return Ok(Collection::Failed);
     }
     if retire.is_empty() {
@@ -380,7 +375,7 @@ fn collect(
         return Ok(Collection::RootsChanged);
     }
     budget.check_cancellation()?;
-    Ok(if retire.run_with(store, gc, packed, || Ok(()))? {
+    Ok(if retire.run_with(store, gc, || Ok(()))? {
         Collection::Complete
     } else {
         Collection::Busy
