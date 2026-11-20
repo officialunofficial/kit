@@ -1778,19 +1778,26 @@ fn request_policy_survives_both_builder_orders_on_writes() {
     }
 }
 
-/// A push never appends a node that makes the chain list more packs than a
-/// reader walks. The prior chain lists `listed` packs (one key repeated)
-/// over nodes of at most 4,096; the push adds one pack.
+/// A push never appends a node that makes the chain longer, or list more
+/// packs, than a reader walks. The prior chain lists `listed` packs (one key
+/// repeated) over nodes of at most `per_node`; the push adds one node with
+/// one pack.
 #[test]
-fn an_append_past_the_fetch_pack_bound_is_refused_before_the_node_uploads() {
+fn an_append_past_a_fetch_bound_is_refused_before_the_node_uploads() {
     use kit_core::transfer::encode_packlist;
     const MAX_PACKS: usize = 1_000_000;
+    const MAX_NODES: usize = 100_000;
 
-    for (listed, refused) in [(MAX_PACKS - 1, false), (MAX_PACKS, true)] {
+    for (listed, per_node, refused) in [
+        (MAX_PACKS - 1, 4096, false),
+        (MAX_PACKS, 4096, true),
+        (MAX_NODES - 1, 1, false),
+        (MAX_NODES, 1, true),
+    ] {
         let mut chain = std::collections::HashMap::new();
         let (mut head, mut left) = (None, listed);
         while left > 0 {
-            let count = left.min(4096);
+            let count = left.min(per_node);
             let bytes = encode_packlist(head, &vec![[9; 32]; count]).unwrap();
             let key = pack_key(&bytes);
             chain.insert(key, bytes);
@@ -1856,12 +1863,12 @@ fn an_append_past_the_fetch_pack_bound_is_refused_before_the_node_uploads() {
                     result,
                     Err(Error::Limit("packmap chain past the fetch bounds"))
                 ),
-                "{result:?}"
+                "{listed}/{per_node}: {result:?}"
             );
             assert_eq!((node_uploads, advances), (0, 0));
         } else {
             assert_eq!(result.unwrap(), kit_client::Outcome::Committed);
-            assert_eq!((node_uploads, advances), (1, 1));
+            assert_eq!((node_uploads, advances), (1, 1), "{listed}/{per_node}");
         }
     }
 }
