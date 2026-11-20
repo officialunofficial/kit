@@ -19,7 +19,9 @@
 # the numbers always name a commit. The dirty flag covers the rust/ directory.
 #
 # Set KIT_BENCH_PROVENANCE_ONLY=1 to print the provenance and exit before the
-# fixtures and the timing runs.
+# fixtures and the timing runs. Set KIT_BENCH_CLONE_ONLY=1 to run only the
+# clone-10k row. KIT_BENCH_CLONE_RUNS (default 8) sets its runs per tool and
+# KIT_BENCH_CLONE_IDLE (default 4) the idle seconds after `sync` before each run.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,6 +64,65 @@ trap 'rm -rf "$WORK"' EXIT
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" XDG_DATA_HOME="$WORK/home/.local/share" XDG_CACHE_HOME="$WORK/home/.cache"
 mkdir -p "$HOME"
 cd "$WORK"
+
+# Clone of 10,000 files of 1 KiB in 100 directories, one commit. A clone is
+# bound by deletion and writeback, so hyperfine's back-to-back runs measure
+# the disk state left by the previous run. Instead the tools alternate. Each
+# run follows `sync` and an idle wait. The report gives the median and the
+# range of the wall-clock times.
+CLONE_RUNS="${KIT_BENCH_CLONE_RUNS:-8}"
+CLONE_IDLE="${KIT_BENCH_CLONE_IDLE:-4}"
+echo "== clone-10k =="
+mkdir clone-src && cd clone-src
+python3 -I - <<'PY'
+import os
+for d in range(100):
+    os.mkdir(f"d{d}")
+    for f in range(100):
+        with open(f"d{d}/f{f}", "wb") as fh:
+            fh.write(os.urandom(1024))
+PY
+"$KIT" init >/dev/null 2>&1 && "$KIT" keygen >/dev/null 2>&1
+"$KIT" add . >/dev/null && "$KIT" commit -m bench >/dev/null 2>&1
+mkdir ../clone-remote && "$KIT" remote add "kit+file://$WORK/clone-remote" && "$KIT" push -q -u >/dev/null 2>&1
+git init -q -b main && git config user.email b@b && git config user.name b
+git add . && git commit -q -m bench
+cd "$WORK"
+fs_type() { df -T "$1" 2>/dev/null | awk 'NR==2 {print $2}' | grep . || stat -f %T "$1"; }
+echo "filesystem of $WORK: $(fs_type "$WORK")"
+python3 -I - "$KIT" "$WORK" "$OUT/clone-10k.txt" "$CLONE_RUNS" "$CLONE_IDLE" <<'PY'
+import statistics, subprocess, sys, time
+
+kit, work, out, runs, idle = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5])
+cmds = {
+    "kit": [kit, "clone", "-q", f"kit+file://{work}/clone-remote", "clone-dst"],
+    "git": ["git", "clone", "-q", f"file://{work}/clone-src", "clone-dst"],
+}
+times = {tool: [] for tool in cmds}
+# The first round warms the page cache of the sources. It is not reported.
+for i in range(runs + 1):
+    for tool, cmd in cmds.items():
+        subprocess.run(["rm", "-rf", "clone-dst"], cwd=work, check=True)
+        subprocess.run(["sync"], check=True)
+        time.sleep(idle)
+        start = time.monotonic()
+        subprocess.run(cmd, cwd=work, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if i:
+            times[tool].append(time.monotonic() - start)
+lines = [
+    f"clone-10k {tool}: median {statistics.median(t):.3f}s, range {min(t):.3f}s to {max(t):.3f}s, {len(t)} runs"
+    for tool, t in times.items()
+]
+lines.append("clone-10k raw seconds: " + "; ".join(f"{tool} " + " ".join(f"{x:.3f}" for x in t) for tool, t in times.items()))
+with open(out, "w") as f:
+    f.write("\n".join(lines) + "\n")
+print("\n".join(lines))
+PY
+rm -rf clone-dst
+
+if [ "${KIT_BENCH_CLONE_ONLY:-}" = "1" ]; then
+  exit 0
+fi
 
 echo "== fixtures (incompressible bytes) =="
 mkdir -p fixtures/small100
