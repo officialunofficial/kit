@@ -340,9 +340,10 @@ fn clone_init_exit_code(error: &kit_sync::CloneInitError) -> u8 {
     match error {
         E::CreateDir { .. } | E::Store(_) | E::Refs(_) | E::WriteConfig(_) => exit::CANTCREAT,
         E::Discover(_) => exit::DATAERR,
-        E::AlreadyInitialized => exit::GENERAL_ERROR,
         // `validate_clone_inputs` rejects these first with the same code.
         E::InvalidRemote(_) => exit::PROTOCOL_ERROR,
+        // `AlreadyInitialized` and any later variant.
+        _ => exit::GENERAL_ERROR,
     }
 }
 

@@ -468,7 +468,7 @@ fn a_known_pack_does_not_hide_a_newly_published_pair() {
 #[test]
 fn a_symlink_cannot_supply_the_pack_directory() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path(), true).unwrap();
+    crate::store::format::activate(&store.format_path()).unwrap();
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), store.pack_dir()).unwrap();
 
@@ -483,7 +483,7 @@ fn a_symlink_cannot_supply_the_pack_directory() {
 #[test]
 fn pack_scan_reports_filesystem_errors_other_than_absence() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path(), true).unwrap();
+    crate::store::format::activate(&store.format_path()).unwrap();
     let objects = layout.objects_dir();
     fs::remove_dir(&objects).unwrap();
     std::os::unix::fs::symlink(&objects, &objects).unwrap();
@@ -629,7 +629,7 @@ fn a_reader_refreshes_a_rebuilt_index_with_the_same_key() {
 #[test]
 fn concurrent_publishers_deduplicate_and_make_the_pair_readable() {
     let (_dir, layout, store) = fresh();
-    crate::store::format::activate(&store.format_path(), true).unwrap();
+    crate::store::format::activate(&store.format_path()).unwrap();
     let bytes = blob(b"two publishers");
     let barrier = std::sync::Barrier::new(2);
     let id = index::canonical_id(&bytes).unwrap();

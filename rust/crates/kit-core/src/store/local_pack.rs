@@ -622,7 +622,7 @@ impl ObjectStore {
     }
 
     /// Try the one-way local-pack activation before taking a prune guard.
-    /// Contention and readable noncanonical legacy markers leave it loose.
+    /// Contention leaves it loose.
     ///
     /// # Errors
     /// An unreadable, incompatible or unwritable format marker.

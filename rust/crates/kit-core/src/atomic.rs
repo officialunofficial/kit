@@ -209,4 +209,20 @@ mod tests {
             assert!(seq.bytes().all(|c| c.is_ascii_digit()) && !seq.is_empty());
         }
     }
+
+    #[test]
+    fn the_batch_syncer_flushes_directories_through_sync_dir() {
+        use crate::batch::{RealSyncer, Syncer};
+
+        let dir = tempfile::tempdir().unwrap();
+        testing::reset_dir_sync_calls();
+        RealSyncer.dir_sync(dir.path()).unwrap();
+        assert_eq!(testing::dir_sync_calls(), 1);
+        // Where the barrier is the directory fsync itself, it counts too.
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            RealSyncer.dir_barrier(dir.path()).unwrap();
+            assert_eq!(testing::dir_sync_calls(), 2);
+        }
+    }
 }

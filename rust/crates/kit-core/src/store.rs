@@ -113,6 +113,7 @@ pub const MAX_TREE_DEPTH: usize = 128;
 /// [`KitError`] so callers can pattern-match on filesystem failures
 /// without losing the structured-decode-error variants.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     #[error("path is not a kit repository (missing .kit/objects)")]
     NotAKitRepository,
@@ -1139,10 +1140,12 @@ impl ObjectStore {
     }
 
     /// Delete object `h` from the store. Idempotent: a missing object is
-    /// not an error (it may have been pruned already).
+    /// not an error (it may have been pruned already). For tests that model a
+    /// damaged store; a build with the `fault-injection` feature has it.
     ///
     /// # Errors
     /// [`StoreError::Io`] on a filesystem failure other than not-found.
+    #[cfg(any(test, feature = "fault-injection"))]
     pub fn remove_object(&self, h: &Hash) -> StoreResult<()> {
         match fs::remove_file(self.path_for(h)) {
             Ok(()) => Ok(()),
@@ -1390,26 +1393,6 @@ thread_local! {
     /// concurrent gc unlink (`NotFound`) would, to exercise the
     /// callers' rewrite fallback.
     static FAIL_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// On Unix, fsync the directory holding the just-renamed file so the
-/// dirent update is durable. No-op on non-Unix (Windows does not expose
-/// a stable directory-fsync primitive via `std::fs`).
-#[cfg(unix)]
-pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    match File::open(parent) {
-        Ok(dir) => dir.sync_all(),
-        // If the dir disappeared under us (race with external cleanup),
-        // the durability invariant is moot — propagate silently.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 fn raw_capacity(len: u64) -> StoreResult<usize> {

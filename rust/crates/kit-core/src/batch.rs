@@ -75,7 +75,6 @@ use tempfile::TempPath;
 use crate::hash::Hash;
 use crate::store::{
     MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog, PruneGuard, StoreError, StoreResult,
-    sync_parent_dir,
 };
 
 /// When object writes become durable.
@@ -196,7 +195,7 @@ impl Syncer for RealSyncer {
     }
 
     fn dir_sync(&self, dir: &Path) -> io::Result<()> {
-        sync_parent_dir(dir)
+        crate::atomic::sync_dir(dir)
     }
 
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -239,7 +238,7 @@ impl Syncer for RealSyncer {
         // dirents), so the "barrier" must stay a real fsync. Windows:
         // no directory flush primitive — no-op, the device_flush
         // covers what the OS exposes.
-        sync_parent_dir(dir)
+        crate::atomic::sync_dir(dir)
     }
 
     #[cfg(unix)]

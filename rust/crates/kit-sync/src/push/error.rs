@@ -1,6 +1,7 @@
 use super::RetryReason;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PushError {
     #[error(transparent)]
     Sync(#[from] crate::SyncError),

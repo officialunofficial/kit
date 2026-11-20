@@ -521,7 +521,7 @@ fn push_inputs<'a>(
 }
 
 /// Fetch the remote and fast-forward the current branch; see
-/// [`transfer::pull_with_source`]. `tags` takes the remote's tags too.
+/// [`transfer::pull_with_options`]. `tags` takes the remote's tags too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pull_all_with_source(
     cwd: &Path,
@@ -545,7 +545,7 @@ pub(crate) fn pull_all_with_source(
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
-/// Fetch the remote; see [`transfer::fetch_with_source`]. `tags` takes the
+/// Fetch the remote; see [`transfer::fetch_with_options`]. `tags` takes the
 /// remote's tags too, and the report names each tag published or refused.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_all_with_source(
