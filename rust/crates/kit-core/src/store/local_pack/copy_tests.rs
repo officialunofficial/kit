@@ -592,3 +592,26 @@ fn outputs_roll_over_at_the_payload_cap() {
         assert!(fs::metadata(pack).unwrap().len() <= (64 << 20) + (1 << 20));
     }
 }
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_write_failure_during_the_copy_leaves_the_inputs_untouched() {
+    let (_dir, layout, store) = fresh();
+    let x = obj("x", 2000);
+    let dead: Vec<_> = (0..4).map(|n| obj(&format!("dead{n}"), 2000)).collect();
+    let mut all = vec![&x];
+    all.extend(dead.iter());
+    let (pair, ids) = publish(&store, &all, OLD);
+    keep(&layout, "x", &ids[0]);
+
+    let failing = crate::fault::fail_writes(crate::fault::Site::Store);
+    assert!(run_gc_observed(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
+    drop(failing);
+    assert!(exists(&pair));
+    assert_eq!(packs(&store).len(), 1, "no output was published");
+    assert_eq!(store.read(&ids[0]).unwrap(), x);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_rewritten, 1);
+    assert_eq!(store.read(&ids[0]).unwrap(), x);
+}
