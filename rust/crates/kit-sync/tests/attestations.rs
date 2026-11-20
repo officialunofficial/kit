@@ -500,3 +500,96 @@ fn missing_pack_is_rejected_without_blocking_newer_envelopes_or_cursor() {
         .remote_unchanged
     );
 }
+
+/// A source that reports an interrupt once the attestation phase has
+/// downloaded its first pack, as a Ctrl-C there.
+struct InterruptAfterPack<'a> {
+    inner: kit_sync::TransportSource<'a>,
+    packs: std::collections::BTreeSet<kit_core::hash::Hash>,
+    cancelled: std::cell::Cell<bool>,
+}
+impl kit_sync::RemoteSource for InterruptAfterPack<'_> {
+    fn supports_attestations(&self) -> bool {
+        true
+    }
+    fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<kit_core::hash::Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        name: &str,
+    ) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_blob(key, name)
+    }
+    fn download_pack(
+        &self,
+        key: &kit_core::protocol::PackKey,
+        name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
+        if self.packs.contains(&key.into_hash()) {
+            self.cancelled.set(true);
+        }
+        self.inner.download_pack(key, name, sink)
+    }
+}
+impl kit_sync::Observer<kit_sync::SyncEvent> for InterruptAfterPack<'_> {
+    fn cancelled(&self) -> bool {
+        self.cancelled.get()
+    }
+}
+
+/// An interrupt in the attestation phase ends the fetch as interrupted, not
+/// as a success with a warning, and the next fetch stores the envelopes.
+#[test]
+fn an_interrupt_in_the_attestation_phase_ends_the_fetch_as_interrupted() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let first = kit_attest::pack::build(&[&attestation_fetch::envelope(tip)], 4096).unwrap();
+    attestation_fetch::append(&tx, &first);
+    let mut second = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
+    second.payload = String::from_utf8(second.payload)
+        .unwrap()
+        .replace("example.com/test/v1", "example.com/second/v1")
+        .into_bytes();
+    let second = kit_attest::pack::build(&[second.encode().unwrap().as_bytes()], 4096).unwrap();
+    attestation_fetch::append(&tx, &second);
+    let temp = tempfile::tempdir().unwrap();
+    kit_sync::init_clone_dir(temp.path(), &descriptor()).unwrap();
+    let source = InterruptAfterPack {
+        inner: kit_sync::TransportSource::new(&tx),
+        packs: [kit_core::hash::hash(&first), kit_core::hash::hash(&second)]
+            .into_iter()
+            .collect(),
+        cancelled: std::cell::Cell::new(false),
+    };
+    let result = kit_sync::fetch(
+        temp.path(),
+        &source,
+        "origin",
+        &kit_sync::SyncOptions::default(),
+        &source,
+    );
+    assert!(source.cancelled.get());
+    assert!(
+        matches!(result, Err(kit_sync::SyncError::Interrupted)),
+        "{result:?}"
+    );
+    kit_sync::fetch(
+        temp.path(),
+        &kit_sync::TransportSource::new(&tx),
+        "origin",
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    let layout = kit_core::layout::RepoLayout::single(temp.path());
+    assert_eq!(kit_attest::store::list(&layout, &tip).unwrap().len(), 2);
+}

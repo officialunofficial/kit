@@ -222,6 +222,11 @@ that dies releases the guard with its process. The objects of a dead fetch are
 then ordinary unreachable objects, and a later fetch repairs the store if a gc
 pruned any of them (SPEC-TRANSPORT, "Pack-chain fetch").
 
+A native `kit push` holds the same guard from before it plans until after
+its last remote-tracking ref write, and writes each of those refs under
+`worktree.lock`. A gc during the push therefore cannot prune the tip of a
+tracking ref the push writes, even when the local branch is deleted first.
+
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the

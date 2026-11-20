@@ -938,12 +938,15 @@ impl ObjectStore {
     /// handle, so no marker file is needed. A fetch takes the guard before it
     /// reads its record of applied packs and keeps it until its last ref
     /// publish, because an object a fetch reuses keeps its old modification
-    /// time, so the grace period does not protect it.
+    /// time, so the grace period does not protect it. A push holds it from
+    /// before it plans until its last remote-tracking ref write, so gc cannot
+    /// prune the tip that ref names.
     ///
     /// The guard protects only against a gc that holds the worktree locks
     /// across its mark and sweep, as `kit gc` does: a gc that marks before the
-    /// fetch publishes and sweeps after the guard drops would not see the new
-    /// ref. It stops the delete step, not the mark.
+    /// fetch or push publishes and sweeps after the guard drops would not see
+    /// the new ref. Both publish under the worktree lock for that reason. It
+    /// stops the delete step, not the mark.
     ///
     /// The guard relies on a local filesystem that honours kernel file locks,
     /// as SPEC-CONCURRENCY already requires. On Linux NFS a shared lock can

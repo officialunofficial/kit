@@ -1,5 +1,5 @@
 //! Optional publication of locally authored, subject-bound envelopes.
-use super::{PushContext, PushOptions, PushReport};
+use super::{PushContext, PushError, PushOptions, PushReport};
 use crate::{
     SourceError,
     attestation_records::{self, NODE_BOUND, Record, RecordKind, WALK_LIMIT},
@@ -27,12 +27,12 @@ pub(super) fn run(
     tx: &PushContext<'_>,
     options: &PushOptions<'_>,
     report: &mut PushReport,
-) {
+) -> Result<(), PushError> {
     if !tx.supports_attestations() {
         report
             .attestation_warnings
             .push("remote does not support attestations; skipped".into());
-        return;
+        return Ok(());
     }
     let result = publish(layout, store, tx, options, report).and_then(|()| {
         let max = tx
@@ -43,10 +43,15 @@ pub(super) fn run(
         compact_log(tx, options, max, &mut report.attestation_warnings, &[])
     });
     if let Err(error) = result {
+        // An interrupt ends the push as one, not as a success with a warning.
+        if tx.observer.cancelled() {
+            return Err(crate::SyncError::Interrupted.into());
+        }
         report
             .attestation_warnings
             .push(format!("attestation push stopped: {error}"));
     }
+    Ok(())
 }
 
 fn persist(path: &std::path::Path, record: &Record) -> Result<(), Failure> {
