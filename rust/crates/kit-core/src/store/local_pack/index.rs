@@ -121,7 +121,13 @@ impl IndexStamp {
 
 impl Index {
     pub(super) fn open(pair: &Pair) -> StoreResult<Self> {
-        Self::load(pair).map_err(|e| pair.context(e))
+        Self::load(pair).or_else(|error| {
+            // A damaged member can hide the other member's version.
+            if !matches!(error, StoreError::IncompatibleRepoFormat { .. }) {
+                pair.check_versions()?;
+            }
+            Err(pair.context(error))
+        })
     }
 
     fn load(pair: &Pair) -> StoreResult<Self> {

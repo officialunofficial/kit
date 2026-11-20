@@ -257,7 +257,7 @@ fn malformed_packed_objects_keep_mismatch_classification() {
 
 #[test]
 fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
-    fn incompatible(error: StoreError, member: &str) {
+    fn incompatible(error: &StoreError, member: &str) {
         assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
         let text = error.to_string();
         assert!(text.contains("Update kit"), "{text}");
@@ -287,12 +287,20 @@ fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
         fs::write(replacement.path(), &newer).unwrap();
         replacement.persist(path).unwrap();
 
-        incompatible(ObjectStore::open(&layout).unwrap_err(), kind);
-        incompatible(store.read(&id).unwrap_err(), kind);
-        incompatible(still_open.read(&[0; 32]).unwrap_err(), kind);
-        incompatible(still_open.iter_object_hashes().unwrap_err(), kind);
-        incompatible(still_open.check_local_packs(true).unwrap_err(), kind);
+        incompatible(&ObjectStore::open(&layout).unwrap_err(), kind);
+        incompatible(&store.read(&id).unwrap_err(), kind);
+        incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
+        incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
+        incompatible(&still_open.check_local_packs(true).unwrap_err(), kind);
         assert_eq!(fs::read(path).unwrap(), newer);
+
+        let counterpart = if unknown_index {
+            &pair.pack
+        } else {
+            &pair.index
+        };
+        fs::write(counterpart, b"damaged").unwrap();
+        incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
     }
 }
 
