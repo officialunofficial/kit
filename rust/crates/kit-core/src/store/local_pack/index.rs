@@ -64,7 +64,9 @@ impl Pair {
     }
 
     pub(super) fn index_error(&self, error: impl std::fmt::Display) -> StoreError {
-        self.error(format_args!("{error}. Run `kit closure repair-indexes`"))
+        self.error(format_args!(
+            "{error}. If the index is damaged, run `kit closure repair-indexes`"
+        ))
     }
 
     pub(super) fn index_context(&self, error: StoreError) -> StoreError {
