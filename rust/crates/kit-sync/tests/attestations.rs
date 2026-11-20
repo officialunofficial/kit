@@ -443,6 +443,7 @@ fn clone_resumes_after_fetch_stores_envelopes_before_checkout() {
         &kit_sync::NoopObserver,
     )
     .unwrap();
+    assert!(temp.path().join(".kit/gc-auto").is_file());
     let report = kit_sync::clone(
         temp.path(),
         &source,

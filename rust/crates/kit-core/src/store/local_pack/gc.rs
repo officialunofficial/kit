@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::{Index, Location, read_pack_dir, scan_pair, visit_pairs};
+use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet, PackedGcReport};
@@ -63,6 +63,11 @@ impl Stamp {
 }
 
 impl ObjectStore {
+    #[cfg(test)]
+    pub(crate) fn last_sweep_hold() -> std::time::Duration {
+        SWEEP_HOLD.get()
+    }
+
     pub(crate) fn plan_pack_sweep(
         &self,
         live: &LiveSet,
@@ -70,17 +75,41 @@ impl ObjectStore {
         grace: u64,
         report: &mut PackedGcReport,
     ) -> StoreResult<PackSweep> {
+        let mut plan = self.plan_pack_retirement(live, now, grace, report, &|| Ok(()))?;
+        let dir = self.pack_dir();
+        if self.local_packs_enabled()?
+            && let Some(entries) = read_pack_dir(&dir)?
+        {
+            for entry in entries {
+                let path = entry?.path();
+                if is_leftover(&path) {
+                    plan.add_old_leftover(path, now, grace);
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    pub(crate) fn plan_pack_retirement(
+        &self,
+        live: &LiveSet,
+        now: u64,
+        grace: u64,
+        report: &mut PackedGcReport,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+    ) -> StoreResult<PackSweep> {
         let mut plan = PackSweep::default();
         if !self.local_packs_enabled()? {
             return Ok(plan);
         }
         let dir = self.pack_dir();
         visit_pairs(&dir, |pair| {
+            checkpoint()?;
             report.packs_scanned += 1;
             let pack = Stamp::read(&pair.pack);
             let locator = Stamp::read(&pair.index);
             let index = Index::open(&pair)?;
-            let (live_bytes, dead_bytes) = payload_bytes(&index, live);
+            let (live_bytes, dead_bytes) = payload_bytes(&index, live, checkpoint)?;
             let old = pack
                 .as_ref()
                 .is_some_and(|stamp| stamp.old_enough(now, grace));
@@ -101,7 +130,7 @@ impl ObjectStore {
             {
                 // An index checksum alone does not prove which ids the pack
                 // holds. Verify the body before authorizing any deletion.
-                let rows = match scan_pair(&pair) {
+                let rows = match scan_pair_checked(&pair, checkpoint) {
                     Ok(rows) => rows,
                     Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
                         report.skipped_pack_errors.push(error.to_string());
@@ -109,6 +138,7 @@ impl ObjectStore {
                     }
                     Err(error) => return Err(error),
                 };
+                checkpoint()?;
                 if !index.matches(&rows) {
                     return Err(pair.index_error("index does not match verified pack"));
                 }
@@ -122,19 +152,56 @@ impl ObjectStore {
             }
             Ok(())
         })?;
+        checkpoint()?;
+        Ok(plan)
+    }
+
+    pub(crate) fn try_packed_for_maintenance(&self) -> StoreResult<bool> {
+        use std::sync::atomic::Ordering;
+        if self.packs.enabled.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        let enabled = super::format::try_check(&self.format_path())?;
+        if enabled {
+            self.packs.enabled.store(true, Ordering::Relaxed);
+        }
+        Ok(enabled)
+    }
+
+    pub(crate) fn plan_pack_leftovers(
+        &self,
+        now: u64,
+        grace: u64,
+    ) -> StoreResult<(PackSweep, usize)> {
+        let mut plan = PackSweep::default();
+        let mut pairs = 0;
+        let dir = self.pack_dir();
         if let Some(entries) = read_pack_dir(&dir)? {
+            let mut members = HashMap::<Hash, u8>::new();
             for entry in entries {
-                let path = entry?.path();
-                if is_leftover(&path)
-                    && let Some(stamp) = Stamp::read(&path)
-                    && stamp.old_enough(now, grace)
-                {
-                    plan.leftovers.insert(path, stamp);
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                match leftover_name(name) {
+                    Some(LeftoverName::Staging) => plan.add_old_leftover(entry.path(), now, grace),
+                    Some(LeftoverName::Pack(key)) => *members.entry(key).or_default() |= 1,
+                    Some(LeftoverName::Index(key)) => *members.entry(key).or_default() |= 2,
+                    None => {}
+                }
+            }
+            for (key, present) in members {
+                if present == 3 {
+                    pairs += 1;
+                } else {
+                    let pair = super::Pair::new(&dir, key);
+                    let path = if present == 1 { pair.pack } else { pair.index };
+                    plan.add_old_leftover(path, now, grace);
                 }
             }
         }
-        Ok(plan)
+        Ok((plan, pairs))
     }
+
     pub(crate) fn sweep_loose_duplicates(
         &self,
         retirements: &PackSweep,
@@ -229,22 +296,34 @@ impl ObjectStore {
 }
 
 impl PackSweep {
+    fn add_old_leftover(&mut self, path: PathBuf, now: u64, grace: u64) {
+        if let Some(stamp) = Stamp::read(&path)
+            && stamp.old_enough(now, grace)
+        {
+            self.leftovers.insert(path, stamp);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pairs.is_empty() && self.leftovers.is_empty()
+    }
+
     pub(crate) fn run(
         &self,
         store: &ObjectStore,
         report: &mut GcReport,
         packed: &mut PackedGcReport,
     ) -> StoreResult<()> {
-        self.run_with(store, report, packed, || Ok(()))
+        self.run_with(store, report, packed, || Ok(())).map(|_| ())
     }
 
-    pub(super) fn run_with(
+    pub(crate) fn run_with(
         &self,
         store: &ObjectStore,
         report: &mut GcReport,
         packed: &mut PackedGcReport,
         after_pack_sync: impl FnOnce() -> StoreResult<()>,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<bool> {
         if report.dry_run {
             packed.packs_retired = self.pairs.len();
             packed.pack_leftovers_pruned = self.leftovers.len();
@@ -254,15 +333,17 @@ impl PackSweep {
                 .map(|r| r.pack.len + r.index.len)
                 .sum::<u64>()
                 + self.leftovers.values().map(|s| s.len).sum::<u64>();
-            return Ok(());
+            return Ok(true);
         }
-        if self.pairs.is_empty() && self.leftovers.is_empty() {
-            return Ok(());
+        if self.is_empty() {
+            return Ok(true);
         }
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
-            return Ok(());
+            return Ok(false);
         }
+        #[cfg(test)]
+        let locked_at = std::time::Instant::now();
         let dir = store.pack_dir();
         let mut retire = Vec::new();
         // Writers may have published or refreshed a pair since the mark. Scan
@@ -307,43 +388,73 @@ impl PackSweep {
         if !retire.is_empty() || !leftovers.is_empty() {
             sync_dir(&dir)?;
         }
-        Ok(())
+        drop(guard);
+        #[cfg(test)]
+        SWEEP_HOLD.set(locked_at.elapsed());
+        Ok(true)
     }
 }
 
-fn payload_bytes(index: &Index, live: &LiveSet) -> (u64, u64) {
+#[cfg(test)]
+thread_local! {
+    static SWEEP_HOLD: std::cell::Cell<std::time::Duration> = const {
+        std::cell::Cell::new(std::time::Duration::ZERO)
+    };
+}
+
+fn payload_bytes(
+    index: &Index,
+    live: &LiveSet,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<(u64, u64)> {
     let mut live_bytes = 0;
     let mut dead_bytes = 0;
     for (id, frame) in index.entries() {
+        checkpoint()?;
         if live.contains(&id) {
             live_bytes += u64::from(frame.len);
         } else {
             dead_bytes += u64::from(frame.len);
         }
     }
-    (live_bytes, dead_bytes)
+    Ok((live_bytes, dead_bytes))
+}
+
+enum LeftoverName {
+    Staging,
+    Pack(Hash),
+    Index(Hash),
+}
+
+fn leftover_name(name: &str) -> Option<LeftoverName> {
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let (stem, final_name): (&str, fn(Hash) -> LeftoverName) =
+        if let Some(stem) = name.strip_suffix(".pack") {
+            (stem, LeftoverName::Pack)
+        } else {
+            (name.strip_suffix(".idx")?, LeftoverName::Index)
+        };
+    if let Some(nonce) = stem
+        .strip_prefix('.')
+        .and_then(|stem| stem.strip_suffix(".tmp"))
+    {
+        return (nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(LeftoverName::Staging);
+    }
+    crate::hash::from_hex(stem).ok().map(final_name)
 }
 
 /// A recognized staging file or a final member with no counterpart.
 fn is_leftover(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
+    let name = path.file_name().and_then(|name| name.to_str());
+    let sibling = match name.and_then(leftover_name) {
+        Some(LeftoverName::Staging) => return true,
+        Some(LeftoverName::Pack(_)) => "idx",
+        Some(LeftoverName::Index(_)) => "pack",
+        None => return false,
     };
-    let has_hex_len = |value: &str, len| {
-        value.len() == len
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    };
-    for (suffix, sibling) in [(".pack", "idx"), (".idx", "pack")] {
-        if let Some(stem) = name.strip_suffix(suffix) {
-            if let Some(nonce) = stem.strip_prefix('.').and_then(|s| s.strip_suffix(".tmp")) {
-                return has_hex_len(nonce, 32);
-            }
-            return has_hex_len(stem, 64)
-                && fs::symlink_metadata(path.with_extension(sibling))
-                    .is_err_and(|e| e.kind() == io::ErrorKind::NotFound);
-        }
-    }
-    false
+    fs::symlink_metadata(path.with_extension(sibling))
+        .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
 }

@@ -31,15 +31,12 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::{GcRootsError, run_gc_with_pack_report};
+use kit_core::ops::gc::{DEFAULT_GRACE_SECS, GcRootsError, run_gc_with_pack_report};
 use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_args;
 use crate::exit;
-
-/// Default object grace window: 14 days, matching Git's `gc.pruneExpire`.
-const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(

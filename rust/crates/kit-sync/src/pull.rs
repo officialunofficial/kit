@@ -48,6 +48,8 @@ pub enum PullOutcome {
 pub struct PullReport {
     pub fetch: FetchReport,
     pub outcome: PullOutcome,
+    /// Best-effort maintenance after publishing the pull.
+    pub maintenance: Option<crate::MaintenanceReport>,
 }
 
 /// Open the object store of `layout` with the options' durability schedule.
@@ -106,7 +108,6 @@ pub fn verify_pull_tip(
 /// lock's job is worktree-mutation exclusivity against concurrent commands,
 /// not GC protection. The fetch's own protection from gc is a
 /// [`kit_core::store::PruneGuard`], released before this phase starts.
-#[allow(clippy::too_many_lines)]
 pub fn pull(
     dir: &Path,
     source: &dyn RemoteSource,
@@ -123,13 +124,30 @@ pub fn pull(
     let fetch = fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
     )?;
-    let _lock = acquire_worktree_lock(&layout, observer, &lock_wait)?;
-    let remote_refs = list_remote_refs_parallel(&layout, remote)?
+    let mut report = land_pull(
+        &layout, &store, remote, options, observer, &lock_wait, fetch,
+    )?;
+    report.maintenance = maintain(&layout, &store, options, observer, &report.fetch);
+    Ok(report)
+}
+
+#[allow(clippy::too_many_lines)]
+fn land_pull(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    remote: &str,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+    lock_wait: &LockWait,
+    fetch: FetchReport,
+) -> Result<PullReport, SyncError> {
+    let _lock = acquire_worktree_lock(layout, observer, lock_wait)?;
+    let remote_refs = list_remote_refs_parallel(layout, remote)?
         .into_iter()
         .filter_map(|r| r.hash.map(|hash| (r.name, hash)))
         .collect::<Vec<_>>();
-    let pending = PullState::read(&layout)?;
-    let original_head = refs::read_head(&layout).ok();
+    let pending = PullState::read(layout)?;
+    let original_head = refs::read_head(layout).ok();
     if matches!(original_head, Some(Head::Detached(_))) {
         return Err(SyncError::DetachedHead);
     }
@@ -139,12 +157,13 @@ pub fn pull(
         }
         return Ok(PullReport {
             fetch,
+            maintenance: None,
             outcome: PullOutcome::NoRemoteBranches,
         });
     }
 
     let (branch, local_tip, remote_tip) = select_branch(
-        &layout,
+        layout,
         original_head.as_ref(),
         options.target_branch.as_deref(),
         &remote_refs,
@@ -153,15 +172,16 @@ pub fn pull(
     // A tracking tip omitted by this fetch may come from an opt-out fetch.
     // Check before recovery or any other worktree, index or HEAD write.
     if options.verify_signatures {
-        verify_pull_tip(&layout, &store, &remote_tip, observer)?;
+        verify_pull_tip(layout, store, &remote_tip, observer)?;
     }
 
-    let restored = resume_pull(&layout, &store, &branch, pending, local_tip, observer)?;
-    let original_head = refs::read_head(&layout).ok();
+    let restored = resume_pull(layout, store, &branch, pending, local_tip, observer)?;
+    let original_head = refs::read_head(layout).ok();
     let ref_condition = if let Some(local_tip) = local_tip {
         if local_tip == remote_tip {
             return Ok(PullReport {
                 fetch,
+                maintenance: None,
                 outcome: if restored {
                     PullOutcome::FastForwarded {
                         branch,
@@ -176,7 +196,7 @@ pub fn pull(
         // A missing commit would read as "not a fast-forward", so the walk
         // reads every commit and names the one it cannot read.
         let fast_forward =
-            is_ancestor_strict(&store, local_tip, remote_tip).map_err(|e| match e {
+            is_ancestor_strict(store, local_tip, remote_tip).map_err(|e| match e {
                 AncestorError::Limit(source) => SyncError::Store(source),
                 // The error keeps the id of the commit it names.
                 other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
@@ -189,19 +209,19 @@ pub fn pull(
         refs::RefWriteCondition::Missing
     };
 
-    let tree = load_tree_hash(&store, remote_tip)?;
+    let tree = load_tree_hash(store, remote_tip)?;
     // Recovery may have changed the worktree and index. Read HEAD afterwards.
-    let base_tree = current_head_tree(&layout, &store).map_err(SyncError::RestoreSafety)?;
-    ensure_restore_safe_from(&layout, &store, tree, &RestoreOptions::default(), base_tree)
+    let base_tree = current_head_tree(layout, store).map_err(SyncError::RestoreSafety)?;
+    ensure_restore_safe_from(layout, store, tree, &RestoreOptions::default(), base_tree)
         .map_err(SyncError::RestoreSafety)?;
     if observer.cancelled() {
         return Err(SyncError::Interrupted);
     }
-    write_pull_head(&layout, &store, remote_tip)?;
-    write_ref_recording_history(&layout, &branch, ref_condition, &remote_tip)?;
-    if let Err(e) = refs::write_head_branch(&layout, &branch) {
-        rollback_pull_ref(&layout, &branch, local_tip, remote_tip)?;
-        clear_pull_head(&layout)?;
+    write_pull_head(layout, store, remote_tip)?;
+    write_ref_recording_history(layout, &branch, ref_condition, &remote_tip)?;
+    if let Err(e) = refs::write_head_branch(layout, &branch) {
+        rollback_pull_ref(layout, &branch, local_tip, remote_tip)?;
+        clear_pull_head(layout)?;
         return Err(e.into());
     }
     if observer.cancelled() {
@@ -212,28 +232,29 @@ pub fn pull(
         // A failed undo still reports the interrupt; `kit pull` then finishes
         // the clone, and the next pull clears a `PULL_HEAD` left behind.
         if local_tip.is_none()
-            && rollback_pull_ref_and_head(&layout, &branch, None, remote_tip, original_head).is_ok()
+            && rollback_pull_ref_and_head(layout, &branch, None, remote_tip, original_head).is_ok()
         {
-            let _ = clear_pull_head(&layout);
+            let _ = clear_pull_head(layout);
         }
         return Err(SyncError::Interrupted);
     }
     if let Err(e) = crate::worktree::restore_worktree_and_index_progress(
-        &layout, &store, tree, base_tree, observer,
+        layout, store, tree, base_tree, observer,
     ) {
         if let Err(rollback) =
-            rollback_pull_ref_and_head(&layout, &branch, local_tip, remote_tip, original_head)
+            rollback_pull_ref_and_head(layout, &branch, local_tip, remote_tip, original_head)
         {
             return Err(SyncError::RestoreSafety(format!(
                 "{e}; additionally failed to roll back ref: {rollback}"
             )));
         }
-        clear_pull_head(&layout)?;
+        clear_pull_head(layout)?;
         return Err(SyncError::RestoreSafety(e));
     }
-    clear_pull_head(&layout)?;
+    clear_pull_head(layout)?;
     Ok(PullReport {
         fetch,
+        maintenance: None,
         outcome: PullOutcome::FastForwarded {
             branch,
             old: local_tip,
@@ -256,9 +277,29 @@ pub fn fetch(
     // around only the ref publish.
     let store = open_store(&layout, options)?;
     let lock_wait = LockWait::new(options.lock_wait);
-    fetch_objects(
+    let mut report = fetch_objects(
         &store, &layout, source, observer, remote, options, &lock_wait,
-    )
+    )?;
+    report.maintenance = maintain(&layout, &store, options, observer, &report);
+    Ok(report)
+}
+
+fn maintain(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    options: &SyncOptions,
+    observer: &dyn Observer<SyncEvent>,
+    fetch: &FetchReport,
+) -> Option<crate::MaintenanceReport> {
+    if !options.auto_maintenance
+        || (fetch.packs_downloaded == 0 && fetch.branches_pruned.is_empty())
+        || observer.cancelled()
+    {
+        return None;
+    }
+    Some(kit_core::ops::gc::maintain_packs(layout, store, &|| {
+        observer.cancelled()
+    }))
 }
 
 fn rollback_pull_ref_and_head(

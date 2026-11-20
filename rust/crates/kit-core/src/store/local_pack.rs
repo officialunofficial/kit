@@ -551,9 +551,28 @@ fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
 }
 
 fn scan_pair(pair: &Pair) -> StoreResult<Vec<(Hash, Frame)>> {
+    scan_pair_checked(pair, &|| Ok(()))
+}
+
+fn scan_pair_checked(
+    pair: &Pair,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<Vec<(Hash, Frame)>> {
     #[cfg(test)]
     tests::pack_scan_error(pair.key)?;
-    let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.context(e))?;
+    let (key, rows) = index::scan_checked(&mut open_regular(&pair.pack)?, checkpoint).map_err(
+        |error| match error {
+            StoreError::Io(ref io)
+                if matches!(
+                    io.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                ) =>
+            {
+                error
+            }
+            other => pair.context(other),
+        },
+    )?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));
     }

@@ -617,3 +617,12 @@ test = false
 doc = false
 bench = false
 required-features = ["libfuzzer"]
+
+
+[[bin]]
+name = "maintenance_stamp"
+path = "fuzz_targets/maintenance_stamp.rs"
+test = false
+doc = false
+bench = false
+required-features = ["libfuzzer"]

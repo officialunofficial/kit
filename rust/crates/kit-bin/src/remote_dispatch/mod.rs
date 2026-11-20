@@ -530,15 +530,16 @@ pub(crate) fn pull_all_with_source(
     target_branch: Option<&str>,
     require_signed: bool,
     tags: bool,
+    cfg: &crate::config::Config,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
     let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
         .with_verify_signatures(require_signed)
         .with_tags(tags)
-        .with_sync_policy(sync_policy(&layout));
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
     attestations.2.clone_into(&mut options.remote_url);
@@ -555,15 +556,16 @@ pub(crate) fn fetch_all_with_source(
     require_signed: bool,
     prune: bool,
     tags: bool,
+    cfg: &crate::config::Config,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::FetchReport, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
     let mut options = kit_sync::SyncOptions::default()
         .with_verify_signatures(require_signed)
         .with_prune(prune)
         .with_tags(tags)
-        .with_sync_policy(sync_policy(&layout));
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
     attestations.2.clone_into(&mut options.remote_url);

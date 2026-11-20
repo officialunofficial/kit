@@ -4,6 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use kit_core::layout::{DiscoverError, RepoLayout};
+use kit_core::ops::gc::AUTO_MAINTENANCE_STAMP;
 use kit_core::refs::{self, RefError};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -93,7 +94,7 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
 }
 
 /// What a clone writes before it makes a branch or lands `HEAD`,
-/// lock files (`*.lock`) aside, and [`BRANCH_HISTORY_DIR`].
+/// lock files and the maintenance stamp aside.
 const UNFINISHED_CLONE_ENTRIES: [&str; 9] = [
     "HEAD",
     "applied-packs",
@@ -114,7 +115,7 @@ const BRANCH_HISTORY_DIR: &str = "history-v1";
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
 /// it made a branch or landed `HEAD`, or undid both: `dir` holds only the repository
 /// directory, which holds only what such a clone writes
-/// ([`UNFINISHED_CLONE_ENTRIES`] and lock files), with the config a clone of `remote`
+/// ([`UNFINISHED_CLONE_ENTRIES`], lock files, and a maintenance stamp), with the config a clone of `remote`
 /// writes, byte for byte, the `HEAD` a new repository starts with, no branch,
 /// fetched tags and remote-tracking refs of `remote` alone (a clone publishes each
 /// branch's tracking ref as soon as that branch is in, before the next one
@@ -139,11 +140,12 @@ fn unfinished_clone(dir: &Path, remote: &CloneRemote) -> Option<RepoLayout> {
     for entry in std::fs::read_dir(&kit).ok()? {
         let entry = entry.ok()?;
         let name = entry.file_name();
-        let lock = Path::new(&name)
-            .extension()
-            .is_some_and(|ext| ext == "lock")
+        let sentinel = (name == AUTO_MAINTENANCE_STAMP
+            || Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext == "lock"))
             && entry.file_type().ok()?.is_file();
-        if !lock && !UNFINISHED_CLONE_ENTRIES.iter().any(|known| name == *known) {
+        if !sentinel && !UNFINISHED_CLONE_ENTRIES.iter().any(|known| name == *known) {
             return None;
         }
     }

@@ -9,6 +9,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Fetch and pull run best-effort local pack maintenance after applying packs or pruning remote-tracking refs. Set `gc.auto = false` to disable it.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.

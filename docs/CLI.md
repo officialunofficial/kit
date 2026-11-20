@@ -1280,6 +1280,17 @@ attestation support warn once per command and skip the log.
   "branch":"...","old":"<hex>|null","new":"<hex>|null",
   "up_to_date":<bool>}` plus the tag fields of `kit fetch` on success, or
   `{"ok":false,"error":"..."}` on failure.
+- **Automatic local pack maintenance (default on).** After applying a
+  pack or pruning a remote-tracking ref, fetch and pull remove abandoned
+  staging files and lone pack members past the 14-day grace period.
+  They periodically retire wholly dead packs past grace. The first fetch
+  creates the advisory stamp. Set `gc.auto = false` in repo or user config
+  to disable the step. A maintenance failure leaves the command's exit
+  status unchanged. Use `-q` to hide the removal summary. Fetch and
+  fast-forward pull add a `maintenance` object to `--format=json` when
+  collection was attempted or a file was removed. It contains
+  `leftovers_removed`, `packs_retired`, `bytes_reclaimed`,
+  `collection`, and `elapsed` in milliseconds.
 - **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `kit verify <rev>` runs manually

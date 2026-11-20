@@ -53,6 +53,13 @@ pub(super) fn check(path: &Path) -> StoreResult<bool> {
     parse(&read_marker(&file)?)
 }
 
+/// Read the marker only if its shared lock is immediately available.
+pub(super) fn try_check(path: &Path) -> StoreResult<bool> {
+    let file = open_marker(path, false)?;
+    file.try_lock_shared().map_err(io::Error::from)?;
+    parse(&read_marker(&file)?)
+}
+
 pub(super) fn try_activate(path: &Path) -> StoreResult<()> {
     #[cfg(feature = "fault-injection")]
     if crate::fault::keeps_loose(path) {

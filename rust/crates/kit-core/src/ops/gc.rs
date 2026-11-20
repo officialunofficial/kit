@@ -28,7 +28,20 @@
 //! [`super::recovery`] logs them (the commands record the old tip before
 //! moving the ref) and they are roots here.
 
+mod maintenance;
 mod soft;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use maintenance::fuzz_maintenance_stamp;
+pub use maintenance::{Collection, MaintenanceReport, maintain_packs};
+
+/// Basename of the advisory stamp and lock for automatic maintenance.
+#[doc(hidden)]
+pub const AUTO_MAINTENANCE_STAMP: &str = "gc-auto";
+
+/// Default grace before an unreachable object or pack leftover can be removed.
+pub const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
@@ -167,6 +180,7 @@ pub fn collect_roots(layout: &RepoLayout) -> Result<BTreeSet<Hash>, GcRootsError
 /// older gc did not keep. If the object is gone, the state file is stale: gc
 /// skips the root and says which file named it. Every other root is a ref or
 /// a state an older gc already kept, so a missing object under it is damage.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct SoftRoot {
     hash: Hash,
     state_file: PathBuf,
@@ -557,12 +571,24 @@ fn mark_live_observed(
     limits: MarkLimits,
     progress: &mut dyn FnMut(&'static str, usize, u64),
 ) -> Result<LiveSet, GcRootsError> {
+    mark_live_checked(store, roots, limits, progress, &|| Ok(()), &|| Ok(()))
+}
+
+fn mark_live_checked(
+    store: &ObjectStore,
+    roots: &BTreeSet<Hash>,
+    limits: MarkLimits,
+    progress: &mut dyn FnMut(&'static str, usize, u64),
+    checkpoint: &dyn Fn() -> Result<(), GcRootsError>,
+    probe: &(dyn Fn() -> Result<(), GcRootsError> + Sync),
+) -> Result<LiveSet, GcRootsError> {
     let mut last_progress = std::time::Instant::now();
     progress("gc_mark", 0, 0);
     let mut objects: BTreeSet<Hash> = BTreeSet::new();
     let mut queue: VecDeque<Hash> = roots.iter().copied().collect();
     let mut ids = ChunkIds::new(limits.compact_floor, limits.chunk_cap);
     while !queue.is_empty() {
+        checkpoint()?;
         let queued = queue.len();
         // Probe a bounded breadth-first window. Apply all results on this
         // thread so traversal, caps and errors keep their sequential order.
@@ -573,10 +599,12 @@ fn mark_live_observed(
         // Skipped ids must still leave the queue so every window progresses.
         debug_assert!(queue.len() < queued, "each probe window drains the queue");
         super::chunk_heads::try_each_in_order(&window, |(h, slot)| {
+            probe()?;
             let _ = slot.set(store.gc_object_type(h));
             Ok::<(), GcRootsError>(())
         })?;
         for (h, slot) in window {
+            checkpoint()?;
             if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
                 progress("gc_mark", objects.len(), 0);
                 last_progress = std::time::Instant::now();
@@ -613,20 +641,26 @@ fn mark_live_observed(
     chunks.retain(|c| !objects.contains(c));
     // Each check opens a chunk and reads its type, so on a cold disk the
     // checks wait on the disk, and run many at a time.
-    let checked =
-        super::chunk_heads::try_each_in_order(&chunks, |chunk| match store.gc_object_type(chunk) {
-            Ok(ObjectType::Blob) => Ok(()),
-            Ok(_) => Err((*chunk, None)),
-            Err(error) => Err((*chunk, Some(error))),
+    for window in chunks.chunks(16 * 1024) {
+        checkpoint()?;
+        let checked = super::chunk_heads::try_each_in_order(window, |chunk| {
+            probe().map_err(|error| (*chunk, Some(error)))?;
+            match store.gc_object_type(chunk) {
+                Ok(ObjectType::Blob) => Ok(()),
+                Ok(_) => Err((*chunk, None)),
+                Err(error) => Err((*chunk, Some(error.into()))),
+            }
         });
-    if let Err((chunk, error)) = checked {
-        return Err(match error {
-            Some(error) => error.into(),
-            None => GcRootsError::ChunkNotBlob {
-                manifest: manifest_listing(store, &objects, &chunk)?,
-                chunk,
-            },
-        });
+        checkpoint()?;
+        if let Err((chunk, error)) = checked {
+            return Err(match error {
+                Some(error) => error,
+                None => GcRootsError::ChunkNotBlob {
+                    manifest: manifest_listing(store, &objects, &chunk, checkpoint)?,
+                    chunk,
+                },
+            });
+        }
     }
     progress("gc_mark", objects.len() + chunks.len(), 0);
     Ok(LiveSet { objects, chunks })
@@ -638,8 +672,10 @@ fn manifest_listing(
     store: &ObjectStore,
     objects: &BTreeSet<Hash>,
     chunk: &Hash,
+    checkpoint: &dyn Fn() -> Result<(), GcRootsError>,
 ) -> Result<Hash, GcRootsError> {
     for h in objects {
+        checkpoint()?;
         if store.object_type(h)? != ObjectType::ChunkedBlob {
             continue;
         }
