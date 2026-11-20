@@ -2171,11 +2171,13 @@ mod tests {
                 uses,
             ));
         }
-        // Only one of the two repeated 128-byte bases fits. The 1 KiB
-        // base exceeds the budget and the 64-byte base is used only once.
-        let cache = super::cache_delta_bases(&store, &candidates, 192).unwrap();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        // One repeated base fits, including when it fills the entire budget.
+        // The 1 KiB base exceeds either budget and the 64-byte base is used once.
+        for byte_budget in [128, 192] {
+            let cache = super::cache_delta_bases(&store, &candidates, byte_budget).unwrap();
+            assert_eq!(cache.len(), 1);
+            assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        }
     }
 
     #[test]
