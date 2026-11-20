@@ -54,6 +54,9 @@ impl ObjectSpool {
     ///
     /// # Errors
     /// An oversized object or a local write error.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
     pub fn append(
         &self,
         position: usize,
@@ -66,10 +69,10 @@ impl ObjectSpool {
         }
         let mut spool = self.inner.lock().expect("object spool mutex");
         let len = u32::try_from(bytes.len()).expect("bounded object length");
-        if !spool
+        if spool
             .by_id
             .get(&id)
-            .is_some_and(|frame| frame.position <= position)
+            .is_none_or(|frame| frame.position > position)
         {
             let frame = Frame {
                 position,
@@ -85,6 +88,9 @@ impl ObjectSpool {
     }
 
     /// Take the list of staged ids and lengths in wire order.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
     pub fn take_order(&self) -> Vec<(usize, Hash, u32, ObjectType)> {
         let mut spool = self.inner.lock().expect("object spool mutex");
         let mut order = std::mem::take(&mut spool.order);
@@ -93,6 +99,10 @@ impl ObjectSpool {
     }
 
     /// Whether the decoder staged this id.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
+    #[must_use]
     pub fn contains(&self, id: &Hash) -> bool {
         self.inner
             .lock()
@@ -133,6 +143,7 @@ impl ObjectSpool {
         bytes.resize(len, 0);
         spool.writer.flush().map_err(StoreError::from)?;
         read_spooled(spool.writer.get_ref(), frame.offset, &mut bytes).map_err(StoreError::from)?;
+        drop(spool);
         let actual = verified_id_and_object(&bytes).0;
         if actual != *id {
             return Err(StoreError::HashMismatch {
@@ -154,5 +165,61 @@ impl UnpackSink for ObjectSpool {
         bytes: &[u8],
     ) -> Result<(), PackError> {
         Ok(self.append(position, id, ty, bytes)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::{Blob, Object};
+    use crate::serialize::serialize;
+
+    fn blob(data: &[u8]) -> (Hash, Vec<u8>) {
+        let object = Object::Blob(Blob {
+            data: data.to_vec(),
+        });
+        (object.id().unwrap(), serialize(&object).unwrap())
+    }
+
+    #[test]
+    fn earlier_windows_cannot_resolve_later_bases_and_reads_check_the_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = ObjectSpool::new(dir.path()).unwrap();
+        let (a, bytes_a) = blob(b"alpha");
+        let (b, bytes_b) = blob(b"beta");
+        let (c, _) = blob(b"corrupted read");
+        assert!(!spool.contains(&a));
+        assert_eq!(spool.read(&a).unwrap(), None);
+        spool.append(2, b, ObjectType::Blob, &bytes_b).unwrap();
+        spool.append(0, a, ObjectType::Blob, &bytes_a).unwrap();
+        spool.append(1, c, ObjectType::Blob, &bytes_b).unwrap();
+        assert!(spool.contains(&a));
+        assert_eq!(
+            spool
+                .read_before::<StoreError>(&b, 2, |_| panic!("future base"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            spool
+                .read_before::<StoreError>(&b, 3, |size| {
+                    assert_eq!(size, bytes_b.len());
+                    Ok(())
+                })
+                .unwrap(),
+            Some(bytes_b),
+        );
+        assert_eq!(spool.read(&a).unwrap(), Some(bytes_a));
+        assert!(matches!(
+            spool.read(&c),
+            Err(StoreError::HashMismatch { .. })
+        ));
+        let ids: Vec<_> = spool
+            .take_order()
+            .into_iter()
+            .map(|(_, id, _, _)| id)
+            .collect();
+        assert_eq!(ids, [a, c, b]);
+        assert!(spool.take_order().is_empty());
     }
 }

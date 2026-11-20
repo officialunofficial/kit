@@ -69,7 +69,7 @@ pub(super) fn activate(path: &Path, strict: bool) -> StoreResult<()> {
                 Ok(())
             };
         }
-        crate::pack::write_spooled(&file, LEGACY.len() as u64, b"P")?;
+        crate::pack::write_at(&file, LEGACY.len() as u64, b"P")?;
     }
     file.sync_all()?;
     Ok(())

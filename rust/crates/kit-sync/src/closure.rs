@@ -34,7 +34,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, KitError, Object, Tree};
 use kit_core::ops::{Known, Presence};
 use kit_core::refs;
-use kit_core::store::{ObjectSource, ObjectStore, StoreError};
+use kit_core::store::{ClosureSource, ObjectStore, StoreError};
 
 use crate::error::SyncError;
 
@@ -111,7 +111,7 @@ pub(crate) fn check_above(
 
 /// A closure check with completed-object counts before each next object.
 pub(crate) fn check_above_observed(
-    store: &(dyn ObjectSource + Sync),
+    store: &dyn ClosureSource,
     tip: &Hash,
     anchors: &Anchors,
     cancelled: &dyn Fn() -> bool,
@@ -134,7 +134,7 @@ pub(crate) fn check_above_observed(
         }
     };
     let cap = kit_core::ops::graph::MAX_REACHABLE;
-    match kit_core::ops::check_closure_present_above(store, tip, &known, cap, cancelled) {
+    match kit_core::ops::check_closure_present_above_from(store, tip, &known, cap, cancelled) {
         Ok(Presence::Complete(checked)) => Ok(checked.len()),
         Ok(Presence::TooLarge(_)) => Err(SyncError::ClosureTooLarge(cap)),
         Ok(Presence::Missing { object, .. }) => {
@@ -206,7 +206,7 @@ const OLD: u8 = 2;
 /// [`MAX_COMMITS`] reads, stop it early, and a commit then counts as new
 /// although it is an ancestor of an anchor.
 fn split(
-    store: &(dyn ObjectSource + Sync),
+    store: &dyn ClosureSource,
     tip: &Hash,
     anchors: &HashSet<Hash>,
     poll: &mut Poll<'_>,
@@ -262,7 +262,7 @@ fn split(
 
 /// The state of [`split`]'s walk.
 struct Paint<'a> {
-    store: &'a (dyn ObjectSource + Sync),
+    store: &'a dyn ClosureSource,
     flags: HashMap<Hash, u8>,
     /// Commits to visit, by timestamp. Each at most once at a time.
     queue: BinaryHeap<(u64, Hash)>,
@@ -326,7 +326,7 @@ impl Paint<'_> {
 /// cannot read only means it learns less, as does reaching [`MAX_COVERED`]
 /// or [`MAX_TREE_READS`].
 fn covered(
-    store: &(dyn ObjectSource + Sync),
+    store: &dyn ClosureSource,
     split: &Split,
     poll: &mut Poll<'_>,
 ) -> Result<HashSet<Hash>, SyncError> {

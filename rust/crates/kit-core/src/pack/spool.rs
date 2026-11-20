@@ -98,6 +98,10 @@ pub(crate) fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Res
 pub(crate) fn write_all_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(feature = "fault-injection")]
     crate::fault::check(crate::fault::Site::Spool)?;
+    write_at(file, offset, bytes)
+}
+
+pub(crate) fn write_at(file: &File, offset: u64, bytes: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileExt;

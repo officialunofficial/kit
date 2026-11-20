@@ -9,11 +9,10 @@ use kit_core::pack::{ObjectSpool, PackError};
 use kit_core::protocol::PackKey;
 use kit_core::serialize;
 use kit_core::store::{
-    LocalPackWriter, ObjectSource, ObjectStore, PruneGuard, StoreError, StoreResult,
+    ClosureSource, LocalPackWriter, ObjectSource, ObjectStore, PruneGuard, StoreError, StoreResult,
 };
 
 use crate::applied_packs::AppliedPacks;
-use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
 
 const WINDOW_BYTES: usize = 64 << 20;
@@ -25,7 +24,7 @@ const WINDOW_ENTRIES: usize = 1 << 16;
 const PACK_OBJECT_BYTES: usize = 16 << 10;
 // One file-role entry is a 32-byte id, a boolean and hash-table overhead.
 // 262,144 roles cover a 100,000-file snapshot with room for changes and
-// bound the table to about 10 MiB. On overflow, use loose blobs.
+// bound the table to about 17 MiB. At the cap, new ids stay unclassified.
 const FILE_ROLES: usize = 1 << 18;
 
 pub(crate) struct Publication<'a> {
@@ -33,7 +32,7 @@ pub(crate) struct Publication<'a> {
     guard: &'a PruneGuard,
     pack: bool,
     window: Option<Window>,
-    roles: Option<HashMap<Hash, bool>>,
+    roles: HashMap<Hash, bool>,
 }
 
 struct Window {
@@ -41,6 +40,7 @@ struct Window {
     bytes: usize,
     entries: usize,
     completed: Vec<PackKey>,
+    completed_set: HashSet<PackKey>,
 }
 
 impl<'a> Publication<'a> {
@@ -50,7 +50,7 @@ impl<'a> Publication<'a> {
             guard,
             pack: store.local_packs_active(guard)?,
             window: None,
-            roles: Some(HashMap::new()),
+            roles: HashMap::new(),
         })
     }
 
@@ -65,7 +65,7 @@ impl<'a> Publication<'a> {
     pub(crate) fn completed(&self, key: &PackKey) -> bool {
         self.window
             .as_ref()
-            .is_some_and(|window| window.completed.contains(key))
+            .is_some_and(|window| window.completed_set.contains(key))
     }
 
     pub(crate) fn accept(
@@ -75,7 +75,7 @@ impl<'a> Publication<'a> {
         observer: &dyn Observer<SyncEvent>,
         remote: &str,
         applied: &mut AppliedPacks,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), PackError> {
         let order = spool.take_order();
         if order.is_empty() {
             record(key, observer, remote, applied);
@@ -97,17 +97,24 @@ impl<'a> Publication<'a> {
             window.bytes += len;
             window.entries += 1;
         }
-        self.window()?.completed.push(key);
+        let packed = self.pack;
+        let window = self.window()?;
+        window.completed.push(key);
+        window.completed_set.insert(key);
+        if !packed || window.bytes >= WINDOW_BYTES || window.entries == WINDOW_ENTRIES {
+            self.seal(observer, remote, applied, &HashSet::new())?;
+        }
         Ok(())
     }
 
-    fn window(&mut self) -> Result<&mut Window, SyncError> {
+    fn window(&mut self) -> Result<&mut Window, PackError> {
         if self.window.is_none() {
             self.window = Some(Window {
                 spool: ObjectSpool::new(&self.store.spool_dir())?,
                 bytes: 0,
                 entries: 0,
                 completed: Vec::new(),
+                completed_set: HashSet::new(),
             });
         }
         Ok(self.window.as_mut().expect("created publication window"))
@@ -117,22 +124,23 @@ impl<'a> Publication<'a> {
         &mut self,
         spool: &ObjectSpool,
         order: &[(usize, Hash, u32, ObjectType)],
-    ) -> Result<(), SyncError> {
-        let Some(roles) = &mut self.roles else {
-            return Ok(());
-        };
+    ) -> Result<(), PackError> {
+        let roles = &mut self.roles;
         for &(_, id, _, ty) in order {
-            let keep = match ty {
+            match ty {
                 ObjectType::Tree => {
                     let Object::Tree(tree) = serialize::deserialize_owned(staged(spool, &id)?)
                         .map_err(PackError::InvalidObject)?
                     else {
                         unreachable!("object id and tree type were checked by the decoder");
                     };
-                    tree.entries
+                    for entry in tree
+                        .entries
                         .into_iter()
-                        .filter(|e| e.mode != EntryMode::Tree)
-                        .all(|entry| remember_role(roles, entry.object_hash, true))
+                        .filter(|entry| entry.mode != EntryMode::Tree)
+                    {
+                        remember_role(roles, entry.object_hash, true);
+                    }
                 }
                 ObjectType::ChunkedBlob => {
                     let Object::ChunkedBlob(manifest) =
@@ -142,17 +150,14 @@ impl<'a> Publication<'a> {
                         unreachable!("object id and manifest type were checked by the decoder");
                     };
                     let mut start = 0;
-                    manifest.entries().all(|(chunk, end)| {
-                        let len = end - start;
+                    for (chunk, end) in manifest.entries() {
+                        if end - start < PACK_OBJECT_BYTES as u64 {
+                            remember_role(roles, chunk, false);
+                        }
                         start = end;
-                        len >= PACK_OBJECT_BYTES as u64 || remember_role(roles, chunk, false)
-                    })
+                    }
                 }
-                _ => true,
-            };
-            if !keep {
-                self.roles = None;
-                break;
+                _ => {}
             }
         }
         Ok(())
@@ -164,7 +169,7 @@ impl<'a> Publication<'a> {
         remote: &str,
         applied: &mut AppliedPacks,
         chunks: &HashSet<Hash>,
-    ) -> Result<(), SyncError> {
+    ) -> Result<(), PackError> {
         let Some(window) = self.window.take() else {
             return Ok(());
         };
@@ -175,11 +180,7 @@ impl<'a> Publication<'a> {
             let eligible = self.pack
                 && (len as usize) < PACK_OBJECT_BYTES
                 && (ty != ObjectType::Blob
-                    || (self
-                        .roles
-                        .as_ref()
-                        .is_some_and(|roles| roles.get(&id) == Some(&true))
-                        && !chunks.contains(&id)));
+                    || (self.roles.get(&id) == Some(&true) && !chunks.contains(&id)));
             if eligible {
                 if pack.is_none() {
                     pack = Some(LocalPackWriter::new(self.store, self.guard)?);
@@ -207,17 +208,13 @@ fn staged(spool: &ObjectSpool, id: &Hash) -> StoreResult<Vec<u8>> {
         .ok_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
 }
 
-fn remember_role(roles: &mut HashMap<Hash, bool>, id: Hash, file: bool) -> bool {
-    // A manifest wins if a hash has both roles. An unwitnessed blob always
-    // stays loose, including chunks whose manifest is in an older pack.
+fn remember_role(roles: &mut HashMap<Hash, bool>, id: Hash, file: bool) {
+    // Known chunk use wins within the pending window. A blob with no
+    // whole-file evidence always stays loose.
     if let Some(existing) = roles.get_mut(&id) {
         *existing &= file;
-        true
     } else if roles.len() < FILE_ROLES {
         roles.insert(id, file);
-        true
-    } else {
-        false
     }
 }
 
@@ -276,7 +273,8 @@ impl ObjectSource for PendingView<'_> {
             self.store.read_object(id)
         }
     }
-
+}
+impl ClosureSource for PendingView<'_> {
     fn object_type(&self, id: &Hash) -> StoreResult<ObjectType> {
         if let Some(bytes) = self.pending(id)? {
             Ok(serialize::deserialize_owned(bytes)?.object_type())

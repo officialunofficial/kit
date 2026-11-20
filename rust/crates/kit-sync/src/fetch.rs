@@ -18,7 +18,7 @@
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::refs;
-use kit_core::store::{ObjectSource, ObjectStore, PruneGuard};
+use kit_core::store::{ClosureSource, ObjectStore, PruneGuard};
 
 use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
@@ -289,7 +289,7 @@ pub(crate) fn apply_and_verify_chain(
 }
 
 fn check_tip(
-    view: &(dyn ObjectSource + Sync),
+    view: &dyn ClosureSource,
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     anchors: &Anchors,
@@ -323,7 +323,7 @@ pub(crate) fn persist_record(
 /// Check presence down to `anchors`, or in full when there are
 /// none.
 fn verify_closure_above(
-    store: &(dyn ObjectSource + Sync),
+    store: &dyn ClosureSource,
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     anchors: &Anchors,
@@ -339,10 +339,11 @@ fn verify_closure_above(
         observer.cancelled()
     };
     if anchors.is_empty() {
-        let result = kit_core::ops::graph::check_closure_present_observed(store, tip, &|count| {
-            done.set(count);
-            poll();
-        });
+        let result =
+            kit_core::ops::graph::check_closure_present_observed_from(store, tip, &|count| {
+                done.set(count);
+                poll();
+            });
         observer.event(&SyncEvent::ClosureProgress { done: done.get() });
         return match result {
             Ok(false) => Ok(()),
@@ -530,7 +531,7 @@ pub(crate) fn fetch_objects(
         &mut applied,
         &mut report,
         cursor,
-        cursor_path,
+        &cursor_path,
         remote_refs,
         tag_listing,
         snapshot,
@@ -575,7 +576,7 @@ fn fetch_objects_inner(
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
     cursor: Option<kit_core::protocol::RepoCursor>,
-    cursor_path: std::path::PathBuf,
+    cursor_path: &std::path::Path,
     remote_refs: Vec<refs::Ref>,
     tag_listing: Option<Result<Vec<refs::Ref>, crate::SourceError>>,
     snapshot: crate::fetch_attestations::Snapshot,
@@ -803,7 +804,7 @@ fn fetch_objects_inner(
                 attestations: options.attestations && source.supports_attestations(),
                 attestmap_head: snapshot.head(),
             };
-            let _ = record.persist(&cursor_path);
+            let _ = record.persist(cursor_path);
         }
     }
     Ok(())

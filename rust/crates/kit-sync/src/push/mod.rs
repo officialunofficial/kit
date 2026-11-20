@@ -2,12 +2,15 @@
 use crate::packmap::packmap_ref;
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
+use kit_core::object::ObjectType;
 use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
 use kit_core::protocol::{self, PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
 mod attestations;
 mod delete;
@@ -36,6 +39,12 @@ struct PreparedPlan {
     force: Option<force::Snapshot>,
 }
 
+#[derive(Default)]
+struct PushRecord {
+    checked: HashSet<Hash>,
+    advanced: Vec<PackKey>,
+}
+
 struct PushContext<'a> {
     source: &'a dyn RemoteSource,
     observer: &'a dyn Observer<SyncEvent>,
@@ -43,6 +52,7 @@ struct PushContext<'a> {
     /// directory.
     deltas: DeltaEncoder,
     spool_dir: std::path::PathBuf,
+    record: Option<RefCell<PushRecord>>,
 }
 impl<'a> PushContext<'a> {
     fn new(
@@ -57,6 +67,7 @@ impl<'a> PushContext<'a> {
             observer,
             deltas: DeltaEncoder::new(spool_dir.clone()),
             spool_dir,
+            record: None,
         }
     }
 
@@ -69,10 +80,48 @@ impl<'a> PushContext<'a> {
             observer,
             deltas: DeltaEncoder::new(spool_dir.clone()),
             spool_dir,
+            record: None,
         }
     }
 }
 impl PushContext<'_> {
+    fn record_advance(&self, keys: impl IntoIterator<Item = Hash>) {
+        if let Some(record) = &self.record {
+            let mut record = record.borrow_mut();
+            for key in keys {
+                if record.checked.remove(&key) {
+                    record.advanced.push(PackKey::from_hash(key));
+                }
+            }
+        }
+    }
+
+    fn persist_advances(
+        &self,
+        store: &ObjectStore,
+        layout: &kit_core::layout::RepoLayout,
+        remote: &str,
+    ) {
+        let Some(record) = &self.record else {
+            return;
+        };
+        let mut record = record.borrow_mut();
+        if record.advanced.is_empty() || store.sync_shards(0..=u8::MAX).is_err() {
+            return;
+        }
+        let mut applied =
+            crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
+        for key in record.advanced.drain(..) {
+            if let Err(error) = applied.record_applied(&key) {
+                self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
+                    remote: remote.to_owned(),
+                    error: error.to_string(),
+                });
+            }
+        }
+        crate::fetch::persist_record(&mut applied, self.observer, remote);
+    }
+
     /// Whether force pushes take the guarded force driver. It needs only a
     /// serialized advance: it appends, and it re-plans when a concurrent
     /// reset drops the chain its plan depends on, which an ordered force
@@ -225,13 +274,16 @@ pub fn push(
     let layout = kit_core::layout::discover(dir)?;
     let mut store = ObjectStore::open(&layout)?;
     store.set_sync_policy(options.sync_policy);
-    let tx = PushContext::new(source, options.control.observer, &store);
+    let mut tx = PushContext::new(source, options.control.observer, &store);
+    tx.record = Some(RefCell::default());
     let mut report = {
         // Held until the last tracking ref is written, as a fetch holds it:
         // a gc that runs during the push deletes nothing, so a tracking ref
         // never names a tip gc removed (see `ObjectStore::prune_guard`).
         let _prune_guard = store.prune_guard()?;
-        push_refs(&layout, &store, &tx, options)?
+        let result = push_refs(&layout, &store, &tx, options);
+        tx.persist_advances(&store, &layout, options.remote_name);
+        result?
     };
     if options.attestations {
         attestations::run(&layout, &store, &tx, options, &mut report)?;
@@ -934,7 +986,9 @@ fn push_branch_once(
         rebaseline_threshold,
         condition,
         tip,
-    )
+    )?;
+    tx.record_advance(pack_keys);
+    Ok(())
 }
 
 /// The plan for `tip`, or `None` when an earlier attempt already landed it.
@@ -1110,7 +1164,7 @@ fn build_and_upload_packs(
     build_packs(
         SealKind::Upload,
         || PackWriter::spool(&tx.spool_dir).map_err(PushError::from),
-        |writer, ticketed| {
+        |writer, ticketed, signed| {
             let spooled = writer.finish_spool()?;
             let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
             tx.upload_pack(&spooled, &PackKey::from_hash(spooled.key()), head_ref)
@@ -1120,6 +1174,11 @@ fn build_and_upload_packs(
             tx.observer.event(&SyncEvent::PackUploaded {
                 bytes: spooled.len(),
             });
+            if let Some(record) = &tx.record
+                && crate::verify::verify_new_object_signatures(store, signed, true).is_ok()
+            {
+                record.borrow_mut().checked.insert(spooled.key());
+            }
             pack_keys.push(spooled.key());
             Ok(is_ticketed)
         },
@@ -1147,7 +1206,7 @@ fn dry_seal(
     build_packs(
         SealKind::Count,
         || Ok(pack::CountingWriter::counting()),
-        |writer, ticketed| {
+        |writer, ticketed, _| {
             let is_ticketed = check_sealed(writer.finish_count()?, limits, ticketed)?;
             packs += 1;
             Ok(is_ticketed)
@@ -1192,7 +1251,7 @@ fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool,
 fn build_packs<W: std::io::Write>(
     kind: SealKind,
     mut fresh: impl FnMut() -> Result<PackWriter<W>, PushError>,
-    mut seal: impl FnMut(PackWriter<W>, usize) -> Result<bool, PushError>,
+    mut seal: impl FnMut(PackWriter<W>, usize, &[(Hash, u32)]) -> Result<bool, PushError>,
     store: &ObjectStore,
     plan: transfer::PackPlan,
     limits: UploadLimits,
@@ -1200,13 +1259,15 @@ fn build_packs<W: std::io::Write>(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<(), PushError> {
     let mut ticketed = 0;
-    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize| {
+    let mut signed = Vec::new();
+    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize, signed: &mut Vec<_>| {
         if observer.cancelled() {
             return Err(PushError::Sync(SyncError::Interrupted));
         }
-        if seal(w, *ticketed)? {
+        if seal(w, *ticketed, signed)? {
             *ticketed += 1;
         }
+        signed.clear();
         Ok(())
     };
     let mut w = fresh()?;
@@ -1227,7 +1288,7 @@ fn build_packs<W: std::io::Write>(
         let chunk = &raw[start..start + len];
         let parallel = batch_fans_out(len, raw_sizes[start..start + len].iter().sum());
         start += len;
-        for entry in prepare_raw_batch(store, chunk, parallel)? {
+        for (entry, signs) in prepare_raw_batch(store, chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(),
@@ -1235,7 +1296,17 @@ fn build_packs<W: std::io::Write>(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_one(std::mem::replace(&mut w, fresh()?), &mut ticketed)?;
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut signed,
+                )?;
+            }
+            if signs {
+                signed.push((
+                    entry.hash(),
+                    u32::try_from(entry.conservative_len()).expect("bounded object"),
+                ));
             }
             w.push_prepared_raw(entry)?;
             // Honest progress: one real object just got staged into
@@ -1246,7 +1317,9 @@ fn build_packs<W: std::io::Write>(
     }
 
     // Delta entries: sizes are known from the plan with no I/O, so batch
-    // lengths are computed directly off them; `drain` then moves each
+    // lengths are computed directly off them. The planner only chooses
+    // blob delta targets, so none of these entries needs a signature check.
+    // `drain` then moves each
     // batch's `PlannedDelta`s out of `deltas`, and each batch reads its
     // streams back from the push's delta spool.
     let delta_sizes: Vec<u64> = deltas
@@ -1266,14 +1339,18 @@ fn build_packs<W: std::io::Write>(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_one(std::mem::replace(&mut w, fresh()?), &mut ticketed)?;
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut signed,
+                )?;
             }
             w.push_prepared_delta(entry)?;
             report_packed(kind, observer);
         }
     }
 
-    seal_one(w, &mut ticketed)
+    seal_one(w, &mut ticketed, &mut signed)
 }
 
 /// Honest progress: one real object just got staged into the outgoing
@@ -1367,8 +1444,16 @@ fn prepare_raw_batch(
     store: &ObjectStore,
     chunk: &[Hash],
     parallel: bool,
-) -> Result<Vec<PreparedRaw>, PushError> {
-    let prepare = |h: &Hash| Ok(PackWriter::prepare_raw(*h, store.read(h)?));
+) -> Result<Vec<(PreparedRaw, bool)>, PushError> {
+    let prepare = |h: &Hash| {
+        let bytes = store.read(h)?;
+        let signed = bytes.first().is_some_and(|tag| {
+            [ObjectType::Commit, ObjectType::Remix, ObjectType::Tag]
+                .iter()
+                .any(|ty| *ty as u8 == *tag)
+        });
+        Ok((PackWriter::prepare_raw(*h, bytes), signed))
+    };
     if parallel {
         chunk.par_iter().map(prepare).collect()
     } else {
@@ -1734,7 +1819,7 @@ mod tests {
         build_packs(
             SealKind::Count,
             || Ok(PackWriter::new()),
-            |w, _| {
+            |w, _, _| {
                 expected.push(w.finish()?);
                 Ok(false)
             },
@@ -2054,7 +2139,10 @@ mod tests {
             let prepared =
                 super::prepare_raw_batch(&store, &hashes, parallel).expect("prepare raw batch");
             assert_eq!(
-                prepared.iter().map(PreparedRaw::hash).collect::<Vec<_>>(),
+                prepared
+                    .iter()
+                    .map(|(raw, _)| raw.hash())
+                    .collect::<Vec<_>>(),
                 hashes,
                 "prepare_raw_batch must preserve input order at n={n}"
             );

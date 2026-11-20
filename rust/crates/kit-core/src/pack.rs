@@ -87,7 +87,7 @@ pub use spool::{
     CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,
     sweep_spool_dir,
 };
-pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled};
+pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled, write_at};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;

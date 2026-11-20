@@ -25,7 +25,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{KitError, Object, ObjectType};
 use kit_core::ops::{Known, Presence};
 use kit_core::refs::{self, TAG_REF_PREFIX, TAGMAP_REF_PREFIX};
-use kit_core::store::{ObjectSource, ObjectStore, PruneGuard, StoreError};
+use kit_core::store::{ClosureSource, ObjectStore, PruneGuard, StoreError};
 
 use crate::applied_packs::AppliedPacks;
 use crate::apply::{ChainApplied, apply_pack_chain};
@@ -250,7 +250,7 @@ impl TagProver {
     /// on where the walk starts and are not.
     pub(crate) fn prove(
         &mut self,
-        store: &(dyn ObjectSource + Sync),
+        store: &dyn ClosureSource,
         layout: &RepoLayout,
         observer: &dyn Observer<SyncEvent>,
         verified: &mut VerifiedHistory,
@@ -314,18 +314,19 @@ impl TagProver {
             }
         };
         let stop = || observer.cancelled();
-        let presence =
-            match kit_core::ops::check_closure_present_above(store, &value, &known, *cap, &stop) {
-                Ok(presence) => presence,
-                Err(StoreError::Decode(
-                    e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
-                )) => {
-                    return Ok(Proof::Refused(TagRejectReason::Transfer(
-                        SyncError::RemoteObject(e).to_string(),
-                    )));
-                }
-                Err(e) => return Err(e.into()),
-            };
+        let presence = match kit_core::ops::check_closure_present_above_from(
+            store, &value, &known, *cap, &stop,
+        ) {
+            Ok(presence) => presence,
+            Err(StoreError::Decode(
+                e @ (KitError::ChunkLengthMismatch { .. } | KitError::ChunkNotBlob { .. }),
+            )) => {
+                return Ok(Proof::Refused(TagRejectReason::Transfer(
+                    SyncError::RemoteObject(e).to_string(),
+                )));
+            }
+            Err(e) => return Err(e.into()),
+        };
         match presence {
             Presence::Complete(checked) => {
                 *objects_checked += checked.len();
@@ -365,7 +366,7 @@ impl TagProver {
     /// set holds. `None` when the tag passes.
     fn peel(
         &self,
-        store: &(dyn ObjectSource + Sync),
+        store: &dyn ClosureSource,
         name: &str,
         value: Hash,
     ) -> Result<Option<Proof>, SyncError> {
@@ -408,7 +409,7 @@ impl TagProver {
     /// `verified` holds runs first and fills the anchored part.
     fn trusted_set(
         &self,
-        store: &(dyn ObjectSource + Sync),
+        store: &dyn ClosureSource,
         layout: &RepoLayout,
         observer: &dyn Observer<SyncEvent>,
         verified: &VerifiedHistory,
@@ -458,7 +459,7 @@ impl TagProver {
 /// walked again, a missing one is skipped, and the walk stops once `into`
 /// holds `cap` ids. `cancelled` is polled every few thousand objects.
 fn reach(
-    store: &(dyn ObjectSource + Sync),
+    store: &dyn ClosureSource,
     tips: &[Hash],
     into: &mut HashSet<Hash>,
     skip: &HashSet<Hash>,

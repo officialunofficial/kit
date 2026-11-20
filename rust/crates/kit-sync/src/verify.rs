@@ -13,7 +13,7 @@ use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
 #[cfg(test)]
 use kit_core::store::ObjectStore;
-use kit_core::store::{ObjectSource, StoreError};
+use kit_core::store::{ClosureSource, ObjectSource, StoreError};
 use rayon::prelude::*;
 
 use crate::error::SyncError;
@@ -418,7 +418,7 @@ pub(crate) type MissingHistory = HashMap<Hash, Hash>;
 /// decoded objects is held at a time, and `observer` is polled for
 /// cancellation after each full chunk.
 pub(crate) fn verify_history_signatures(
-    store: &(impl ObjectSource + Sync + ?Sized),
+    store: &(impl ClosureSource + ?Sized),
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     verified: &mut VerifiedHistory,
@@ -460,7 +460,7 @@ impl HistoryWalk<'_> {
     /// Walk the history of `tip` as [`verify_history_signatures`] describes.
     pub(crate) fn run(
         &mut self,
-        store: &(impl ObjectSource + Sync + ?Sized),
+        store: &(impl ClosureSource + ?Sized),
         observer: &dyn Observer<SyncEvent>,
         tip: &Hash,
     ) -> Result<(), SyncError> {

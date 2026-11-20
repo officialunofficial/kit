@@ -17,6 +17,9 @@ fn local(tx: &dyn Transport, predicate: &str) -> (tempfile::TempDir, Hash) {
         url: "kit+memory://push".into(),
         kind: "memory".into(),
     };
+    // One caller removes a tree to exercise incomplete attested history.
+    let layout = kit_sync::init_clone_dir(temp.path(), &desc).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
     kit_sync::clone(
         temp.path(),
         &TransportSource::new(tx),

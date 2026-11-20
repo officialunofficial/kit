@@ -22,9 +22,7 @@ use std::collections::HashMap;
 use super::graph::chunk_blob_len;
 use crate::hash::Hash;
 use crate::object::ChunkedBlob;
-#[cfg(test)]
-use crate::store::ObjectStore;
-use crate::store::{ObjectSource, StoreError};
+use crate::store::{ClosureSource, StoreError};
 
 /// The bounds of a walk. The tests run it with small ones, so a manifest of a
 /// few dozen chunks takes several rounds and reaches the parallel path.
@@ -105,7 +103,7 @@ enum Slot {
 ///
 /// A head read error, a length mismatch and `visit`'s own error.
 pub(crate) fn for_each_checked_chunk<C: LenCache>(
-    store: &(impl ObjectSource + Sync + ?Sized),
+    store: &(impl ClosureSource + ?Sized),
     blob: &ChunkedBlob,
     cache: &mut C,
     wants_head: impl Fn(u32, &Hash) -> bool,
@@ -116,7 +114,7 @@ pub(crate) fn for_each_checked_chunk<C: LenCache>(
 
 /// [`for_each_checked_chunk`] with the bounds of `tuning`.
 fn walk_chunks<C: LenCache>(
-    store: &(impl ObjectSource + Sync + ?Sized),
+    store: &(impl ClosureSource + ?Sized),
     blob: &ChunkedBlob,
     cache: &mut C,
     wants_head: impl Fn(u32, &Hash) -> bool,
@@ -192,7 +190,7 @@ type HeadResult = Option<Result<u64, StoreError>>;
 /// may be `Some` or `None`.
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
 fn read_heads(
-    store: &(impl ObjectSource + Sync + ?Sized),
+    store: &(impl ClosureSource + ?Sized),
     reads: &[(u32, Hash)],
     tuning: Tuning,
 ) -> Vec<HeadResult> {

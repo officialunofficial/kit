@@ -1424,7 +1424,11 @@ Fetch and clone pack fetched objects whose serialized size is smaller
 than 16 KiB. Objects of 16 KiB or more and chunks stay loose. The latter
 rule includes short final chunks and chunks from small fixed-size
 layouts. A chunk shares the Blob encoding of a whole-file blob. A writer
-that lacks enough information to classify a blob writes it loose.
+that lacks enough information to classify a blob writes it loose. A
+non-directory tree entry can establish whole-file use. A known chunk
+reference wins while the blob is pending. The same id can serve both
+roles, so a manifest that arrives after a seal can reference an id
+that was already packed as a whole file.
 Local creation and import write loose objects. The local reader accepts
 the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
@@ -1436,7 +1440,8 @@ window before closing the branch or tag batch.
 Respect the local pack caps and any lower staging-memory bound. Publish
 one local pack for the window's eligible objects when `P` is active and
 commit its loose writes using [SPEC-OBJECTS §10.1](SPEC-OBJECTS.md#101-durability).
-A window with no eligible objects needs no local pack. The cadence fixes
+A window with no eligible objects needs no local pack. In loose storage,
+a window may also close when it completes a wire pack. The cadence fixes
 when progress is durable. Flush batching and decode-window sizes remain
 implementation choices.
 

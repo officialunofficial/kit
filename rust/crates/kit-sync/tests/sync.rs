@@ -9,7 +9,7 @@ use std::path::Path;
 
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use kit_core::ops::pull_state::PullState;
 use kit_core::pack::{self, PackWriter};
 use kit_core::protocol::{PackKey, Transport};
@@ -309,6 +309,13 @@ fn clone_into(remote: &Remote, dir: &Path) -> kit_sync::CloneReport {
     .unwrap()
 }
 
+// These fixtures need to unlink individual objects to model a damaged store.
+fn clone_loose_into(remote: &Remote, dir: &Path) {
+    let layout = init_clone_dir(dir, &default_remote("kit+memory://x")).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
+    clone_into(remote, dir);
+}
+
 #[test]
 fn clone_packs_small_files_and_leaves_large_files_loose() {
     let remote = Remote::new();
@@ -332,13 +339,91 @@ fn clone_packs_small_files_and_leaves_large_files_loose() {
         panic!("expected a tree");
     };
     for entry in tree.entries {
-        let path = hash::object_path(&entry.object_hash);
-        let loose = layout
-            .objects_dir()
-            .join(std::str::from_utf8(&path.dir).unwrap())
-            .join(std::str::from_utf8(&path.file).unwrap());
-        assert_eq!(loose.is_file(), entry.name == b"large");
+        assert_eq!(
+            loose_object_path(&layout, &entry.object_hash).is_file(),
+            entry.name == b"large"
+        );
     }
+}
+
+#[test]
+fn a_manifest_in_a_later_wire_pack_keeps_its_blob_loose() {
+    let remote = Remote::new();
+    let (mut objects, _) = remote.build(None, &[("inline", b"shared bytes")], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(mut tree) = objects.pop().unwrap() else {
+        panic!("expected a tree");
+    };
+    let chunk = tree.entries[0].object_hash;
+    let manifest = Object::ChunkedBlob(ChunkedBlob::new(12, 16 * 1024, [(chunk, 12)]).unwrap());
+    tree.entries.push(TreeEntry {
+        name: b"manifest".to_vec(),
+        mode: EntryMode::Blob,
+        object_hash: manifest.id().unwrap(),
+    });
+    let tree = Object::Tree(tree);
+    commit.tree_hash = tree.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+    objects.extend([tree, commit]);
+    remote.publish_objects(&objects, tip, false);
+    remote.publish_objects(&[manifest], tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    assert!(loose_object_path(&layout, &chunk).is_file());
+    assert_eq!(
+        std::fs::read_dir(layout.objects_dir().join("pack"))
+            .unwrap()
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::fs::read(target.join("manifest")).unwrap(),
+        b"shared bytes"
+    );
+}
+
+#[test]
+fn a_busy_activation_keeps_the_marker_and_repairs_a_loose_copy() {
+    use kit_core::store::ObjectStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\0").unwrap();
+    let guard = store.prune_guard().unwrap();
+
+    let blob = Object::Blob(Blob {
+        data: b"fresh".to_vec(),
+    });
+    let bytes = kit_core::serialize::serialize(&blob).unwrap();
+    let id = store.write(&bytes).unwrap();
+    let mut corrupt = bytes.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    std::fs::write(loose_object_path(&layout, &id), corrupt).unwrap();
+
+    let remote = Remote::new();
+    remote.publish(None, &[("file", b"fresh")], true);
+    signed_fetch(&target, &remote).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n\0");
+    assert!(!layout.objects_dir().join("pack").exists());
+    assert_eq!(store.read(&id).unwrap(), bytes);
+    drop(guard);
+}
+
+fn loose_object_path(layout: &RepoLayout, id: &Hash) -> std::path::PathBuf {
+    let path = hash::object_path(id);
+    layout
+        .objects_dir()
+        .join(std::str::from_utf8(&path.dir).unwrap())
+        .join(std::str::from_utf8(&path.file).unwrap())
 }
 
 #[test]
@@ -1064,17 +1149,17 @@ fn assert_refused(target: &Path, remote: &Remote, forged: Hash, tracking: Hash, 
     assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(held));
 }
 
-/// A refused pack leaves its objects in the store. A remote that then points
-/// the branch at the refused commit with a chain that no longer carries it
-/// is refused again: the tip is checked, not only the packs this run applied.
+/// The tip is checked even when the store held its unsigned objects before
+/// the fetch and the advertised chain does not carry them.
 #[test]
-fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
+fn an_unsigned_commit_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     clone_into(&remote, &target);
-    let forged = remote.publish(Some(first), &[("a.txt", b"forged\n")], false);
+    let (objects, forged) = remote.build(Some(first), &[("a.txt", b"forged\n")], false);
+    remote.publish_objects(&objects, forged, false);
     let error = signed_fetch(&target, &remote).unwrap_err();
     assert!(
         matches!(error, SyncError::UnsignedOrInvalidObject { .. }),
@@ -1082,10 +1167,12 @@ fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at
     );
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
-    assert!(
-        store.contains(&forged),
-        "the refused objects stay in the store"
-    );
+    assert!(!store.contains(&forged), "a refused pack stays private");
+    for object in objects {
+        store
+            .write(&kit_core::serialize::serialize(&object).unwrap())
+            .unwrap();
+    }
 
     remote.repoint(forged);
     assert_refused(&target, &remote, forged, first, first);
@@ -1440,7 +1527,7 @@ fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
     let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     // Drop an object below the tracking tip from the store.
     let bee = Object::Blob(Blob {
@@ -1502,7 +1589,7 @@ fn a_tracking_tip_the_verified_record_does_not_name_is_no_anchor() {
     let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     fetch(
@@ -1558,6 +1645,7 @@ fn history_gc_pruned_after_a_forced_update_is_checked_again() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
     let fetch_default = || {
         fetch(
             &target,
@@ -3528,7 +3616,7 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
     let blob = Object::Blob(Blob {
@@ -4280,7 +4368,7 @@ fn interrupted_pull_with_a_missing_unchanged_blob_refuses_recovery() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a", b"keep"), ("b", b"old")], true);
     let dir = tempfile::tempdir().unwrap();
-    clone_into(&remote, dir.path());
+    clone_loose_into(&remote, dir.path());
     let layout = RepoLayout::single(dir.path());
     let blob = Object::Blob(Blob {
         data: b"keep".to_vec(),

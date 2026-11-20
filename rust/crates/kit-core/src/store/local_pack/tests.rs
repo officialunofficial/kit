@@ -762,3 +762,43 @@ fn mixed_golden_vector() {
         assert_eq!(store.read(&id).unwrap(), bytes);
     }
 }
+
+#[test]
+fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
+    use super::writer::LocalPackWriter;
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(a.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    let other = ObjectStore::init(&RepoLayout::single(b.path())).unwrap();
+
+    let busy = store.prune_guard().unwrap();
+    store.try_activate_local_packs().unwrap();
+    assert!(!store.local_packs_active(&busy).unwrap());
+    assert!(LocalPackWriter::new(&store, &busy).is_err());
+    drop(busy);
+
+    store.try_activate_local_packs().unwrap();
+    let guard = store.prune_guard().unwrap();
+    assert!(store.local_packs_active(&guard).unwrap());
+    assert!(LocalPackWriter::new(&other, &guard).is_err());
+    LocalPackWriter::new(&store, &guard)
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 0);
+
+    let bytes = blob(b"overlap");
+    let id = store.write(&bytes).unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+    assert_eq!(writer.write(&bytes).unwrap(), id);
+    assert_eq!(writer.write(&bytes).unwrap(), id);
+    writer.publish().unwrap();
+    assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 2);
+    store.remove_object(&id).unwrap();
+    assert_eq!(
+        ObjectStore::open(&layout).unwrap().read(&id).unwrap(),
+        bytes
+    );
+}

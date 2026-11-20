@@ -15,6 +15,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Push records its verified data packs locally so the next fetch can skip them.
+
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.
 - A clone interrupted after it made its branch, before it wrote the files, undoes the branch

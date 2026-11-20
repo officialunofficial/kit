@@ -144,6 +144,9 @@ mod attestation_fetch {
             kind: "memory".into(),
         };
         options.remote_url.clone_from(&descriptor.url);
+        // The gc assertion below needs to remove an individual tree.
+        let layout = kit_sync::init_clone_dir(&dir, &descriptor).unwrap();
+        std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
         let report = kit_sync::clone(&dir, &source, &descriptor, &options, &NoopObserver).unwrap();
         assert_eq!(report.pull.fetch.attestations_stored, 1);
         assert_eq!(report.pull.fetch.attestations_dropped, 1);

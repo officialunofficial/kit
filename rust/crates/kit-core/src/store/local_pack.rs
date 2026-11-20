@@ -376,10 +376,7 @@ impl ObjectStore {
     /// An unreadable, incompatible or unwritable format marker.
     #[doc(hidden)]
     pub fn try_activate_local_packs(&self) -> StoreResult<()> {
-        if !format::check(&self.format_path())? {
-            format::try_activate(&self.format_path())?;
-        }
-        Ok(())
+        format::try_activate(&self.format_path())
     }
 
     /// Check whether the current marker selects packed storage.
@@ -397,7 +394,19 @@ impl ObjectStore {
     /// An unreadable or incompatible format marker.
     #[doc(hidden)]
     pub fn local_packs_active(&self, guard: &super::PruneGuard) -> StoreResult<bool> {
+        self.check_prune_guard(guard)?;
         format::packed_under_guard(guard)
+    }
+
+    fn check_prune_guard(&self, guard: &super::PruneGuard) -> StoreResult<()> {
+        if guard.objects_root != self.objects_root {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prune guard belongs to a different object store",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     fn pack_dir(&self) -> PathBuf {

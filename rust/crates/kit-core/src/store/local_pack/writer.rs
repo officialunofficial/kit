@@ -27,6 +27,7 @@ impl<'a> LocalPackWriter<'a> {
     /// # Errors
     /// The packed marker could not be validated or synced, or staging failed.
     pub fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> StoreResult<Self> {
+        store.check_prune_guard(guard)?;
         prepare_dir(store, guard)?;
         Ok(Self {
             store,

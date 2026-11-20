@@ -12,6 +12,7 @@
 //! its ref, and the guard keeps gc from deleting them.
 
 use kit_core::protocol::{PackSink, TransportResult};
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -214,13 +215,14 @@ pub(crate) fn apply_pack_chain(
     if let Some(error) = failure {
         // Keep the accepted prefix when a later download is interrupted or
         // refused. The failed pack never entered the publication window.
-        publication.seal(observer, remote, applied, &Default::default())?;
+        publication.seal(observer, remote, applied, &HashSet::new())?;
         return Err(error);
     }
     let view = publication.view();
-    validate(&view)?;
+    let checked = validate(&view);
     let chunks = view.chunks();
-    publication.seal(observer, remote, applied, &chunks)
+    publication.seal(observer, remote, applied, &chunks)?;
+    checked
 }
 
 fn decode_pack(
@@ -254,7 +256,7 @@ fn apply_pack(
     let mut publication = Publication::new(store, &guard)?;
     let (spool, unpacked) = decode_pack(store, pack, None, require_signed)?;
     publication.accept(&spool, *key, observer, remote, applied)?;
-    publication.seal(observer, remote, applied, &Default::default())?;
+    publication.seal(observer, remote, applied, &HashSet::new())?;
     if unpacked > 0 {
         observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
     }
@@ -490,6 +492,38 @@ mod tests {
         assert!(reloaded.contains(&PackKey::from_hash(a)));
         assert!(reloaded.contains(&PackKey::from_hash(b)));
         assert!(!reloaded.contains(&PackKey::from_hash(missing)));
+    }
+
+    #[test]
+    fn an_interrupted_final_check_keeps_the_accepted_window() {
+        let tx = MemoryTransport::new();
+        let key = upload_blob_pack(&tx, &[b"kept"]);
+        let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
+        let result = apply_pack_chain(
+            &store,
+            &TransportSource::new(&tx),
+            &NoopObserver,
+            "origin",
+            "refs/heads/main",
+            &[key],
+            &mut applied,
+            true,
+            &mut ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |view| {
+                assert!(view.contains(&blob(b"kept").id().unwrap()));
+                assert!(!store.contains(&blob(b"kept").id().unwrap()));
+                Err(SyncError::Interrupted)
+            },
+        );
+        assert!(matches!(result, Err(SyncError::Interrupted)));
+        assert!(store.contains(&blob(b"kept").id().unwrap()));
+        assert!(
+            AppliedPacks::load(&layout, "origin")
+                .unwrap()
+                .contains(&PackKey::from_hash(key))
+        );
     }
 
     /// A source whose every pack is `len` zero bytes, declared up front.
