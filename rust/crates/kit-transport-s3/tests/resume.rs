@@ -183,15 +183,18 @@ fn a_download_interrupted_twice_continues_twice() {
     );
 }
 
+/// A name, the reason it must give, and how it spoils the honest answer.
+type Case = (
+    &'static str,
+    RestartReason,
+    Box<dyn Fn(Response) -> Response + Send + Sync>,
+);
+
 #[test]
 fn an_answer_that_is_not_the_rest_reads_the_pack_again() {
     let (object, key) = pack();
     let total = object.len();
-    let cases: Vec<(
-        &str,
-        RestartReason,
-        Box<dyn Fn(Response) -> Response + Send + Sync>,
-    )> = vec![
+    let cases: Vec<Case> = vec![
         (
             "range ignored",
             RestartReason::Status,
