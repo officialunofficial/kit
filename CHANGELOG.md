@@ -14,8 +14,17 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Fetch writes no cursor record when a local tag changes while it runs, so the next fetch
   restores a tag deleted meanwhile.
 - `kit push --delete <remote> <name>` deletes a tag whose name is too long for a branch.
+- Add `ObjectStore::sync_shards`, which makes the directory entries of object shards durable
+  with one device flush.
+- Fetch makes the objects a new tag reaches durable before it writes the tag, also when another
+  process stored them and has not yet flushed them.
 - Let checkout finish switching branches after the first Ctrl-C during a restore. A second Ctrl-C stops it immediately.
 - Keep untracked restore temporary files out of status and add.
+- Keep all symlinks intact when saving a trust catalog through a dangling chain.
+- Reduce stderr writes when printing the commit summary.
+- Resolve relative clone destinations once before restoring objects.
+- Stage the new spelling and remove the old one when `add -A` sees a case-only rename.
+- Check out committed case-only file renames on case-insensitive volumes.
 
 ## [0.9.0] - 2026-11-19
 

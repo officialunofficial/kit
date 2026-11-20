@@ -2029,7 +2029,7 @@ pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
     use std::os::unix::fs::PermissionsExt;
 
     if meta.permissions().mode() & 0o111 != 0 {
@@ -2040,7 +2040,7 @@ fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
 }
 
 #[cfg(not(unix))]
-fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
     EntryMode::Blob
 }
 

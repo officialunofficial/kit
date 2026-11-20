@@ -6,8 +6,11 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::cell::Cell;
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use kit_core::fault::{self, SyncStep};
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{
@@ -683,6 +686,82 @@ fn a_tag_whose_closure_is_local_publishes_with_no_tag_map_read() {
         assert_eq!(count(&calls, "ReadRef refs/kit/tagmap/"), 0, "{calls:?}");
         assert_eq!(count(&calls, "ReadRef refs/tags/"), 0, "{calls:?}");
     }
+}
+
+/// Each step a store took, with a tag ref's value at that time.
+type Steps = Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>>;
+
+/// A tag over objects the store already holds, as a concurrent fetch leaves
+/// them, publishes only once their directory entries are durable: that fetch
+/// may have made them visible and not yet flushed them (SPEC-OBJECTS §10.1).
+/// So a barrier on every shard, the objects' among them, and a device flush
+/// come before the tag ref. The hook sees every store in the process, so it
+/// keeps only this repository's steps.
+#[test]
+fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    let (_dir, target) = work();
+    clone_from(&remote, &target);
+    let (mut objects, c2) = remote.commit(Some(c1), true);
+    let (tag, v2) = remote.tag_object("v2", c2, true);
+    objects.push(tag);
+    remote.push_tag("v2", &objects, v2, Some(main));
+    let store = ObjectStore::open(&RepoLayout::single(&target)).unwrap();
+    let batch = store.batch();
+    for object in &objects {
+        let id = batch
+            .write(&kit_core::serialize::serialize(object).unwrap())
+            .unwrap();
+        assert_eq!(id, object.id().unwrap());
+    }
+    batch.commit().unwrap();
+    let root = store.objects_root().to_path_buf();
+    let shards: BTreeSet<PathBuf> = objects
+        .iter()
+        .map(|o| root.join(&hash::to_hex(&o.id().unwrap())[..2]))
+        .collect();
+    let steps: Steps = Arc::default();
+    let _hook = {
+        let steps = Arc::clone(&steps);
+        let root = root.clone();
+        let target = target.clone();
+        fault::on_sync(move |step| {
+            let ours = match step {
+                SyncStep::DirBarrier(dir) => dir.starts_with(&root),
+                SyncStep::DeviceFlush(at) => *at == root,
+            };
+            if ours {
+                let tag = local_tag(&target, "v2");
+                steps.lock().unwrap().push((step.clone(), tag));
+            }
+        })
+    };
+
+    let report = fetch_from(&remote, &target);
+
+    assert_eq!(report.tags_fetched, ["v2"]);
+    assert_eq!(report.packs_downloaded, 0, "the closure was local");
+    let steps = steps.lock().unwrap();
+    let flush = steps
+        .iter()
+        .position(|(step, _)| *step == SyncStep::DeviceFlush(root.clone()))
+        .unwrap_or_else(|| panic!("no device flush: {steps:?}"));
+    let barriered: BTreeSet<PathBuf> = steps[..flush]
+        .iter()
+        .filter_map(|(step, _)| match step {
+            SyncStep::DirBarrier(dir) => Some(dir.clone()),
+            SyncStep::DeviceFlush(_) => None,
+        })
+        .collect();
+    assert!(shards.is_subset(&barriered), "{steps:?}");
+    // Chunks are checked but not listed, so every shard is flushed.
+    assert_eq!(barriered.len(), 256);
+    assert!(
+        steps[..=flush].iter().all(|(_, tag)| tag.is_none()),
+        "the tag ref was written before the flush: {steps:?}"
+    );
+    assert_eq!(local_tag(&target, "v2"), Some(v2));
 }
 
 /// A remote whose branch chain names every pack, tag objects included, and
