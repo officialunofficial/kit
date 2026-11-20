@@ -1,6 +1,6 @@
 //! Restore.
 //!
-//! Materialises a stored [`Tree`](crate::object::Tree) into a target
+//! Materialises a stored [`Tree`] into a target
 //! directory: writes blobs as files, recurses into subtrees as
 //! directories, creates symlinks for symlink entries, and (when
 //! `clean=true`) deletes anything in the target dir that is not in the
@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::layout::RepoLayout;
-use crate::object::{self, EntryMode, Object, TreeEntry};
+use crate::object::{self, EntryMode, Object, Tree, TreeEntry};
 use crate::store::{MAX_TREE_DEPTH, ObjectStore};
 use crate::worktree;
 
@@ -599,6 +599,7 @@ where
         check_unswept(store, skipped, &ignore_list)?;
     }
     let mut total = 0;
+    let mut case_rename_sources = std::collections::HashMap::new();
     check_nested_repositories_inner(
         store,
         *tree,
@@ -608,6 +609,7 @@ where
         "",
         0,
         progress.is_some().then_some(&mut total),
+        &mut case_rename_sources,
     )?;
     fs::create_dir_all(root)?;
     if let Some(callback) = progress.as_mut() {
@@ -631,6 +633,7 @@ where
         &mut progress,
         total,
         &mut last_progress,
+        &case_rename_sources,
     )?;
     if let Some(callback) = progress.as_mut() {
         callback(
@@ -658,6 +661,7 @@ fn restore_tree_to_worktree_inner<F>(
     progress: &mut Option<&mut dyn FnMut(usize, usize)>,
     total: usize,
     last_progress: &mut std::time::Instant,
+    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
 ) -> RestoreResult<()>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -696,7 +700,7 @@ where
             Some(ignore),
         )?;
     } else {
-        remove_stale_temps(target_dir, &tree.entries);
+        remove_stale_temps(target_dir, &tree.entries, case_rename_sources);
     }
 
     for entry in &tree.entries {
@@ -722,6 +726,10 @@ where
         // them would desync the index from the worktree). Ignore rules only
         // protect *untracked* worktree files during the ignore-aware
         // `clean_directory` sweep below.
+        let case_source = case_rename_sources.get(&full_path);
+        if let Some(source) = case_source {
+            at_path(source.check_tracked(store), &full_path)?;
+        }
         match entry.mode {
             EntryMode::Blob | EntryMode::Executable => {
                 if let Some(patterns) = options.sparse_patterns.as_deref()
@@ -739,6 +747,7 @@ where
                         batch_size,
                         read_chunks,
                         observed.is_some(),
+                        case_source,
                     ),
                     &full_path,
                 )?;
@@ -777,6 +786,7 @@ where
                     progress,
                     total,
                     last_progress,
+                    case_rename_sources,
                 )?;
             }
             EntryMode::Symlink => {
@@ -786,7 +796,7 @@ where
                     continue;
                 }
                 at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    restore_symlink(store, target_dir, name, entry.object_hash, case_source),
                     &full_path,
                 )?;
                 report.symlinks_written += 1;
@@ -836,7 +846,8 @@ pub fn restore_tree(
 ///
 /// # Errors
 /// Returns a restore error when a target tree cannot be read or a directory
-/// that would be replaced contains repository metadata. A restore also refuses path aliases on the destination filesystem.
+/// that would be replaced contains repository metadata. A restore also
+/// refuses conflicting path aliases on the destination filesystem.
 pub fn check_nested_repositories(
     store: &ObjectStore,
     tree: Hash,
@@ -844,7 +855,17 @@ pub fn check_nested_repositories(
     options: &RestoreOptions,
     base: Option<Hash>,
 ) -> RestoreResult<()> {
-    check_nested_repositories_inner(store, tree, root, options, base, "", 0, None)
+    check_nested_repositories_inner(
+        store,
+        tree,
+        root,
+        options,
+        base,
+        "",
+        0,
+        None,
+        &mut std::collections::HashMap::new(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -857,6 +878,7 @@ fn check_nested_repositories_inner(
     prefix: &str,
     depth: usize,
     mut count: Option<&mut usize>,
+    case_rename_sources: &mut std::collections::HashMap<String, CaseRenameSource>,
 ) -> RestoreResult<()> {
     if depth > MAX_TREE_DEPTH {
         return Err(RestoreError::TreeTooDeep);
@@ -865,36 +887,32 @@ fn check_nested_repositories_inner(
         return Err(RestoreError::NotATree);
     };
     check_name_collisions(&tree.entries, dir, prefix)?;
-    let base = base.and_then(|hash| store.read_object(&hash).ok());
+    let base = base.and_then(|hash| match store.read_object(&hash).ok()? {
+        Object::Tree(tree) => Some(tree),
+        _ => None,
+    });
     let disk_names = directory_names(dir)?;
     for entry in &tree.entries {
         if !TreeEntry::validate_name(&entry.name) {
             continue;
         }
-        let target =
-            dir.join(std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?);
-        if disk_names
-            .as_ref()
-            .is_some_and(|names| !names.contains(target.file_name().unwrap_or_default()))
-            && fs::symlink_metadata(&target).is_ok()
-        {
-            if entry.mode == EntryMode::Tree && options.clean && options.sparse_patterns.is_some() {
-                return Err(RestoreError::SparseDirectoryAlias(name_path(
-                    prefix,
-                    std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?,
-                )));
-            }
-            return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                format!("restore path '{}' has a different spelling on disk; rename it to match the tree", name_path(prefix, std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?))).into());
+        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+        let target = dir.join(name);
+        if let Some(source) = check_worktree_alias(
+            &tree,
+            base.as_ref(),
+            entry,
+            prefix,
+            &target,
+            disk_names.as_ref(),
+            options,
+        )? {
+            case_rename_sources.insert(name_path(prefix, name), source);
         }
-        let base_entry = match &base {
-            Some(Object::Tree(tree)) => tree_entry(tree, &entry.name),
-            _ => None,
-        };
+        let base_entry = base.as_ref().and_then(|base| tree_entry(base, &entry.name));
         if base_entry.is_some_and(|e| e.mode == entry.mode && e.object_hash == entry.object_hash) {
             continue;
         }
-        let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
         let path = name_path(prefix, name);
         let is_tree = entry.mode == EntryMode::Tree;
         if options.sparse_patterns.as_deref().is_some_and(|patterns| {
@@ -909,7 +927,6 @@ fn check_nested_repositories_inner(
         if !is_tree && let Some(count) = count.as_deref_mut() {
             *count += 1;
         }
-        let target = dir.join(name);
         // A non-directory ancestor is replaced by the restore. Its descendants
         // do not exist yet; following a symlink here would inspect another tree.
         if !fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
@@ -942,12 +959,173 @@ fn check_nested_repositories_inner(
                 &path,
                 depth + 1,
                 count.as_deref_mut(),
+                case_rename_sources,
             )?;
         } else if let Some(entry) = nested_repository(&target)? {
             return Err(RestoreError::NestedRepository(name_path(&path, &entry)));
         }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct CaseRenameSource {
+    path: PathBuf,
+    metadata: fs::Metadata,
+    tracked_mode: EntryMode,
+    tracked_hash: Hash,
+}
+
+impl CaseRenameSource {
+    fn check_tracked(&self, store: &ObjectStore) -> RestoreResult<()> {
+        let matches = if self.metadata.is_symlink() {
+            let target = self.path.read_link()?;
+            self.tracked_mode == EntryMode::Symlink
+                && matches!(store.read_object(&self.tracked_hash)?, Object::Blob(blob)
+                    if blob.data == target.as_os_str().as_encoded_bytes())
+        } else {
+            let (metadata, equal) =
+                worktree::file_content_eq(store, &self.tracked_hash, &self.path)
+                    .map_err(io::Error::other)?;
+            equal && worktree::entry_mode_from_file_metadata(&metadata) == self.tracked_mode
+        };
+        if matches {
+            return Ok(());
+        }
+        Err(io::Error::other("case-only source changed before checkout").into())
+    }
+
+    fn unchanged_at(&self, path: &Path, check_ctime: bool) -> io::Result<bool> {
+        let before = &self.metadata;
+        let now = path.symlink_metadata()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            // A content edit can preserve length and mtime. Check ctime
+            // before Kit moves the source, since the move updates ctime.
+            let identity = |metadata: &fs::Metadata| {
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.mode(),
+                    metadata.len(),
+                    metadata.mtime(),
+                    metadata.mtime_nsec(),
+                    check_ctime.then_some((metadata.ctime(), metadata.ctime_nsec())),
+                )
+            };
+            Ok(identity(before) == identity(&now))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (before, now, check_ctime);
+            Ok(false)
+        }
+    }
+}
+
+fn check_worktree_alias(
+    tree: &Tree,
+    base: Option<&Tree>,
+    entry: &TreeEntry,
+    prefix: &str,
+    target: &Path,
+    names: Option<&std::collections::HashSet<std::ffi::OsString>>,
+    options: &RestoreOptions,
+) -> RestoreResult<Option<CaseRenameSource>> {
+    let Some(names) = names.filter(|names| !names.contains(target.file_name().unwrap_or_default()))
+    else {
+        return Ok(None);
+    };
+    let Ok(metadata) = fs::symlink_metadata(target) else {
+        return Ok(None);
+    };
+    if entry.mode != EntryMode::Tree
+        && !options.clean
+        && options.sparse_patterns.is_none()
+        && let Some(base) = base
+        && let Some(parent) = target.parent()
+        && let Some(source) = case_rename_source(parent, names, base, tree, target, &metadata)
+    {
+        return Ok(Some(source));
+    }
+
+    let name = std::str::from_utf8(&entry.name).map_err(|_| RestoreError::InvalidUtf8)?;
+    let path = name_path(prefix, name);
+    if entry.mode == EntryMode::Tree && options.clean && options.sparse_patterns.is_some() {
+        return Err(RestoreError::SparseDirectoryAlias(path));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!(
+            "restore path '{path}' has a different spelling on disk; rename it to match the tree"
+        ),
+    )
+    .into())
+}
+
+/// Allow an alias only when it names an exact tracked file that the target
+/// drops. Use the filesystem's spelling instead of folding Unicode in Kit.
+#[cfg(unix)]
+fn case_rename_source(
+    dir: &Path,
+    names: &std::collections::HashSet<std::ffi::OsString>,
+    base: &Tree,
+    target: &Tree,
+    destination: &Path,
+    metadata: &fs::Metadata,
+) -> Option<CaseRenameSource> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if !(metadata.is_file() || metadata.is_symlink()) {
+        return None;
+    }
+    let same_entry = |name: &std::ffi::OsStr| {
+        fs::symlink_metadata(dir.join(name))
+            .is_ok_and(|other| other.dev() == metadata.dev() && other.ino() == metadata.ino())
+    };
+    // A canonical regular-file path can name the exact directory entry,
+    // even when another entry is a hard link to it. Never follow a symlink.
+    let canonical = metadata
+        .is_file()
+        .then(|| destination.canonicalize().ok())
+        .flatten();
+    let exact = canonical
+        .as_deref()
+        .and_then(Path::file_name)
+        .and_then(|name| names.get(name))
+        .filter(|name| same_entry(name));
+    let source = exact.or_else(|| {
+        // An alias must name an entry in this directory. Hard links in a
+        // different directory cannot make the spelling ambiguous here.
+        let mut matches = names.iter().filter(|name| same_entry(name));
+        let first = matches.next()?;
+        (metadata.nlink() == 1 || matches.next().is_none()).then_some(first)
+    })?;
+    let name = source.to_str()?.as_bytes();
+    let old = tree_entry(base, name)?;
+    if old.mode == EntryMode::Tree || tree_entry(target, name).is_some() {
+        return None;
+    }
+    Some(CaseRenameSource {
+        path: dir.join(source),
+        metadata: metadata.clone(),
+        tracked_mode: old.mode,
+        tracked_hash: old.object_hash,
+    })
+}
+
+#[cfg(not(unix))]
+fn case_rename_source(
+    _: &Path,
+    _: &std::collections::HashSet<std::ffi::OsString>,
+    _: &Tree,
+    _: &Tree,
+    _: &Path,
+    _: &fs::Metadata,
+) -> Option<CaseRenameSource> {
+    None
 }
 
 fn directory_names(
@@ -1108,7 +1286,7 @@ fn restore_tree_inner(
                     continue;
                 }
                 at_path(
-                    restore_symlink(store, target_dir, name, entry.object_hash),
+                    restore_symlink(store, target_dir, name, entry.object_hash, None),
                     &full_path,
                 )?;
             }
@@ -1139,7 +1317,7 @@ fn restore_blob(
     let obj = store.read_object(&blob_hash)?;
     match obj {
         Object::Blob(b) => {
-            write_file_atomic(dir, name, &b.data, executable, false)?;
+            write_file_atomic(dir, name, &b.data, executable, false, None)?;
         }
         Object::ChunkedBlob(cb) => {
             let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
@@ -1159,7 +1337,7 @@ fn restore_blob(
             })();
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, None)?;
         }
         _ => return Err(RestoreError::NotABlob),
     }
@@ -1192,13 +1370,14 @@ fn restore_blob_with<F>(
     batch_size: usize,
     read_chunks: &F,
     observe: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<Option<StatFields>>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
     let obj = store.read_object(&blob_hash)?;
     match obj {
-        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe),
+        Object::Blob(b) => write_file_atomic(dir, name, &b.data, executable, observe, case_source),
         Object::ChunkedBlob(cb) => {
             // Stream each batch straight to the open tmp file instead of
             // concatenating the whole reassembled file into memory first.
@@ -1221,7 +1400,7 @@ where
             };
             #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
             drop(tmp);
-            finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+            finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
             Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
         }
         _ => Err(RestoreError::NotABlob),
@@ -1268,8 +1447,14 @@ fn finish_or_discard_tmp(
     tmp_path: &Path,
     final_path: &Path,
     executable: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<()> {
-    let result = result.and_then(|()| Ok(finish_atomic_write(tmp_path, final_path, executable)?));
+    let result = result.and_then(|()| {
+        if executable {
+            apply_executable_bit(tmp_path)?;
+        }
+        Ok(publish_restore_temp(tmp_path, final_path, case_source)?)
+    });
     if result.is_err() {
         let _ = fs::remove_file(tmp_path);
     }
@@ -1428,6 +1613,7 @@ fn restore_symlink(
     dir: &Path,
     name: &str,
     blob_hash: Hash,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<()> {
     let obj = store.read_object(&blob_hash)?;
     let Object::Blob(b) = obj else {
@@ -1446,8 +1632,7 @@ fn restore_symlink(
             Err(e) => return Err(e.into()),
         }
     };
-    let result =
-        prepare_path_for_rename(&final_path).and_then(|()| fs::rename(&tmp_path, &final_path));
+    let result = publish_restore_temp(&tmp_path, &final_path, case_source);
     if result.is_err() {
         let _ = fs::remove_file(&tmp_path);
     }
@@ -1496,13 +1681,14 @@ fn write_file_atomic(
     data: &[u8],
     executable: bool,
     observe: bool,
+    case_source: Option<&CaseRenameSource>,
 ) -> RestoreResult<Option<StatFields>> {
     let (tmp_path, final_path, mut tmp) = create_tmp_for_write(dir, name)?;
     let result = tmp.write_all(data).map_err(RestoreError::from);
     let written = if observe { tmp.metadata().ok() } else { None };
     #[cfg(not(target_arch = "wasm32"))] // wasm File has no destructor
     drop(tmp);
-    finish_or_discard_tmp(result, &tmp_path, &final_path, executable)?;
+    finish_or_discard_tmp(result, &tmp_path, &final_path, executable, case_source)?;
     Ok(written.and_then(|meta| observe_written(&meta, &final_path)))
 }
 
@@ -1529,17 +1715,89 @@ fn create_tmp_for_write(dir: &Path, name: &str) -> io::Result<(PathBuf, PathBuf,
     }
 }
 
-/// Apply the executable bit (if requested) and atomically rename the
-/// tmp file from [`create_tmp_for_write`] into its final path. The tmp
-/// file's handle must already be closed/dropped before calling this
-/// (renaming an open handle is unreliable on some platforms).
-fn finish_atomic_write(tmp_path: &Path, final_path: &Path, executable: bool) -> io::Result<()> {
-    if executable {
-        apply_executable_bit(tmp_path)?;
+const CASE_RENAME_BACKUP_PREFIX: &str = ".kit-restore-backup.";
+
+/// Publish a fully prepared file or symlink. Move a case-only source aside
+/// first so the destination gets its requested spelling. If publication
+/// fails, put the source back or report where it was saved.
+fn publish_restore_temp(
+    tmp_path: &Path,
+    final_path: &Path,
+    case_source: Option<&CaseRenameSource>,
+) -> io::Result<()> {
+    let Some(source) = case_source else {
+        prepare_path_for_rename(final_path)?;
+        return fs::rename(tmp_path, final_path);
+    };
+    let parent = source.path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "restore source has no parent")
+    })?;
+    // Add skips the scratch name. The stale sweep only visits directories
+    // in the target tree, so it cannot remove a file saved in this directory.
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(CASE_RENAME_BACKUP_PREFIX);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(fs::Permissions::from_mode(0o700));
     }
-    prepare_path_for_rename(final_path)?;
-    fs::rename(tmp_path, final_path)?;
-    Ok(())
+    let recovery = builder.tempdir_in(parent)?;
+    let backup = recovery.path().join(make_tmp_name());
+    if !source.unchanged_at(&source.path, true)? {
+        return Err(io::Error::other("case-only source changed before checkout"));
+    }
+    move_case_rename_source(&source.path, &backup)?;
+    let recovery = recovery.keep();
+    let result = finish_case_rename(tmp_path, final_path, source, &backup);
+    let _ = fs::remove_dir(recovery);
+    result
+}
+
+fn move_case_rename_source(source: &Path, backup: &Path) -> io::Result<()> {
+    // A directory cannot replace this regular file, even if it raced the
+    // check of the source. A retained backup is always a non-directory.
+    {
+        let _placeholder = fs::File::create_new(backup)?;
+    }
+    fs::rename(source, backup)
+}
+
+fn finish_case_rename(
+    tmp_path: &Path,
+    final_path: &Path,
+    source: &CaseRenameSource,
+    backup: &Path,
+) -> io::Result<()> {
+    if !source.unchanged_at(backup, false).unwrap_or(false) {
+        return Err(io::Error::other(format!(
+            "case-only source changed during checkout. Check for the moved file at {}",
+            backup.display()
+        )));
+    }
+    let result = move_without_replacing(tmp_path, final_path);
+    if let Err(err) = &result
+        && let Err(rollback) = move_without_replacing(backup, &source.path)
+    {
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "{err}. Could not restore the old spelling ({rollback}). Original saved at {}",
+                backup.display()
+            ),
+        ));
+    }
+    let _ = fs::remove_file(backup);
+    result
+}
+
+fn move_without_replacing(source: &Path, destination: &Path) -> io::Result<()> {
+    let mut source = tempfile::TempPath::try_from_path(source)?;
+    // Both paths have owners. A failed move must leave the source in place.
+    source.disable_cleanup(true);
+    source
+        .persist_noclobber(destination)
+        .map_err(|error| error.error)
 }
 
 #[cfg(unix)]
@@ -1651,11 +1909,16 @@ pub fn nested_repository(dir: &Path) -> io::Result<Option<String>> {
 const TMP_PREFIX: &str = ".kit-restore-tmp";
 
 /// Remove from the worktree directory `dir` the regular files with a restore
-/// temporary name of another process, except a name the tree at `dir` holds.
+/// temporary name of another process. Keep names in the target tree and
+/// tracked sources of case-only renames.
 /// A worktree restore holds the worktree, so such a file is one a restore
 /// stopped by a signal left. A file that cannot be removed only stays, and a
 /// symlink a stopped symlink restore left is not touched.
-fn remove_stale_temps(dir: &Path, entries: &[TreeEntry]) {
+fn remove_stale_temps(
+    dir: &Path,
+    entries: &[TreeEntry],
+    case_rename_sources: &std::collections::HashMap<String, CaseRenameSource>,
+) {
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
@@ -1668,6 +1931,9 @@ fn remove_stale_temps(dir: &Path, entries: &[TreeEntry]) {
         if is_restore_temp_name(name)
             && !name.starts_with(&own)
             && !entries.iter().any(|e| e.name == name.as_bytes())
+            && !case_rename_sources
+                .values()
+                .any(|source| source.path == entry.path())
             && entry.file_type().is_ok_and(|t| t.is_file())
         {
             let _ = fs::remove_file(entry.path());
@@ -2269,6 +2535,172 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_source_requires_one_matching_name_in_its_directory() {
+        let dir = TempDir::new().unwrap();
+        let work = dir.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let source = work.join("Foo");
+        fs::write(&source, b"original").unwrap();
+        fs::write(work.join("unrelated"), b"other").unwrap();
+        fs::hard_link(&source, dir.path().join("backup")).unwrap();
+        let tree = |name: &[u8]| Tree {
+            entries: vec![TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::ZERO,
+            }],
+        };
+        let mut base = tree(b"Foo");
+        base.entries.extend(tree(b"another-name").entries);
+        let target = tree(b"foo");
+        // Supply the inode from an insensitive lookup without a canonical
+        // spelling, so this also exercises filesystems that preserve input.
+        let unavailable_spelling = work.join("unavailable");
+        let find_source = || {
+            case_rename_source(
+                &work,
+                &directory_names(&work).unwrap().unwrap(),
+                &base,
+                &target,
+                &unavailable_spelling,
+                &source.symlink_metadata().unwrap(),
+            )
+            .map(|source| source.path)
+        };
+        assert_eq!(find_source(), Some(source.clone()));
+        fs::hard_link(&source, work.join("another-name")).unwrap();
+        assert_eq!(find_source(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_alias_requires_a_tracked_file_removed_from_the_target() {
+        let dir = TempDir::new().unwrap();
+        let old_path = dir.path().join("Foo");
+        let new_path = dir.path().join("foo");
+        fs::write(&old_path, b"original").unwrap();
+        if !new_path.exists() {
+            fs::hard_link(&old_path, &new_path).unwrap();
+        }
+        // Model an insensitive lookup on a case-sensitive volume too.
+        let disk_names = ["Foo".into()].into_iter().collect();
+        let entry = |name: &[u8], mode| TreeEntry {
+            name: name.to_vec(),
+            mode,
+            object_hash: crate::hash::ZERO,
+        };
+        let old = entry(b"Foo", EntryMode::Blob);
+        let new = entry(b"foo", EntryMode::Blob);
+        let base = Tree {
+            entries: vec![old.clone()],
+        };
+        let target = Tree {
+            entries: vec![new.clone()],
+        };
+        let ordinary = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let check = |target, base, new, options| {
+            check_worktree_alias(target, base, new, "", &new_path, Some(&disk_names), options)
+        };
+        assert_eq!(
+            check(&target, Some(&base), &new, &ordinary)
+                .unwrap()
+                .map(|source| source.path),
+            Some(old_path)
+        );
+        assert!(check(&target, None, &new, &ordinary).is_err());
+        let retains_old = Tree {
+            entries: vec![old, new.clone()],
+        };
+        assert!(check(&retains_old, Some(&base), &new, &ordinary).is_err());
+        let clean = RestoreOptions {
+            clean: true,
+            sparse_patterns: None,
+        };
+        assert!(check(&target, Some(&base), &new, &clean).is_err());
+        let sparse = RestoreOptions {
+            clean: false,
+            sparse_patterns: Some(Vec::new()),
+        };
+        assert!(matches!(
+            check(&target, Some(&base), &new, &sparse),
+            Err(RestoreError::Io(_))
+        ));
+        let tree_instead = entry(b"foo", EntryMode::Tree);
+        assert!(matches!(
+            check(&target, Some(&base), &tree_instead, &ordinary),
+            Err(RestoreError::Io(_))
+        ));
+        let clean_sparse = RestoreOptions {
+            clean: true,
+            sparse_patterns: Some(Vec::new()),
+        };
+        assert!(matches!(
+            check(&target, Some(&base), &tree_instead, &clean_sparse),
+            Err(RestoreError::SparseDirectoryAlias(path)) if path == "foo"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_case_rename_source_survives_the_temporary_file_sweep() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let old = ".kit-restore-tmp.1.2";
+        let new = ".KIT-RESTORE-TMP.1.2";
+        let source = dir.path().join(old);
+        fs::write(&source, b"original").unwrap();
+        let stale = dir.path().join(".kit-restore-tmp.4294967295.3");
+        fs::write(&stale, b"abandoned write").unwrap();
+        let case_sources =
+            std::collections::HashMap::from([(new.to_owned(), approved_restore_blob(&source))]);
+        remove_stale_temps(dir.path(), &[], &case_sources);
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert!(!stale.exists());
+
+        if !dir.path().join(new).exists() {
+            return;
+        }
+        let base = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: old.as_bytes().to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"original"),
+            }],
+        );
+        let target = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: new.as_bytes().to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: put_blob(&store, b"updated"),
+            }],
+        );
+        restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &sequential_read_chunks,
+        )
+        .unwrap();
+        assert_eq!(fs::read(dir.path().join(new)).unwrap(), b"updated");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(new)]);
+    }
+
     #[test]
     fn restore_progress_counts_only_selected_files_and_finishes_at_total() {
         let (_dir, store) = fresh_store();
@@ -2785,6 +3217,312 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn approved_restore_blob(path: &Path) -> CaseRenameSource {
+        CaseRenameSource {
+            path: path.to_owned(),
+            metadata: path.symlink_metadata().unwrap(),
+            tracked_mode: EntryMode::Blob,
+            tracked_hash: crate::hash::ZERO,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_case_rename_publication_restores_the_previous_name() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        let approved = approved_restore_blob(&source);
+
+        let unavailable = dir.path().join("unavailable");
+        assert!(publish_restore_temp(&unavailable, &destination, Some(&approved)).is_err());
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("Foo")]);
+        assert_eq!(fs::read(source).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_publication_removes_the_old_name_and_backup() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        let prepared = dir.path().join("prepared");
+        fs::write(&source, b"original").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        let approved = approved_restore_blob(&source);
+
+        publish_restore_temp(&prepared, &destination, Some(&approved)).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("foo")]);
+        assert_eq!(fs::read(destination).unwrap(), b"replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_keeps_both_files_when_rollback_cannot_reclaim_the_name() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let recovery = dir
+            .path()
+            .join(format!("{CASE_RENAME_BACKUP_PREFIX}example"));
+        fs::create_dir(&recovery).unwrap();
+        let backup = recovery.join(".kit-restore-tmp.4294967295.2");
+        let prepared = dir.path().join("prepared");
+        fs::write(&backup, b"original").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        fs::write(&source, b"concurrent write").unwrap();
+        let approved = CaseRenameSource {
+            path: source.clone(),
+            ..approved_restore_blob(&backup)
+        };
+
+        // Use the same name to model two spellings of one directory entry
+        // on case-sensitive test volumes too.
+        let err = finish_case_rename(&prepared, &source, &approved, &backup).unwrap_err();
+        assert!(err.to_string().contains(&backup.display().to_string()));
+        remove_stale_temps(dir.path(), &[], &std::collections::HashMap::new());
+        assert_eq!(fs::read(source).unwrap(), b"concurrent write");
+        assert_eq!(fs::read(backup).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_keeps_a_replacement_moved_to_the_recovery_path() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        let backup = dir.path().join("moved");
+        let prepared = dir.path().join("prepared");
+        fs::write(&source, b"tracked").unwrap();
+        fs::write(&backup, b"concurrent write").unwrap();
+        fs::write(&prepared, b"replacement").unwrap();
+        let approved = approved_restore_blob(&source);
+        fs::remove_file(&source).unwrap();
+
+        let err = finish_case_rename(&prepared, &destination, &approved, &backup).unwrap_err();
+        assert!(err.to_string().contains(&backup.display().to_string()));
+        assert_eq!(fs::read(backup).unwrap(), b"concurrent write");
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_new_case_alias_created_after_preflight() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let concurrent_file = dir.path().join("new file");
+        fs::write(&concurrent_file, b"concurrent write").unwrap();
+        let base = tree_of_one_file(&store, b"Foo", b"original");
+        let target = tree_of_one_file(&store, b"foo", b"replacement");
+        let options = RestoreOptions {
+            clean: false,
+            sparse_patterns: None,
+        };
+        let err = restore_tree_to_worktree_progress(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &options,
+            &sequential_read_chunks,
+            None,
+            &mut |_, _| {
+                fs::remove_file(&source).unwrap();
+                fs::rename(&concurrent_file, &destination).unwrap();
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("foo")]);
+        assert_eq!(fs::read(destination).unwrap(), b"concurrent write");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_case_rename_source_edited_with_its_mtime_preserved() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let mtime = source.symlink_metadata().unwrap().modified().unwrap();
+        let base = tree_of_one_file(&store, b"Foo", b"original");
+        let chunk = put_blob(&store, b"replacement");
+        let manifest = Object::ChunkedBlob(object::ChunkedBlob::new(11, 0, [(chunk, 11)]).unwrap());
+        let hash = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let target = put_tree_with(
+            &store,
+            vec![TreeEntry {
+                name: b"foo".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: hash,
+            }],
+        );
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &|store, chunks| {
+                fs::write(&source, b"new edit").unwrap();
+                let file = fs::File::options().write(true).open(&source).unwrap();
+                file.set_times(fs::FileTimes::new().set_modified(mtime))
+                    .unwrap();
+                assert_eq!(file.metadata().unwrap().modified().unwrap(), mtime);
+                sequential_read_chunks(store, chunks)
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        assert_eq!(fs::read(source).unwrap(), b"new edit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_refuses_a_case_rename_source_that_changed_before_restore_preflight() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"local edit").unwrap();
+        if !destination.exists() {
+            return;
+        }
+        let base = tree_of_one_file(&store, b"Foo", b"tracked original");
+        let target = tree_of_one_file(&store, b"foo", b"replacement");
+        let err = restore_tree_to_worktree_with(
+            &store,
+            &target,
+            Some(base),
+            dir.path(),
+            &RestoreOptions {
+                clean: false,
+                sparse_patterns: None,
+            },
+            &sequential_read_chunks,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("case-only source changed"));
+        assert_eq!(fs::read(source).unwrap(), b"local edit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_accepts_a_case_rename_source_stored_with_a_different_chunk_layout() {
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        let destination = dir.path().join("foo");
+        fs::write(&source, b"original").unwrap();
+        let chunks = [
+            (put_blob(&store, b"orig"), 4),
+            (put_blob(&store, b"inal"), 8),
+        ];
+        let manifest = Object::ChunkedBlob(object::ChunkedBlob::new(8, 4, chunks).unwrap());
+        let hash = store
+            .write(&serialize::serialize(&manifest).unwrap())
+            .unwrap();
+        let candidate = CaseRenameSource {
+            tracked_hash: hash,
+            ..approved_restore_blob(&source)
+        };
+        candidate.check_tracked(&store).unwrap();
+        let wrong_mode = CaseRenameSource {
+            tracked_mode: EntryMode::Executable,
+            tracked_hash: hash,
+            ..approved_restore_blob(&source)
+        };
+        assert!(wrong_mode.check_tracked(&store).is_err());
+
+        if destination.exists() {
+            let base = put_tree_with(
+                &store,
+                vec![TreeEntry {
+                    name: b"Foo".to_vec(),
+                    mode: EntryMode::Blob,
+                    object_hash: hash,
+                }],
+            );
+            let target = tree_of_one_file(&store, b"foo", b"replacement");
+            restore_tree_to_worktree_with(
+                &store,
+                &target,
+                Some(base),
+                dir.path(),
+                &RestoreOptions {
+                    clean: false,
+                    sparse_patterns: None,
+                },
+                &sequential_read_chunks,
+            )
+            .unwrap();
+            assert_eq!(fs::read(destination).unwrap(), b"replacement");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_compares_a_symlink_to_its_tracked_target() {
+        use std::os::unix::fs::symlink;
+
+        let (_repo, store) = fresh_store();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Link");
+        symlink("tracked-target", &path).unwrap();
+        let source = CaseRenameSource {
+            path: path.clone(),
+            metadata: path.symlink_metadata().unwrap(),
+            tracked_mode: EntryMode::Symlink,
+            tracked_hash: put_blob(&store, b"tracked-target"),
+        };
+        source.check_tracked(&store).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink("new-target", &path).unwrap();
+        assert!(source.check_tracked(&store).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn case_rename_cannot_move_a_directory_over_the_recovery_file() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("Foo");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("child"), b"keep").unwrap();
+        let backup = dir.path().join("backup");
+
+        assert!(move_case_rename_source(&source, &backup).is_err());
+        assert_eq!(fs::read(source.join("child")).unwrap(), b"keep");
+        assert!(backup.is_file());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_failed_removal_does_not_replace_the_restore_error() {
         use std::os::unix::fs::PermissionsExt;
@@ -2798,6 +3536,7 @@ mod tests {
             &tmp_path,
             &dir.path().join("final"),
             false,
+            None,
         )
         .unwrap_err();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
@@ -3255,11 +3994,22 @@ mod tests {
         let plain = put_blob(&store, b"plain");
         let rd = |s: &ObjectStore, h: &[Hash]| sequential_read_chunks(s, h);
         for (name, hash) in [("big", big), ("plain", plain)] {
-            let off =
-                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, false).unwrap();
+            let off = restore_blob_with(
+                &store,
+                target.path(),
+                name,
+                hash,
+                false,
+                1,
+                &rd,
+                false,
+                None,
+            )
+            .unwrap();
             assert_eq!(off, None, "{name} without observe");
             let on =
-                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true).unwrap();
+                restore_blob_with(&store, target.path(), name, hash, false, 1, &rd, true, None)
+                    .unwrap();
             assert!(on.is_some(), "{name} with observe");
         }
     }

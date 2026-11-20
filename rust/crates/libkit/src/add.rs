@@ -16,6 +16,7 @@
 //! The index changes in the order of the walk, whichever way the hash ran.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1198,15 +1199,45 @@ fn add_tree(
 }
 
 fn mark_missing_paths_removed(root: &Path, idx: &mut Index, seen: &HashSet<String>) {
+    let mut directory_names = HashMap::new();
     for entry in &mut idx.entries {
         if entry.status != EntryStatus::Removed
             && !seen.contains(&entry.path)
-            && matches!(root.join(&entry.path).symlink_metadata(), Err(e) if is_gone(&e))
+            && match root.join(&entry.path).symlink_metadata() {
+                Ok(_) => has_exact_spelling(root, &entry.path, &mut directory_names) == Some(false),
+                Err(error) => is_gone(&error),
+            }
         {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
         }
     }
+}
+
+/// A case-insensitive lookup can succeed even after the name disappeared.
+fn has_exact_spelling(
+    root: &Path,
+    path: &str,
+    directory_names: &mut HashMap<PathBuf, Option<HashSet<OsString>>>,
+) -> Option<bool> {
+    let mut parent = root.to_path_buf();
+    for component in path.split('/') {
+        let names = directory_names
+            .entry(parent.clone())
+            .or_insert_with_key(|dir| {
+                std::fs::read_dir(dir)
+                    .ok()?
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<io::Result<_>>()
+                    .ok()
+            })
+            .as_ref()?;
+        if !names.contains(std::ffi::OsStr::new(component)) {
+            return Some(false);
+        }
+        parent.push(component);
+    }
+    Some(true)
 }
 
 /// Choose hunks across the named files. The index is seeded from `HEAD`, so a
@@ -1468,6 +1499,48 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), Error> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_add_keeps_an_unseen_tracked_file_with_its_exact_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("present"), b"data").unwrap();
+        let mut index = Index::new();
+        let original = [3; 32];
+        for path in ["present", "gone"] {
+            stage_hashed(
+                &mut index,
+                path.to_owned(),
+                (EntryStatus::Blob, original, (0, 0, 0, 0)),
+            );
+        }
+
+        mark_missing_paths_removed(dir.path(), &mut index, &HashSet::new());
+
+        assert_eq!(index.entries[0].status, EntryStatus::Blob);
+        assert_eq!(index.entries[0].object_hash, original);
+        assert_eq!(index.entries[1].status, EntryStatus::Removed);
+        assert_eq!(index.entries[1].object_hash, ZERO);
+    }
+
+    #[test]
+    fn bulk_add_checks_exact_spelling_of_each_path_component() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Folder")).unwrap();
+        std::fs::write(dir.path().join("Folder/foo"), b"data").unwrap();
+        let mut names = HashMap::new();
+
+        assert_eq!(
+            has_exact_spelling(dir.path(), "Folder/foo", &mut names),
+            Some(true)
+        );
+        for path in ["Folder/Foo", "folder/foo"] {
+            assert_eq!(
+                has_exact_spelling(dir.path(), path, &mut names),
+                Some(false)
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_path_text_preserves_boundaries_and_refuses_lossy_names() {
