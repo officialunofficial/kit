@@ -230,14 +230,14 @@ pub fn encode(base: &[u8], result: &[u8]) -> Result<Vec<u8>, KitError> {
                     emit_inserts(&mut out, &result[lit_start..ti]);
 
                     // Greedy forward extension, capped at u16::MAX.
-                    let mut match_len = BLOCK_SIZE;
-                    while base_pos_usize + match_len < base.len()
-                        && ti + match_len < result.len()
-                        && base[base_pos_usize + match_len] == result[ti + match_len]
-                        && match_len < u16::MAX as usize
-                    {
-                        match_len += 1;
-                    }
+                    let limit = (base.len() - base_pos_usize)
+                        .min(result.len() - ti)
+                        .min(u16::MAX as usize);
+                    let match_len = BLOCK_SIZE
+                        + common_prefix_len(
+                            &base[base_pos_usize + BLOCK_SIZE..base_pos_usize + limit],
+                            &result[ti + BLOCK_SIZE..ti + limit],
+                        );
                     // match_len is bounded by u16::MAX above.
                     emit_copy(
                         &mut out,
@@ -441,6 +441,23 @@ fn write_header(out: &mut Vec<u8>, base_len: usize, result_len: usize) {
     out.extend_from_slice(&rl.to_le_bytes());
 }
 
+/// Length of the longest common prefix of `a` and `b`, which have equal length.
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    const WORD: usize = 8;
+    let mut n = 0;
+    for (x, y) in a.chunks_exact(WORD).zip(b.chunks_exact(WORD)) {
+        if x != y {
+            break;
+        }
+        n += WORD;
+    }
+    n + a[n..]
+        .iter()
+        .zip(&b[n..])
+        .take_while(|(x, y)| x == y)
+        .count()
+}
+
 fn emit_copy(out: &mut Vec<u8>, offset: u32, length: u16) {
     out.push(OP_COPY);
     out.extend_from_slice(&offset.to_le_bytes());
@@ -578,6 +595,19 @@ mod tests {
         // Within one seed (i.e. one `encode()` call's index), hashing
         // must still be internally consistent.
         assert_eq!(hash_u64_with(&a, 42), hash_u64_with(&a, 42));
+    }
+
+    #[test]
+    fn common_prefix_len_finds_the_first_difference_at_every_offset() {
+        let a: Vec<u8> = (0..40).collect();
+        for len in 0..=a.len() {
+            assert_eq!(common_prefix_len(&a[..len], &a[..len]), len);
+            for at in 0..len {
+                let mut b = a[..len].to_vec();
+                b[at] ^= 0xFF;
+                assert_eq!(common_prefix_len(&a[..len], &b), at, "len {len} at {at}");
+            }
+        }
     }
 
     #[test]
