@@ -906,7 +906,8 @@ Branches / refs:
   per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
   `no previous branch`. Running an older kit's gc on a repository a newer kit
   uses can prune the previous HEAD; `switch -` then reports `previous HEAD
-  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}` for N greater than 1 is not supported.
+  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
+  for N greater than 1 is not supported.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`

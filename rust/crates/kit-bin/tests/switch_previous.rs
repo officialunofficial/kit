@@ -125,8 +125,7 @@ fn pruned_previous_head_is_reported_and_changes_nothing() {
     let previous_before = fs::read(p.join(".kit/PREVIOUS_HEAD")).unwrap();
 
     let out = run_in(p, &["switch", "-"]);
-    let missing = run_in(p, &["switch", "no-such-branch"]);
-    assert_eq!(out.status.code(), missing.status.code());
+    assert_eq!(out.status.code(), Some(1));
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -137,6 +136,9 @@ fn pruned_previous_head_is_reported_and_changes_nothing() {
         "{err}"
     );
     assert_eq!(fs::read(p.join(".kit/HEAD")).unwrap(), head_before);
-    assert_eq!(fs::read(p.join(".kit/PREVIOUS_HEAD")).unwrap(), previous_before);
+    assert_eq!(
+        fs::read(p.join(".kit/PREVIOUS_HEAD")).unwrap(),
+        previous_before
+    );
     assert_eq!(fs::read(p.join("a.txt")).unwrap(), b"two\n");
 }
