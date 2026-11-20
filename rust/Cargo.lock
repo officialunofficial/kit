@@ -2528,6 +2528,7 @@ dependencies = [
  "http-body",
  "hyper",
  "kit-core",
+ "kit-test-util",
  "md-5",
  "mockito",
  "reqwest",
