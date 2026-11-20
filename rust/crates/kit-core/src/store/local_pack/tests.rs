@@ -143,15 +143,14 @@ fn write_sink_presence_checks_use_staged_loose_and_known_pack_objects() {
     writer.finish().unwrap();
 
     assert!(store.batch().has(&packed));
+    let loose = store.write(&blob(b"loose object")).unwrap();
     let reader = ObjectStore::open(&layout).unwrap();
-    let loose = reader.write(&blob(b"loose object")).unwrap();
     let batch = reader.batch();
-    let staged = batch.write(&blob(b"staged object")).unwrap();
-
     assert!(!batch.has(&packed));
-    assert!(reader.contains(&packed));
-    assert!(batch.has(&packed));
     assert!(batch.has(&loose));
+
+    let staged = batch.write(&blob(b"staged object")).unwrap();
+    assert!(batch.has(&packed));
     assert!(batch.has(&staged));
     assert!(!batch.has(&[0; 32]));
 }
@@ -215,7 +214,9 @@ fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
         Err(StoreError::HashMismatch { .. })
     ));
     assert_ne!(store.read_raw_for_verification(&id).unwrap(), bytes);
-    store.write(&bytes).unwrap();
+    let batch = store.batch();
+    batch.write_fetched(&bytes).unwrap();
+    batch.commit().unwrap();
     assert_eq!(store.read(&id).unwrap(), bytes);
     assert_eq!(store.read_raw_for_verification(&id).unwrap(), bytes);
     assert_eq!(
@@ -384,7 +385,9 @@ fn unknown_live_pack_versions_refuse_lookup_and_repair() {
         drop(guard);
         let still_open = ObjectStore::open(&layout).unwrap();
         assert_eq!(store.read(&id).unwrap(), bytes);
-        store.write(&bytes).unwrap();
+        let batch = store.batch();
+        batch.write_fetched(&bytes).unwrap();
+        batch.commit().unwrap();
 
         let (path, kind) = if unknown_index {
             (&pair.index, "local index version 2")

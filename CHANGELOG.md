@@ -19,6 +19,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
+
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
