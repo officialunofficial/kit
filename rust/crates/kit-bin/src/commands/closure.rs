@@ -1,7 +1,7 @@
-//! `kit closure export|verify` — full-disclosure pack export and verify.
+//! Export and verify full-disclosure packs or repair local pack indexes.
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
@@ -28,13 +28,15 @@ enum ClosureFormat {
 #[derive(Debug, Parser)]
 #[command(
     name = "kit closure",
-    about = "Export or verify a commit's object-set closure (full disclosure)."
+    about = "Export or verify a commit closure, or repair local pack indexes."
 )]
 enum Cmd {
     /// Write MANIFEST.mkcl and raw-only pack files for a revision.
     Export(ExportArgs),
     /// Verify a closure against a trusted id (`--from`) or the local store.
     Verify(VerifyArgs),
+    /// Rebuild damaged local pack indexes from verified packs.
+    RepairIndexes,
 }
 
 #[derive(Debug, Parser)]
@@ -85,6 +87,7 @@ pub fn run(args: &[String]) -> u8 {
     match cmd {
         Cmd::Export(opts) => run_export(&opts),
         Cmd::Verify(opts) => run_verify(&opts),
+        Cmd::RepairIndexes => run_repair_indexes(),
     }
 }
 
@@ -165,6 +168,41 @@ fn run_export(opts: &ExportArgs) -> u8 {
     exit::OK
 }
 
+fn run_repair_indexes() -> u8 {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => return emit_err(&format!("cwd: {e}"), exit::NOINPUT),
+    };
+    let repo = match super::open_repo(&cwd) {
+        Ok(repo) => repo,
+        Err(code) => return code,
+    };
+    match repo.store().check_local_packs(true) {
+        Ok(count) => {
+            let noun = if count == 1 { "index" } else { "indexes" };
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "Rebuilt {count} local pack {noun}."
+            );
+            exit::OK
+        }
+        Err(StoreError::Io(e)) if e.kind() == ErrorKind::WouldBlock => emit_err(
+            "the format lock is busy. Retry `kit closure repair-indexes` after other kit commands finish.",
+            exit::TEMPFAIL,
+        ),
+        Err(StoreError::Io(e)) if e.kind() == ErrorKind::InvalidData => {
+            super::fetch_repair::note_bad_pack(repo.layout());
+            emit_err(
+                &format!(
+                    "repair local pack indexes: {e}. To recover a damaged fetched pack, run `kit fetch <remote>`."
+                ),
+                exit::DATAERR,
+            )
+        }
+        Err(e) => emit_err(&format!("repair local pack indexes: {e}"), exit::DATAERR),
+    }
+}
+
 fn run_verify(opts: &VerifyArgs) -> u8 {
     let json = matches!(opts.format, ClosureFormat::Json);
     if let Some(dir) = opts.from.as_deref() {
@@ -237,7 +275,7 @@ fn run_verify_local(opts: &VerifyArgs, json: bool) -> u8 {
     if opts.show_unreferenced
         && let Err(e) = store.check_local_packs(false)
     {
-        if matches!(&e, StoreError::Io(err) if err.kind() == std::io::ErrorKind::InvalidData) {
+        if matches!(&e, StoreError::Io(err) if err.kind() == ErrorKind::InvalidData) {
             super::fetch_repair::note_bad_pack(&layout);
         }
         return emit_err(&format!("check local packs: {e}"), exit::DATAERR);
