@@ -944,6 +944,7 @@ pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
 /// All decode / validation errors raised by the serialize module, plus
 /// a small number of construction-time errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum KitError {
     #[error("input is shorter than the 6-byte v1 prologue")]
     EmptyData,

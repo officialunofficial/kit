@@ -15,6 +15,7 @@ use kit_core::transfer::PackListError;
 /// Display text is part of the contract the `kit` command line relies on:
 /// it prints these messages verbatim.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SyncError {
     /// The caller's [`Observer::cancelled`](crate::Observer::cancelled)
     /// returned `true` at a checkpoint. The transfer is half-finished, but no

@@ -24,6 +24,14 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
+- **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
+- **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
+- **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
+
+### Removed
+
+- **Breaking:** Remove `libkit::transfer::pull_with_source` and `fetch_with_source`. Call `pull_with_options` or `fetch_with_options` with a `SyncOptions`.
+- **Breaking:** Remove `libkit::transfer::push_branch_with_depth` and `push_branch_with_limits`. Call `push_branch_steps`, which takes the same depth and pack bound plus a `PushControl` and a step callback.
 
 ### Fixed
 

@@ -22,15 +22,18 @@ fn read_marker(file: &File) -> StoreResult<Vec<u8>> {
     }
 }
 
+/// The marker is exactly one of three byte strings. Any other bytes, such as
+/// trailing whitespace, refuse the store.
 fn parse(bytes: &[u8]) -> StoreResult<bool> {
     if bytes == PACKED {
         return Ok(true);
     }
-    if bytes == LOST_APPEND {
+    if bytes == LEGACY || bytes == LOST_APPEND {
         return Ok(false);
     }
     match std::str::from_utf8(bytes) {
-        Ok(text) if text.trim() == FORMAT_VALUE => Ok(false),
+        // Padding around the right value shows in the report.
+        Ok(text) if text.trim() == FORMAT_VALUE => Err(incompatible(Some(text.into()))),
         Ok(text) => Err(incompatible(Some(text.trim().into()))),
         Err(_) => Err(incompatible(Some("unreadable".into()))),
     }
@@ -51,24 +54,20 @@ pub(super) fn check(path: &Path) -> StoreResult<bool> {
 }
 
 pub(super) fn try_activate(path: &Path) -> StoreResult<()> {
-    match activate(path, false) {
+    #[cfg(feature = "fault-injection")]
+    if crate::fault::keeps_loose(path) {
+        return Ok(());
+    }
+    match activate(path) {
         Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
         result => result,
     }
 }
 
-pub(super) fn activate(path: &Path, strict: bool) -> StoreResult<()> {
+pub(super) fn activate(path: &Path) -> StoreResult<()> {
     let file = open_marker(path, true)?;
     file.try_lock().map_err(io::Error::from)?;
-    let bytes = read_marker(&file)?;
-    if !parse(&bytes)? {
-        if bytes != LEGACY && bytes != LOST_APPEND {
-            return if strict {
-                Err(incompatible(Some("noncanonical legacy marker".into())))
-            } else {
-                Ok(())
-            };
-        }
+    if !parse(&read_marker(&file)?)? {
         crate::pack::write_at(&file, LEGACY.len() as u64, b"P")?;
     }
     file.sync_all()?;
@@ -135,8 +134,8 @@ mod tests {
             fs::write(&marker, state).unwrap();
             let mut original = File::open(&marker).unwrap();
 
-            activate(&marker, true).unwrap();
-            activate(&marker, true).unwrap();
+            activate(&marker).unwrap();
+            activate(&marker).unwrap();
             assert!(check(&marker).unwrap());
             let mut current = Vec::new();
             original.read_to_end(&mut current).unwrap();
@@ -155,33 +154,74 @@ mod tests {
 
         let guard = store.prune_guard().unwrap();
         assert!(
-            matches!(activate(&marker, true), Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock)
+            matches!(activate(&marker), Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock)
         );
         assert_eq!(fs::read(&marker).unwrap(), LOST_APPEND);
         drop(guard);
-        activate(&marker, true).unwrap();
+        activate(&marker).unwrap();
         assert_eq!(fs::read(&marker).unwrap(), PACKED);
     }
 
     #[test]
-    fn the_guard_checks_the_marker_at_and_above_its_read_limit() {
+    fn the_guard_refuses_every_marker_but_the_three_exact_ones() {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
         let store = ObjectStore::init(&layout).unwrap();
-        let mut marker = b"bmt-v2".to_vec();
-        marker.resize(64, b' ');
-        fs::write(layout.format_file(), &marker).unwrap();
-        let guard = store.prune_guard().unwrap();
-        assert!(!store.local_packs_active(&guard).unwrap());
-        drop(guard);
+        let mut padded = b"bmt-v2".to_vec();
+        padded.resize(64, b' ');
+        let mut too_long = padded.clone();
+        too_long.push(b' ');
 
-        marker.push(b' ');
-        fs::write(layout.format_file(), &marker).unwrap();
-        let guard = store.prune_guard().unwrap();
-        assert!(matches!(
-            store.local_packs_active(&guard),
-            Err(StoreError::IncompatibleRepoFormat { .. })
-        ));
+        for (bytes, active) in [
+            (LEGACY.to_vec(), Some(false)),
+            (LOST_APPEND.to_vec(), Some(false)),
+            (PACKED.to_vec(), Some(true)),
+            (b"bmt-v2\n\n".to_vec(), None),
+            (b"bmt-v2".to_vec(), None),
+            (b"bmt-v2\r\n".to_vec(), None),
+            (b" bmt-v2\n".to_vec(), None),
+            (padded, None),
+            (too_long, None),
+        ] {
+            fs::write(layout.format_file(), &bytes).unwrap();
+            let guard = store.prune_guard().unwrap();
+            match active {
+                Some(active) => {
+                    assert_eq!(
+                        store.local_packs_active(&guard).unwrap(),
+                        active,
+                        "{bytes:?}"
+                    );
+                }
+                None => assert!(
+                    matches!(
+                        store.local_packs_active(&guard),
+                        Err(StoreError::IncompatibleRepoFormat { .. })
+                    ),
+                    "{bytes:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_marker_is_reported_with_its_padding_only_for_the_known_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("format");
+        for (bytes, found) in [
+            (b"bmt-v2\n\n".as_slice(), "bmt-v2\n\n"),
+            (b"bmt-v2 ".as_slice(), "bmt-v2 "),
+            (b"bmt-v1\n".as_slice(), "bmt-v1"),
+        ] {
+            fs::write(&marker, bytes).unwrap();
+            assert!(
+                matches!(
+                    check(&marker),
+                    Err(StoreError::IncompatibleRepoFormat { found: Some(ref got) }) if got == found
+                ),
+                "{bytes:?}"
+            );
+        }
     }
 
     #[test]
@@ -211,30 +251,27 @@ mod tests {
         ObjectStore::init(&layout).unwrap();
         let marker = layout.format_file();
 
-        for malformed in [b"bmt-v2\nX".as_slice(), b"bmt-v2\n\0\0", b"bmt-v2\nP\n"] {
+        for malformed in [
+            b"bmt-v2\nX".as_slice(),
+            b"bmt-v2\n\0\0",
+            b"bmt-v2\nP\n",
+            b"bmt-v2\n\n",
+            b"bmt-v2",
+        ] {
             fs::write(&marker, malformed).unwrap();
             assert!(matches!(
                 check(&marker),
                 Err(StoreError::IncompatibleRepoFormat { .. })
             ));
             assert!(matches!(
-                activate(&marker, true),
+                activate(&marker),
                 Err(StoreError::IncompatibleRepoFormat { .. })
             ));
             assert_eq!(fs::read(&marker).unwrap(), malformed);
         }
-        let noncanonical = b"bmt-v2\n\n";
-        fs::write(&marker, noncanonical).unwrap();
-        assert!(!check(&marker).unwrap());
-        assert!(matches!(
-            activate(&marker, true),
-            Err(StoreError::IncompatibleRepoFormat { .. })
-        ));
-        assert_eq!(fs::read(&marker).unwrap(), noncanonical);
-
         fs::remove_file(&marker).unwrap();
         assert!(matches!(
-            activate(&marker, true),
+            activate(&marker),
             Err(StoreError::IncompatibleRepoFormat { found: None })
         ));
         assert!(!marker.exists());

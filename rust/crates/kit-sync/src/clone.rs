@@ -30,6 +30,7 @@ pub struct CloneRemote {
 
 /// Why preparing the clone destination failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CloneInitError {
     #[error("create {path}: {source}")]
     CreateDir {

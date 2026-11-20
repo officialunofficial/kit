@@ -217,12 +217,8 @@ fn fresh_target() -> (tempfile::TempDir, std::path::PathBuf, RepoLayout) {
 /// objects or want one durable checkpoint per wire pack use this fixture.
 fn fresh_loose_target() -> (tempfile::TempDir, std::path::PathBuf, RepoLayout) {
     let target = fresh_target();
-    keep_loose(&target.2);
+    kit_core::fault::keep_loose(&target.2);
     target
-}
-
-fn keep_loose(layout: &RepoLayout) {
-    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
 }
 
 fn run_fetch(
@@ -958,7 +954,7 @@ fn a_clone_run_again_over_its_unfinished_self_resumes() {
 
     let resumed = dir.path().join("resumed");
     let layout = init_clone_dir(&resumed, &clone_remote()).unwrap();
-    keep_loose(&layout);
+    kit_core::fault::keep_loose(&layout);
     let dying = HookSource::new(&remote, 2, Action::Panic);
     let died = catch_unwind(AssertUnwindSafe(|| {
         run_fetch(&resumed, &dying, &NoopObserver)
