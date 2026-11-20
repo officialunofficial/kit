@@ -96,3 +96,43 @@ pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
         hook(&step());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{SyncStep, on_sync};
+    use crate::layout::RepoLayout;
+    use crate::store::ObjectStore;
+
+    #[test]
+    fn the_hook_sees_each_dirent_flush_until_its_guard_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let root = store.objects_root().to_path_buf();
+        let seen: Arc<Mutex<Vec<SyncStep>>> = Arc::default();
+        {
+            let seen = Arc::clone(&seen);
+            let root = root.clone();
+            let _hook = on_sync(move |step| {
+                let ours = match step {
+                    SyncStep::DirBarrier(dir) => dir.starts_with(&root),
+                    SyncStep::DeviceFlush(at) => *at == root,
+                };
+                if ours {
+                    seen.lock().unwrap().push(step.clone());
+                }
+            });
+            store.sync_shards([0x01]).unwrap();
+        }
+        store.sync_shards([0x02]).unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                SyncStep::DirBarrier(root.join("01")),
+                SyncStep::DeviceFlush(root.clone()),
+            ]
+        );
+    }
+}
