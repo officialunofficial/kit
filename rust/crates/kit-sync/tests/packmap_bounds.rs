@@ -256,3 +256,27 @@ fn a_push_at_the_node_bound_re_baselines_a_chain_one_node_can_list() {
     assert_eq!(tx.read_ref(MAIN).unwrap(), Some(c2));
     assert_eq!(fetched_chain(&tx).unwrap(), (1, 3));
 }
+
+/// A force push of a commit whose closure the remote lacks replaces a chain
+/// a fetch refuses (its head names no node) with a new one.
+#[test]
+fn a_force_push_of_a_fresh_root_resets_a_broken_chain() {
+    let tx = MemoryTransport::new();
+    let work = Work::new();
+    let c1 = work.commit(None);
+    work.branch("main", c1);
+    work.push(&TransportSource::new(&tx), PushLease::FastForward)
+        .unwrap();
+    tx.update_ref(MAIN_MAP, RefWriteCondition::Any, &[0xEE; 32])
+        .unwrap();
+    assert!(fetched_chain(&tx).is_err());
+
+    let other = Work::new();
+    let root = other.commit(None);
+    other.branch("main", root);
+    other
+        .push(&TransportSource::new(&tx), PushLease::Force)
+        .unwrap();
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(root));
+    assert_eq!(fetched_chain(&tx).unwrap().0, 1);
+}
