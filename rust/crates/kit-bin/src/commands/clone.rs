@@ -203,6 +203,7 @@ pub fn run(args: &[String]) -> u8 {
                         opts.branch.as_deref(),
                         require_signed,
                         opts.tags.fetch_tags(),
+                        merged.gc_auto_enabled(),
                         opts.attestations.settings(&merged, url),
                         progress.terminal(),
                     )

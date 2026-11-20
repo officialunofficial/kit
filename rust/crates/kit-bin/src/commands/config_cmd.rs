@@ -383,6 +383,7 @@ const CONFIG_KEYS: &[&str] = &[
     "default_branch",
     "durability.objects",
     "fetch.attestations",
+    "gc.auto",
     "push.attestations",
     "grant.webauthn_rp",
     "http.sslcainfo",
@@ -418,6 +419,11 @@ fn lookup<'a>(cfg: &'a Config, key: &str) -> Option<Cow<'a, str>> {
         "trusted_remote_endpoint" => Some(Cow::Borrowed(&cfg.trusted_remote_endpoint)),
         "signing_key" => Some(Cow::Borrowed(&cfg.signing_key)),
         "default_branch" => Some(Cow::Borrowed(&cfg.default_branch)),
+        "gc.auto" => Some(Cow::Borrowed(if cfg.gc_auto_enabled() {
+            "true"
+        } else {
+            "false"
+        })),
         "durability.objects" => Some(Cow::Borrowed(&cfg.durability_objects)),
         "fetch.attestations" => Some(Cow::Borrowed(&cfg.fetch_attestations)),
         "push.attestations" => Some(Cow::Borrowed(&cfg.push_attestations)),

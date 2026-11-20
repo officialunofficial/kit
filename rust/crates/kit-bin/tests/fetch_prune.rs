@@ -96,3 +96,51 @@ fn prune_with_nothing_lost_changes_nothing() {
     assert!(tracking(repo.path(), "topic"));
     assert!(tracking(repo.path(), "main"));
 }
+
+#[test]
+fn prune_reports_maintenance_and_honors_the_repo_switch() {
+    let (publisher, remote) = pushed_repo();
+    let clone = tempfile::tempdir().unwrap();
+    let url = format!("kit+file://{}", remote.path().display());
+    ok(
+        publisher.path(),
+        &["clone", &url, clone.path().to_str().unwrap()],
+    );
+    let stamp = clone.path().join(".kit/gc-auto");
+    assert!(stamp.is_file());
+    let leftover = clone
+        .path()
+        .join(".kit/objects/pack/.11111111111111111111111111111111.tmp.pack");
+    fs::write(&leftover, b"old stage").unwrap();
+    fs::File::open(&leftover)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+
+    lose_remote_topic(remote.path());
+    ok(clone.path(), &["config", "--local", "gc.auto", "false"]);
+    let disabled = ok(clone.path(), &["fetch", "-p", "--format=json"]);
+    assert!(
+        !String::from_utf8(disabled.stdout)
+            .unwrap()
+            .contains("\"maintenance\"")
+    );
+    assert!(leftover.exists());
+
+    ok(clone.path(), &["config", "--local", "gc.auto", "true"]);
+    fs::write(publisher.path().join("a.txt"), b"two").unwrap();
+    ok(publisher.path(), &["add", "a.txt"]);
+    ok(publisher.path(), &["commit", "-m", "c2"]);
+    ok(publisher.path(), &["push", "origin", "main:main"]);
+    let swept = ok(clone.path(), &["fetch", "-q", "--format=json"]);
+    let report: serde_json::Value = serde_json::from_slice(&swept.stdout).unwrap();
+    assert_eq!(report["maintenance"]["leftovers_removed"], 1);
+    assert_eq!(report["maintenance"]["bytes_reclaimed"], 9);
+    assert_eq!(report["maintenance"]["collection"], "not_due");
+    assert!(
+        !String::from_utf8(swept.stderr)
+            .unwrap()
+            .contains("maintenance:")
+    );
+    assert!(!leftover.exists());
+}

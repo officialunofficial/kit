@@ -40,6 +40,8 @@ use crate::verify::{VerifiedHistory, verify_history_signatures};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FetchReport {
+    /// Best-effort maintenance after publishing the fetch.
+    pub maintenance: Option<crate::MaintenanceReport>,
     /// Branches whose remote-tracking ref was published.
     pub branches_fetched: usize,
     /// Envelopes saved after validating their pack and local subject.

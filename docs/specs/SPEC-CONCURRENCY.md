@@ -42,6 +42,7 @@ document points here.
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
+| `gc-auto` | common dir | per-repo, try-only | one automatic maintenance step at a time. The file holds its advisory stamp | SPEC-GC, "Automatic maintenance" |
 | shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except the prune guard, which lasts a whole fetch or the branch phase of a push | shared for bulk writes, cached reuse, format validation, and the fetch and push prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
 | `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
@@ -222,6 +223,15 @@ or push holding the prune guard can therefore wait for that command to release
 `worktree.lock` without a deadlock. The existing local-filesystem locking
 assumptions apply.
 
+Automatic maintenance never waits for a lock. The leftover sweep tries
+the exclusive `format` lock only when it finds an eligible old leftover.
+A fetch or push arriving during the hold can wait for the recheck,
+unlinks and directory flushes. During collection, when there is a
+verified pair to retire, automatic maintenance first tries the registry
+and worktree locks in gc's order. It holds them for the second root read
+and the retirement of the verified names. See SPEC-GC, "Automatic
+maintenance".
+
 ## 4. Global lock order and per-command lock sets
 
 A process that takes more than one lock from §2 MUST acquire them in
@@ -287,6 +297,7 @@ the history lock):
 | `worktree add` | `worktrees.lock` (guard re-verified after acquiring), then the new tree's `worktree.lock` |
 | `worktree remove` | `worktrees.lock`, then the condemned tree's `worktree.lock` |
 | `gc` | `worktrees.lock` first (freezes the worktree set), then every registered tree's `worktree.lock`, deterministic order (main tree first, then registry ids ascending) |
+| automatic maintenance after `fetch` or `pull` | After release of the command's prune guard and worktree locks, try `gc-auto`. The sweep adds only the exclusive `format` try-lock. Collection with a verified retirement candidate tries `worktrees.lock`, each `worktree.lock` in gc's order, then the exclusive `format` lock. A miss ends the step. |
 | `clean` | this tree's `worktree.lock` |
 | `status` (opportunistic index refresh) | this tree's `worktree.lock`, tried with a 10 ms timeout; on contention the refresh is skipped |
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |

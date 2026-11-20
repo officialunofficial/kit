@@ -317,6 +317,52 @@ fn clone_loose_into(remote: &Remote, dir: &Path) {
 }
 
 #[test]
+fn maintenance_stamps_a_clone_and_skips_an_up_to_date_fetch() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let report = clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    assert!(stamp.is_file(), "{report:?}");
+    std::fs::remove_file(&stamp).unwrap();
+
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(!stamp.exists());
+}
+
+#[test]
+fn maintenance_can_be_disabled_for_a_fetch_that_applies_a_pack() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    std::fs::remove_file(&stamp).unwrap();
+    remote.publish(Some(first), &[("a", b"second")], true);
+
+    let report = fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_auto_maintenance(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_ne!(report.packs_downloaded, 0);
+    assert!(report.maintenance.is_none());
+    assert!(!stamp.exists());
+}
+
+#[test]
 fn clone_packs_small_files_and_leaves_large_files_loose() {
     let remote = Remote::new();
     let large = vec![42; 16 * 1024 - kit_core::serialize::BLOB_PROLOGUE_LEN];

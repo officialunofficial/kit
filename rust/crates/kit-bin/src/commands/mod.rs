@@ -41,6 +41,7 @@ pub mod keygen;
 pub mod log;
 pub mod ls_files;
 pub mod ls_tree;
+mod maintenance;
 pub mod mcp;
 #[cfg(feature = "mcp-v2")]
 pub mod mcp_v2;

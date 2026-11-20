@@ -178,10 +178,14 @@ fn pull_one(
                                 require_signed,
                                 false,
                                 opts.tags.fetch_tags(),
+                                cfg.merged.gc_auto_enabled(),
                                 opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
-                            .map(|fetch| (fetch, None))
+                            .map(|mut fetch| {
+                                let maintenance = fetch.maintenance.take();
+                                (fetch, None, maintenance)
+                            })
                         } else {
                             remote_dispatch::pull_all_with_source(
                                 cwd,
@@ -190,10 +194,11 @@ fn pull_one(
                                 None,
                                 require_signed,
                                 opts.tags.fetch_tags(),
+                                cfg.merged.gc_auto_enabled(),
                                 opts.attestations.settings(&cfg.merged, endpoint),
                                 progress.terminal(),
                             )
-                            .map(|report| (report.fetch, Some(report.outcome)))
+                            .map(|report| (report.fetch, Some(report.outcome), report.maintenance))
                         }
                     })
                     .and_then(|result| result);
@@ -204,7 +209,7 @@ fn pull_one(
                 outcome
             };
             match pull_outcome {
-                Ok((fetch, outcome)) => {
+                Ok((fetch, outcome, maintenance)) => {
                     let tags = {
                         let mut stderr = std::io::stderr().lock();
                         super::fetched_tags::print_new(&fetch, &mut stderr);
@@ -221,9 +226,11 @@ fn pull_one(
                             endpoint,
                             outcome,
                             &fetch,
+                            maintenance.as_ref(),
                             json,
                         ),
                     };
+                    super::maintenance::print(maintenance.as_ref(), quiet);
                     // A refused tag fails the pull only after the branch moved.
                     if code == exit::OK { tags } else { code }
                 }
@@ -251,6 +258,7 @@ fn report_fast_forward(
     endpoint: &str,
     outcome: kit_sync::PullOutcome,
     fetch: &kit_sync::FetchReport,
+    maintenance: Option<&kit_sync::MaintenanceReport>,
     json: bool,
 ) -> u8 {
     let (branch, old_tip, new_tip, up_to_date) = match outcome {
@@ -286,6 +294,7 @@ fn report_fast_forward(
             .field_opt_hash("new", new_tip.as_ref())
             .field_bool("up_to_date", up_to_date);
         super::fetched_tags::json_fields(&mut obj, fetch);
+        super::maintenance::json_field(&mut obj, maintenance);
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }

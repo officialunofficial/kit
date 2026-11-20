@@ -391,6 +391,71 @@ rewriting those packs. These estimates exclude framing and index
 overhead. The sweep reclaims whole eligible packs. The dry run changes
 no files.
 
+### Automatic maintenance
+
+A native fetch or pull that applied at least one pack or pruned a
+remote-tracking ref runs one maintenance step after its last ref publish.
+It first releases its prune guard and every `worktree.lock`. It reports
+the original command result even if maintenance fails or is interrupted.
+Set `gc.auto = false` or disable the embedder's option to skip the step.
+
+The step only tries locks. It stops at the first miss. It tries the
+exclusive lock of `<common_dir>/gc-auto` first. The holder rewrites that
+file in place with the last attempt's time and outcome and the pair count
+at the last complete collection. A missing or unreadable stamp means
+the step has never run. The first gated fetch writes the stamp and stops.
+The stamp is advisory and never authorizes deletion.
+
+**Sweep.** List `objects/pack/` by name to count published pairs and
+find recognized staging files and lone final members. Apply the manual
+orphan rule above at the default grace. Under the exclusive `format`
+try-lock, recheck the candidate's name, counterpart, file identity and
+age, unlink it, then flush the directory. The sweep reads no object
+and takes no `format` lock unless it finds an eligible leftover. A
+publisher holds the shared guard from staging through its final flush.
+A fetch or push that requests the shared guard during the sweep can
+wait for the rest of the exclusive hold, including the recheck,
+unlinks and directory flushes. The sweep remains effective if the
+collection that follows stops without retiring any pack.
+
+**Collection.** The listing must show at least 32 published pairs.
+The stamp allows a new collection 7 days after a complete collection
+or an error, 1 hour after a lock miss or changed roots, or 30 days
+after an attempt that ran out of budget. These intervals are policy.
+
+1. Read `now` and collect retention roots without the worktree locks.
+2. Mark the roots under a wall-clock budget of 5 seconds that also covers
+   retirement planning. A missing object or skipped soft root stops
+   collection.
+3. Plan retirement at the default grace. Validate the indexes, account
+   for each entry against the mark, verify the body of each wholly dead
+   pair past grace, and record each candidate's file stamps. A damaged
+   pair or expired budget ends collection before retirement. With no
+   candidate, record a complete collection and stop.
+4. Try `worktrees.lock`, then every registered tree's `worktree.lock`
+   in the order of SPEC-CONCURRENCY §4.
+5. Read the roots again. If the hard set or the soft list differs, stop.
+   An unreadable root also stops collection before retirement.
+6. Retire the planned pairs under the exclusive `format` try-lock.
+   Apply the stamp recheck and removal order above. Release the locks.
+
+The mark depends on immutable objects and the retention roots. The
+second root read holds every lock that manual gc takes, so a locked
+writer cannot publish between that read and retirement. Fetch and push
+hold a prune guard until they publish under a worktree lock. A git
+import refreshes the mtime of the selected copy, and the pre-mark
+`now` preserves the grace condition. The collection reads root files
+and rechecks names and metadata under the locks. It reads no object
+or pack body while holding them.
+
+Automatic maintenance never expires the recovery log, prunes loose
+objects or their temporary files, sweeps the spool, rebuilds an index,
+merges packs, or invalidates fetch records. Collection stops on an
+integrity error without retiring a pair or repairing anything. A
+completed orphan sweep stands. An interruption during retirement can
+leave a lone index. The orphan rule removes it on a later sweep. A
+torn stamp can only cause a new attempt.
+
 ### Integrity checks and repair
 
 Fsck verifies the index and pack against each other, including the
@@ -421,6 +486,7 @@ remains an error.
 | Invariant | Enforced by |
 |---|---|
 | No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and merge retirement require durable replacement coverage. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
+| Automatic collection retires only wholly dead packs past the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

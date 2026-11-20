@@ -530,6 +530,7 @@ pub(crate) fn pull_all_with_source(
     target_branch: Option<&str>,
     require_signed: bool,
     tags: bool,
+    auto_maintenance: bool,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
@@ -538,6 +539,7 @@ pub(crate) fn pull_all_with_source(
         .with_target_branch(target_branch.map(str::to_owned))
         .with_verify_signatures(require_signed)
         .with_tags(tags)
+        .with_auto_maintenance(auto_maintenance)
         .with_sync_policy(sync_policy(&layout));
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
@@ -555,6 +557,7 @@ pub(crate) fn fetch_all_with_source(
     require_signed: bool,
     prune: bool,
     tags: bool,
+    auto_maintenance: bool,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::FetchReport, Error> {
@@ -563,6 +566,7 @@ pub(crate) fn fetch_all_with_source(
         .with_verify_signatures(require_signed)
         .with_prune(prune)
         .with_tags(tags)
+        .with_auto_maintenance(auto_maintenance)
         .with_sync_policy(sync_policy(&layout));
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
