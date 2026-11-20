@@ -711,7 +711,8 @@ pub(crate) fn live_objects(
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
 /// Loose leaves are probed by type. For packed leaves, verify the payload
-/// before trusting where the index points.
+/// before trusting where the index points. A packed id that only a manifest
+/// lists is checked by its head and frame length, without hashing it.
 ///
 /// # Errors
 ///

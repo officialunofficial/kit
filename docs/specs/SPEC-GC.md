@@ -98,7 +98,15 @@ chunked blob.
 
 Before a packed blob can end a walk, gc verifies its canonical bytes
 and id. A bad locator cannot hide the edges of a tree or manifest.
-Loose leaf probes read the object type as before.
+For an id reached only as a chunk, gc checks the blob prologue and frame
+length of a packed copy and does not hash it. Such an id is live because a
+manifest lists it, whatever its copy holds, and the walk follows no edge from
+it. Every step that deletes or replaces a copy in reliance on a packed copy
+verifies that copy: loose-duplicate removal and the body check before
+retirement. So a wrong locator for a chunk can hide only the `ChunkNotBlob`
+error, which an integrity scan still reports. An id that the walk also reaches
+as a file stays fully verified. Loose leaf probes read the object type as
+before.
 
 The walk keeps the chunk ids in a buffer that it sorts and deduplicates
 whenever the buffer would grow past the larger of twice its length after the
