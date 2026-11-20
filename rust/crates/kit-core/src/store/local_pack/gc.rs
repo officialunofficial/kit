@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::{Index, Location, read_pack_dir, scan_pair, visit_pairs};
+use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet, PackedGcReport};
@@ -130,7 +130,7 @@ impl ObjectStore {
             {
                 // An index checksum alone does not prove which ids the pack
                 // holds. Verify the body before authorizing any deletion.
-                let rows = match scan_pair(&pair) {
+                let rows = match scan_pair_checked(&pair, checkpoint) {
                     Ok(rows) => rows,
                     Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::InvalidData => {
                         report.skipped_pack_errors.push(error.to_string());

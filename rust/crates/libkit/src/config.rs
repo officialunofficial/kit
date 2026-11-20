@@ -996,6 +996,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
         ("fetch.attestations", cfg.fetch_attestations.as_str()),
+        ("gc.auto", cfg.gc_auto.as_str()),
         ("push.attestations", cfg.push_attestations.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),

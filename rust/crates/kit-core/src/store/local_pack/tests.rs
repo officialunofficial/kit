@@ -1052,10 +1052,12 @@ fn gc_refuses_a_corrupt_index_before_pruning_loose_objects() {
 
 #[test]
 fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
-    use crate::ops::gc::{GcReport, LiveSet, PackedGcReport, run_gc};
+    use crate::ops::gc::{GcReport, LiveSet, PackedGcReport, maintain_packs};
 
     let (_dir, layout, store) = fresh();
+    let _ = maintain_packs(&layout, &store, &|| false);
     let (pair, ids) = publish_objects(&store, &[&blob(b"retirement crash point")]);
+    set_pack_age(&pair.index, 1);
     let mut packed = PackedGcReport::default();
     let sweep = store
         .plan_pack_sweep(&LiveSet::default(), u64::MAX, 0, &mut packed)
@@ -1072,7 +1074,10 @@ fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
     let reopened = ObjectStore::open(&layout).unwrap();
     assert!(!reopened.contains(&ids[0]));
     assert_eq!(reopened.check_local_packs(true).unwrap(), 0);
-    run_gc(&reopened, &layout, u64::MAX, 0, false).unwrap();
+    assert_eq!(
+        maintain_packs(&layout, &reopened, &|| false).leftovers_removed,
+        1
+    );
     assert!(!pair.pack.exists() && !pair.index.exists());
 }
 

@@ -31,6 +31,9 @@
 mod maintenance;
 mod soft;
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub use maintenance::fuzz_maintenance_stamp;
 pub use maintenance::{Collection, MaintenanceReport, maintain_packs};
 
 /// Default grace before an unreachable object or pack leftover can be removed.

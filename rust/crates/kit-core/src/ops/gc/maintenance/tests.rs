@@ -136,6 +136,7 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
 
 #[test]
 fn collection_retires_only_wholly_dead_packs_past_grace() {
+    TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
     let (dead, _) = repo.old_pack(&[b"dead"]);
@@ -161,13 +162,14 @@ fn collection_retires_only_wholly_dead_packs_past_grace() {
 fn busy_worktree_retries_in_an_hour() {
     let repo = Repo::new();
     repo.due();
-    let (dead, _) = repo.old_pack(&[b"owned by an in-flight writer"]);
+    let (dead, ids) = repo.old_pack(&[b"owned by an in-flight writer"]);
     let lock = acquire(
         repo.layout.worktree_state_dir(),
         WORKTREE_LOCK,
         Duration::ZERO,
     )
     .unwrap();
+    assert!(repo.store.read(&ids[0]).is_ok());
     let report = repo.run();
     assert_eq!(report.collection, Collection::Busy);
     assert_eq!(report.packs_retired, 0);
@@ -317,4 +319,48 @@ fn interruption_after_planning_preserves_the_pair() {
     );
     assert_eq!(report.collection, Collection::Failed);
     assert!(dead.exists());
+}
+
+#[test]
+fn corrupt_pack_body_stops_retirement_of_other_candidates() {
+    let repo = Repo::new();
+    repo.due();
+    let (dead, _) = repo.old_pack(&[b"intact dead pack"]);
+    let (bad, _) = repo.old_pack(&[b"damaged body"]);
+    let mut bytes = fs::read(&bad).unwrap();
+    let position = bytes
+        .windows(b"damaged body".len())
+        .position(|window| window == b"damaged body")
+        .unwrap();
+    bytes[position] ^= 1;
+    fs::write(&bad, bytes).unwrap();
+    age_file(&bad, DEFAULT_GRACE_SECS + 86_400);
+
+    assert_eq!(repo.run().collection, Collection::Failed);
+    assert!(dead.exists());
+    assert!(bad.exists());
+}
+
+#[test]
+fn a_soft_root_published_after_the_mark_keeps_the_pair() {
+    let repo = Repo::new();
+    repo.due();
+    let (dead, ids) = repo.old_pack(&[b"becomes attested"]);
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        let _lock = acquire(
+            repo.layout.worktree_state_dir(),
+            WORKTREE_LOCK,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let root = repo
+            .layout
+            .attestations_dir()
+            .join(crate::hash::to_hex(&ids[0]));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(format!("{:064x}.dsse", 1)), []).unwrap();
+    });
+    assert_eq!(report.collection, Collection::RootsChanged);
+    assert!(dead.exists());
+    assert!(repo.store.read(&ids[0]).is_ok());
 }

@@ -93,6 +93,10 @@ impl Stamp {
         if file.read(&mut [0]).ok()? != 0 {
             return None;
         }
+        Self::decode(&bytes)
+    }
+
+    fn decode(bytes: &[u8; 17]) -> Option<Self> {
         let outcome = match bytes[8] {
             1 => Collection::NotDue,
             2 => Collection::Complete,
@@ -109,7 +113,7 @@ impl Stamp {
         })
     }
 
-    fn write(self, file: &mut File) -> io::Result<()> {
+    fn encode(self) -> [u8; 17] {
         let mut bytes = [0; 17];
         bytes[..8].copy_from_slice(&self.attempted.to_le_bytes());
         bytes[8] = match self.outcome {
@@ -121,9 +125,13 @@ impl Stamp {
             Collection::Failed => 6,
         };
         bytes[9..].copy_from_slice(&self.complete_pairs.to_le_bytes());
+        bytes
+    }
+
+    fn write(self, file: &mut File) -> io::Result<()> {
         file.rewind()?;
         file.set_len(0)?;
-        file.write_all(&bytes)
+        file.write_all(&self.encode())
     }
 
     fn due(self, now: u64, pairs: usize) -> bool {
@@ -159,6 +167,10 @@ fn lock_stamp(dir: &Path) -> io::Result<File> {
 }
 
 fn now_secs() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_NOW.get() {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
@@ -373,6 +385,21 @@ fn collect(
     } else {
         Collection::Busy
     })
+}
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_maintenance_stamp(bytes: &[u8]) {
+    if let Ok(input) = bytes.try_into()
+        && let Some(stamp) = Stamp::decode(input)
+    {
+        assert_eq!(&stamp.encode(), input);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

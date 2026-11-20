@@ -100,17 +100,13 @@ fn prune_with_nothing_lost_changes_nothing() {
 #[test]
 fn prune_reports_maintenance_and_honors_the_repo_switch() {
     let (publisher, remote) = pushed_repo();
-    let clone = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let clone = destination.path().join("clone");
     let url = format!("kit+file://{}", remote.path().display());
-    ok(
-        publisher.path(),
-        &["clone", &url, clone.path().to_str().unwrap()],
-    );
-    let stamp = clone.path().join(".kit/gc-auto");
+    ok(publisher.path(), &["clone", &url, clone.to_str().unwrap()]);
+    let stamp = clone.join(".kit/gc-auto");
     assert!(stamp.is_file());
-    let leftover = clone
-        .path()
-        .join(".kit/objects/pack/.11111111111111111111111111111111.tmp.pack");
+    let leftover = clone.join(".kit/objects/pack/.11111111111111111111111111111111.tmp.pack");
     fs::write(&leftover, b"old stage").unwrap();
     fs::File::open(&leftover)
         .unwrap()
@@ -118,8 +114,11 @@ fn prune_reports_maintenance_and_honors_the_repo_switch() {
         .unwrap();
 
     lose_remote_topic(remote.path());
-    ok(clone.path(), &["config", "--local", "gc.auto", "false"]);
-    let disabled = ok(clone.path(), &["fetch", "-p", "--format=json"]);
+    ok(&clone, &["config", "--local", "gc.auto", "false"]);
+    ok(&clone, &["remote", "add", "mirror", &url]);
+    let config = ok(&clone, &["config", "gc.auto"]);
+    assert_eq!(String::from_utf8(config.stdout).unwrap().trim(), "false");
+    let disabled = ok(&clone, &["fetch", "-p", "--format=json"]);
     assert!(
         !String::from_utf8(disabled.stdout)
             .unwrap()
@@ -127,12 +126,11 @@ fn prune_reports_maintenance_and_honors_the_repo_switch() {
     );
     assert!(leftover.exists());
 
-    ok(clone.path(), &["config", "--local", "gc.auto", "true"]);
-    fs::write(publisher.path().join("a.txt"), b"two").unwrap();
-    ok(publisher.path(), &["add", "a.txt"]);
-    ok(publisher.path(), &["commit", "-m", "c2"]);
-    ok(publisher.path(), &["push", "origin", "main:main"]);
-    let swept = ok(clone.path(), &["fetch", "-q", "--format=json"]);
+    ok(publisher.path(), &["push", "origin", "main:topic"]);
+    ok(&clone, &["fetch"]);
+    lose_remote_topic(remote.path());
+    ok(&clone, &["config", "--local", "--unset", "gc.auto"]);
+    let swept = ok(&clone, &["fetch", "-q", "-p", "--format=json"]);
     let report: serde_json::Value = serde_json::from_slice(&swept.stdout).unwrap();
     assert_eq!(report["maintenance"]["leftovers_removed"], 1);
     assert_eq!(report["maintenance"]["bytes_reclaimed"], 9);

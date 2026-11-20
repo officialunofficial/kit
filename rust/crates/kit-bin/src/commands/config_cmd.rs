@@ -131,7 +131,8 @@ pub fn run(args: &[String]) -> u8 {
     {
         return emit_err(&format!("{key}: {e}"), exit::CONFIG_ERROR);
     }
-    let normalized_value = if matches!(key, "fetch.attestations" | "push.attestations") {
+    let normalized_value = if matches!(key, "fetch.attestations" | "gc.auto" | "push.attestations")
+    {
         let value = value.to_ascii_lowercase();
         if !matches!(value.as_str(), "true" | "false") {
             return emit_err(&format!("{key} must be true or false"), exit::CONFIG_ERROR);
@@ -260,6 +261,7 @@ fn unset_repo_key(cfg: &mut Config, key: &str) -> Result<bool, u8> {
         "default_branch" => Ok(take_nonempty(&mut cfg.default_branch)),
         "durability.objects" => Ok(take_nonempty(&mut cfg.durability_objects)),
         "fetch.attestations" => Ok(take_nonempty(&mut cfg.fetch_attestations)),
+        "gc.auto" => Ok(take_nonempty(&mut cfg.gc_auto)),
         "push.attestations" => Ok(take_nonempty(&mut cfg.push_attestations)),
         "remote_endpoint" => Ok(take_nonempty(&mut cfg.remote_endpoint)),
         "remote_bucket" => Ok(take_nonempty(&mut cfg.remote_bucket)),
@@ -322,6 +324,7 @@ fn apply(cfg: &mut Config, key: &str, value: &str) -> Result<(), u8> {
     match key {
         "default_branch" => value.clone_into(&mut cfg.default_branch),
         "fetch.attestations" => value.clone_into(&mut cfg.fetch_attestations),
+        "gc.auto" => value.clone_into(&mut cfg.gc_auto),
         "push.attestations" => value.clone_into(&mut cfg.push_attestations),
         // SPEC-OBJECTS §10.1 durability escape hatch. Validated at the
         // set boundary, so a typo can't silently leave the user on the

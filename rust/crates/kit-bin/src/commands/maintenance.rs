@@ -5,10 +5,10 @@ use kit_sync::{Collection, MaintenanceReport};
 use crate::format::JsonObject;
 
 pub(super) fn print(report: Option<&MaintenanceReport>, quiet: bool) {
+    const MIB: u64 = 1024 * 1024;
     let Some(report) = report.filter(|report| !quiet && changed(report)) else {
         return;
     };
-    const MIB: u64 = 1024 * 1024;
     let bytes = report.bytes_reclaimed;
     let tenths = bytes / MIB * 10 + (bytes % MIB * 10 + MIB / 2) / MIB;
     let _ = writeln!(

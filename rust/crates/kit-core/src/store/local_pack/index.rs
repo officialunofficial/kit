@@ -450,6 +450,14 @@ pub(in crate::store) fn canonical_id(bytes: &[u8]) -> StoreResult<Hash> {
 }
 
 pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
+    scan_checked(pack, &|| Ok(()))
+}
+
+pub(super) fn scan_checked(
+    pack: &mut File,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
+    checkpoint()?;
     pack.rewind()?;
     let (count, trailer, header) = read_header(pack)?;
     let mut digest = blake3::Hasher::new();
@@ -457,6 +465,7 @@ pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
     let mut rows = Vec::with_capacity(count);
     let mut next = HEADER_LEN as u64;
     for _ in 0..count {
+        checkpoint()?;
         let len = read_frame_header(pack)?;
         let frame = Frame {
             offset: next + FRAME_LEN,
