@@ -8,8 +8,10 @@ use std::path::PathBuf;
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
-use kit_core::protocol::{PackKey, Transport};
-use kit_core::refs::{self, RefWriteCondition};
+use kit_core::protocol::{
+    PackBody, PackKey, PackSink, RefListing, RepoCursor, Transport, TransportResult,
+};
+use kit_core::refs::{self, Ref, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_core::transfer;
@@ -26,6 +28,64 @@ const MAX_NODES: usize = 100_000;
 const MAX_PACKS: usize = 1_000_000;
 /// The most packs one synthetic node lists.
 const NODE_PACKS: usize = 4096;
+
+/// A memory remote that offers serialized advance, as the file and Connect
+/// transports do, so a force push takes its guarded path.
+struct Remote(MemoryTransport);
+
+impl Remote {
+    fn new() -> Self {
+        Self(MemoryTransport::new())
+    }
+}
+
+impl Transport for Remote {
+    fn repo_cursor(&self) -> TransportResult<Option<RepoCursor>> {
+        self.0.repo_cursor()
+    }
+    fn upload_pack(
+        &self,
+        pack: &dyn PackBody,
+        key: &PackKey,
+        head: Option<&str>,
+    ) -> TransportResult<()> {
+        self.0.upload_pack(pack, key, head)
+    }
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        hint: Option<&str>,
+        sink: &mut dyn PackSink,
+    ) -> TransportResult<()> {
+        self.0.download_pack(key, hint, sink)
+    }
+    fn pack_exists(&self, key: &PackKey, hint: Option<&str>) -> TransportResult<bool> {
+        self.0.pack_exists(key, hint)
+    }
+    fn update_ref(
+        &self,
+        name: &str,
+        condition: RefWriteCondition,
+        hash: &Hash,
+    ) -> TransportResult<()> {
+        self.0.update_ref(name, condition, hash)
+    }
+    fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
+        self.0.delete_ref(name, expected)
+    }
+    fn read_ref(&self, name: &str) -> TransportResult<Option<Hash>> {
+        self.0.read_ref(name)
+    }
+    fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
+        self.0.list_refs(prefix)
+    }
+    fn ref_listing(&self) -> RefListing {
+        self.0.ref_listing()
+    }
+    fn supports_serialized_advance(&self) -> bool {
+        true
+    }
+}
 
 /// A local repository that signs what it makes.
 struct Work {
@@ -113,7 +173,7 @@ impl Work {
 /// Link `nodes` onto the packmap of `main`, each listing the packs of one
 /// entry of `listings`, and move the packmap to the last. Each listing names
 /// `pack`, the pack the chain already holds, so the chain stays fetchable.
-fn grow_chain(tx: &MemoryTransport, pack: Hash, listings: impl Iterator<Item = usize>) {
+fn grow_chain(tx: &Remote, pack: Hash, listings: impl Iterator<Item = usize>) {
     let mut head = tx.read_ref(MAIN_MAP).unwrap().unwrap();
     let start = head;
     for count in listings {
@@ -128,7 +188,7 @@ fn grow_chain(tx: &MemoryTransport, pack: Hash, listings: impl Iterator<Item = u
 }
 
 /// The chain of `main` as a fetch walks it: its depth and listed packs.
-fn fetched_chain(tx: &MemoryTransport) -> Result<(usize, usize), kit_sync::SyncError> {
+fn fetched_chain(tx: &Remote) -> Result<(usize, usize), kit_sync::SyncError> {
     let head = tx.read_ref(MAIN_MAP).unwrap().unwrap();
     let nodes =
         kit_sync::packmap::walk_pack_chain(&TransportSource::new(tx), &NoopObserver, MAIN, head)?;
@@ -137,7 +197,7 @@ fn fetched_chain(tx: &MemoryTransport) -> Result<(usize, usize), kit_sync::SyncE
 
 /// `main` pushed once, and its chain grown by `listings` to a size a fetch
 /// still accepts. Returns the repository, the pushed tip and its child.
-fn at_the_bound(tx: &MemoryTransport, listings: &[usize]) -> (Work, Hash, Hash) {
+fn at_the_bound(tx: &Remote, listings: &[usize]) -> (Work, Hash, Hash) {
     let work = Work::new();
     let c1 = work.commit(None);
     work.branch("main", c1);
@@ -151,7 +211,7 @@ fn at_the_bound(tx: &MemoryTransport, listings: &[usize]) -> (Work, Hash, Hash) 
     (work, c1, c2)
 }
 
-fn fetched_root_pack(tx: &MemoryTransport, map: Hash) -> Hash {
+fn fetched_root_pack(tx: &Remote, map: Hash) -> Hash {
     let bytes = tx
         .download_blob(&PackKey::from_hash(map), Some(MAIN), 1 << 20)
         .unwrap();
@@ -190,7 +250,7 @@ fn the_synthetic_chains_are_at_the_fetch_bounds() {
         (node_bound(), MAX_NODES, NODE_PACKS + 1),
         (pack_bound(), 1 + pack_bound().len(), MAX_PACKS),
     ] {
-        let tx = MemoryTransport::new();
+        let tx = Remote::new();
         at_the_bound(&tx, &listings);
         assert_eq!(fetched_chain(&tx).unwrap(), (nodes, packs));
     }
@@ -203,7 +263,7 @@ fn the_synthetic_chains_are_at_the_fetch_bounds() {
 fn a_push_refuses_a_chain_a_fetch_would_refuse() {
     for (case, listings) in [("nodes", node_bound()), ("packs", pack_bound())] {
         for lease in [PushLease::FastForward, PushLease::Force] {
-            let tx = MemoryTransport::new();
+            let tx = Remote::new();
             let (work, c1, _c2) = at_the_bound(&tx, &listings);
             let map = tx.read_ref(MAIN_MAP).unwrap();
             let result = work.push(&TransportSource::new(&tx), lease);
@@ -235,7 +295,7 @@ fn a_push_that_reaches_a_bound_is_published() {
         ),
     ] {
         for lease in [PushLease::FastForward, PushLease::Force] {
-            let tx = MemoryTransport::new();
+            let tx = Remote::new();
             let (work, _c1, c2) = at_the_bound(&tx, &listings);
             work.push(&TransportSource::new(&tx), lease)
                 .unwrap_or_else(|error| panic!("{case} {lease:?}: {error}"));
@@ -249,7 +309,7 @@ fn a_push_that_reaches_a_bound_is_published() {
 /// node has no predecessor, so the bound does not refuse it.
 #[test]
 fn a_push_at_the_node_bound_re_baselines_a_chain_one_node_can_list() {
-    let tx = MemoryTransport::new();
+    let tx = Remote::new();
     let (work, _c1, c2) = at_the_bound(&tx, &deep(MAX_NODES, 1));
     work.push(&TransportSource::new(&tx), PushLease::FastForward)
         .unwrap();
@@ -261,7 +321,7 @@ fn a_push_at_the_node_bound_re_baselines_a_chain_one_node_can_list() {
 /// a fetch refuses (its head names no node) with a new one.
 #[test]
 fn a_force_push_of_a_fresh_root_resets_a_broken_chain() {
-    let tx = MemoryTransport::new();
+    let tx = Remote::new();
     let work = Work::new();
     let c1 = work.commit(None);
     work.branch("main", c1);

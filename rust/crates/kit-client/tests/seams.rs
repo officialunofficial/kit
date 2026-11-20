@@ -99,7 +99,7 @@ fn error(status: u16, body: &str) -> Result<Response<Vec<u8>>, String> {
 
 struct TestClock {
     now: Cell<i64>,
-    nonces: Cell<u8>,
+    nonces: Cell<u32>,
     /// Where `wait` leaves the clock, to land exactly on an expiry.
     after_wait: Cell<Option<i64>>,
 }
@@ -117,8 +117,11 @@ impl Clock for TestClock {
         self.now.get()
     }
     fn nonce(&self) -> Result<Hash, String> {
+        // Distinct for every request, as a long chain walk sends many.
         self.nonces.set(self.nonces.get() + 1);
-        Ok([self.nonces.get(); 32])
+        let mut nonce = [0; 32];
+        nonce[..4].copy_from_slice(&self.nonces.get().to_le_bytes());
+        Ok(nonce)
     }
     async fn wait(&self, _: Duration) {
         if let Some(now) = self.after_wait.get() {
