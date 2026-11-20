@@ -287,3 +287,19 @@ fn persist_unique(
         Err(e) => Err(e.error.into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publishing_to_a_missing_directory_is_not_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let target = dir.path().join("missing").join("pack");
+        assert!(matches!(
+            persist_unique(staged, &target),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+    }
+}

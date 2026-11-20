@@ -897,9 +897,11 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
     assert_eq!(packed.packs_retired, 1);
     assert!(old.pack.exists() && old.index.exists());
 
+    crate::atomic::testing::reset_dir_sync_calls();
     let (report, packed) =
         run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(packed.packs_retired, 1);
+    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
     assert_eq!(report.bytes_reclaimed, preview.bytes_reclaimed);
     assert!(report.bytes_reclaimed > dead.len() as u64);
     assert!(!old.pack.exists() && !old.index.exists());
@@ -1003,13 +1005,21 @@ fn gc_sweeps_only_aged_recognized_pack_leftovers() {
     assert!(!ObjectStore::open(&layout).unwrap().contains(&ids[0]));
     assert_eq!(store.check_local_packs(true).unwrap(), 0);
 
-    let (_, preview) =
+    let expected_bytes: u64 = [&retired.index, &unpublished.pack, &staging]
+        .iter()
+        .map(|path| fs::metadata(path).unwrap().len())
+        .sum();
+    let (preview_totals, preview) =
         run_gc_with_pack_report(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
     assert_eq!(preview.pack_leftovers_pruned, 3);
+    assert_eq!(preview_totals.bytes_reclaimed, expected_bytes);
     assert!(retired.index.exists());
-    let (_, report) =
+    crate::atomic::testing::reset_dir_sync_calls();
+    let (totals, report) =
         run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.pack_leftovers_pruned, 3);
+    assert_eq!(totals.bytes_reclaimed, expected_bytes);
+    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
     assert!(!retired.index.exists() && !unpublished.pack.exists() && !staging.exists());
     assert!(recent.exists() && sidecar.exists() && non_hex.exists() && directory.is_dir());
 }
@@ -1042,9 +1052,11 @@ fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
     let sweep = store
         .plan_pack_sweep(&LiveSet::default(), u64::MAX, 0, &mut packed)
         .unwrap();
+    crate::atomic::testing::reset_dir_sync_calls();
     let result = sweep.run_with(&store, &mut GcReport::default(), &mut packed, || {
         assert!(!pair.pack.exists());
         assert!(pair.index.is_file());
+        assert_eq!(crate::atomic::testing::dir_sync_calls(), 1);
         Err(std::io::Error::other("interrupted between pack and index removal").into())
     });
     assert!(result.is_err());
@@ -1064,6 +1076,7 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
     for (label, loose_age, pack_age, corrupt, keep) in [
         ("old-loose", 1, 1, false, false),
         ("newer-pack", 8, 9, false, false),
+        ("same-pack-mtime", 8, 8, false, false),
         ("older-pack", 8, 1, false, true),
         ("bad-pack", 1, 1, true, true),
     ] {
@@ -1081,13 +1094,15 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         set_pack_age(&pair.pack, pack_age);
         set_pack_age(&loose, loose_age);
 
-        let (_, preview) =
+        let expected_bytes = if keep { 0 } else { bytes.len() as u64 };
+        let (preview_totals, preview) =
             run_gc_with_pack_report(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             preview.loose_duplicates_pruned,
             usize::from(!keep),
             "{label}"
         );
+        assert_eq!(preview_totals.bytes_reclaimed, expected_bytes, "{label}");
         assert!(loose.is_file());
         let guard = store.prune_guard().unwrap();
         let (_, blocked) =
@@ -1095,7 +1110,8 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         assert_eq!(blocked.loose_duplicates_pruned, 0);
         assert!(loose.is_file());
         drop(guard);
-        let (_, packed) =
+        crate::atomic::testing::reset_dir_sync_calls();
+        let (totals, packed) =
             run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             packed.loose_duplicates_pruned,
@@ -1103,38 +1119,53 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
             "{label}"
         );
         assert_eq!(loose.is_file(), keep, "{label}");
+        assert_eq!(totals.bytes_reclaimed, expected_bytes, "{label}");
+        assert_eq!(
+            crate::atomic::testing::dir_sync_calls(),
+            if keep { 0 } else { 2 },
+            "{label}"
+        );
         assert_eq!(store.read(&h).unwrap(), bytes);
     }
 }
 
 #[test]
 fn a_packed_leaf_probe_cannot_hide_edges_of_a_live_tree() {
-    use crate::object::{EntryMode, Tree, TreeEntry};
+    use crate::object::{EntryMode, ObjectType, Tree, TreeEntry};
     use crate::ops::gc::run_gc;
 
-    let (_dir, layout, store) = fresh();
-    let (child_pack, children) = publish_objects(&store, &[&blob(b"tree child")]);
-    let tree = serialize(&Object::Tree(Tree {
-        entries: vec![TreeEntry {
-            name: b"child".to_vec(),
-            mode: EntryMode::Blob,
-            object_hash: children[0],
-        }],
-    }))
-    .unwrap();
-    let root = store.write(&tree).unwrap();
-    crate::refs::write_ref(&layout, "live", &root).unwrap();
+    for kind in [ObjectType::Blob, ObjectType::Delta] {
+        let (_dir, layout, store) = fresh();
+        let (child_pack, children) = publish_objects(&store, &[&blob(b"tree child")]);
+        let tree = serialize(&Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"child".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: children[0],
+            }],
+        }))
+        .unwrap();
+        let root = store.write(&tree).unwrap();
+        crate::refs::write_ref(&layout, "live", &root).unwrap();
 
-    let (decoy, ids) = publish_objects(&store, &[&blob(b"incorrect leaf")]);
-    let index = super::Index::open(&decoy).unwrap();
-    let frame = index.find(&ids[0]).unwrap();
-    fs::write(&decoy.index, index::encode(decoy.key, &[(root, frame)])).unwrap();
+        let (decoy, ids) = publish_objects(&store, &[&blob(b"incorrect leaf")]);
+        let index = super::Index::open(&decoy).unwrap();
+        let frame = index.find(&ids[0]).unwrap();
+        if kind == ObjectType::Delta {
+            let mut bytes = fs::read(&decoy.pack).unwrap();
+            let offset = usize::try_from(frame.offset).unwrap();
+            bytes[offset] = kind as u8;
+            bytes[offset + 5] = kind.schema_version();
+            fs::write(&decoy.pack, bytes).unwrap();
+        }
+        fs::write(&decoy.index, index::encode(decoy.key, &[(root, frame)])).unwrap();
 
-    let gc = ObjectStore::open(&layout).unwrap();
-    gc.iter_object_hashes().unwrap(); // Put the incorrect locator in the cache.
-    run_gc(&gc, &layout, u64::MAX, 0, false).unwrap();
-    assert!(child_pack.pack.is_file());
-    assert!(gc.read(&children[0]).is_ok());
+        let gc = ObjectStore::open(&layout).unwrap();
+        gc.iter_object_hashes().unwrap(); // Put the incorrect locator in the cache.
+        run_gc(&gc, &layout, u64::MAX, 0, false).unwrap();
+        assert!(child_pack.pack.is_file());
+        assert!(gc.read(&children[0]).is_ok());
+    }
 }
 
 #[test]
@@ -1198,21 +1229,29 @@ fn gc_preserves_a_candidate_whose_index_inode_changes_at_the_same_mtime() {
 }
 
 #[test]
-fn same_key_publication_replaces_a_damaged_index_with_the_verified_index() {
-    let (_dir, _layout, store) = fresh();
-    let bytes = blob(b"verified by the new publisher");
-    let (pair, ids) = publish_objects(&store, &[&bytes]);
-    let index = fs::read(&pair.index).unwrap();
-    let mut corrupt = index.clone();
-    *corrupt.last_mut().unwrap() ^= 1;
-    fs::write(&pair.index, corrupt).unwrap();
-    assert!(store.check_local_packs(false).is_err());
+fn same_key_publication_replaces_only_the_damaged_member_with_verified_bytes() {
+    for damage_pack in [false, true] {
+        let (_dir, _layout, store) = fresh();
+        let bytes = blob(b"verified by the new publisher");
+        let (pair, ids) = publish_objects(&store, &[&bytes]);
+        let pack = fs::read(&pair.pack).unwrap();
+        let index = fs::read(&pair.index).unwrap();
+        let (mut corrupt, member) = if damage_pack {
+            (pack.clone(), &pair.pack)
+        } else {
+            (index.clone(), &pair.index)
+        };
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(member, corrupt).unwrap();
+        assert!(store.check_local_packs(false).is_err());
 
-    let (published, _) = publish_objects(&store, &[&bytes]);
-    assert_eq!(pair.key, published.key);
-    assert_eq!(fs::read(&pair.index).unwrap(), index);
-    assert_eq!(store.check_local_packs(false).unwrap(), 0);
-    assert_eq!(store.read(&ids[0]).unwrap(), bytes);
+        let (published, _) = publish_objects(&store, &[&bytes]);
+        assert_eq!(pair.key, published.key);
+        assert_eq!(fs::read(&pair.pack).unwrap(), pack);
+        assert_eq!(fs::read(&pair.index).unwrap(), index);
+        assert_eq!(store.check_local_packs(false).unwrap(), 0);
+        assert_eq!(store.read(&ids[0]).unwrap(), bytes);
+    }
 }
 
 #[test]
@@ -1276,4 +1315,23 @@ fn a_recent_loose_copy_replaced_by_a_newer_pack_is_not_counted_as_kept() {
         assert_eq!(loose.exists(), dry_run);
         assert_eq!(store.read(&h).unwrap(), bytes);
     }
+}
+
+#[test]
+fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    let (_dir, layout, store) = fresh();
+    let live = blob(b"shared packed object");
+    let id = store.write(&live).unwrap();
+    crate::refs::write_ref(&layout, "live", &id).unwrap();
+    publish_objects(&store, &[&live, &blob(b"first extra entry")]);
+    publish_objects(&store, &[&live, &blob(b"second extra entry")]);
+
+    let (report, packed) =
+        run_gc_with_pack_report(&store, &layout, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
+    assert_eq!(packed.packs_retired, 0);
+    assert_eq!(packed.loose_duplicates_pruned, 1);
+    assert_eq!(report.bytes_reclaimed, live.len() as u64);
+    assert!(store.path_for(&id).exists());
 }
