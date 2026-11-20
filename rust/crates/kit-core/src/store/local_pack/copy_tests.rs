@@ -582,7 +582,7 @@ fn outputs_roll_over_at_the_payload_cap() {
         assert!(exists(&pair));
     }
     let report = run(&store, &layout, false);
-    assert_eq!(report.packs_merged, 8);
+    assert_eq!(report.packs_merged, 8, "{report:?}");
     assert_eq!(report.survivor_bytes_copied, total);
     let outputs = packs(&store);
     assert_eq!(outputs.len(), 2);

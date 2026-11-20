@@ -330,19 +330,23 @@ impl CopyPlan {
                 let ok = if let Some(ok) = verdicts.get(&id) {
                     *ok
                 } else {
-                    let location = Location::Packed(
-                        Arc::clone(&self.members[dropped.by].index),
-                        dropped.entry.frame,
-                    );
-                    let ok = match ObjectStore::raw_at(&location)
-                        .and_then(|bytes| ObjectStore::verify_at(&location, &id, &bytes))
-                    {
-                        Ok(()) => true,
-                        Err(error) if is_damage(&error) => {
-                            report.skipped_pack_errors.push(error.to_string());
-                            false
+                    // The covering pair frames the id at its own offset.
+                    let covering = &self.members[dropped.by];
+                    let ok = match covering.index.find(&id) {
+                        None => false,
+                        Some(frame) => {
+                            let location = Location::Packed(Arc::clone(&covering.index), frame);
+                            match ObjectStore::raw_at(&location)
+                                .and_then(|bytes| ObjectStore::verify_at(&location, &id, &bytes))
+                            {
+                                Ok(()) => true,
+                                Err(error) if is_damage(&error) => {
+                                    report.skipped_pack_errors.push(error.to_string());
+                                    false
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
-                        Err(error) => return Err(error),
                     };
                     verdicts.insert(id, ok);
                     ok
