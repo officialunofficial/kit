@@ -308,6 +308,8 @@ fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
 }
 
 fn scan_pair(pair: &Pair) -> StoreResult<Vec<(Hash, Frame)>> {
+    #[cfg(test)]
+    tests::pack_scan_error(pair.key)?;
     let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.context(e))?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));

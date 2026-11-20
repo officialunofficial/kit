@@ -1335,3 +1335,117 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
     assert_eq!(report.bytes_reclaimed, live.len() as u64);
     assert!(store.path_for(&id).exists());
 }
+
+thread_local! {
+    static BEFORE_DUPLICATE_TRY_LOCK: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+    static PACK_SCAN_ERROR: std::cell::Cell<Option<(Hash, std::io::ErrorKind)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+pub(super) fn before_duplicate_try_lock() {
+    if let Some(change) = BEFORE_DUPLICATE_TRY_LOCK.take() {
+        change();
+    }
+}
+
+pub(super) fn pack_scan_error(key: Hash) -> std::io::Result<()> {
+    if let Some((target, kind)) = PACK_SCAN_ERROR.get()
+        && target == key
+    {
+        PACK_SCAN_ERROR.set(None);
+        return Err(kind.into());
+    }
+    Ok(())
+}
+
+#[test]
+fn gc_keeps_a_loose_duplicate_when_any_member_changes_before_the_try_lock() {
+    use crate::ops::gc::run_gc_with_pack_report;
+
+    for member in ["pack", "index", "loose"] {
+        let (_dir, layout, store) = fresh();
+        let bytes = blob(b"loose duplicate of a live packed object");
+        let id = store.write(&bytes).unwrap();
+        crate::refs::write_ref(&layout, "live", &id).unwrap();
+        let loose = store.path_for(&id);
+        let (pair, _) = publish_objects(&store, &[&bytes]);
+        set_pack_age(&pair.pack, 9);
+        set_pack_age(&pair.index, 1);
+        set_pack_age(&loose, 8);
+
+        let path = match member {
+            "pack" => pair.pack,
+            "index" => pair.index,
+            _ => loose.clone(),
+        };
+        let pack_dir = store.pack_dir();
+        BEFORE_DUPLICATE_TRY_LOCK.set(Some(Box::new(move || match member {
+            "pack" => set_pack_age(&path, 1),
+            "index" => {
+                // Keep the locator bytes and mtime identical while replacing
+                // its file identity.
+                let replacement = tempfile::NamedTempFile::new_in(pack_dir).unwrap();
+                fs::write(replacement.path(), fs::read(&path).unwrap()).unwrap();
+                set_pack_age(replacement.path(), 1);
+                replacement.persist(&path).unwrap();
+            }
+            _ => set_pack_age(&path, 10),
+        })));
+
+        let (report, packed) =
+            run_gc_with_pack_report(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        assert!(BEFORE_DUPLICATE_TRY_LOCK.take().is_none());
+        assert_eq!(packed.loose_duplicates_pruned, 0, "{member} changed");
+        assert_eq!(report.bytes_reclaimed, 0, "{member} changed");
+        assert_eq!(fs::read(loose).unwrap(), bytes, "{member} changed");
+    }
+}
+
+#[test]
+fn a_pack_scan_io_error_aborts_gc_without_removing_other_garbage() {
+    use crate::ops::gc::{GcRootsError, run_gc};
+
+    let (_dir, layout, store) = fresh();
+    let (unreadable, _) = publish_objects(&store, &[&blob(b"unreadable dead pack")]);
+    let (other, _) = publish_objects(&store, &[&blob(b"other dead pack")]);
+    let loose = store.write(&blob(b"unrelated loose garbage")).unwrap();
+    let kind = std::io::ErrorKind::PermissionDenied;
+    PACK_SCAN_ERROR.set(Some((unreadable.key, kind)));
+
+    let result = run_gc(&store, &layout, u64::MAX, 0, false);
+    assert!(PACK_SCAN_ERROR.get().is_none());
+    assert!(matches!(
+        result,
+        Err(GcRootsError::Store(StoreError::Io(error))) if error.kind() == kind
+    ));
+    assert!(unreadable.pack.is_file() && unreadable.index.is_file());
+    assert!(other.pack.is_file() && other.index.is_file());
+    assert!(store.path_for(&loose).is_file());
+}
+
+#[test]
+fn a_same_key_pack_scan_io_error_leaves_the_existing_pair_untouched() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let (_dir, _layout, store) = fresh();
+    let bytes = blob(b"same-key pack scan I/O error");
+    let (pair, _) = publish_objects(&store, &[&bytes]);
+    let original_pack = fs::read(&pair.pack).unwrap();
+    let original_index = fs::read(&pair.index).unwrap();
+    set_pack_age(&pair.pack, 1);
+    let mut retry = writer(&store);
+    retry.write(&bytes).unwrap();
+    let kind = std::io::ErrorKind::PermissionDenied;
+    PACK_SCAN_ERROR.set(Some((pair.key, kind)));
+
+    let result = retry.finish();
+    assert!(PACK_SCAN_ERROR.get().is_none());
+    assert!(matches!(result, Err(StoreError::Io(error)) if error.kind() == kind));
+    assert_eq!(fs::read(&pair.pack).unwrap(), original_pack);
+    assert_eq!(fs::read(&pair.index).unwrap(), original_index);
+    assert_eq!(
+        fs::metadata(&pair.pack).unwrap().modified().unwrap(),
+        UNIX_EPOCH + Duration::from_secs(1)
+    );
+}

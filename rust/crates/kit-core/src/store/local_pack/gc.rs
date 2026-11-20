@@ -182,6 +182,8 @@ impl ObjectStore {
                 return Ok(());
             }
 
+            #[cfg(test)]
+            super::tests::before_duplicate_try_lock();
             let _guard = if report.dry_run {
                 None
             } else {
