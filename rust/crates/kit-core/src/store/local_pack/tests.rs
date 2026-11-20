@@ -2284,14 +2284,7 @@ fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
     }
 }
 
-#[test]
-fn a_pack_cut_short_after_its_handle_is_cached_is_damage_not_a_read_error() {
-    let (_dir, layout, store) = fresh();
-    let bytes = blob(&[7; 4096]);
-    let (pair, ids) = publish_objects(&store, &[&bytes]);
-    let reader = ObjectStore::open(&layout).unwrap();
-    assert_eq!(reader.read(&ids[0]).unwrap(), bytes);
-
+fn cut_pack_short(pair: &Pair) {
     let cut = fs::metadata(&pair.pack).unwrap().len() - 100;
     fs::OpenOptions::new()
         .write(true)
@@ -2299,6 +2292,16 @@ fn a_pack_cut_short_after_its_handle_is_cached_is_damage_not_a_read_error() {
         .unwrap()
         .set_len(cut)
         .unwrap();
+}
+
+#[test]
+fn a_pack_cut_short_before_a_read_is_damage_on_every_read_path() {
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[7; 4096]);
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.read(&ids[0]).unwrap(), bytes);
+    cut_pack_short(&pair);
 
     for error in [
         reader.read(&ids[0]).unwrap_err(),
@@ -2308,6 +2311,46 @@ fn a_pack_cut_short_after_its_handle_is_cached_is_damage_not_a_read_error() {
             .unwrap_err(),
         reader.read_object(&ids[0]).unwrap_err(),
     ] {
-        assert_damage(&error, &pair, "ends early");
+        assert!(
+            matches!(&error, StoreError::LocalPackDamaged { pack, .. } if **pack == *pair.pack.display().to_string()),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pack_cut_short_after_its_handle_is_cached_is_damage_and_a_read_error_is_not() {
+    use std::io::Read;
+
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[8; 4096]);
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.read(&ids[0]).unwrap(), bytes); // Caches the locator and handle.
+
+    // The pack ends early after the frame was opened and before it is read.
+    let error = reader
+        .packs
+        .lookup(&reader, &ids[0], false, |location| {
+            let mut contents = location.open()?;
+            cut_pack_short(&pair);
+            let mut read = vec![0; bytes.len()];
+            contents.read_exact(&mut read)?;
+            Ok(read)
+        })
+        .unwrap_err();
+    assert_damage(&error, &pair, "ends early");
+
+    for kind in [
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let error = reader
+            .packs
+            .lookup(&reader, &ids[0], false, |_| -> Result<(), StoreError> {
+                Err(std::io::Error::from(kind).into())
+            })
+            .unwrap_err();
+        assert!(matches!(&error, StoreError::Io(e) if e.kind() == kind), "{error:?}");
     }
 }
