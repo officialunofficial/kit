@@ -262,8 +262,10 @@ impl<'a> Writer<'a> {
         write_frame(&mut self.pack, bytes.len(), &[bytes])?;
         self.payload += bytes.len() as u64;
         self.ids.insert(id);
-        self.frames
-            .record(id, u32::try_from(bytes.len()).expect("bounded object length"));
+        self.frames.record(
+            id,
+            u32::try_from(bytes.len()).expect("bounded object length"),
+        );
         Ok(id)
     }
 
@@ -537,7 +539,11 @@ mod tests {
     fn object(kind: u8, size: usize, seed: u8) -> Vec<u8> {
         match kind % 4 {
             0 => blob(&vec![seed; size]),
-            1 => blob(&(0..size).map(|i| (i as u8).wrapping_mul(seed | 1)).collect::<Vec<_>>()),
+            1 => blob(
+                &(0..size)
+                    .map(|i| u8::try_from(i % 251).unwrap().wrapping_mul(seed | 1))
+                    .collect::<Vec<_>>(),
+            ),
             2 => tree(size % 300 + 1, seed),
             _ => manifest(size % 300 + 2, seed),
         }
