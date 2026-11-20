@@ -97,6 +97,29 @@ pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
     }
 }
 
+static LOOSE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Keep the store of `layout` loose: the one-way local-pack activation that a
+/// fetch or clone attempts leaves its format marker as it is. For tests that
+/// unlink or inspect individual objects, which a pack does not hold as files.
+/// Applies to this repository only, for the rest of the process, so tests run
+/// in parallel are not affected. Call it before the first fetch or clone.
+pub fn keep_loose(layout: &crate::layout::RepoLayout) {
+    LOOSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(layout.format_file());
+}
+
+/// Whether [`keep_loose`] named the format marker at `path`.
+pub(crate) fn keeps_loose(path: &std::path::Path) -> bool {
+    LOOSE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|kept| kept == path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -134,5 +157,20 @@ mod tests {
                 SyncStep::DeviceFlush(root.clone()),
             ]
         );
+    }
+
+    #[test]
+    fn keep_loose_stops_activation_of_that_store_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = RepoLayout::single(dir.path().join("kept"));
+        let other = RepoLayout::single(dir.path().join("other"));
+        let kept_store = ObjectStore::init(&kept).unwrap();
+        let other_store = ObjectStore::init(&other).unwrap();
+        super::keep_loose(&kept);
+
+        kept_store.try_activate_local_packs().unwrap();
+        other_store.try_activate_local_packs().unwrap();
+        assert!(!kept_store.local_packs_enabled().unwrap());
+        assert!(other_store.local_packs_enabled().unwrap());
     }
 }

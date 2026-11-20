@@ -524,12 +524,13 @@ if the set contains a letter the reader does not know. `P` is the only
 currently defined letter. It requires support for the raw local pack
 and its index, including the full range of storable objects. The current
 packed marker is exactly `bmt-v2\nP` with no final newline.
-Bound marker reads. Accept the legacy marker under its whitespace-trimming
-rule. Treat exactly `bmt-v2\n\0` as a lost activation and open it as a
-loose store. Refuse all other marker bytes and an absent marker with
-`IncompatibleRepoFormat`. A legacy reader refuses the packed form.
-Readers check the marker under the shared lock and enable local-pack
-discovery only with `P`.
+Bound marker reads. Accept exactly three byte strings and no others:
+`bmt-v2\n` (the legacy marker, a loose store), `bmt-v2\n\0` (a lost
+activation, which opens as a loose store) and `bmt-v2\nP` (a packed
+store). Refuse every other byte string, including whitespace around the
+legacy value, and an absent marker, with `IncompatibleRepoFormat`. A
+legacy reader refuses the packed form. Readers check the marker under the
+shared lock and enable local-pack discovery only with `P`.
 
 Try activation before a fetch acquires its shared prune guard, once
 advertised work indicates the fetch may apply new data packs. An
@@ -537,8 +538,7 @@ up-to-date fetch requires no activation. Under the exclusive `format`
 try-lock, validate the marker. For the canonical legacy marker or the
 exact zero-tail form, write only the ASCII byte `P` at offset 7 with a
 positional write through the locked handle, then sync the file. Preserve
-the seven-byte prefix and the inode, including on error. A noncanonical
-legacy marker continues to serve loose storage without activation. If the
+the seven-byte prefix and the inode, including on error. If the
 try-lock is busy and the marker still selects loose storage when the
 shared guard is acquired, use loose writes for that fetch.
 Lock details are in [SPEC-CONCURRENCY §3.4](SPEC-CONCURRENCY.md#34-object-refresh-versus-local-gc).
@@ -640,6 +640,11 @@ directory and, if needed, the directory containing the pack directory.
 When another process can retire the selected location, follow the
 guard and re-resolution rules in SPEC-CONCURRENCY §3.4.
 
+Local batched and per-object writes look in loose storage and in their
+discovered pack catalog. They MAY accept a loose file or packed frame of
+the exact serialized length without reading the object body. Fetch writes
+every object in its window.
+
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
 flush, the pack name or the complete pair can survive a power loss.
@@ -667,6 +672,9 @@ This prevents trivial amplification and prologue-replay attacks.
 |---------|----------|------------------------------------------------------------------|
 | `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
 | `0x02`  |          | `chunked_blob` only: 40-byte entries that carry end offsets (§7). |
+| marker `P` | 0.10 | Repository marker capability `P` (`bmt-v2\nP`): raw local packs and their index (§10). A reader that does not know `P` refuses the store. This reader accepts exactly the three marker byte strings of §10. |
+
+A later marker capability is another letter after the `bmt-v2\n` prefix, and a reader that does not know it refuses the store.
 
 `schema_version` is per object type. It is `0x02` for `chunked_blob`
 (`0x05`) and `0x01` for every other type. A version bump is reserved for

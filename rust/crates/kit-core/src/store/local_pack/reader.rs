@@ -98,7 +98,7 @@ impl Locator {
                 // A damaged member can hide the other member's version.
                 pair.check_versions()?;
             }
-            return result.map_err(|e| pair.context(e));
+            return result.map_err(|e| pair.index_context(e));
         }
         result
     }
@@ -276,7 +276,7 @@ impl Locator {
             .map_err(|e| self.pair.error(e))?;
         if frame.extent(self.trailer).is_none() {
             self.check_current()?;
-            return Err(self.pair.error("invalid index extent"));
+            return Err(self.pair.index_error("invalid index extent"));
         }
         Ok(Some(frame))
     }

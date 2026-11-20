@@ -24,7 +24,7 @@ use reader::{Handles, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route
 pub use writer::LocalPackWriter;
 
 #[derive(Debug, Default)]
-struct Catalog {
+pub(crate) struct Catalog {
     error: Option<Arc<StoreError>>,
     packs: Vec<Arc<Locator>>,
     routes: Vec<Route>,
@@ -49,6 +49,10 @@ impl Catalog {
             routes,
             on_disk,
         }
+    }
+
+    pub(crate) fn may_contain(&self, id: &Hash) -> bool {
+        self.candidates(id).next().is_some()
     }
 
     fn candidates(&self, id: &Hash) -> impl Iterator<Item = (&Arc<Locator>, Option<usize>)> {
@@ -221,6 +225,29 @@ impl LocalPacks {
         discovery.latest = None;
         discovery.catalog = Arc::new(Catalog::from_packs(packs, error));
         Ok(Arc::clone(&discovery.catalog))
+    }
+
+    // Freeze the set of candidates for one local write session. A later
+    // reader can discover more packs without changing that session's view.
+    pub(super) fn write_catalog(&self, store: &ObjectStore) -> StoreResult<Arc<Catalog>> {
+        self.discover(&store.pack_dir(), false)
+    }
+
+    pub(super) fn has_packed_size(&self, catalog: &Catalog, id: &Hash, size: u64) -> bool {
+        self.try_catalog(
+            catalog,
+            id,
+            None,
+            &mut LookupErrors::default(),
+            &mut |location| {
+                if location.size()? == size {
+                    Ok(())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound).into())
+                }
+            },
+        )
+        .is_ok_and(|hit| hit.is_some())
     }
 
     pub(super) fn collect(
@@ -614,7 +641,7 @@ impl ObjectStore {
     }
 
     /// Try the one-way local-pack activation before taking a prune guard.
-    /// Contention and readable noncanonical legacy markers leave it loose.
+    /// Contention leaves it loose.
     ///
     /// # Errors
     /// An unreadable, incompatible or unwritable format marker.
@@ -653,7 +680,7 @@ impl ObjectStore {
         Ok(())
     }
 
-    fn pack_dir(&self) -> PathBuf {
+    pub(crate) fn pack_dir(&self) -> PathBuf {
         self.objects_root.join("pack")
     }
 
@@ -677,7 +704,7 @@ impl ObjectStore {
                 return Ok(());
             }
             if !repair {
-                return Err(pair.error("index does not match verified pack"));
+                return Err(pair.index_error("index does not match verified pack"));
             }
 
             drop(rows);

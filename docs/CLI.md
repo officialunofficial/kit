@@ -904,7 +904,10 @@ Branches / refs:
   `checkout -` return to the previous HEAD, detached when it was detached.
   A successful HEAD change atomically saves one previous HEAD in the local
   per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
-  `no previous branch`. `@{-N}` for N greater than 1 is not supported.
+  `no previous branch`. Running an older kit's gc on a repository a newer kit
+  uses can prune the previous HEAD; `switch -` then reports `previous HEAD
+  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
+  for N greater than 1 is not supported.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -1547,6 +1550,9 @@ attestation support warn once per command and skip the log.
   (`DATAERR`).
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
+- `kit closure repair-indexes` &mdash; rebuild damaged local pack indexes
+  from verified packs. Run it from any worktree, even if no revision resolves.
+  If a pack fails verification, fetch again from the remote that supplied it.
 - `kit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of

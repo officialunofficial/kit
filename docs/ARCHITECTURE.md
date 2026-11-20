@@ -203,8 +203,8 @@ oversized allocations; the FastCDC chunker is fully deterministic
 
 The local store resolves ids from raw indexed packs and loose files. The
 common directory's `format` inode declares packed-read capability `P`.
-Fetch and clone write loose files. Local pack format and durability are
-specified in [SPEC-OBJECTS §10](specs/SPEC-OBJECTS.md#10-storage).
+Once the store is packed, fetch and clone write small non-chunk objects
+into local packs and leave the rest loose. Local pack format and durability are specified in [SPEC-OBJECTS §10](specs/SPEC-OBJECTS.md#10-storage).
 
 ---
 
@@ -237,10 +237,11 @@ therefore verifies every tree, entry, and chunk reachable from it.
 
 `ObjectStore::open` enforces addressing consistency through the
 `.kit/format` repository marker. `ObjectStore::init` writes the
-marker with the value `bmt-v2`; `open` requires that same value and
-rejects the repository with `IncompatibleRepoFormat` when the marker
-is missing or different, rather than misreading objects under the
-wrong addressing rule. The marker governs object identity. A change
+marker with the value `bmt-v2`; `open` accepts exactly the three
+marker byte strings of SPEC-OBJECTS §10 (`bmt-v2\n`, `bmt-v2\n\0` and
+`bmt-v2\nP`) and rejects the repository with `IncompatibleRepoFormat`
+when the marker is missing or holds any other bytes, rather than
+misreading objects under the wrong addressing rule. The marker governs object identity. A change
 to the identity of an object type moves the marker and that type's
 `schema_version` together: the span-committed chunked blob is `bmt-v2`
 and `schema_version` `0x02`.

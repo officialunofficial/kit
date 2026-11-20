@@ -261,6 +261,7 @@ impl std::fmt::Display for ReadLimit {
 /// pack-specific failures (trailer mismatch, base-missing) without
 /// catching every object decode error.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackError {
     #[error("packfile is shorter than the {HEADER_LEN}-byte header + {TRAILER_LEN}-byte trailer")]
     PackfileTooShort,

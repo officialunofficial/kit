@@ -159,8 +159,9 @@ rebuildable locator. All integer fields are unsigned little-endian.
 The letters after `bmt-v2\n` in the repository marker form a set of
 required capabilities. If a reader encounters an unknown letter, it
 MUST refuse to open the store with `IncompatibleRepoFormat` and tell the
-user to update kit. The exact marker `bmt-v2\n\0` represents a lost
-activation and selects loose storage. See
+user to update kit. The marker is exactly one of `bmt-v2\n`, `bmt-v2\n\0`
+and `bmt-v2\nP`. The zero-tail form represents a lost activation and
+selects loose storage. See
 [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
 
 On a live pair, an unknown pack header version or index version MUST

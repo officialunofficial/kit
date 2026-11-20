@@ -140,7 +140,7 @@ impl ObjectStore {
                 };
                 checkpoint()?;
                 if !index.matches(&rows) {
-                    return Err(pair.error("index does not match verified pack"));
+                    return Err(pair.index_error("index does not match verified pack"));
                 }
                 plan.pairs.insert(
                     pair.key,

@@ -38,6 +38,7 @@ pub struct RemoteFailure {
 /// The ordinary transport variants retain their existing display text. A raw
 /// channel string is a refusal because it may describe a deterministic failure.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SourceError {
     #[error("pack not found on remote")]
     PackNotFound,

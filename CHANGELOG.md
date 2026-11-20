@@ -15,16 +15,28 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
 - Fetch and clone pack small objects and keep chunks loose when their manifests arrive before publication. Once activated, the repository requires a reader that supports local packs.
 
-- Read and verify raw local object packs in repositories that declare capability `P`, and rebuild damaged pack indexes.
+- Read and verify raw local object packs in repositories that declare capability `P`.
+- Run `kit closure repair-indexes` to rebuild damaged local pack indexes from verified packs.
 
 ### Changed
+
+- Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
+- **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
+- **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
+- **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
+
+### Removed
+
+- **Breaking:** Remove `libkit::transfer::pull_with_source` and `fetch_with_source`. Call `pull_with_options` or `fetch_with_options` with a `SyncOptions`.
+- **Breaking:** Remove `libkit::transfer::push_branch_with_depth` and `push_branch_with_limits`. Call `push_branch_steps`, which takes the same depth and pack bound plus a `PushControl` and a step callback.
 
 ### Fixed
 
+- `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
 
 - Continue SSH transfers in a fresh session after 10,000 requests.

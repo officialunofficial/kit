@@ -312,7 +312,7 @@ fn clone_into(remote: &Remote, dir: &Path) -> kit_sync::CloneReport {
 // These fixtures need to unlink individual objects to model a damaged store.
 fn clone_loose_into(remote: &Remote, dir: &Path) {
     let layout = init_clone_dir(dir, &default_remote("kit+memory://x")).unwrap();
-    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
+    kit_core::fault::keep_loose(&layout);
     clone_into(remote, dir);
 }
 
@@ -1875,7 +1875,7 @@ fn history_gc_pruned_after_a_forced_update_is_checked_again() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
-    std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
+    kit_core::fault::keep_loose(&layout);
     let fetch_default = || {
         fetch(
             &target,

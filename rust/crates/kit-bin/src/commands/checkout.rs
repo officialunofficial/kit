@@ -165,7 +165,20 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
             Ok(Some(h)) => Some(h),
             _ => return emit_err("no previous branch", exit::GENERAL_ERROR),
         },
-        Some(refs::Head::Detached(h)) => Some(*h),
+        Some(refs::Head::Detached(h)) => {
+            // An older kit's gc does not know PREVIOUS_HEAD and may have
+            // pruned the commit it names.
+            if !store.contains(h) {
+                return emit_err(
+                    &format!(
+                        "previous HEAD {} was pruned; nothing to switch back to",
+                        format::short_hash(h, 8)
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Some(*h)
+        }
         None => None,
     };
     if let Some(head) = &previous_head {

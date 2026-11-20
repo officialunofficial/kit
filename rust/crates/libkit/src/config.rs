@@ -423,6 +423,7 @@ impl Config {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("I/O: {0}")]
     Io(#[from] io::Error),

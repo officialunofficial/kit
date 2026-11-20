@@ -130,8 +130,8 @@ history-mmr = ["dep:commonware-storage", "dep:commonware-cryptography"]
 sparse-checkout = []
 # Exposes private parser seams to the `kit-fuzz` harness. Off by default.
 fuzzing = []
-# Injected write failures for tests (`kit_core::fault`). Only test builds
-# turn it on.
+# Injected write failures and other test hooks (`kit_core::fault`, and
+# `ObjectStore::remove_object`). Only test builds turn it on.
 fault-injection = []
 
 [dev-dependencies]

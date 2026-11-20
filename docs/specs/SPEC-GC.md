@@ -323,9 +323,9 @@ delete an object at the boundary (the model's `mutBoundedLax` mutant and
 
 A published local pack has both final names and a valid index
 ([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)). A scan
-recognizes only the final name and staged-file forms in SPEC-OBJECTS
-§10.1 and SPEC-PACKFILE §3.1.1, and considers only regular files in
-those forms. Readers and integrity scans ignore unknown files. Gc
+recognizes only the final name forms of SPEC-PACKFILE §3.1.1 and the
+staged-file names of [SPEC-OBJECTS §10.1](SPEC-OBJECTS.md#101-durability),
+and considers only regular files in those forms. Readers and integrity scans ignore unknown files. Gc
 leaves them untouched. An optional sidecar cannot determine discovery,
 object identity, reachability, or retention.
 
@@ -342,7 +342,9 @@ Gc aborts before sweeping on such an error. Enumeration skips a lone
 member, but existing hard-root closure checks still fail if any
 required object has no readable copy.
 
-Gc can merge packs to bound their count. The merge preserves every
+Pack merging is not implemented yet. It is planned work, and until it
+lands gc does not bound the pack count. The rules below are the
+requirements that a merge MUST meet. A merge preserves every
 distinct id in the inputs, including unreachable ids. It verifies each
 copied object's canonical encoding and id, and fully verifies and
 publishes all replacements durably before retiring an input. An input
@@ -358,7 +360,7 @@ changed. Live and mixed packs stay in place. If a candidate's body
 fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
-Retirement after a merge takes the same try-lock and rechecks input
+Retirement after a merge (once merging exists) takes the same try-lock and rechecks input
 identity and durable coverage by the verified replacement packs.
 Keep an input when its replacements cannot be read independently of it.
 In either case, remove the pack name first.

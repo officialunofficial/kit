@@ -935,7 +935,7 @@ fn a_deleted_and_collected_tag_is_restored_through_self_heal() {
         remote.push_tag("v1", std::slice::from_ref(&tag), v1, Some(main));
         let (_dir, target) = work();
         let layout = kit_sync::init_clone_dir(&target, &default_remote()).unwrap();
-        std::fs::write(layout.format_file(), b"bmt-v2\n\n").unwrap();
+        kit_core::fault::keep_loose(&layout);
         clone_from(&remote, &target);
         let layout = RepoLayout::single(&target);
         refs::delete_tag(&layout, "v1").unwrap();

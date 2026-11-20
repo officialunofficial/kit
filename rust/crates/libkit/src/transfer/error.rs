@@ -420,6 +420,8 @@ impl From<kit_sync::SyncError> for Error {
                 Self::UnsignedOrInvalidObject { hash, reason }
             }
             S::InvalidRemoteName(n) => Self::InvalidRemoteName(n),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }
@@ -495,6 +497,8 @@ impl From<kit_sync::PushError> for Error {
                 ..
             }) if message == PENDING_INTERRUPTED_MESSAGE => Self::Interrupted,
             P::Delete(error) => Self::Delete(error),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }
