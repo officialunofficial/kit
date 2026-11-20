@@ -324,8 +324,10 @@ fn apply_chain(
         }
         let key = PackKey::from_hash(pk);
         if applied.contains(&key) || publication.completed(&key) {
-            // Applied meanwhile, so a copy kept for it is of no use.
-            retained.discard(&key);
+            if applied.contains(&key) {
+                // Applied meanwhile, so a copy kept for it is of no use.
+                retained.discard(&key);
+            }
             done.skipped += 1;
             continue;
         }

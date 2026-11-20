@@ -11,7 +11,7 @@
 //!
 //! [`take`]: RetainedPacks::take
 
-use super::{PackSpool, SPOOL_BUFFER, VerifiedPack};
+use super::{PackError, PackSpool, SPOOL_BUFFER, VerifiedPack};
 use crate::protocol::{PACK_BODY_LIMIT, PackKey};
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
@@ -88,19 +88,34 @@ impl RetainedPacks {
     /// deleted.
     #[must_use]
     pub fn take(&self, key: &PackKey) -> Option<VerifiedPack> {
-        let path = self.path(key);
-        let pack = open_regular(&path)
-            .and_then(|file| read_verified(file, &self.spool_dir, key))
-            .ok();
-        if pack.is_none() {
-            let _ = std::fs::remove_file(&path);
+        if !self.dir_is_real() {
+            return None;
         }
-        pack
+        let path = self.path(key);
+        match open_regular(&path).and_then(|file| read_verified(file, &self.spool_dir, key)) {
+            Ok(pack) => Some(pack),
+            Err(error) => {
+                // A file that is not the pack goes. One that could not be
+                // read for want of a resource stays for the next try.
+                if unusable(&error) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                None
+            }
+        }
     }
 
     /// Delete the pack kept for `key`, if any.
     pub fn discard(&self, key: &PackKey) {
-        let _ = std::fs::remove_file(self.path(key));
+        if self.dir_is_real() {
+            let _ = std::fs::remove_file(self.path(key));
+        }
+    }
+
+    /// Whether the cache directory is a directory itself and not a link to
+    /// one, so that nothing here reaches outside the repository.
+    fn dir_is_real(&self) -> bool {
+        std::fs::symlink_metadata(&self.dir).is_ok_and(|meta| meta.is_dir())
     }
 
     /// Delete every file older than a week, then the oldest packs past the
@@ -140,10 +155,26 @@ fn open_regular(path: &Path) -> io::Result<File> {
     }
 }
 
+/// Whether `error` says the file itself is not a kept pack, rather than that
+/// the machine could not read it just now.
+fn unusable(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof
+    )
+}
+
 /// Read all of `file` into a new spool in `spool_dir` and verify it against
 /// `key`.
 fn read_verified(mut file: File, spool_dir: &Path, key: &PackKey) -> io::Result<VerifiedPack> {
-    let invalid = |_| io::Error::from(io::ErrorKind::InvalidData);
+    let invalid = |error| match error {
+        PackError::Io(error) => error,
+        _ => io::Error::from(io::ErrorKind::InvalidData),
+    };
     let len = file.metadata()?.len();
     let mut spool = PackSpool::create(spool_dir, PACK_BODY_LIMIT).map_err(invalid)?;
     spool.begin(Some(len)).map_err(invalid)?;
@@ -313,6 +344,11 @@ mod tests {
         set_age(&elsewhere.join("old"), MAX_RETAINED_AGE * 2);
         std::os::unix::fs::symlink(&elsewhere, &cache.dir).unwrap();
         assert!(cache.keep(&key, &pack).is_err());
+        // Neither a read nor a discard reaches through the link.
+        std::fs::write(elsewhere.join(format!("{}.pack", key.to_hex())), &bytes).unwrap();
+        assert!(cache.take(&key).is_none());
+        cache.discard(&key);
+        assert!(elsewhere.join(format!("{}.pack", key.to_hex())).exists());
         cache.trim();
         assert!(elsewhere.join("old").exists());
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 1);
@@ -359,6 +395,25 @@ mod tests {
         assert_eq!(names.len(), MAX_RETAINED_PACKS);
         assert!(!names.contains(&format!("{}.pack", keys[0].to_hex())));
         assert!(names.contains(&format!("{}.pack", keys[MAX_RETAINED_PACKS].to_hex())));
+    }
+
+    #[test]
+    fn only_a_file_that_is_not_a_pack_is_unusable() {
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(unusable(&io::Error::from(kind)), "{kind:?}");
+        }
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::StorageFull,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!unusable(&io::Error::from(kind)), "{kind:?}");
+        }
     }
 
     #[cfg(unix)]

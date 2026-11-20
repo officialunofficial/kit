@@ -2705,7 +2705,9 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
         "the fetch heals once"
     );
     assert_eq!(report.packs_downloaded, 2);
-    assert_eq!(counted.take().len(), 9); // suffix attempt, one full walk, tag listing
+    // The suffix attempt, one full walk, the tag listing. The delta pack that
+    // failed on its missing base is kept, so the retry does not get it again.
+    assert_eq!(counted.take().len(), 8);
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(second)
