@@ -236,7 +236,8 @@ pub(crate) fn apply_pack_chain(
     guard: &PruneGuard,
     validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
-    let mut kept = Vec::new();
+    let retained = RetainedPacks::new(&store.spool_dir());
+    let mut unsettled = Vec::new();
     let result = apply_chain(
         store,
         source,
@@ -248,20 +249,45 @@ pub(crate) fn apply_pack_chain(
         require_signed,
         done,
         guard,
-        &mut kept,
+        &retained,
+        &mut unsettled,
         validate,
     );
-    // A kept pack that a retry applied has served; one whose window did not
-    // land stays for the next retry.
-    let retained = RetainedPacks::new(&store.spool_dir());
-    for key in kept.into_iter().filter(|key| applied.contains(key)) {
-        retained.discard(&key);
+    settle(&mut unsettled, applied, &retained);
+    if result.is_err() {
+        // These packs verified and then did not reach the store, or reached
+        // a window that did not land. Keep them for a retry. A pack that came
+        // from the disk is still there.
+        for held in &unsettled {
+            if held.origin == Origin::Remote {
+                let _ = retained.keep(&held.key, &held.pack);
+            }
+        }
     }
     result
 }
 
-/// [`apply_pack_chain`]'s work. `kept` collects the keys of the packs it took
-/// from the disk instead of downloading.
+/// A verified pack that no window has made durable yet.
+struct Unsettled {
+    key: PackKey,
+    pack: VerifiedPack,
+    origin: Origin,
+}
+
+/// Drop the packs `applied` records: their objects are in the store. A kept
+/// pack that served leaves the disk.
+fn settle(unsettled: &mut Vec<Unsettled>, applied: &AppliedPacks, retained: &RetainedPacks) {
+    unsettled.retain(|held| {
+        let recorded = applied.contains(&held.key);
+        if recorded && held.origin == Origin::Kept {
+            retained.discard(&held.key);
+        }
+        !recorded
+    });
+}
+
+/// [`apply_pack_chain`]'s work. It leaves in `unsettled` every verified pack
+/// whose objects may not be in the store.
 #[allow(clippy::too_many_arguments)]
 fn apply_chain(
     store: &ObjectStore,
@@ -274,7 +300,8 @@ fn apply_chain(
     require_signed: bool,
     done: &mut ChainApplied,
     guard: &PruneGuard,
-    kept: &mut Vec<PackKey>,
+    retained: &RetainedPacks,
+    unsettled: &mut Vec<Unsettled>,
     validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
     let mut publication = Publication::new(store, guard)?;
@@ -297,29 +324,18 @@ fn apply_chain(
                     break;
                 }
             };
-        if origin == Origin::Kept {
-            kept.push(key);
-        }
-        // From here the pack is verified. If applying it fails, keep it for a
-        // retry. One that came from the disk is still there.
-        let keep = || {
-            if origin == Origin::Remote {
-                let _ = RetainedPacks::new(&store.spool_dir()).keep(&key, &pack);
-            }
-        };
-        let decoded = decode_pack(store, &pack, publication.pending(), require_signed);
+        unsettled.push(Unsettled { key, pack, origin });
+        let held = unsettled.last().expect("pushed a pack");
+        let decoded = decode_pack(store, &held.pack, publication.pending(), require_signed);
         let (spool, unpacked) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
-                keep();
                 failure = Some(error);
                 break;
             }
         };
-        if let Err(error) = publication.accept(&spool, key, observer, remote, applied) {
-            keep();
-            return Err(error.into());
-        }
+        publication.accept(&spool, key, observer, remote, applied)?;
+        settle(unsettled, applied, retained);
         if unpacked > 0 {
             observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
         }
