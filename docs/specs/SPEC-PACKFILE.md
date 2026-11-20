@@ -168,23 +168,23 @@ raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
 check the version before using its declared layout. Repair MUST preserve
 a pair with an unknown version.
 
-The exact version-1 index size is `1,100 + 44 × N` bytes. Reject unknown magic or
-version, trailing or truncated bytes, a bad checksum, a mismatched
-key or frame count, duplicate or unsorted ids, and fanout inconsistent
-with the ids. Before allocating or following an offset, check the count,
-exact file size, and all arithmetic and integer conversions. Every row
-must describe one whole frame before the trailer. Extents include the
-five-byte frame headers for the overlap check. Check the frame type and
-length before using its payload. Bound memory independently of the number
-of local packs.
+The exact version-1 index size is `1,100 + 44 × N` bytes. Before
+allocating or following an offset, check the magic, version, key, count,
+exact file size, fanout bounds, and arithmetic and integer conversions.
+Ordinary lookups check the extent of each selected row, including the
+five-byte frame header. Check the frame type and length before using
+its payload. Full object reads check canonical encoding and recompute
+the requested id. Bound cached row bytes and open file handles
+independently of the number of local packs.
 
-Before sealing or rebuilding an index, and during an integrity scan,
-check the pack trailer and whole-file key, walk the declared frames to
-the trailer with no gaps or extra data, and check the one-to-one
-correspondence of frames and index rows. Check canonical encoding and
-recompute each indexed id using SPEC-OBJECTS §10. Ordinary lookups can use
-the validated index and check the selected frame and object without
-rehashing the whole pack on every read.
+Integrity scans, repair, merge and retirement MUST verify the full index
+checksum. Reject duplicate or unsorted ids, fanout inconsistent with the
+ids, and overlapping or missing extents. Check the pack trailer and
+whole-file key, walk the declared frames to the trailer with no gaps or
+extra data, and check the one-to-one correspondence of frames and index
+rows. Check canonical encoding and recompute each indexed id using
+SPEC-OBJECTS §10. A writer performs these checks on the pair it seals
+or on the rebuilt index and its verified pack.
 
 See [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage) for marker activation,
 discovery, publication, and the mixed local-pack conformance vector.

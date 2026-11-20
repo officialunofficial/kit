@@ -18,6 +18,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Open packed stores without scanning pack headers and speed up lookups across many local packs.
+
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 
 ### Fixed

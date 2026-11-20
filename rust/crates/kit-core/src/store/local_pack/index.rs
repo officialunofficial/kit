@@ -11,10 +11,10 @@ use crate::serialize;
 
 use super::super::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult, read_header_prefix};
 
-const MAGIC_INDEX: &[u8; 4] = b"KITX";
-const FANOUT_END: usize = 12 + 256 * 4;
-const INDEX_BASE_LEN: usize = FANOUT_END + 64;
-const INDEX_ROW_LEN: usize = 44;
+pub(super) const MAGIC_INDEX: &[u8; 4] = b"KITX";
+pub(super) const FANOUT_END: usize = 12 + 256 * 4;
+pub(super) const INDEX_BASE_LEN: usize = FANOUT_END + 64;
+pub(super) const INDEX_ROW_LEN: usize = 44;
 const FRAME_LEN: u64 = ENTRY_FRAME_LEN as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub(in crate::store) struct Frame {
 }
 
 impl Frame {
-    fn extent(self, trailer: u64) -> Option<(u64, u64)> {
+    pub(super) fn extent(self, trailer: u64) -> Option<(u64, u64)> {
         let start = self.offset.checked_sub(FRAME_LEN)?;
         let end = self.offset.checked_add(u64::from(self.len))?;
         (start >= HEADER_LEN as u64
@@ -94,19 +94,21 @@ pub(in crate::store) struct Index {
     bytes: Vec<u8>,
     count: usize,
     trailer: u64,
-    stamp: Option<IndexStamp>,
+    stamp: Option<Stamp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct IndexStamp {
+pub(super) struct Stamp {
     modified: std::time::SystemTime,
     len: u64,
     #[cfg(unix)]
     identity: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
 }
 
-impl IndexStamp {
-    fn get(metadata: &fs::Metadata) -> io::Result<Self> {
+impl Stamp {
+    pub(super) fn get(metadata: &fs::Metadata) -> io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -115,7 +117,36 @@ impl IndexStamp {
             len: metadata.len(),
             #[cfg(unix)]
             identity: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
+    }
+
+    pub(super) fn settled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::time::{Duration, SystemTime};
+            let (seconds, nanos) = self.changed;
+            let Ok(seconds) = u64::try_from(seconds) else {
+                return false;
+            };
+            let Ok(nanos) = u32::try_from(nanos) else {
+                return false;
+            };
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::new(seconds, nanos))
+                .and_then(|changed| changed.elapsed().ok())
+                .is_some_and(|age| age >= Duration::from_secs(1))
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
+    pub(super) fn same_file(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        return self.identity == other.identity && self.len == other.len;
+        #[cfg(not(unix))]
+        return self == other;
     }
 }
 
@@ -147,7 +178,7 @@ impl Index {
             return Err(invalid("trailing index bytes").into());
         }
         let mut index = Self::decode(pair.clone(), bytes, count, trailer)?;
-        index.stamp = IndexStamp::get(&metadata).ok();
+        index.stamp = Stamp::get(&metadata).ok();
         Ok(index)
     }
 
@@ -167,21 +198,6 @@ impl Index {
         Ok(index)
     }
 
-    pub(super) fn byte_len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub(super) fn unchanged(&self) -> bool {
-        if let Some(stamp) = &self.stamp
-            && let Ok(metadata) = fs::symlink_metadata(&self.pair.index)
-            && metadata.is_file()
-            && let Ok(current) = IndexStamp::get(&metadata)
-        {
-            return current == *stamp;
-        }
-        false
-    }
-
     fn validate(&self) -> io::Result<()> {
         let bytes = &self.bytes;
         if &bytes[..4] != MAGIC_INDEX || le_u32(&bytes[4..8]) != 1 {
@@ -198,6 +214,7 @@ impl Index {
         if blake3::hash(&bytes[..checksum_at]).as_bytes() != &bytes[checksum_at..] {
             return Err(invalid("index checksum mismatch"));
         }
+        validate_fanout_bounds(&bytes[12..FANOUT_END], self.count)?;
         if (1..self.count).any(|i| self.id(i - 1) >= self.id(i)) {
             return Err(invalid("index ids must be strictly increasing"));
         }
@@ -270,6 +287,7 @@ impl Index {
             .map(|i| *self.id(i))
     }
 
+    #[cfg(test)]
     pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
         let mut range = self.bucket(id[0]);
         let mut end = range.end;
@@ -289,7 +307,7 @@ impl Index {
         if !metadata.is_file() {
             return Err(self.pair.error("index is not a regular file"));
         }
-        if self.stamp.is_none() || IndexStamp::get(&metadata).ok() != self.stamp {
+        if self.stamp.is_none() || Stamp::get(&metadata).ok() != self.stamp {
             let mut file = open_regular(&self.pair.index)?;
             read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
                 .map_err(|e| self.pair.context(e))?;
@@ -334,7 +352,7 @@ pub(super) fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_version<const N: usize>(
+pub(super) fn read_version<const N: usize>(
     reader: &mut impl Read,
     magic: [u8; 4],
     kind: &str,
@@ -363,7 +381,7 @@ fn frame_count_is_supported(count: usize) -> bool {
     count <= MAX_ENTRIES as usize
 }
 
-fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+pub(super) fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if !frame_count_is_supported(count as usize) {
@@ -383,7 +401,7 @@ fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     Ok((count as usize, trailer, header))
 }
 
-fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
+pub(super) fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
     let mut header = [0; ENTRY_FRAME_LEN];
     reader.read_exact(&mut header)?;
     if header[0] != 0 {
@@ -392,7 +410,22 @@ fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
     Ok(le_u32(&header[1..]))
 }
 
-fn le_u32(bytes: &[u8]) -> u32 {
+pub(super) fn validate_fanout_bounds(fanout: &[u8], count: usize) -> io::Result<()> {
+    let mut prev = 0;
+    for bucket in fanout.chunks_exact(4) {
+        let end = le_u32(bucket) as usize;
+        if end < prev || end > count {
+            return Err(invalid("invalid index fanout"));
+        }
+        prev = end;
+    }
+    if prev != count {
+        return Err(invalid("index fanout does not reach frame count"));
+    }
+    Ok(())
+}
+
+pub(super) fn le_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().expect("u32 width"))
 }
 
@@ -512,9 +545,7 @@ mod tests {
     use crate::object::KitError;
     use crate::serialize;
     use crate::store::StoreError;
-    use crate::store::local_pack::LocalPacks;
     use std::path::Path;
-    use std::sync::Arc;
 
     #[test]
     fn packed_blob_identity_rejects_a_short_object_header() {
@@ -542,50 +573,6 @@ mod tests {
             super::canonical_id(&bytes),
             Err(StoreError::Decode(KitError::TrailingData))
         ));
-    }
-
-    #[test]
-    fn cache_evicts_the_oldest_index_at_its_byte_and_entry_limits() {
-        fn index(tag: u8, size: usize) -> Arc<Index> {
-            Arc::new(Index {
-                pair: Pair::new(Path::new(""), [tag; 32]),
-                bytes: vec![0; size],
-                count: 0,
-                trailer: 0,
-                stamp: None,
-            })
-        }
-
-        let cache = LocalPacks::new(true);
-        let mib = 1024 * 1024;
-        for tag in 1..=4 {
-            cache.remember(index(tag, 16 * mib));
-        }
-        assert_eq!(cache.known.lock().unwrap().len(), 4);
-        cache.remember(index(5, 32 * mib));
-        cache.remember(index(6, 64 * mib + 1));
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 3);
-            assert_eq!(known[0].pair.key, [5; 32]);
-            assert_eq!(known[1].pair.key, [4; 32]);
-            assert_eq!(known[2].pair.key, [3; 32]);
-        }
-        cache.forget(&[5; 32]);
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 2);
-            assert_eq!(known[0].pair.key, [4; 32]);
-            assert_eq!(known[1].pair.key, [3; 32]);
-        }
-
-        let cache = LocalPacks::new(true);
-        for tag in 0..65 {
-            cache.remember(index(tag, 1_100));
-        }
-        let known = cache.known.lock().unwrap();
-        assert_eq!(known.len(), 64);
-        assert_eq!(known.last().unwrap().pair.key, [1; 32]);
     }
 
     #[test]
@@ -733,5 +720,63 @@ mod tests {
         assert!(read(&mut file, 2, frames).is_ok());
         assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD).is_ok());
         assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD + 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reader_bounds_tests {
+    #[cfg(unix)]
+    use super::Stamp;
+    use super::{FANOUT_END, validate_fanout_bounds};
+
+    #[test]
+    fn locator_fanout_stays_monotonic_and_ends_at_the_row_count() {
+        let check = |buckets: &[u32], count| {
+            let mut bytes = [0; FANOUT_END - 12];
+            for (i, bucket) in bytes.chunks_exact_mut(4).enumerate() {
+                bucket.copy_from_slice(&buckets[i.min(buckets.len() - 1)].to_le_bytes());
+            }
+            validate_fanout_bounds(&bytes, count)
+        };
+        assert!(check(&[0], 0).is_ok());
+        assert!(check(&[0, 1, 1, 2], 2).is_ok());
+        assert!(check(&[0, 1, 0, 2], 2).is_err());
+        assert!(check(&[0, 3, 2], 2).is_err());
+        assert!(check(&[0, 1], 2).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_distinguishes_inode_and_length_but_allows_timestamp_changes() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let first = Stamp::get(&file.metadata().unwrap()).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let touched = Stamp::get(&file.metadata().unwrap()).unwrap();
+        assert_ne!(first, touched);
+        assert!(first.same_file(&touched));
+        file.set_len(1).unwrap();
+        assert!(!first.same_file(&Stamp::get(&file.metadata().unwrap()).unwrap()));
+        let other = tempfile::tempfile().unwrap();
+        assert!(!first.same_file(&Stamp::get(&other.metadata().unwrap()).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_past_directory_stamp_can_settle() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let mut stamp = Stamp::get(&file.metadata().unwrap()).unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let future = now + Duration::from_secs(15);
+        stamp.changed = (i64::try_from(future.as_secs()).unwrap(), 0);
+        assert!(!stamp.settled());
+        stamp.changed = (i64::try_from(now.as_secs() - 15).unwrap(), 0);
+        assert!(stamp.settled());
     }
 }

@@ -5,7 +5,7 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use crate::pack::{HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
 use super::{
-    Arc, Hash, Index, ObjectStore, Pair, StoreResult, format, index, matching_index, open_regular,
+    Hash, Index, ObjectStore, Pair, StoreResult, format, index, matching_index, open_regular,
     scan_pair, stage_file, stage_index,
 };
 use crate::store::{MAX_RAW_OBJECT_SIZE, PruneGuard, StoreError};
@@ -264,13 +264,13 @@ impl Staged {
                 staged.persist(&pair.index).map_err(|e| e.error)?;
             }
         }
-        let checked = Index::open(&pair)?;
+        Index::open(&pair)?;
         crate::atomic::sync_dir(&dir)?;
         store
             .packs
             .enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        store.packs.remember(Arc::new(checked));
+        store.packs.remember_publication(&pair);
         Ok(())
     }
 }

@@ -333,9 +333,6 @@ impl ObjectStore {
             return Err(StoreError::NotAKitRepository);
         }
         let packed = format::check(&layout.format_file())?;
-        if packed {
-            local_pack::check_live_pack_versions(&objects_root)?;
-        }
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(packed)),
