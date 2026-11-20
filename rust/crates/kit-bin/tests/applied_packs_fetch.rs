@@ -60,17 +60,17 @@ fn commit_all(dir: &Path, msg: &str) {
 }
 
 #[test]
-fn closure_verify_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn closure_verify_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["closure", "verify", "origin/main", "--history"], true);
 }
 
 #[test]
-fn gc_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn gc_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["gc"], false);
 }
 
 #[test]
-fn restore_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn restore_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["restore", "--force", "dir/large"], false);
 }
 
@@ -152,7 +152,8 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
     let url = format!("kit+file://{}", remote.path().display());
     run_in(source.path(), &["remote", "add", "origin", &url]);
     fs::create_dir(source.path().join("dir")).unwrap();
-    let len = usize::try_from(kit_core::worktree::CHUNK_THRESHOLD).unwrap() + 1;
+    // A whole-file blob over the fetch packing limit stays loose in a clone.
+    let len = kit_core::chunker::MAX_SIZE + 1;
     fs::write(source.path().join("dir/large"), vec![42; len]).unwrap();
     commit_all(source.path(), "large file");
     run_in(source.path(), &["push", "origin"]);
@@ -167,9 +168,11 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         .iter_object_hashes()
         .unwrap()
         .into_iter()
-        .find_map(|id| match store.read_object(&id).unwrap() {
-            kit_core::object::Object::ChunkedBlob(manifest) => Some(manifest.chunks()[0]),
-            _ => None,
+        .find(|id| {
+            matches!(
+                store.read_object(id).unwrap(),
+                kit_core::object::Object::Blob(blob) if blob.data.len() == len
+            )
         })
         .unwrap();
     store.remove_object(&chunk).unwrap();
@@ -233,7 +236,7 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
     run_in(&client, &["fetch", "origin"]);
     assert!(
         store.contains(&chunk),
-        "fetch must restore the missing chunk"
+        "fetch must restore the missing object"
     );
     run_in(&client, &["closure", "verify", "origin/main", "--history"]);
 }
