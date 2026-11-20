@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Open packed stores without scanning pack headers and speed up lookups across many local packs.
+
 ### Added
 
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.

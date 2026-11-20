@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
 
 use crate::hash::{Hash, from_hex, to_hex};
@@ -11,10 +11,10 @@ use crate::serialize;
 
 use super::super::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult, read_header_prefix};
 
-const MAGIC_INDEX: &[u8; 4] = b"KITX";
-const FANOUT_END: usize = 12 + 256 * 4;
-const INDEX_BASE_LEN: usize = FANOUT_END + 64;
-const INDEX_ROW_LEN: usize = 44;
+pub(super) const MAGIC_INDEX: &[u8; 4] = b"KITX";
+pub(super) const FANOUT_END: usize = 12 + 256 * 4;
+pub(super) const INDEX_BASE_LEN: usize = FANOUT_END + 64;
+pub(super) const INDEX_ROW_LEN: usize = 44;
 const FRAME_LEN: u64 = ENTRY_FRAME_LEN as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub(in crate::store) struct Frame {
 }
 
 impl Frame {
-    fn extent(self, trailer: u64) -> Option<(u64, u64)> {
+    pub(super) fn extent(self, trailer: u64) -> Option<(u64, u64)> {
         let start = self.offset.checked_sub(FRAME_LEN)?;
         let end = self.offset.checked_add(u64::from(self.len))?;
         (start >= HEADER_LEN as u64
@@ -94,19 +94,20 @@ pub(in crate::store) struct Index {
     bytes: Vec<u8>,
     count: usize,
     trailer: u64,
-    stamp: Option<IndexStamp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct IndexStamp {
+pub(super) struct Stamp {
     modified: std::time::SystemTime,
     len: u64,
     #[cfg(unix)]
     identity: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
 }
 
-impl IndexStamp {
-    fn get(metadata: &fs::Metadata) -> io::Result<Self> {
+impl Stamp {
+    pub(super) fn get(metadata: &fs::Metadata) -> io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -115,7 +116,16 @@ impl IndexStamp {
             len: metadata.len(),
             #[cfg(unix)]
             identity: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
+    }
+
+    pub(super) fn same_file(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        return self.identity == other.identity && self.len == other.len;
+        #[cfg(not(unix))]
+        return self == other;
     }
 }
 
@@ -136,8 +146,7 @@ impl Index {
         let mut file = open_regular(&pair.index)?;
         let prefix = read_version::<8>(&mut file, *MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;
-        let metadata = file.metadata()?;
-        if metadata.len() != size as u64 {
+        if file.metadata()?.len() != size as u64 {
             return Err(invalid("index length does not match frame count").into());
         }
         let mut bytes = vec![0; size];
@@ -146,9 +155,7 @@ impl Index {
         if file.read(&mut [0])? != 0 {
             return Err(invalid("trailing index bytes").into());
         }
-        let mut index = Self::decode(pair.clone(), bytes, count, trailer)?;
-        index.stamp = IndexStamp::get(&metadata).ok();
-        Ok(index)
+        Ok(Self::decode(pair.clone(), bytes, count, trailer)?)
     }
 
     fn decode(pair: Pair, bytes: Vec<u8>, count: usize, trailer: u64) -> io::Result<Self> {
@@ -161,25 +168,9 @@ impl Index {
             bytes,
             count,
             trailer,
-            stamp: None,
         };
         index.validate()?;
         Ok(index)
-    }
-
-    pub(super) fn byte_len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub(super) fn unchanged(&self) -> bool {
-        if let Some(stamp) = &self.stamp
-            && let Ok(metadata) = fs::symlink_metadata(&self.pair.index)
-            && metadata.is_file()
-            && let Ok(current) = IndexStamp::get(&metadata)
-        {
-            return current == *stamp;
-        }
-        false
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -270,7 +261,8 @@ impl Index {
             .map(|i| *self.id(i))
     }
 
-    pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
+    #[cfg(test)]
+    fn find(&self, id: &Hash) -> Option<Frame> {
         let mut range = self.bucket(id[0]);
         let mut end = range.end;
         while range.start < end {
@@ -282,36 +274,6 @@ impl Index {
             }
         }
         None
-    }
-
-    pub(super) fn check_index_version(&self) -> StoreResult<()> {
-        let metadata = fs::symlink_metadata(&self.pair.index)?;
-        if !metadata.is_file() {
-            return Err(self.pair.error("index is not a regular file"));
-        }
-        if self.stamp.is_none() || IndexStamp::get(&metadata).ok() != self.stamp {
-            let mut file = open_regular(&self.pair.index)?;
-            read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
-                .map_err(|e| self.pair.context(e))?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn open_frame(&self, frame: Frame) -> StoreResult<File> {
-        let mut file = open_regular(&self.pair.pack)?;
-        let (count, trailer, _) = read_header(&mut file).map_err(|e| self.pair.context(e))?;
-        if count != self.count || trailer != self.trailer {
-            return Err(self.pair.error("pack size or count changed"));
-        }
-        let (start, _) = frame
-            .extent(trailer)
-            .ok_or_else(|| self.pair.error("invalid frame extent"))?;
-        file.seek(SeekFrom::Start(start))?;
-        let len = read_frame_header(&mut file).map_err(|e| self.pair.error(e))?;
-        if len != frame.len {
-            return Err(self.pair.error("index and pack disagree on frame length"));
-        }
-        Ok(file)
     }
 
     pub(super) fn matches(&self, rows: &[(Hash, Frame)]) -> bool {
@@ -334,7 +296,7 @@ pub(super) fn open_regular(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn read_version<const N: usize>(
+pub(super) fn read_version<const N: usize>(
     reader: &mut impl Read,
     magic: [u8; 4],
     kind: &str,
@@ -363,7 +325,7 @@ fn frame_count_is_supported(count: usize) -> bool {
     count <= MAX_ENTRIES as usize
 }
 
-fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+pub(super) fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if !frame_count_is_supported(count as usize) {
@@ -383,7 +345,7 @@ fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     Ok((count as usize, trailer, header))
 }
 
-fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
+pub(super) fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
     let mut header = [0; ENTRY_FRAME_LEN];
     reader.read_exact(&mut header)?;
     if header[0] != 0 {
@@ -392,7 +354,7 @@ fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
     Ok(le_u32(&header[1..]))
 }
 
-fn le_u32(bytes: &[u8]) -> u32 {
+pub(super) fn le_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().expect("u32 width"))
 }
 
@@ -512,9 +474,7 @@ mod tests {
     use crate::object::KitError;
     use crate::serialize;
     use crate::store::StoreError;
-    use crate::store::local_pack::LocalPacks;
     use std::path::Path;
-    use std::sync::Arc;
 
     #[test]
     fn packed_blob_identity_rejects_a_short_object_header() {
@@ -542,50 +502,6 @@ mod tests {
             super::canonical_id(&bytes),
             Err(StoreError::Decode(KitError::TrailingData))
         ));
-    }
-
-    #[test]
-    fn cache_evicts_the_oldest_index_at_its_byte_and_entry_limits() {
-        fn index(tag: u8, size: usize) -> Arc<Index> {
-            Arc::new(Index {
-                pair: Pair::new(Path::new(""), [tag; 32]),
-                bytes: vec![0; size],
-                count: 0,
-                trailer: 0,
-                stamp: None,
-            })
-        }
-
-        let cache = LocalPacks::new(true);
-        let mib = 1024 * 1024;
-        for tag in 1..=4 {
-            cache.remember(index(tag, 16 * mib));
-        }
-        assert_eq!(cache.known.lock().unwrap().len(), 4);
-        cache.remember(index(5, 32 * mib));
-        cache.remember(index(6, 64 * mib + 1));
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 3);
-            assert_eq!(known[0].pair.key, [5; 32]);
-            assert_eq!(known[1].pair.key, [4; 32]);
-            assert_eq!(known[2].pair.key, [3; 32]);
-        }
-        cache.forget(&[5; 32]);
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 2);
-            assert_eq!(known[0].pair.key, [4; 32]);
-            assert_eq!(known[1].pair.key, [3; 32]);
-        }
-
-        let cache = LocalPacks::new(true);
-        for tag in 0..65 {
-            cache.remember(index(tag, 1_100));
-        }
-        let known = cache.known.lock().unwrap();
-        assert_eq!(known.len(), 64);
-        assert_eq!(known.last().unwrap().pair.key, [1; 32]);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,25 +16,56 @@ pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
 pub(super) use index::{canonical_id, invalid};
 
+mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
+use reader::{Handles, Locator, Member, Route, prefix, row_budget};
 pub use writer::LocalPackWriter;
 
-const CACHE_BYTES: usize = 64 * 1024 * 1024;
-const CACHE_ENTRIES: usize = 64;
+#[derive(Debug, Default)]
+struct Catalog {
+    dir: Option<index::Stamp>,
+    packs: Vec<Arc<Locator>>,
+    routes: Vec<Route>,
+    on_disk: Vec<usize>,
+}
+
+impl Catalog {
+    fn candidates(&self, id: &Hash) -> impl Iterator<Item = (&Arc<Locator>, Option<usize>)> {
+        let prefix = prefix(id);
+        let start = self.routes.partition_point(|route| route.prefix < prefix);
+        self.routes[start..]
+            .iter()
+            .take_while(move |route| route.prefix == prefix)
+            .map(|route| (&self.packs[route.pack as usize], Some(route.row as usize)))
+            .chain(self.on_disk.iter().map(|&pack| (&self.packs[pack], None)))
+    }
+}
+
+#[derive(Debug, Default)]
+struct Discovery {
+    catalog: Arc<Catalog>,
+    scanned: bool,
+}
 
 #[derive(Debug)]
 pub(super) struct LocalPacks {
     enabled: AtomicBool,
-    known: Mutex<Vec<Arc<Index>>>,
+    discovery: Mutex<Discovery>,
+    handles: Handles,
+    #[cfg(test)]
+    index_loads: std::sync::atomic::AtomicUsize,
 }
 
 impl LocalPacks {
     pub(super) fn new(enabled: bool) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
-            known: Mutex::new(Vec::new()),
+            discovery: Mutex::default(),
+            handles: Handles::default(),
+            #[cfg(test)]
+            index_loads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -48,24 +80,81 @@ impl LocalPacks {
         Ok(true)
     }
 
-    fn remember(&self, index: Arc<Index>) {
-        if index.byte_len() > CACHE_BYTES {
-            return;
-        }
-        let mut known = self.known.lock().expect("local pack cache mutex");
-        known.retain(|old| old.pair.key != index.pair.key);
-        let mut bytes = index.byte_len() + known.iter().map(|i| i.byte_len()).sum::<usize>();
-        while bytes > CACHE_BYTES || known.len() >= CACHE_ENTRIES {
-            bytes -= known.pop().expect("cache exceeds capacity").byte_len();
-        }
-        known.insert(0, index);
+    fn forget(&self, key: &Hash) {
+        self.discovery
+            .lock()
+            .expect("local pack catalog mutex")
+            .scanned = false;
+        self.handles.retain(|locator| locator.pair.key != *key);
     }
 
-    fn forget(&self, key: &Hash) {
-        self.known
-            .lock()
-            .expect("local pack cache mutex")
-            .retain(|i| i.pair.key != *key);
+    fn discover(&self, dir: &Path, force: bool) -> StoreResult<(Arc<Catalog>, Option<StoreError>)> {
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        let stamp = match fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() => Some(index::Stamp::get(&meta)?),
+            Ok(_) => return Err(index::invalid("local pack directory is not a directory").into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        // A publication changes the directory's status time even if its
+        // modification time is restored. Without a status time, scan on a miss.
+        if cfg!(unix) && !force && discovery.scanned && discovery.catalog.dir == stamp {
+            return Ok((Arc::clone(&discovery.catalog), None));
+        }
+        let mut catalog = Catalog {
+            dir: stamp,
+            ..Catalog::default()
+        };
+        let old: BTreeMap<_, _> = discovery
+            .catalog
+            .packs
+            .iter()
+            .map(|p| (p.pair.key, p))
+            .collect();
+        let mut budget = row_budget() - old.values().map(|p| p.charge()).sum::<usize>();
+        let mut error = None;
+        visit_pairs(dir, |pair| {
+            let previous = old.get(&pair.key).copied();
+            if let Some(locator) = previous {
+                budget += locator.charge();
+            }
+            let locator = match previous {
+                Some(locator) if locator.check_current().is_ok() => Arc::clone(locator),
+                _ => {
+                    #[cfg(test)]
+                    self.index_loads.fetch_add(1, Ordering::Relaxed);
+                    match Locator::open(&pair, budget) {
+                        Ok(locator) => Arc::new(locator),
+                        Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
+                        Err(e) if is_disappeared(&e) => return Ok(()),
+                        Err(e) => {
+                            error.get_or_insert(e);
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            let pack = catalog.packs.len();
+            if locator.charge() == 0 {
+                catalog.on_disk.push(pack);
+            } else {
+                budget -= locator.charge();
+                catalog.routes.extend(locator.routes(pack));
+            }
+            catalog.packs.push(locator);
+            Ok(())
+        })?;
+        catalog
+            .routes
+            .sort_unstable_by_key(|route| (route.prefix, route.pack));
+        let live: BTreeMap<_, _> = catalog.packs.iter().map(|p| (p.pair.key, p)).collect();
+        self.handles.retain(|p| {
+            live.get(&p.pair.key)
+                .is_some_and(|live| Arc::ptr_eq(live, p))
+        });
+        discovery.scanned = error.is_none();
+        discovery.catalog = Arc::new(catalog);
+        Ok((Arc::clone(&discovery.catalog), error))
     }
 
     pub(super) fn collect(
@@ -76,9 +165,8 @@ impl LocalPacks {
     ) -> StoreResult<()> {
         if self.refresh_enabled(store)? {
             visit_pairs(&store.pack_dir(), |pair| {
-                let index = Arc::new(Index::open(&pair)?);
+                let index = Index::open(&pair)?;
                 out.extend(index.ids(shard));
-                self.remember(index);
                 Ok(())
             })?;
         }
@@ -94,67 +182,92 @@ impl LocalPacks {
         refresh: bool,
         mut use_location: impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
-        let mut error = None;
-        let mut mismatch = None;
-        let mut attempt = |location| match use_location(location) {
+        let known = Arc::clone(
+            &self
+                .discovery
+                .lock()
+                .expect("local pack catalog mutex")
+                .catalog,
+        );
+        let mut errors = LookupErrors::default();
+        if let Some(value) = self.try_catalog(&known, id, None, &mut errors, &mut use_location)? {
+            return Ok(value);
+        }
+        if let Some(value) = errors.attempt(use_location(Location::Loose(store.path_for(id))))? {
+            return Ok(value);
+        }
+        let mut pair_error = None;
+        if refresh && self.refresh_enabled(store)? {
+            let (fresh, error) = self.discover(&store.pack_dir(), errors.stale)?;
+            pair_error = error;
+            if !Arc::ptr_eq(&known, &fresh)
+                && let Some(value) =
+                    self.try_catalog(&fresh, id, Some(&known), &mut errors, &mut use_location)?
+            {
+                return Ok(value);
+            }
+        }
+        Err(errors
+            .mismatch
+            .or(errors.error)
+            .or(pair_error)
+            .unwrap_or_else(|| StoreError::ObjectNotFound(to_hex(id))))
+    }
+
+    fn try_catalog<T>(
+        &self,
+        catalog: &Catalog,
+        id: &Hash,
+        checked: Option<&Catalog>,
+        errors: &mut LookupErrors,
+        use_location: &mut impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<Option<T>> {
+        for (locator, row) in catalog.candidates(id) {
+            if checked.is_some_and(|old| old.candidates(id).any(|(p, _)| Arc::ptr_eq(p, locator))) {
+                continue;
+            }
+            let value = (|| {
+                let Some(frame) = locator.find(&self.handles, id, row)? else {
+                    return Ok(None);
+                };
+                let file = self.handles.get(locator, Member::Pack)?;
+                use_location(Location::Packed(Arc::clone(locator), frame, file)).map(Some)
+            })();
+            match value {
+                Err(ref error) if is_disappeared(error) => errors.stale = true,
+                _ => {
+                    if let Some(Some(value)) = errors.attempt(value)? {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
+struct LookupErrors {
+    mismatch: Option<StoreError>,
+    error: Option<StoreError>,
+    stale: bool,
+}
+
+impl LookupErrors {
+    fn attempt<T>(&mut self, value: StoreResult<T>) -> StoreResult<Option<T>> {
+        match value {
             Ok(value) => Ok(Some(value)),
             Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
             Err(e) if is_disappeared(&e) => Ok(None),
             Err(e @ StoreError::HashMismatch { .. }) => {
-                mismatch.get_or_insert(e);
+                self.mismatch.get_or_insert(e);
                 Ok(None)
             }
             Err(e) => {
-                error.get_or_insert(e);
+                self.error.get_or_insert(e);
                 Ok(None)
             }
-        };
-        let known = self.known.lock().expect("local pack cache mutex").clone();
-        for index in &known {
-            let Some(frame) = index.find(id) else {
-                continue;
-            };
-            if let Some(value) = attempt(Location::Packed(Arc::clone(index), frame))? {
-                return Ok(value);
-            }
         }
-        let loose = store.path_for(id);
-        if let Some(value) = attempt(Location::Loose(loose))? {
-            return Ok(value);
-        }
-        let mut found = None;
-        let mut pair_error = None;
-        if refresh && self.refresh_enabled(store)? {
-            let dir = store.pack_dir();
-            visit_pairs_until(&dir, |pair| {
-                if known
-                    .iter()
-                    .any(|index| index.pair.key == pair.key && index.unchanged())
-                {
-                    return Ok(false);
-                }
-                let index = match Index::open(&pair) {
-                    Ok(index) => Arc::new(index),
-                    Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
-                    Err(e) => {
-                        pair_error.get_or_insert(e);
-                        return Ok(false);
-                    }
-                };
-                let frame = index.find(id);
-                self.remember(Arc::clone(&index));
-                if let Some(frame) = frame {
-                    found = attempt(Location::Packed(index, frame))?;
-                }
-                Ok(found.is_some())
-            })?;
-        }
-        found.ok_or_else(|| {
-            mismatch
-                .or(error)
-                .or(pair_error)
-                .unwrap_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
-        })
     }
 }
 
@@ -165,14 +278,14 @@ fn is_disappeared(err: &StoreError) -> bool {
 #[derive(Debug)]
 pub(super) enum Location {
     Loose(PathBuf),
-    Packed(Arc<Index>, Frame),
+    Packed(Arc<Locator>, Frame, Arc<File>),
 }
 
 impl Location {
     pub(super) fn path(&self) -> &Path {
         match self {
             Self::Loose(path) => path,
-            Self::Packed(index, _) => &index.pair.pack,
+            Self::Packed(index, ..) => &index.pair.pack,
         }
     }
 
@@ -186,20 +299,19 @@ impl Location {
                 let file = File::open(path)?;
                 let len = file.metadata()?.len();
                 Ok(Contents {
-                    file,
-                    packed_len: None,
+                    source: Source::Loose(file),
                     len,
                 })
             }
-            Self::Packed(index, frame) => {
-                // A disappeared member invalidates the cached location.
-                index.check_index_version()?;
-                let file = index.open_frame(*frame)?;
-                let len = u64::from(frame.len);
+            Self::Packed(index, frame, file) => {
+                index.open_frame(file, *frame)?;
                 Ok(Contents {
-                    file,
-                    packed_len: Some(len),
-                    len,
+                    source: Source::Packed {
+                        file: Arc::clone(file),
+                        offset: frame.offset,
+                        remaining: usize::try_from(frame.len).expect("bounded frame length"),
+                    },
+                    len: u64::from(frame.len),
                 })
             }
         }
@@ -225,22 +337,35 @@ impl Location {
 }
 
 pub(super) struct Contents {
-    file: File,
-    packed_len: Option<u64>,
+    source: Source,
     pub(super) len: u64,
+}
+
+enum Source {
+    Loose(File),
+    Packed {
+        file: Arc<File>,
+        offset: u64,
+        remaining: usize,
+    },
 }
 
 impl Read for Contents {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let Some(remaining) = &mut self.packed_len else {
-            return self.file.read(bytes);
-        };
-        let limit = (*remaining).min(bytes.len() as u64);
-        let read = self
-            .file
-            .read(&mut bytes[..usize::try_from(limit).expect("limited to slice length")])?;
-        *remaining -= read as u64;
-        Ok(read)
+        match &mut self.source {
+            Source::Loose(file) => file.read(bytes),
+            Source::Packed {
+                file,
+                offset,
+                remaining,
+            } => {
+                let len = (*remaining).min(bytes.len());
+                crate::pack::read_spooled(file, *offset, &mut bytes[..len])?;
+                *offset += len as u64;
+                *remaining -= len;
+                Ok(len)
+            }
+        }
     }
 }
 
@@ -293,10 +418,6 @@ fn visit_pairs_until(
         }
     }
     Ok(())
-}
-
-pub(super) fn check_live_pack_versions(objects: &Path) -> StoreResult<()> {
-    visit_pairs(&objects.join("pack"), |pair| pair.check_versions())
 }
 
 fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {

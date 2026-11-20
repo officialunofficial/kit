@@ -228,19 +228,23 @@ fn corrupt_pack_copy_falls_back_to_verified_loose_bytes() {
 fn verified_accessors_try_another_pack_after_the_cached_copy_fails() {
     let (_dir, _layout, store) = fresh();
     let bytes = blob(b"survives in another pack");
-    let mut good = writer(&store);
-    let id = good.write(&bytes).unwrap();
-    good.write(&blob(b"pack key differs")).unwrap();
-    good.finish().unwrap();
-
     let mut damaged = writer(&store);
-    damaged.write(&bytes).unwrap();
+    let id = damaged.write(&bytes).unwrap();
     let (staged, _guard) = damaged.stage().unwrap();
     let pair = staged.pair.clone();
     staged.publish(&store).unwrap();
     let mut file = fs::OpenOptions::new().write(true).open(&pair.pack).unwrap();
     file.seek(SeekFrom::Start(12 + 5 + 10)).unwrap();
     file.write_all(b"x").unwrap();
+
+    assert!(matches!(
+        store.read(&id),
+        Err(StoreError::HashMismatch { .. })
+    ));
+    let mut good = writer(&store);
+    good.write(&bytes).unwrap();
+    good.write(&blob(b"pack key differs")).unwrap();
+    good.finish().unwrap();
 
     assert_eq!(store.read(&id).unwrap(), bytes);
     let mut allocations = 0;
@@ -346,6 +350,7 @@ fn a_cached_location_refuses_a_pack_with_a_changed_count() {
     let (staged, _guard) = writer.stage().unwrap();
     let pair = staged.pair.clone();
     staged.publish(&store).unwrap();
+    assert!(store.object_size(&id).is_ok());
     let mut bytes = fs::read(&pair.pack).unwrap();
     bytes[8..12].copy_from_slice(&0_u32.to_le_bytes());
     fs::write(&pair.pack, bytes).unwrap();
@@ -358,7 +363,7 @@ fn a_cached_location_refuses_a_pack_with_a_changed_count() {
 }
 
 #[test]
-fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
+fn unknown_live_pack_versions_refuse_lookup_and_repair() {
     fn incompatible(error: &StoreError, member: &str) {
         assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
         let text = error.to_string();
@@ -376,7 +381,8 @@ fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
         staged.publish(&store).unwrap();
         drop(guard);
         let still_open = ObjectStore::open(&layout).unwrap();
-        store.write(&bytes).unwrap(); // The publisher has the cached pack and a loose copy.
+        assert_eq!(store.read(&id).unwrap(), bytes);
+        store.write(&bytes).unwrap();
 
         let (path, kind) = if unknown_index {
             (&pair.index, "local index version 2")
@@ -389,7 +395,8 @@ fn unknown_live_pack_versions_refuse_open_lookup_and_repair() {
         fs::write(replacement.path(), &newer).unwrap();
         replacement.persist(path).unwrap();
 
-        incompatible(&ObjectStore::open(&layout).unwrap_err(), kind);
+        let reopened = ObjectStore::open(&layout).unwrap();
+        incompatible(&reopened.read(&[0; 32]).unwrap_err(), kind);
         incompatible(&store.read(&id).unwrap_err(), kind);
         incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
         incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
@@ -460,8 +467,9 @@ fn a_symlink_cannot_supply_the_pack_directory() {
     let outside = tempfile::tempdir().unwrap();
     std::os::unix::fs::symlink(outside.path(), store.pack_dir()).unwrap();
 
+    let reader = ObjectStore::open(&layout).unwrap();
     assert!(matches!(
-        ObjectStore::open(&layout),
+        reader.read(&[0; 32]),
         Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
     ));
 }
@@ -522,12 +530,13 @@ fn rejects_invalid_index_rows_even_with_a_valid_checksum() {
     let pair = staged.pair.clone();
     staged.publish(&store).unwrap();
     let original = fs::read(&pair.index).unwrap();
+    let row = usize::from(original[12 + 1024..12 + 1024 + 32] != id);
     for (offset, bad_value) in [
         (0, b'X'),                                                // magic
         (8, 0),                                                   // count
         (12, 9),                                                  // fanout
-        (12 + 1024 + 64 + 7, 0xff),                               // offset outside pack
-        (12 + 1024 + 80 + 3, 0xff),                               // payload length over cap
+        (12 + 1024 + 64 + row * 8 + 7, 0xff),                     // offset outside pack
+        (12 + 1024 + 80 + row * 4 + 3, 0xff),                     // payload length over cap
         (original.len() - 64, original[original.len() - 64] ^ 1), // key
     ] {
         let mut damaged = original.clone();
@@ -604,14 +613,11 @@ fn a_reader_refreshes_a_rebuilt_index_with_the_same_key() {
     fs::write(&pair.index, idx).unwrap();
 
     let reader = ObjectStore::open(&layout).unwrap();
-    let cached = index::Index::open(&pair).unwrap();
-    assert!(cached.unchanged());
     assert!(matches!(
         reader.read(&id),
         Err(StoreError::HashMismatch { .. })
     ));
     assert_eq!(store.check_local_packs(true).unwrap(), 1);
-    assert!(!cached.unchanged());
     assert_eq!(reader.read(&id).unwrap(), first);
 }
 
@@ -1448,4 +1454,97 @@ fn a_same_key_pack_scan_io_error_leaves_the_existing_pair_untouched() {
         fs::metadata(&pair.pack).unwrap().modified().unwrap(),
         UNIX_EPOCH + Duration::from_secs(1)
     );
+}
+
+#[test]
+fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
+    use std::sync::atomic::Ordering;
+
+    let (_dir, layout, store) = fresh();
+    let mut writer = Writer::new(&store, 1, MAX_TOTAL_PAYLOAD).unwrap();
+    let objects: Vec<_> = (0..72)
+        .map(|n| {
+            let bytes = blob(&[n]);
+            (writer.write(&bytes).unwrap(), bytes)
+        })
+        .collect();
+    writer.finish().unwrap();
+
+    let reader = ObjectStore::open(&layout).unwrap();
+    let loads = || reader.packs.index_loads.load(Ordering::Relaxed);
+    assert!(matches!(
+        reader.read(&[0; 32]),
+        Err(StoreError::ObjectNotFound(_))
+    ));
+    assert_eq!(loads(), objects.len());
+
+    for (id, bytes) in objects.iter().rev() {
+        assert_eq!(reader.read(id).unwrap(), *bytes);
+    }
+    for n in 1..8 {
+        assert!(matches!(
+            reader.read(&[n; 32]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+    }
+    assert_eq!(loads(), objects.len());
+}
+
+#[test]
+fn lookups_check_the_selected_extent_and_scans_check_the_checksum() {
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(b"indexed bytes");
+    let mut writer = writer(&store);
+    let id = writer.write(&bytes).unwrap();
+    let (staged, _guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+
+    let mut idx = fs::read(&pair.index).unwrap();
+    *idx.last_mut().unwrap() ^= 1;
+    fs::write(&pair.index, &idx).unwrap();
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.read(&id).unwrap(), bytes);
+    assert!(reader.check_local_packs(false).is_err());
+
+    let offset_at = 12 + 1024 + 32;
+    idx[offset_at..offset_at + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    fs::write(&pair.index, idx).unwrap();
+    let error = reader.read(&id).unwrap_err();
+    assert!(error.to_string().contains("extent"), "{error}");
+}
+
+#[test]
+fn cached_pack_handles_do_not_keep_unpublished_locations_visible() {
+    for pack_removed in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let bytes = blob(b"retired object");
+        let mut writer = writer(&store);
+        let id = writer.write(&bytes).unwrap();
+        let (staged, _guard) = writer.stage().unwrap();
+        let pair = staged.pair.clone();
+        staged.publish(&store).unwrap();
+        let reader = ObjectStore::open(&layout).unwrap();
+        assert_eq!(reader.read(&id).unwrap(), bytes);
+
+        fs::remove_file(if pack_removed {
+            &pair.pack
+        } else {
+            &pair.index
+        })
+        .unwrap();
+        assert!(matches!(
+            reader.read(&id),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        store.write(&bytes).unwrap();
+        assert_eq!(reader.read(&id).unwrap(), bytes);
+        store.remove_object(&id).unwrap();
+
+        let mut replacement = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        replacement.write(&bytes).unwrap();
+        replacement.write(&blob(b"new pack key")).unwrap();
+        replacement.finish().unwrap();
+        assert_eq!(reader.read(&id).unwrap(), bytes);
+    }
 }

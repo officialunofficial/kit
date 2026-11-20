@@ -562,11 +562,10 @@ split limits, and delta budgeting. The packed serialized size is the raw
 payload length. Physical loose-file metadata remains available for a
 loose-file sweep.
 
-With `P` set, a reader checks the version headers of live pack and index
-pairs when opening the store. An unknown local pack header or index
-version is `IncompatibleRepoFormat`, with an instruction to update kit.
-The same error applies when a reader discovers an unknown version later.
-This error stops lookup and repair on that pair. See
+With `P` set, a reader checks the versions of each live pair before
+using its layout. An unknown local pack header or index version is
+`IncompatibleRepoFormat`, with an instruction to update kit. This
+error stops lookup and repair on that pair. See
 [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
 Try known published packs, then the loose path. Skip an unusable index

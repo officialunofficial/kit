@@ -1430,9 +1430,10 @@ readers accept packed chunks ([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local
 Local creation and import write loose objects. The local reader accepts
 the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
-Fetch stages accepted objects in 64 MiB publication windows of decoded
-serialized bytes. A window can span several remote packs. Seal the
-current window before adding an object that would pass the target.
+Fetch stages accepted objects in publication windows. The current writer
+seals at 64 MiB of decoded serialized bytes or 65,536 entries. These
+limits are writer policy. A window can span several remote packs. Seal
+the current window before adding an object that would pass either limit.
 A larger loose object occupies a window by itself. Seal a final partial
 window before closing the branch or tag batch.
 Respect the local pack caps and any lower staging-memory bound. Publish
