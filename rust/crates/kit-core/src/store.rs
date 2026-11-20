@@ -523,6 +523,9 @@ impl ObjectStore {
         else {
             return Ok(false);
         };
+        if !catalog.may_contain(h) {
+            return Ok(false);
+        }
         let _guard = self.prune_guard()?;
         if !self.has_packed_size(catalog, h, size) {
             return Ok(false);

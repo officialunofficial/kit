@@ -51,6 +51,10 @@ impl Catalog {
         }
     }
 
+    pub(crate) fn may_contain(&self, id: &Hash) -> bool {
+        self.candidates(id).next().is_some()
+    }
+
     fn candidates(&self, id: &Hash) -> impl Iterator<Item = (&Arc<Locator>, Option<usize>)> {
         let prefix = prefix(id);
         let start = self.routes.partition_point(|route| route.prefix < prefix);

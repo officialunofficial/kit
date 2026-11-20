@@ -59,7 +59,7 @@
 //!
 //! Workloads that prefer the historical schedule can select
 //! [`SyncPolicy::PerObject`] (config key `durability.objects =
-//! per-object`), which reproduces the old write path exactly.
+//! per-object`), which flushes each new object as it is written.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -641,10 +641,8 @@ impl<'s> WriteBatch<'s> {
             }
         }
         // 4-5. Dirent barriers, then the terminal device flush. Per-object
-        // batches only need this for packed reuse.
-        if self.policy == SyncPolicy::Batch || reused_pack {
-            flush_dirents(store, touched_shards)?;
-        }
+        // batches only need this for existing locations they reused.
+        flush_dirents(store, touched_shards)?;
         if sync_pack_parent {
             store.mark_pack_parent_synced();
         }
@@ -1553,6 +1551,27 @@ mod tests {
     }
 
     #[test]
+    fn per_object_batch_flushes_a_reused_loose_shard() {
+        let (_dir, store, recorder) = recording_store();
+        let bytes = b"already present";
+        let id = store.write(bytes).unwrap();
+        let start = recorder.events().len();
+
+        let batch = store.batch_with_policy(SyncPolicy::PerObject);
+        assert_eq!(batch.write(bytes).unwrap(), id);
+        batch.commit().unwrap();
+
+        let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+        assert_eq!(
+            recorder.events()[start..],
+            [
+                Ev::DirBarrier(shard),
+                Ev::Full(store.objects_root().to_path_buf())
+            ]
+        );
+    }
+
+    #[test]
     fn sync_policy_per_object_matches_write_event_pattern() {
         // Write pattern = ObjectStore::write: Full(tmp), Rename, DirSync
         // per object, in that order, objects visible immediately.
@@ -2205,6 +2224,18 @@ mod tests {
             assert!(events.contains(&Ev::DirBarrier(root.to_path_buf())));
             assert!(!writer.path_for(&id).exists());
             crate::refs::write_ref(&layout, "main", &id).unwrap();
+
+            let start = recorder.events().len();
+            let next = writer.batch_with_policy(policy);
+            assert_eq!(next.write(&bytes).unwrap(), id);
+            next.commit().unwrap();
+            assert_eq!(
+                recorder.events()[start..],
+                [
+                    Ev::DirBarrier(root.join("pack")),
+                    Ev::Full(root.to_path_buf())
+                ]
+            );
         }
     }
 
@@ -2242,6 +2273,10 @@ mod tests {
         let (id, bytes) = publish_blob(&store, b"length match");
         let (_guard, catalog) = store.discover_write_packs().unwrap();
         let size = bytes.len() as u64;
+        let mut absent = id;
+        absent[0] ^= 1;
+        assert!(catalog.may_contain(&id));
+        assert!(!catalog.may_contain(&absent));
 
         assert!(store.has_packed_size(&catalog, &id, size));
         assert!(!store.has_packed_size(&catalog, &id, size - 1));
@@ -2271,6 +2306,39 @@ mod tests {
                 Ev::DirSync(root.to_path_buf())
             ]
         );
+    }
+
+    #[test]
+    fn direct_packed_writes_fall_back_after_retirement_or_index_repair() {
+        for retire in [true, false] {
+            let (dir, publisher) = fresh_store();
+            let layout = crate::layout::RepoLayout::single(dir.path());
+            publisher.try_activate_local_packs().unwrap();
+            let (id, bytes) = publish_blob(&publisher, b"published before discovery");
+            let writer = ObjectStore::open(&layout).unwrap();
+            assert_eq!(writer.write(&bytes).unwrap(), id);
+            assert!(!writer.path_for(&id).exists());
+
+            let exclusive = File::open(layout.format_file()).unwrap();
+            exclusive.try_lock().unwrap();
+            for entry in fs::read_dir(writer.pack_dir()).unwrap() {
+                let path = entry.unwrap().path();
+                if retire {
+                    fs::remove_file(path).unwrap();
+                } else if path.extension().is_some_and(|ext| ext == "idx") {
+                    let mut index = fs::read(&path).unwrap();
+                    *index.last_mut().unwrap() ^= 1;
+                    fs::write(path, index).unwrap();
+                }
+            }
+            drop(exclusive);
+            if !retire {
+                assert_eq!(publisher.check_local_packs(true).unwrap(), 1);
+            }
+
+            assert_eq!(writer.write(&bytes).unwrap(), id);
+            assert_eq!(fs::read(writer.path_for(&id)).unwrap(), bytes);
+        }
     }
 
     #[test]

@@ -640,9 +640,10 @@ directory and, if needed, the directory containing the pack directory.
 When another process can retire the selected location, follow the
 guard and re-resolution rules in SPEC-CONCURRENCY §3.4.
 
-A local writer looks in loose storage and in its discovered pack catalog.
-It MAY accept a loose file or packed frame of the exact serialized length
-without reading the object body. Fetch writes every object in its window.
+Local batched and per-object writes look in loose storage and in their
+discovered pack catalog. They MAY accept a loose file or packed frame of
+the exact serialized length without reading the object body. Fetch writes
+every object in its window.
 
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
