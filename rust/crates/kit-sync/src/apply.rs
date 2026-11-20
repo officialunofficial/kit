@@ -8,7 +8,7 @@
 //! The caller holds the prune guard until the ref names the objects.
 //! Downloads and window publication run outside the worktree lock.
 
-use kit_core::protocol::{PackSink, TransportResult};
+use kit_core::protocol::{PackSink, ResumeOutcome, TransportResult};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,8 @@ struct ProgressSink<'a> {
     bytes: u64,
     total: Option<u64>,
     last: Instant,
+    /// How the transport answered each request to continue the body.
+    resumes: Vec<ResumeOutcome>,
 }
 
 impl PackSink for ProgressSink<'_> {
@@ -45,6 +47,23 @@ impl PackSink for ProgressSink<'_> {
     fn failed(&self) -> Option<std::io::ErrorKind> {
         self.spool.failed()
     }
+
+    fn retained(&self) -> u64 {
+        PackSink::retained(self.spool)
+    }
+
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        PackSink::resume(self.spool, total, offset)?;
+        self.bytes = offset;
+        self.total = Some(total);
+        self.last = Instant::now();
+        self.emit();
+        Ok(())
+    }
+
+    fn note_resume(&mut self, outcome: ResumeOutcome) {
+        self.resumes.push(outcome);
+    }
 }
 
 impl ProgressSink<'_> {
@@ -59,13 +78,14 @@ impl ProgressSink<'_> {
 }
 
 use kit_core::hash::Hash;
-use kit_core::pack::{ObjectSpool, PackError, PackReader, PackSpool, VerifiedPack};
+use kit_core::pack::{ObjectSpool, PackError, PackReader, PackSpool, RetainedPacks, VerifiedPack};
 use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
 use kit_core::store::{ObjectStore, PruneGuard};
 
 use crate::SourceError;
 use crate::applied_packs::AppliedPacks;
 use crate::error::SyncError;
+use crate::fetch::DownloadSavings;
 use crate::observer::{Observer, SyncEvent};
 use crate::packmap::chain_label;
 use crate::publication::{PendingView, Publication};
@@ -81,6 +101,7 @@ pub(crate) struct ChainApplied {
     pub(crate) packs: usize,
     pub(crate) skipped: usize,
     pub(crate) objects: usize,
+    pub(crate) savings: DownloadSavings,
 }
 
 /// A local I/O error on the spool in `dir`, named by that directory.
@@ -91,22 +112,40 @@ pub(crate) fn spool_error(dir: &Path, kind: std::io::ErrorKind, detail: &str) ->
     ))
 }
 
-/// Download one pack into a spool in `store`'s spool directory, checking its
-/// length, its key and its trailer as it arrives. Only a pack that passes all
-/// three comes back, as a [`VerifiedPack`]; the spool of any other is closed
-/// and, being unnamed, leaves nothing on disk.
+/// Where a verified pack came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Remote,
+    /// The disk: kept after a failed apply, and verified again.
+    Kept,
+}
+
+/// The verified pack `key`: one kept after a failed apply, when there is
+/// one, or else a download into a spool in `store`'s spool directory,
+/// checking its length, its key and its trailer as it arrives. Only a pack
+/// that passes all three comes back, as a [`VerifiedPack`]; the spool of any
+/// other is closed and, being unnamed, leaves nothing on disk.
 ///
 /// A local disk error on the spool (out of space, say) is
 /// [`SyncError::Io`] whatever the transport made of it: it is checked
 /// before the transport's error is mapped, and no transport retries it.
-fn download_verified_pack(
+///
+/// What a resumed download or a kept pack saved goes to `savings` and the
+/// observer.
+fn verified_pack(
     store: &ObjectStore,
     source: &dyn RemoteSource,
     head_ref: &str,
     key: &PackKey,
     observer: &dyn Observer<SyncEvent>,
-) -> Result<VerifiedPack, SyncError> {
+    savings: &mut DownloadSavings,
+) -> Result<(VerifiedPack, Origin), SyncError> {
     let dir = store.spool_dir();
+    if let Some(pack) = RetainedPacks::new(&dir).take(key) {
+        savings.bytes_reused += pack.len();
+        observer.event(&SyncEvent::PackReused { bytes: pack.len() });
+        return Ok((pack, Origin::Kept));
+    }
     let mut spool = PackSpool::create(&dir, PACK_BODY_LIMIT).map_err(|error| match error {
         PackError::Io(io) => spool_error(&dir, io.kind(), &io.to_string()),
         error => error.into(),
@@ -117,6 +156,7 @@ fn download_verified_pack(
         bytes: 0,
         total: None,
         last: Instant::now(),
+        resumes: Vec::new(),
     };
     observer.event(&SyncEvent::DownloadProgress {
         bytes: 0,
@@ -127,6 +167,21 @@ fn download_verified_pack(
         bytes: sink.bytes,
         bytes_total: sink.total,
     });
+    for outcome in std::mem::take(&mut sink.resumes) {
+        match outcome {
+            ResumeOutcome::Resumed { bytes } => {
+                savings.bytes_resumed += bytes;
+                observer.event(&SyncEvent::DownloadResumed { bytes });
+            }
+            ResumeOutcome::Restarted { reason } => {
+                savings.resumes_restarted += 1;
+                observer.event(&SyncEvent::DownloadRestarted {
+                    reason: reason.as_str(),
+                });
+            }
+            _ => {}
+        }
+    }
     if let Some(kind) = spool.failed() {
         return Err(spool_error(&dir, kind, "write failed"));
     }
@@ -141,7 +196,7 @@ fn download_verified_pack(
         }
         Err(error) => return Err(error.into()),
     }
-    spool.finish(key).map_err(|error| match error {
+    let pack = spool.finish(key).map_err(|error| match error {
         // Bytes that are not the requested pack, whole or in part, are an
         // invalid response, as a digest mismatch always was.
         PackError::KeyMismatch | PackError::UnexpectedEof | PackError::PackfileTooShort => {
@@ -149,7 +204,8 @@ fn download_verified_pack(
         }
         PackError::Io(io) => spool_error(&dir, io.kind(), &io.to_string()),
         error => error.into(),
-    })
+    })?;
+    Ok((pack, Origin::Remote))
 }
 
 /// Download and apply every pack of `chain`, the chain of `head_ref`, oldest
@@ -180,6 +236,47 @@ pub(crate) fn apply_pack_chain(
     guard: &PruneGuard,
     validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
+    let mut kept = Vec::new();
+    let result = apply_chain(
+        store,
+        source,
+        observer,
+        remote,
+        head_ref,
+        chain,
+        applied,
+        require_signed,
+        done,
+        guard,
+        &mut kept,
+        validate,
+    );
+    // A kept pack that a retry applied has served; one whose window did not
+    // land stays for the next retry.
+    let retained = RetainedPacks::new(&store.spool_dir());
+    for key in kept.into_iter().filter(|key| applied.contains(key)) {
+        retained.discard(&key);
+    }
+    result
+}
+
+/// [`apply_pack_chain`]'s work. `kept` collects the keys of the packs it took
+/// from the disk instead of downloading.
+#[allow(clippy::too_many_arguments)]
+fn apply_chain(
+    store: &ObjectStore,
+    source: &dyn RemoteSource,
+    observer: &dyn Observer<SyncEvent>,
+    remote: &str,
+    head_ref: &str,
+    chain: &[Hash],
+    applied: &mut AppliedPacks,
+    require_signed: bool,
+    done: &mut ChainApplied,
+    guard: &PruneGuard,
+    kept: &mut Vec<PackKey>,
+    validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
+) -> Result<(), SyncError> {
     let mut publication = Publication::new(store, guard)?;
     let mut failure = None;
     for &pk in chain {
@@ -192,16 +289,37 @@ pub(crate) fn apply_pack_chain(
             done.skipped += 1;
             continue;
         }
-        let decoded = download_verified_pack(store, source, head_ref, &key, observer)
-            .and_then(|pack| decode_pack(store, &pack, publication.pending(), require_signed));
+        let (pack, origin) =
+            match verified_pack(store, source, head_ref, &key, observer, &mut done.savings) {
+                Ok(found) => found,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            };
+        if origin == Origin::Kept {
+            kept.push(key);
+        }
+        // From here the pack is verified. If applying it fails, keep it for a
+        // retry. One that came from the disk is still there.
+        let keep = || {
+            if origin == Origin::Remote {
+                let _ = RetainedPacks::new(&store.spool_dir()).keep(&key, &pack);
+            }
+        };
+        let decoded = decode_pack(store, &pack, publication.pending(), require_signed);
         let (spool, unpacked) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
+                keep();
                 failure = Some(error);
                 break;
             }
         };
-        publication.accept(&spool, key, observer, remote, applied)?;
+        if let Err(error) = publication.accept(&spool, key, observer, remote, applied) {
+            keep();
+            return Err(error.into());
+        }
         if unpacked > 0 {
             observer.event(&SyncEvent::ObjectsUnpacked { count: unpacked });
         }
@@ -293,6 +411,7 @@ mod tests {
             bytes: 0,
             total: None,
             last: Instant::now(),
+            resumes: Vec::new(),
         };
         sink.begin(Some(128)).unwrap();
         sink.write(&[0; 64]).unwrap();
@@ -560,13 +679,15 @@ mod tests {
 
     fn download_zero_pack(len: u64) -> Result<VerifiedPack, SyncError> {
         let (_td, _layout, store, _applied) = store_and_record();
-        download_verified_pack(
+        verified_pack(
             &store,
             &ZeroPacks { len },
             "refs/heads/main",
             &PackKey::from_hash(h("zero pack")),
             &NoopObserver,
+            &mut DownloadSavings::default(),
         )
+        .map(|(pack, _)| pack)
     }
 
     #[test]

@@ -65,7 +65,9 @@ use sha2::{Digest as _, Sha256};
 use crate::sigv4::{Credentials, SignedRequest, sha256_hex, sign_request_with_payload_hash};
 
 // Body-size cap for a pack download. Canonical value lives in kit-core.
-use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
+use kit_core::protocol::{
+    PACK_BODY_LIMIT, PackBody, PackSink, RestartReason, ResumeOutcome, Validator, saturating_usize,
+};
 use kit_core::ref_listing::{MAX_PAGES, RefListing};
 /// Body-size cap for a ref body (64 hex + newline + slack).
 const REF_BODY_LIMIT: usize = 256;
@@ -511,25 +513,90 @@ impl S3Transport {
         }
     }
 
-    /// `GET` the pack at `object_key` into `sink`. Only a `200` answer's body
-    /// reaches the sink (see [`copy_to_sink`]). Any other answer's body is
-    /// never read: the status alone maps to the error. A retried attempt
-    /// begins the sink again.
+    /// `GET` the pack at `object_key` into `sink`. Only a `200` answer's body,
+    /// or the rest of it in a `206`, reaches the sink (see [`copy_to_sink`]).
+    /// Any other answer's body is never read: the status alone maps to the
+    /// error.
+    ///
+    /// A retried attempt continues the body when the sink holds a prefix of
+    /// it ([`PackSink::retained`]) and the first answer gave a strong entity
+    /// tag and a length: it asks for the rest with `Range` and `If-Match`,
+    /// and takes the body only if the answer is exactly that rest
+    /// ([`Validator::accepts`]). Any other answer to the request, a refusal
+    /// to range included, reads the pack again from its start, and the sink
+    /// begins again. The caller checks the whole pack against its key.
     fn get_pack(&self, object_key: &str, sink: &mut dyn PackSink) -> TransportResult<()> {
         let empty_sha256 = sha256_hex(&[]);
+        let mut validator: Option<Validator> = None;
         let resp = self.retrying(|| {
-            let resp = self
-                .signed_request(&Method::GET, object_key, "", &empty_sha256, &[])
-                .send()
-                .map_err(|_| TransportError::ConnectionFailed)?;
-            let status = resp.status().as_u16();
-            if status == 200 {
-                copy_to_sink(resp, sink)?;
+            let mut resume = validator
+                .clone()
+                .zip(Some(sink.retained()).filter(|&n| n > 0));
+            loop {
+                let ranged = resume.as_ref().map(|(validator, offset)| {
+                    vec![
+                        ("Range", Validator::range(*offset)),
+                        ("If-Match", validator.etag().to_owned()),
+                    ]
+                });
+                let resp = self
+                    .signed_request(
+                        &Method::GET,
+                        object_key,
+                        "",
+                        &empty_sha256,
+                        ranged.as_deref().unwrap_or_default(),
+                    )
+                    .send()
+                    .map_err(|_| TransportError::ConnectionFailed)?;
+                let status = resp.status().as_u16();
+                if let Some((held, offset)) = &resume {
+                    match status {
+                        206 => {
+                            let accepted = held.accepts(
+                                *offset,
+                                status,
+                                header(&resp, "etag"),
+                                header(&resp, "content-range"),
+                                resp.content_length(),
+                            );
+                            if let Err(reason) = accepted {
+                                sink.note_resume(ResumeOutcome::Restarted { reason });
+                                resume = None;
+                                continue;
+                            }
+                            sink.note_resume(ResumeOutcome::Resumed { bytes: *offset });
+                            copy_to_sink(resp, sink, Some((held.total(), *offset)))?;
+                            return Ok(HttpResponse {
+                                status: 200,
+                                body: Vec::new(),
+                            });
+                        }
+                        412 | 416 => {
+                            let reason = if status == 412 {
+                                RestartReason::Validator
+                            } else {
+                                RestartReason::Range
+                            };
+                            sink.note_resume(ResumeOutcome::Restarted { reason });
+                            resume = None;
+                            continue;
+                        }
+                        200 => sink.note_resume(ResumeOutcome::Restarted {
+                            reason: RestartReason::Status,
+                        }),
+                        _ => {}
+                    }
+                }
+                if status == 200 {
+                    validator = Validator::new(header(&resp, "etag"), resp.content_length());
+                    copy_to_sink(resp, sink, None)?;
+                }
+                return Ok(HttpResponse {
+                    status,
+                    body: Vec::new(),
+                });
             }
-            Ok(HttpResponse {
-                status,
-                body: Vec::new(),
-            })
         })?;
         match resp.status {
             200 => Ok(()),
@@ -538,6 +605,11 @@ impl S3Transport {
             s => Err(TransportError::ServerError { status: s }),
         }
     }
+}
+
+/// The value of response header `name`, when it is text.
+fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
+    resp.headers().get(name)?.to_str().ok()
 }
 
 /// The lowercase hex SHA-256 of `pack`'s `len()` bytes, read once from
@@ -902,24 +974,41 @@ impl http_body::Body for FedBody {
     }
 }
 
-/// Write a `200` answer's body to `sink` as it arrives, a chunk at a time.
+/// Write a `200` answer's body to `sink` as it arrives, a chunk at a time,
+/// or with `resume` as `(total, offset)` the rest of a body from `offset`.
 ///
-/// Its `Content-Length`, when present, goes to [`PackSink::begin`] before
-/// any byte is read, so a body over [`PACK_BODY_LIMIT`] or the sink's limit
-/// is refused unread, and the sink refuses bytes past it. Without one, the
-/// sink's limit and [`PACK_BODY_LIMIT`] bound the body.
+/// A body's `Content-Length`, when present, goes to [`PackSink::begin`]
+/// before any byte is read, so a body over [`PACK_BODY_LIMIT`] or the sink's
+/// limit is refused unread, and the sink refuses bytes past it. Without one,
+/// the sink's limit and [`PACK_BODY_LIMIT`] bound the body. The rest of a
+/// body goes to [`PackSink::resume`] instead, which keeps what the sink took.
 ///
 /// # Errors
 /// [`TransportError::PayloadTooLarge`] past a limit; the sink's error;
 /// [`TransportError::ConnectionFailed`] when the body cannot be read.
-fn copy_to_sink(mut resp: Response, sink: &mut dyn PackSink) -> TransportResult<()> {
-    let declared = resp.content_length();
-    if let Some(len) = declared.filter(|&len| len > PACK_BODY_LIMIT) {
-        return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
-    }
-    sink.begin(declared)?;
+fn copy_to_sink(
+    mut resp: Response,
+    sink: &mut dyn PackSink,
+    resume: Option<(u64, u64)>,
+) -> TransportResult<()> {
+    let mut taken = match resume {
+        Some((total, offset)) => {
+            if total > PACK_BODY_LIMIT {
+                return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
+            }
+            sink.resume(total, offset)?;
+            offset
+        }
+        None => {
+            let declared = resp.content_length();
+            if let Some(len) = declared.filter(|&len| len > PACK_BODY_LIMIT) {
+                return Err(TransportError::PayloadTooLarge(saturating_usize(len)));
+            }
+            sink.begin(declared)?;
+            0
+        }
+    };
     let mut buf = vec![0u8; PACK_IO_CHUNK];
-    let mut taken = 0u64;
     loop {
         let n = resp
             .read(&mut buf)

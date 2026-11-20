@@ -43,7 +43,8 @@ fn unnamed_file(dir: &Path) -> io::Result<File> {
 /// skips, so fetch, push and gc call this when they start. Deleting a spool
 /// another process still holds open fails, and that failure is ignored, as
 /// is a missing directory. A `dir` that is a symlink is left alone, so the
-/// sweep never deletes outside the repository.
+/// sweep never deletes outside the repository. It also trims the packs that
+/// [`super::RetainedPacks`] keeps in `retained/` under `dir`.
 pub fn sweep_spool_dir(dir: &Path) {
     if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
         return;
@@ -57,6 +58,7 @@ pub fn sweep_spool_dir(dir: &Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+    super::retained::trim_dir(&dir.join("retained"), std::time::SystemTime::now());
 }
 
 /// Fill `buf` from `file` at `offset`. Each call names its own offset, so
@@ -428,6 +430,35 @@ impl PackSpool {
         self.failed
     }
 
+    /// The bytes of the current body this spool holds, which an interrupted
+    /// attempt can continue from: zero unless the body began with a declared
+    /// length and no byte has failed.
+    #[must_use]
+    pub fn retained(&self) -> u64 {
+        if self.failed.is_none() && self.begun && self.declared.is_some() {
+            self.written
+        } else {
+            0
+        }
+    }
+
+    /// Continue the current body at `offset`, which must be
+    /// [`Self::retained`], of a body whose length is `total`, the length it
+    /// began with. The bytes taken stay, and the hash goes on from them.
+    ///
+    /// # Errors
+    /// [`PackError::UnexpectedEof`] when no body with that length and prefix
+    /// is held, or the prefix already is the whole body; [`PackError::Io`]
+    /// after an earlier I/O failure.
+    pub fn resume(&mut self, total: u64, offset: u64) -> Result<(), PackError> {
+        self.check_failed()?;
+        let held = self.retained();
+        if held == 0 || held != offset || self.declared != Some(total) || offset >= total {
+            return Err(PackError::UnexpectedEof);
+        }
+        Ok(())
+    }
+
     /// Bytes taken of the current body, and how many of them reached the file.
     #[cfg(test)]
     pub(super) fn taken(&self) -> (u64, u64) {
@@ -532,6 +563,14 @@ impl PackSink for PackSpool {
 
     fn failed(&self) -> Option<io::ErrorKind> {
         self.failed
+    }
+
+    fn retained(&self) -> u64 {
+        Self::retained(self)
+    }
+
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        Self::resume(self, total, offset).map_err(|error| transport_error(&error, total))
     }
 }
 

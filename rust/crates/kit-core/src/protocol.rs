@@ -607,7 +607,39 @@ pub trait PackSink: Send {
     /// before it retries, falls back or maps an error, and reports this
     /// error instead. It stays set: [`Self::begin`] never clears it.
     fn failed(&self) -> Option<std::io::ErrorKind>;
+
+    /// The bytes of the current body this sink holds and can continue from
+    /// after an interrupted attempt: zero unless the body began with a
+    /// declared length and no byte has failed. A transport may ask the
+    /// remote for the rest of the body only when this is not zero. The
+    /// default keeps nothing, so a transport reads the body again from its
+    /// start.
+    fn retained(&self) -> u64 {
+        0
+    }
+
+    /// Continue the body at `offset`, which is [`Self::retained`], of a
+    /// body whose full length is `total`. The bytes that follow are the
+    /// body from `offset` on. Unlike [`Self::begin`], nothing taken is
+    /// discarded.
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when this sink holds no such
+    /// prefix, or `total` is not the declared length.
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        let _ = (total, offset);
+        Err(TransportError::ProtocolError)
+    }
+
+    /// Learn how a transport answered the sink's request to continue a body.
+    /// Called at most once per attempt that held a prefix.
+    fn note_resume(&mut self, outcome: ResumeOutcome) {
+        let _ = outcome;
+    }
 }
+
+pub mod resume;
+pub use resume::{RestartReason, ResumeOutcome, Validator};
 
 /// A sink that keeps a body of at most `limit` bytes in memory, for small
 /// transfers such as packlist nodes.

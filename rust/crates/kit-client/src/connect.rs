@@ -13,7 +13,8 @@ use kit_core::{
     admission::{MAX_CHALLENGES, MAX_DESCRIPTION_BYTES, MAX_VALUE_BYTES, validate_challenges},
     hash::{Hash, hash, to_hex},
     protocol::{
-        AdmissionChallengeEntry, AdmissionRequired, PackSink, TransportError, TransportResult,
+        AdmissionChallengeEntry, AdmissionRequired, PackSink, ResumeOutcome, TransportError,
+        TransportResult,
     },
     write_auth::{ContentCommitment, Context, MAX_VALIDITY_MS, Operation},
 };
@@ -230,6 +231,25 @@ impl PackSink for LocationSink<'_> {
     }
     fn failed(&self) -> Option<std::io::ErrorKind> {
         self.inner.failed()
+    }
+    fn retained(&self) -> u64 {
+        // The inner sink and this one count the same bytes, or the prefix
+        // cannot be trusted to continue the hash.
+        let held = self.inner.retained();
+        if self.begun && held == self.received {
+            held
+        } else {
+            0
+        }
+    }
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        if total != self.size || offset != self.retained() || offset == 0 {
+            return Err(TransportError::ProtocolError);
+        }
+        self.inner.resume(total, offset)
+    }
+    fn note_resume(&mut self, outcome: ResumeOutcome) {
+        self.inner.note_resume(outcome);
     }
 }
 

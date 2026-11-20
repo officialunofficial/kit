@@ -69,6 +69,7 @@ pub mod window;
 
 mod file_read;
 mod object_spool;
+mod retained;
 pub mod rewrite;
 mod spool;
 use crate::delta;
@@ -82,6 +83,7 @@ pub use file_read::{
 };
 #[doc(hidden)]
 pub use object_spool::ObjectSpool;
+pub use retained::RetainedPacks;
 pub use rewrite::{Rewritten, rewrite_excluding};
 pub use spool::{
     CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,

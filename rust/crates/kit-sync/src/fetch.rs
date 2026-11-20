@@ -36,6 +36,29 @@ use crate::source::RemoteSource;
 use crate::tags::{StopSet, TagPhase, TagRejection, TagWarning};
 use crate::verify::{VerifiedHistory, verify_history_signatures};
 
+/// Download work a fetch did not repeat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DownloadSavings {
+    /// Bytes an interrupted download did not fetch again, because the
+    /// transport asked the remote for the rest of the pack.
+    pub bytes_resumed: u64,
+    /// Interrupted downloads whose remote could not continue, so the pack
+    /// was read again from its start.
+    pub resumes_restarted: usize,
+    /// Bytes of verified packs that came from disk, kept after a failed
+    /// apply, instead of from the remote.
+    pub bytes_reused: u64,
+}
+
+impl DownloadSavings {
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.bytes_resumed += other.bytes_resumed;
+        self.resumes_restarted += other.resumes_restarted;
+        self.bytes_reused += other.bytes_reused;
+    }
+}
+
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -66,6 +89,9 @@ pub struct FetchReport {
     pub packs_already_applied: usize,
     /// Objects written to the object store.
     pub objects_unpacked: usize,
+    /// Download work the fetch did not repeat after an interruption or a
+    /// failed apply.
+    pub savings: DownloadSavings,
     /// The remote's cursor equalled the one the last complete fetch saw,
     /// and the remote-tracking refs and local tags were as that fetch left
     /// them, so the fetch made no other request (SPEC-TRANSPORT §1.2).
@@ -156,6 +182,7 @@ pub(crate) struct Applied {
     pub(crate) packs_downloaded: usize,
     pub(crate) packs_skipped: usize,
     pub(crate) objects_unpacked: usize,
+    pub(crate) savings: DownloadSavings,
 }
 
 /// Step 2 of a branch fetch: download and unpack each pack of `resolved`
@@ -231,6 +258,7 @@ pub(crate) fn apply_and_verify_chain(
         packs_downloaded: done.packs,
         packs_skipped: skipped,
         objects_unpacked: done.objects,
+        savings: done.savings,
     };
     let stale = match first {
         Ok(()) => return Ok(stats),
@@ -281,11 +309,16 @@ pub(crate) fn apply_and_verify_chain(
             )
         },
     )?;
-    // The report covers the attempt that published.
+    // The report covers the attempt that published. Savings count both
+    // attempts: the first one's downloads, resumed or kept, are the reason the
+    // retry reads less.
+    let mut savings = stats.savings;
+    savings.add(&retry.savings);
     Ok(Applied {
         packs_downloaded: retry.packs,
         packs_skipped: retry.skipped,
         objects_unpacked: retry.objects,
+        savings,
     })
 }
 
@@ -698,6 +731,7 @@ fn fetch_objects_inner(
             report.packs_downloaded += applied_stats.packs_downloaded;
             report.packs_already_applied += applied_stats.packs_skipped;
             report.objects_unpacked += applied_stats.objects_unpacked;
+            report.savings.add(&applied_stats.savings);
         }
         Ok(())
     })();
