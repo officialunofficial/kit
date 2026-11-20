@@ -306,13 +306,22 @@ fn a_full_disk_ends_the_fetch_as_an_io_error_without_a_retry_or_a_file() {
             1,
             "{site:?}: the download is not retried"
         );
-        assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new(), "{site:?}");
+        // A pack that verified and then failed to store stays for the retry,
+        // in its own directory. A download that failed leaves nothing.
+        let kept = if site == Site::Store {
+            vec!["retained".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(entries(&spool_dir(&work)), kept, "{site:?}");
         assert_eq!(stray_object_files(&work), Vec::<String>::new(), "{site:?}");
         assert!(!recorded(&work, remote.pack), "{site:?}");
         assert_eq!(remote_tip(&work), None, "{site:?}");
 
         run_fetch(&work, &source).unwrap();
         assert_eq!(remote_tip(&work), Some(remote.tip), "{site:?}");
+        let downloads = if site == Site::Store { 1 } else { 2 };
+        assert_eq!(source.packs.get(), downloads, "{site:?}");
     }
 }
 
