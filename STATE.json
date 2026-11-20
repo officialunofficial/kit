@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-19: all main workflows green, including the macOS leg and nightly formal and fuzz. PRs 217, 219, 220-223 were touched by a person in the last 24 hours and skipped. PR 195 fails only cargo semver-checks (known baseline issue). PR 152 fails cargo-mutants on changed lines and its commit is unsigned; both are owner perf PRs left as is. PR 93 is an old draft. Dependabot 171/173 left for Monday.",
+  "last_findings": "2026-11-20: all main workflows green (macOS leg for 095e698 still running). PRs 237, 239, 240 are person drafts; 233 was pushed 09:18 today and skipped. PR 220 is green and clean. PR 195 fails only cargo semver-checks (baseline issue). PR 152 fails cargo-mutants on changed lines (owner perf PR, left as is). PR 93 is an old draft, left open. Not a Monday; no dependency work.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -15,6 +15,7 @@
     "A CI leg that passes on Linux and fails on macOS: search the saved full job log (tail_lines 20000 is saved to a file) for 'panicked at' instead of reading the tail; the macOS leg runs only on push or dispatch, so dispatch it on the PR branch via actions_run_trigger.",
     "scripts/check-commit-messages.py rejects tool or model trailers; omit the Co-Authored-By and Claude-Session trailers on kit commits even when the harness asks for them, and run the script on origin/main..HEAD before pushing.",
     "kit-ci-pr (Cloud Build) logs are not readable through the GitHub tools; compare its conclusion on a recently merged PR to tell a repo-wide failure from a PR-specific one before spending effort.",
-    "list_workflow_runs with a branch filter returns every workflow in one page; read the top 20 runs by workflow name instead of paging."
+    "list_workflow_runs with a branch filter returns every workflow in one page; read the top 20 runs by workflow name instead of paging.",
+    "gh pr view fails with a GraphQL 403 here; use gh api repos/OWNER/REPO/pulls/N and commits/SHA/check-runs for mergeable state and failed checks."
   ]
 }
