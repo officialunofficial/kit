@@ -86,6 +86,8 @@ fn prune_json_names_the_pruned_refs() {
         stdout.contains("\"pruned\":[\"topic\"]"),
         "stdout: {stdout}"
     );
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(report.get("maintenance").is_none());
 }
 
 #[test]
@@ -141,4 +143,19 @@ fn prune_reports_maintenance_and_honors_the_repo_switch() {
             .contains("maintenance:")
     );
     assert!(!leftover.exists());
+
+    ok(publisher.path(), &["push", "origin", "main:topic"]);
+    ok(&clone, &["fetch"]);
+    let file = fs::File::create(&leftover).unwrap();
+    file.set_len(5 * 1024 * 1024 / 4).unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    lose_remote_topic(remote.path());
+
+    let output = ok(&clone, &["fetch", "-p"]);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.lines().last(),
+        Some("maintenance: retired 0 dead local pack(s), removed 1 leftover, 1.3 MiB"),
+    );
 }
