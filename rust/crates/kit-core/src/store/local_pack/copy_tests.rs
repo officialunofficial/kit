@@ -582,7 +582,9 @@ fn outputs_roll_over_at_the_payload_cap() {
         assert!(exists(&pair));
     }
     let report = run(&store, &layout, false);
-    assert_eq!(report.packs_merged, 8, "{report:?}");
+    // The last output holds the last input's nine entries in the input's own
+    // order: the same bytes, so the same key. That input stays in place.
+    assert_eq!(report.packs_merged, 7);
     assert_eq!(report.survivor_bytes_copied, total);
     let outputs = packs(&store);
     assert_eq!(outputs.len(), 2);

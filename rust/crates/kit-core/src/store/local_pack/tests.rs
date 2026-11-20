@@ -1106,7 +1106,9 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
 
     let (_dir, layout, store) = fresh();
     let (live, live_ids) = publish_objects(&store, &[&blob(b"live pack")]);
-    let mixed_live = blob(b"mixed live entry");
+    // Dead bytes stay under a quarter of the pack, so only the wholly dead
+    // retirement applies here.
+    let mixed_live = blob(&[b'l'; 200]);
     let mixed_dead = blob(b"mixed dead entry");
     let (mixed, mixed_ids) = publish_objects(&store, &[&mixed_live, &mixed_dead]);
     let dead = blob(b"all old dead entries");
