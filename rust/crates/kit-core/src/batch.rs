@@ -370,6 +370,25 @@ impl<'s> WriteBatch<'s> {
         self.stage_prehashed(crate::object::object_id_from_bytes(bytes), &[bytes], false)
     }
 
+    /// Stage the loose entries of a verified fetch window, then join every
+    /// worker before returning. The caller commits the batch.
+    ///
+    /// # Errors
+    /// An error reading or staging an entry.
+    #[doc(hidden)]
+    pub fn stage_fetched<T: Sync>(
+        &self,
+        entries: &[T],
+        read: impl Fn(&T) -> StoreResult<Vec<u8>> + Sync,
+    ) -> StoreResult<()> {
+        crate::pack::stage_independent(entries, |entry| {
+            let bytes = read(entry)?;
+            self.write_fetched(&bytes).map(drop)
+        })
+        .into_iter()
+        .collect()
+    }
+
     fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_loose: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
@@ -2021,6 +2040,38 @@ mod tests {
         let h = batch.write(&[0u8; 16]).unwrap();
         batch.commit().unwrap();
         assert!(store.contains(&h));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fetched_loose_entries_can_stage_concurrently() {
+        let workers = std::thread::available_parallelism().unwrap().get();
+        if workers < 2 {
+            return;
+        }
+        let (_dir, store, _recorder) = recording_store();
+        let batch = store.batch();
+        let entries: Vec<_> = (0..workers * 8).map(usize::to_le_bytes).collect();
+        let arrived = Mutex::new(0);
+        let wake = std::sync::Condvar::new();
+        batch
+            .stage_fetched(&entries, |bytes| {
+                if *bytes == entries[0] || *bytes == entries[8] {
+                    let mut count = arrived.lock().unwrap();
+                    *count += 1;
+                    wake.notify_all();
+                    let (count, _) = wake
+                        .wait_timeout_while(count, std::time::Duration::from_secs(5), |n| *n < 2)
+                        .unwrap();
+                    assert_eq!(*count, 2, "both staging workers must reach the gate");
+                }
+                Ok(bytes.to_vec())
+            })
+            .unwrap();
+        batch.commit().unwrap();
+        for bytes in entries {
+            assert_eq!(store.read(&hash::hash(&bytes)).unwrap(), bytes);
+        }
     }
 
     #[test]

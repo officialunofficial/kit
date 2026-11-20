@@ -1,10 +1,10 @@
 //! Private fetch windows. Only complete, checked wire packs enter a window.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use kit_core::hash::{Hash, to_hex};
-use kit_core::object::{EntryMode, Object, ObjectType};
+use kit_core::object::{Object, ObjectType};
 use kit_core::pack::{ObjectSpool, PackError};
 use kit_core::protocol::PackKey;
 use kit_core::serialize;
@@ -22,17 +22,16 @@ const WINDOW_BYTES: usize = 64 << 20;
 // the decoder's normal window.
 const WINDOW_ENTRIES: usize = 1 << 16;
 const PACK_OBJECT_BYTES: usize = 16 << 10;
-// One file-role entry is a 32-byte id, a boolean and hash-table overhead.
-// 262,144 roles cover a 100,000-file snapshot with room for changes and
-// bound the table to about 17 MiB. At the cap, new ids stay unclassified.
-const FILE_ROLES: usize = 1 << 18;
+// Bound short-chunk evidence across the branch or tag batch.
+const SHORT_CHUNK_IDS: usize = 1 << 18;
 
 pub(crate) struct Publication<'a> {
     store: &'a ObjectStore,
     guard: &'a PruneGuard,
     pack: bool,
     window: Option<Window>,
-    roles: HashMap<Hash, bool>,
+    // Overflow disables blob packing for the rest of this batch.
+    short_chunks: Option<HashSet<Hash>>,
 }
 
 struct Window {
@@ -50,7 +49,7 @@ impl<'a> Publication<'a> {
             guard,
             pack: store.local_packs_active(guard)?,
             window: None,
-            roles: HashMap::new(),
+            short_chunks: Some(HashSet::new()),
         })
     }
 
@@ -81,8 +80,8 @@ impl<'a> Publication<'a> {
             record(key, observer, remote, applied);
             return Ok(());
         }
-        if self.pack {
-            self.note_file_roles(spool, &order)?;
+        if self.pack && self.short_chunks.is_some() {
+            self.note_chunk_ids(spool, &order)?;
         }
         for (_, id, len, ty) in order {
             let len = len as usize;
@@ -120,44 +119,29 @@ impl<'a> Publication<'a> {
         Ok(self.window.as_mut().expect("created publication window"))
     }
 
-    fn note_file_roles(
+    fn note_chunk_ids(
         &mut self,
         spool: &ObjectSpool,
         order: &[(usize, Hash, u32, ObjectType)],
     ) -> Result<(), PackError> {
-        let roles = &mut self.roles;
         for &(_, id, _, ty) in order {
-            match ty {
-                ObjectType::Tree => {
-                    let Object::Tree(tree) = serialize::deserialize_owned(staged(spool, &id)?)
-                        .map_err(PackError::InvalidObject)?
-                    else {
-                        unreachable!("object id and tree type were checked by the decoder");
-                    };
-                    for entry in tree
-                        .entries
-                        .into_iter()
-                        .filter(|entry| entry.mode != EntryMode::Tree)
-                    {
-                        remember_role(roles, entry.object_hash, true);
+            if ty != ObjectType::ChunkedBlob {
+                continue;
+            }
+            let Object::ChunkedBlob(manifest) = serialize::deserialize_owned(staged(spool, &id)?)
+                .map_err(PackError::InvalidObject)?
+            else {
+                unreachable!("object id and manifest type were checked by the decoder");
+            };
+            let mut start = 0;
+            for (chunk, end) in manifest.entries() {
+                if bytes_fit_pack(end - start) {
+                    remember_chunk(&mut self.short_chunks, chunk);
+                    if self.short_chunks.is_none() {
+                        return Ok(());
                     }
                 }
-                ObjectType::ChunkedBlob => {
-                    let Object::ChunkedBlob(manifest) =
-                        serialize::deserialize_owned(staged(spool, &id)?)
-                            .map_err(PackError::InvalidObject)?
-                    else {
-                        unreachable!("object id and manifest type were checked by the decoder");
-                    };
-                    let mut start = 0;
-                    for (chunk, end) in manifest.entries() {
-                        if end - start < PACK_OBJECT_BYTES as u64 {
-                            remember_role(roles, chunk, false);
-                        }
-                        start = end;
-                    }
-                }
-                _ => {}
+                start = end;
             }
         }
         Ok(())
@@ -173,23 +157,32 @@ impl<'a> Publication<'a> {
         let Some(window) = self.window.take() else {
             return Ok(());
         };
+        for &chunk in chunks {
+            remember_chunk(&mut self.short_chunks, chunk);
+        }
+
         let loose = self.store.batch();
+        let mut loose_ids = Vec::new();
         let mut pack = None;
         for (_, id, len, ty) in window.spool.take_order() {
-            let bytes = staged(&window.spool, &id)?;
             let eligible = self.pack
                 && (len as usize) < PACK_OBJECT_BYTES
                 && (ty != ObjectType::Blob
-                    || (self.roles.get(&id) == Some(&true) && !chunks.contains(&id)));
+                    || self
+                        .short_chunks
+                        .as_ref()
+                        .is_some_and(|ids| !ids.contains(&id)));
             if eligible {
                 if pack.is_none() {
                     pack = Some(LocalPackWriter::new(self.store, self.guard)?);
                 }
+                let bytes = staged(&window.spool, &id)?;
                 pack.as_mut().expect("created local pack").write(&bytes)?;
             } else {
-                loose.write_fetched(&bytes)?;
+                loose_ids.push(id);
             }
         }
+        loose.stage_fetched(&loose_ids, |id| staged(&window.spool, id))?;
         if let Some(pack) = pack {
             pack.publish()?;
         }
@@ -208,13 +201,12 @@ fn staged(spool: &ObjectSpool, id: &Hash) -> StoreResult<Vec<u8>> {
         .ok_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
 }
 
-fn remember_role(roles: &mut HashMap<Hash, bool>, id: Hash, file: bool) {
-    // Known chunk use wins within the pending window. A blob with no
-    // whole-file evidence always stays loose.
-    if let Some(existing) = roles.get_mut(&id) {
-        *existing &= file;
-    } else if roles.len() < FILE_ROLES {
-        roles.insert(id, file);
+fn remember_chunk(tracking: &mut Option<HashSet<Hash>>, id: Hash) {
+    let Some(ids) = tracking else { return };
+    if ids.len() < SHORT_CHUNK_IDS {
+        ids.insert(id);
+    } else if !ids.contains(&id) {
+        *tracking = None;
     }
 }
 
@@ -288,7 +280,7 @@ impl ClosureSource for PendingView<'_> {
             let object = serialize::deserialize_owned(bytes)?;
             let len = match &object {
                 Object::Blob(blob) => {
-                    if bytes_fit_pack(blob.data.len()) {
+                    if bytes_fit_pack(blob.data.len() as u64) {
                         self.chunks.lock().expect("pending chunk mutex").insert(*id);
                     }
                     Some(blob.data.len() as u64)
@@ -302,8 +294,8 @@ impl ClosureSource for PendingView<'_> {
     }
 }
 
-fn bytes_fit_pack(blob_len: usize) -> bool {
-    blob_len + 10 < PACK_OBJECT_BYTES
+fn bytes_fit_pack(blob_len: u64) -> bool {
+    blob_len < (PACK_OBJECT_BYTES - serialize::BLOB_PROLOGUE_LEN) as u64
 }
 
 #[cfg(test)]

@@ -3087,54 +3087,41 @@ fn stage_raw_entries<'b>(
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
 ) -> RawStageResults<'b> {
+    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    stage_independent(frames, |&(position, payload)| {
+        stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
+    })
+}
+
+/// Run independent staging operations with bounded workers and return their
+/// results in input order. Small windows use the caller's thread.
+pub(crate) fn stage_independent<T: Sync, R: Send>(
+    entries: &[T],
+    stage: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         const ENTRIES_PER_THREAD: usize = 8;
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
-            return stage_raw_entries_parallel(batch, frames, uses, budget, threads);
+        if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return stage_parallel(entries, &stage, threads);
         }
     }
-    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
-    frames
-        .iter()
-        .map(|&(position, payload)| {
-            stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
-        })
-        .collect()
+    entries.iter().map(stage).collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn stage_raw_entries_parallel<'b>(
-    batch: &(impl UnpackSink + ?Sized),
-    frames: &[(usize, EncodedPayload<'_>)],
-    uses: &std::collections::HashMap<Hash, BaseUses>,
-    budget: &'b ResidentBudget<'_>,
+fn stage_parallel<T: Sync, R: Send>(
+    entries: &[T],
+    stage: &(impl Fn(&T) -> R + Sync),
     threads: usize,
-) -> RawStageResults<'b> {
-    let first_failure = &std::sync::atomic::AtomicUsize::new(usize::MAX);
-    let chunk_size = frames.len().div_ceil(threads).max(1);
-    let mut out = Vec::with_capacity(frames.len());
+) -> Vec<R> {
+    let chunk_size = entries.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(entries.len());
     std::thread::scope(|scope| {
-        let handles: Vec<_> = frames
+        let handles: Vec<_> = entries
             .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|&(position, payload)| {
-                            stage_raw_in_phase_two(
-                                batch,
-                                position,
-                                payload,
-                                uses,
-                                budget,
-                                first_failure,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
+            .map(|chunk| scope.spawn(move || chunk.iter().map(stage).collect::<Vec<_>>()))
             .collect();
         for handle in handles {
             out.extend(handle.join().expect("pack unpack worker thread panicked"));
@@ -4166,7 +4153,20 @@ mod tests {
                 .is_none()
             );
             assert_eq!(first_failure.load(Ordering::Relaxed), usize::MAX);
-            let results = stage_raw_entries_parallel(&batch, &frames, &uses, &budget, threads);
+            let results = stage_parallel(
+                &frames,
+                &|(position, payload)| {
+                    stage_raw_in_phase_two(
+                        &batch,
+                        *position,
+                        *payload,
+                        &uses,
+                        &budget,
+                        &first_failure,
+                    )
+                },
+                threads,
+            );
             assert_eq!(results.len(), frames.len());
             assert!(results.iter().all(Option::is_none));
             drop(in_flight);

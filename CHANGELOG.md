@@ -9,7 +9,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Fetch and clone pack small objects and keep chunks loose. Once activated, the repository requires a reader that supports local packs.
+- Fetch and clone pack small objects and keep chunks loose when their manifests arrive before publication. Once activated, the repository requires a reader that supports local packs.
 
 - Read and verify raw local object packs in repositories that declare capability `P`, and rebuild damaged pack indexes.
 

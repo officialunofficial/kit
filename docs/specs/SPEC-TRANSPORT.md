@@ -1421,14 +1421,12 @@ Downloads and apply hold no worktree lock. The CLI limits chain packs
 to one million and pack-list nodes to 100,000.
 
 Fetch and clone pack fetched objects whose serialized size is smaller
-than 16 KiB. Objects of 16 KiB or more and chunks stay loose. The latter
-rule includes short final chunks and chunks from small fixed-size
-layouts. A chunk shares the Blob encoding of a whole-file blob. A writer
-that lacks enough information to classify a blob writes it loose. A
-non-directory tree entry can establish whole-file use. A known chunk
-reference wins while the blob is pending. The same id can serve both
-roles, so a manifest that arrives after a seal can reference an id
-that was already packed as a whole file.
+than 16 KiB. Objects of 16 KiB or more stay loose. Fetch packs a blob under
+16 KiB unless a manifest decoded before the window seals names it as a
+chunk. A chunk whose manifest arrives later MAY be packed. If the writer
+cannot track chunk ids, it writes unclassified blobs loose. A server's
+object order can cause chunks to be packed, which is harmless because
+readers accept packed chunks ([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)).
 Local creation and import write loose objects. The local reader accepts
 the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 

@@ -390,6 +390,150 @@ fn a_manifest_in_a_later_wire_pack_keeps_its_blob_loose() {
 }
 
 #[test]
+fn fetch_packs_more_than_the_old_role_cap_even_when_blobs_precede_their_tree() {
+    let remote = Remote::new();
+    let entries: Vec<_> = (0u32..=262_144)
+        .map(|n| (format!("file-{n:06}"), n.to_le_bytes()))
+        .collect();
+    let files: Vec<_> = entries
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let (objects, tip) = remote.build(None, &files, true);
+    let last_blob = objects[262_144].id().unwrap();
+    remote.publish_objects(&objects, tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("fetch");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    signed_fetch(&target, &remote).unwrap();
+
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(store.read_object(&last_blob).unwrap(), objects[262_144]);
+    assert!(
+        !loose_object_path(&layout, &last_blob).is_file(),
+        "the last whole-file blob must pack despite the number of tree entries"
+    );
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+#[test]
+fn a_chunk_whose_manifest_arrives_after_seal_can_read_restore_and_mark_from_pack() {
+    let remote = Remote::new();
+    let data = b"short last chunk";
+    let (mut objects, _) = remote.build(None, &[("chunked", data)], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(mut tree) = objects.pop().unwrap() else {
+        panic!("expected a tree");
+    };
+    let chunk = objects.pop().unwrap();
+    let chunk_id = chunk.id().unwrap();
+    let len = data.len() as u64;
+    let manifest =
+        Object::ChunkedBlob(ChunkedBlob::new(len, 16 * 1024, [(chunk_id, len)]).unwrap());
+    tree.entries[0].object_hash = manifest.id().unwrap();
+    let tree = Object::Tree(tree);
+    commit.tree_hash = tree.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+
+    // Fill the entry window before the pack carrying the manifest arrives.
+    let filler = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let filler_id = filler.id().unwrap();
+    let filler = kit_core::serialize::serialize(&filler).unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    writer
+        .push_raw(chunk_id, &kit_core::serialize::serialize(&chunk).unwrap())
+        .unwrap();
+    for _ in 1..65_536 {
+        writer.push_raw(filler_id, &filler).unwrap();
+    }
+    remote.publish_pack(&writer.finish().unwrap(), tip, false);
+    remote.publish_objects(&[manifest, tree, commit], tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(!loose_object_path(&layout, &chunk_id).is_file());
+    assert_eq!(store.read_object(&chunk_id).unwrap(), chunk);
+    assert_eq!(std::fs::read(target.join("chunked")).unwrap(), data);
+    let _lock = kit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        kit_core::repo_lock::WORKTREE_LOCK,
+    )
+    .unwrap();
+    let mut marked = 0;
+    kit_core::ops::gc::run_gc_observed(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        true,
+        &mut |phase, count, _| {
+            if phase == "gc_mark" {
+                marked = count;
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        marked, 4,
+        "gc must mark the commit, tree, manifest and packed chunk"
+    );
+}
+
+#[test]
+fn a_clone_keeps_unclassified_blobs_loose_when_chunk_tracking_overflows() {
+    let remote = Remote::new();
+    let data = b"whole file";
+    let (objects, tip) = remote.build(None, &[("file", data)], true);
+    let blob_id = objects[0].id().unwrap();
+    let mut writer = PackWriter::new_raw_only();
+    for object in objects {
+        writer
+            .push_raw(
+                object.id().unwrap(),
+                &kit_core::serialize::serialize(&object).unwrap(),
+            )
+            .unwrap();
+    }
+    // The wire pack may carry unreachable manifests. Distinct short chunk
+    // references exhaust the tracking table while the tip stays verifiable.
+    for n in 0u32..=262_144 {
+        let chunk = hash::hash(&n.to_le_bytes());
+        let manifest = Object::ChunkedBlob(ChunkedBlob::new(1, 16 * 1024, [(chunk, 1)]).unwrap());
+        writer
+            .push_raw(
+                manifest.id().unwrap(),
+                &kit_core::serialize::serialize(&manifest).unwrap(),
+            )
+            .unwrap();
+    }
+    remote.publish_pack(&writer.finish().unwrap(), tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(tip));
+    assert_eq!(std::fs::read(target.join("file")).unwrap(), data);
+    assert!(
+        loose_object_path(&layout, &blob_id).is_file(),
+        "the writer must leave unclassified blobs loose after overflow"
+    );
+}
+
+#[test]
 fn a_busy_activation_keeps_the_marker_and_repairs_a_loose_copy() {
     use kit_core::store::ObjectStore;
 
