@@ -2174,7 +2174,10 @@ fn the_mark_checks_a_packed_chunk_by_its_head_and_hashes_none_of_it() {
     let root = manifest_root(&store, &layout, "live", &chunks);
 
     let gc = ObjectStore::open(&layout).unwrap();
-    assert!(chunks.iter().all(|c| !gc.path_for(c).exists()), "chunks are packed");
+    assert!(
+        chunks.iter().all(|c| !gc.path_for(c).exists()),
+        "chunks are packed"
+    );
     let live = crate::ops::gc::live_objects(&gc, &layout).unwrap();
     assert!(live.contains(&root) && chunks.iter().all(|c| live.contains(c)));
     assert_eq!(gc.gc_hashed_byte_count(), 0);
@@ -2416,7 +2419,12 @@ fn the_soft_classification_hashes_an_id_it_reached_as_a_chunk_and_as_a_node() {
         let gc = ObjectStore::open(&layout).unwrap();
         let result = crate::ops::gc::classify_soft_root(&gc, tree);
         assert!(
-            matches!(result, Err(crate::ops::gc::GcRootsError::Store(StoreError::HashMismatch { .. }))),
+            matches!(
+                result,
+                Err(crate::ops::gc::GcRootsError::Store(
+                    StoreError::HashMismatch { .. }
+                ))
+            ),
             "{manifest_name}/{blob_name}: {result:?}"
         );
     }
