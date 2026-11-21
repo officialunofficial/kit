@@ -5177,6 +5177,45 @@ mod tests {
         }
     }
 
+    /// The total a sparse restore reports counts the files under a selected
+    /// directory, whether or not that directory exists yet.
+    #[test]
+    fn sparse_restore_progress_total_counts_selected_files_under_directories() {
+        let options = RestoreOptions {
+            clean: false,
+            sparse_patterns: Some(vec![sparse("t/sub", false, false)]),
+        };
+        for existing_dir in [false, true] {
+            let (_d, store) = fresh_store();
+            let root = put_tree_with(
+                &store,
+                vec![
+                    dir_entry(&store, "t", vec![file_entry(&store, "sub")]),
+                    dir_entry(&store, "u", vec![file_entry(&store, "other")]),
+                ],
+            );
+            let target = TempDir::new().unwrap();
+            if existing_dir {
+                fs::create_dir_all(target.path().join("t")).unwrap();
+                fs::create_dir_all(target.path().join("u")).unwrap();
+            }
+            let mut reports = Vec::new();
+            restore_tree_to_worktree_progress(
+                &store,
+                &root,
+                None,
+                target.path(),
+                &options,
+                &sequential_read_chunks,
+                None,
+                &mut |done, total| reports.push((done, total)),
+            )
+            .unwrap();
+            assert_eq!(reports.first(), Some(&(0, 1)), "dir exists: {existing_dir}");
+            assert_eq!(reports.last(), Some(&(1, 1)), "dir exists: {existing_dir}");
+        }
+    }
+
     /// The sweep of a clean restore removes untracked files the patterns
     /// select, walks only directories that can hold selected paths, and leaves
     /// the rest alone.
