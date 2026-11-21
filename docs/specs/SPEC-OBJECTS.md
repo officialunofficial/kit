@@ -674,8 +674,8 @@ payload limit of 64 MiB of serialized bytes, with one exception: gc gives one
 object that alone passes 64 MiB an output pack of its own. These limits are
 writer policy and bound the locators, batch paths and index workspace of one
 pack. A reader accepts any pack within the format caps of 10,000,000 entries
-and 4 GiB of payload (§10, SPEC-PACKFILE §3.1.1), so a pack from a writer with
-other limits stays readable.
+and 4 GiB of payload ([SPEC-PACKFILE](SPEC-PACKFILE.md) §5 and §3.1.1), so a
+pack from a writer with other limits stays readable.
 
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
