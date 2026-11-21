@@ -283,7 +283,7 @@ impl CopyPlan {
                 relies: BTreeSet::new(),
             })
             .collect();
-        self.verify_coverage(&mut work, report)?;
+        self.verify_coverage(&mut work, report);
         let (outputs, copied) = self.copy(store, &mut work, report)?;
         report.survivor_bytes_copied += copied;
 
@@ -324,7 +324,7 @@ impl CopyPlan {
 
     /// Read and hash the covering copy of every live entry that the run
     /// drops. A copy that fails verification counts as no copy.
-    fn verify_coverage(&self, work: &mut [Work], report: &mut GcReport) -> StoreResult<()> {
+    fn verify_coverage(&self, work: &mut [Work], report: &mut GcReport) {
         let mut verdicts: HashMap<Hash, bool> = HashMap::new();
         for (input, work) in self.inputs.iter().zip(work) {
             for dropped in &input.dropped {
@@ -363,7 +363,6 @@ impl CopyPlan {
             work.survivors
                 .sort_unstable_by_key(|entry| entry.frame.offset);
         }
-        Ok(())
     }
 
     /// Write every survivor into rolling output packs, oldest input first.
