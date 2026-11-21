@@ -102,6 +102,13 @@ struct Stamp {
 }
 
 impl Stamp {
+    /// The stamp of a step that has never run: due as soon as the floor is.
+    const NEVER: Self = Self {
+        attempted: 0,
+        outcome: Collection::Complete,
+        complete_pairs: 0,
+    };
+
     fn read(file: &mut File) -> Option<Self> {
         let mut bytes = [0; 17];
         file.read_exact(&mut bytes).ok()?;
@@ -146,9 +153,12 @@ impl Stamp {
     }
 
     fn write(self, file: &mut File) -> io::Result<()> {
+        // Never truncate first: a failed write leaves a torn stamp, which is
+        // rewritten and stops the step, and not an empty one, which means the
+        // step has never run.
         file.rewind()?;
-        file.set_len(0)?;
-        file.write_all(&self.encode())
+        file.write_all(&self.encode())?;
+        file.set_len(17)
     }
 
     /// A step that left planned work is due again whatever the pair count: a
@@ -213,6 +223,33 @@ pub fn maintain_packs(
     maintain_with(layout, store, cancelled, BUDGET, || {})
 }
 
+/// [`maintain_packs`] for a command that writes objects, such as a commit.
+///
+/// A repository that has never run the step and holds fewer pairs than the
+/// floor gets no stamp file and no sweep: its `.kit` layout is unchanged and
+/// the step costs one listing of the pack directory. The first step runs once
+/// the store holds the floor, or after any fetch has created the stamp.
+#[doc(hidden)]
+#[must_use]
+pub fn maintain_packs_after_write(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    cancelled: &dyn Fn() -> bool,
+) -> MaintenanceReport {
+    let unstamped = matches!(
+        std::fs::symlink_metadata(layout.common_dir().join(AUTO_MAINTENANCE_STAMP)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    );
+    if unstamped
+        && !store
+            .plan_pack_leftovers(now_secs(), DEFAULT_GRACE_SECS)
+            .is_ok_and(|(_, pairs)| pairs >= MIN_PAIRS)
+    {
+        return MaintenanceReport::default();
+    }
+    maintain_packs(layout, store, cancelled)
+}
+
 fn maintain_with(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -262,14 +299,20 @@ fn run(
         return Collection::NotDue;
     };
     let now = now_secs();
-    let Some(stamp) = Stamp::read(&mut file) else {
-        let _ = Stamp {
-            attempted: now,
-            outcome: Collection::NotDue,
-            complete_pairs: 0,
+    let stamp = match Stamp::read(&mut file) {
+        Some(stamp) => stamp,
+        // A step that has never run is due once the store holds the floor,
+        // so a repository that never fetches is maintained too.
+        None if file.metadata().is_ok_and(|meta| meta.len() == 0) => Stamp::NEVER,
+        None => {
+            let _ = Stamp {
+                attempted: now,
+                outcome: Collection::NotDue,
+                complete_pairs: 0,
+            }
+            .write(&mut file);
+            return Collection::NotDue;
         }
-        .write(&mut file);
-        return Collection::NotDue;
     };
     if !matches!(store.try_packed_for_maintenance(), Ok(true)) {
         return Collection::NotDue;

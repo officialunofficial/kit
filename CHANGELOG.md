@@ -17,6 +17,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
 - A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 256 MiB of pack and index files, so a hold of 64 MiB packs takes about 15 ms and not 150 ms.
 - The maintenance step after fetch and pull verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
+- `kit commit` runs the due maintenance step after it publishes, so a repository that never fetches no longer builds up packs. The step prints only its maintenance line, and `kit add` alone does not run it. A step that has never run is due as soon as the store holds 32 packs, and not a week later.
+- A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
 - `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
