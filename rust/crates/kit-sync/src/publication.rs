@@ -223,6 +223,8 @@ fn record(
 }
 
 /// Hash-check private reads and fall through to the durable store on a miss.
+/// The type and head of a private object are read from its first bytes alone;
+/// `seal` checks the bytes before anything is committed or recorded.
 pub(crate) struct PendingView<'a> {
     store: &'a ObjectStore,
     spool: Option<&'a ObjectSpool>,
