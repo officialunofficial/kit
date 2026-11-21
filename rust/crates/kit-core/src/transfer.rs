@@ -2487,7 +2487,8 @@ mod tests {
         let (_d, s) = store();
         let old = chunk_content(1, 40_000);
         // A new chunk that is byte-identical to the old blob has its id.
-        let (_, out) = pair_blob_within(&s, &old, &[old.clone()], BlobBudget::default());
+        let (_, out) =
+            pair_blob_within(&s, &old, std::slice::from_ref(&old), BlobBudget::default());
         assert!(out.is_empty());
     }
 
