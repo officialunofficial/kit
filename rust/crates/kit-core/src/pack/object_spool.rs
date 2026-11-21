@@ -464,4 +464,37 @@ mod tests {
             .unwrap();
         assert!(window.head(&short).is_err());
     }
+
+    #[test]
+    fn an_adopted_frame_replaces_a_staged_one_only_at_an_earlier_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, good) = blob(b"the staged copy");
+        let (_, bad) = blob(b"another object");
+        let entry = |position| {
+            (
+                position,
+                id,
+                u32::try_from(bad.len()).unwrap(),
+                ObjectType::Blob,
+            )
+        };
+        // The donor's copy is bad, so a read tells which frame won.
+        let adopt_at = |staged_at: usize, adopted_at: usize| {
+            let window = ObjectSpool::new(dir.path()).unwrap();
+            window
+                .append(staged_at, id, ObjectType::Blob, &good)
+                .unwrap();
+            let donor = ObjectSpool::new(dir.path()).unwrap();
+            donor.append(0, id, ObjectType::Blob, &bad).unwrap();
+            window.adopt(&donor, &[entry(adopted_at)]).unwrap();
+            window.read(&id)
+        };
+
+        assert!(matches!(
+            adopt_at(5, 2),
+            Err(StoreError::HashMismatch { .. })
+        ));
+        assert_eq!(adopt_at(2, 2).unwrap(), Some(good.clone()));
+        assert_eq!(adopt_at(2, 9).unwrap(), Some(good));
+    }
 }
