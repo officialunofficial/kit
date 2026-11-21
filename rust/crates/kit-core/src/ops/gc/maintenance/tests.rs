@@ -1086,17 +1086,21 @@ fn a_copy_capped_to_one_output_leaves_work_and_runs_again_under_the_floor() {
     }
 }
 
-/// A step that has left work but did nothing keeps the weekly interval: a
-/// refresh of every planned pack cannot make the step loop every hour.
+/// A step that has left work but retired nothing keeps the interval of its
+/// own outcome: a refresh of every verified pack cannot make the step loop
+/// every hour.
 #[test]
 fn a_step_that_retires_nothing_is_never_stamped_progress() {
     TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
-    repo.old_pack(&[b"dead"]);
+    repo.old_pack(&[b"dead one"]);
+    repo.old_pack(&[b"dead two"]);
+    // Room for one of the two: verification is cut with one pack planned.
     TEST_VERIFY_ROOM.set(Some(1));
     let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
-        // A writer refreshes the only planned pair before the locks.
+        // A writer refreshes every pack before the locks, so the planned
+        // pair fails its recheck and nothing retires.
         for entry in fs::read_dir(repo.pack_dir()).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "pack") {
@@ -1108,8 +1112,69 @@ fn a_step_that_retires_nothing_is_never_stamped_progress() {
         }
     });
     TEST_VERIFY_ROOM.set(None);
-    assert_ne!(report.collection, Collection::Progress, "{report:?}");
-    assert_ne!(stamp_of(&repo).outcome, Collection::Progress);
+    assert_eq!(report.packs_retired, 0, "{report:?}");
+    assert_eq!(report.collection, Collection::OverBudget, "{report:?}");
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+}
+
+/// A lock miss after a step of progress keeps the floor bypass: the store may
+/// have fallen under 32 pairs with work still planned.
+#[test]
+fn a_lock_miss_after_progress_still_ignores_the_pair_floor() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    for n in 0..2 {
+        repo.old_pack(&[format!("dead {n}").as_bytes()]);
+    }
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    Stamp {
+        attempted: 1,
+        outcome: Collection::Progress,
+        complete_pairs: 0,
+    }
+    .write(&mut file)
+    .unwrap();
+    drop(file);
+    let lock = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Busy);
+    drop(lock);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert!(stamp.due(stamp.attempted + HOUR, 3));
+}
+
+/// A cancellation during the verification of a pack stops the step with
+/// nothing retired: it is not a deadline, so it never reads as progress.
+#[test]
+fn a_cancellation_while_a_dead_pack_is_verified_retires_nothing() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let dead: Vec<_> = (0..3)
+        .map(|n| repo.old_pack(&[format!("dead {n}").as_bytes()]).0)
+        .collect();
+    TEST_VERIFY_ROOM.set(Some(5));
+    // The first verification start moves the counter, and every check after
+    // it is a cancellation.
+    let report = maintain_with(
+        &repo.layout,
+        &repo.store,
+        &|| TEST_VERIFY_ROOM.get() != Some(5),
+        BUDGET,
+        || panic!("a cancelled step must not reach the locks"),
+    );
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(report.collection, Collection::Failed, "{report:?}");
+    assert_eq!(report.packs_retired, 0);
+    assert!(dead.iter().all(|path| path.exists()));
+    assert_eq!(stamp_of(&repo).outcome, Collection::Failed);
 }
 
 #[test]

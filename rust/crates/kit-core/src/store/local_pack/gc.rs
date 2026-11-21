@@ -568,6 +568,7 @@ impl PackSweep {
             .collect();
         let leftover_bytes: Vec<u64> = leftovers.iter().map(|(_, stamp)| stamp.len).collect();
         let (size, byte_cap) = Self::batch();
+        debug_assert!(size > 0, "a batch needs room for one item");
         let mut run = Run {
             hook: Some(after_pack_sync),
             flushed: BTreeSet::new(),

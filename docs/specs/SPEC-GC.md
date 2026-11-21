@@ -506,11 +506,13 @@ planned work for the next step: wholly dead packs it had no time to verify,
 or copy inputs that did not fit in its one output pack. The step then stamps
 `progress`, which is due after an hour and ignores the 32-pair floor, because
 a store that a step brings under the floor can still hold garbage that the
-next step plans to remove. A step that left work but retired nothing keeps
-the interval of its own outcome, so work that cannot be done never repeats
-every hour. A store under the floor with no stamp of progress is left alone
-until a manual `kit gc`: its garbage is bounded by the size of fewer than 32
-packs, and the step costs a mark of the whole history.
+next step plans to remove. A lock miss or changed roots right after a
+step of progress keeps the `progress` stamp, so the retry is due in the same
+hour and still ignores the floor. A step that left work but retired nothing
+keeps the interval of its own outcome, so work that cannot be done never
+repeats every hour. A store under the floor with no stamp of progress is left
+alone until a manual `kit gc`: its garbage is bounded by the size of fewer
+than 32 packs, and the step costs a mark of the whole history.
 
 1. Read `now` and collect retention roots without the worktree locks.
 2. Mark the roots under a wall-clock budget of 5 seconds that also covers
@@ -522,9 +524,11 @@ packs, and the step costs a mark of the whole history.
    The budget is checked before each pack and never inside one, so a pack
    that has started is read to its end. When the budget ends, the packs
    verified so far stay planned and the rest wait for the next step; the
-   step then skips the copy and reports `progress`. If it ended before one
-   pack was verified, nothing is planned and the step reports `over_budget`
-   with the 30-day interval. A damaged pair or cancellation ends collection
+   step then skips the copy and, once it has retired at least one of them,
+   reports `progress`. If it ended before one pack was verified, nothing is
+   planned and the step reports `over_budget` with the 30-day interval. If
+   every verified pack fails its recheck before retirement, the step
+   reports `over_budget` and keeps the 7-day interval of a finished step. A damaged pair or cancellation ends collection
    before retirement. Then plan
    copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
    keep only the inputs whose survivors fit in one output pack: at most

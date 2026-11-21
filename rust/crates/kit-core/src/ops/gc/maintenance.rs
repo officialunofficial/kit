@@ -320,6 +320,15 @@ fn run(
         collection.reported = Collection::Progress;
         collection.stamped = Collection::Progress;
     }
+    // A lock miss or changed roots after a step of progress keeps the work in
+    // view: the retry is due in the same hour and still ignores the floor.
+    if matches!(
+        collection.stamped,
+        Collection::Busy | Collection::RootsChanged
+    ) && stamp.outcome == Collection::Progress
+    {
+        collection.stamped = Collection::Progress;
+    }
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
