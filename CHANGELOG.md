@@ -55,6 +55,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
 - A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
+- A push to a file, ssh or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. Packs below 8 MiB and pushes to a remote that issues upload tickets are unchanged, and a failed existence check uploads the pack.
 
 ### Removed
 

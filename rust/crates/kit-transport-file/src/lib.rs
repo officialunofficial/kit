@@ -1807,7 +1807,9 @@ impl Transport for FileTransport {
     }
 
     fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
-        Ok(self.pack_path(key).exists())
+        // A regular file only, as `download_pack` reads: a link or a
+        // directory at the key is not a stored pack.
+        Ok(fs::symlink_metadata(self.pack_path(key)).is_ok_and(|meta| meta.is_file()))
     }
 
     // ------------------------------------------------------------------
@@ -2073,6 +2075,26 @@ mod tests {
         t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
             .unwrap();
         assert!(dir.path().join("packs").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pack_exists_is_false_for_a_link_or_a_directory_at_the_key() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"real pack";
+        let key = pack_key_for(data);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let path = t.pack_path(&key);
+        fs::remove_file(&path).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
     }
 
     #[cfg(unix)]
