@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
@@ -490,49 +490,126 @@ impl Staged {
     }
 }
 
+/// How many bytes of whole frames [`check_frames`] reads and digests at a
+/// time. It is the only buffer the check holds, and a frame above it is read
+/// in pieces of this size.
+const SEGMENT: usize = 8 << 20;
+
 /// Read the pack once, from its header to the end of its last frame, and
 /// check it against the rows the writer recorded: the magic, version and
 /// count, each frame's reserved byte, offset and length, that the frames end
 /// where the trailer will start, and that nothing follows. Returns the digest
 /// of those bytes. The ids come from the writer, so this is the one check of
 /// everything `scan` verifies except the id hash of each object.
+///
+/// The digest is BLAKE3 of the file's bytes up to `end`: a raw frame is its
+/// reserved byte 0, its little-endian length and its body. The check reads
+/// whole frames into one buffer, validates every header in that buffer, and
+/// digests the same buffer on several threads, so the bytes digested are the
+/// bytes checked and the file is read once.
 fn check_frames(
     file: &mut fs::File,
     rows: &[(Hash, Frame)],
     end: u64,
 ) -> StoreResult<blake3::Hasher> {
-    let mut reader = BufReader::with_capacity(256 << 10, file);
-    let header = index::read_version::<HEADER_LEN>(&mut reader, *MAGIC, "local pack")?;
+    check_frames_in(file, rows, end, SEGMENT)
+}
+
+fn check_frames_in(
+    file: &mut fs::File,
+    rows: &[(Hash, Frame)],
+    end: u64,
+    segment: usize,
+) -> StoreResult<blake3::Hasher> {
+    let header = index::read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     if index::le_u32(&header[8..12]) as usize != rows.len() {
         return Err(index::invalid("local pack frame count disagrees with rows"));
     }
     let mut digest = blake3::Hasher::new();
     digest.update(&header);
-    let mut next = HEADER_LEN as u64;
-    let mut bytes = Vec::new();
-    for (_, row) in rows {
-        let len = index::read_frame_header(&mut reader)?;
+    let mut checked = FrameChecker {
+        next: HEADER_LEN as u64,
+        end,
+    };
+    let mut buf = Vec::new();
+    let mut rows = rows.iter().peekable();
+    while let Some((_, first)) = rows.peek() {
+        let first_len = ENTRY_FRAME_LEN + first.len as usize;
+        if first_len > segment {
+            // One frame larger than the buffer: check its header from the
+            // first piece, then digest the rest piece by piece.
+            let (_, row) = rows.next().expect("peeked");
+            buf.resize(segment, 0);
+            file.read_exact(&mut buf)?;
+            checked.frame(&buf, row)?;
+            update(&mut digest, &buf);
+            let mut left = first_len - segment;
+            while left > 0 {
+                let piece = left.min(segment);
+                buf.resize(piece, 0);
+                file.read_exact(&mut buf)?;
+                update(&mut digest, &buf);
+                left -= piece;
+            }
+            continue;
+        }
+        // The rows that fit the buffer whole: read them in one go.
+        let mut group = Vec::new();
+        let mut len = 0;
+        while let Some((_, row)) = rows.peek() {
+            let frame_len = ENTRY_FRAME_LEN + row.len as usize;
+            if len + frame_len > segment {
+                break;
+            }
+            len += frame_len;
+            group.push(rows.next().expect("peeked").1);
+        }
+        buf.resize(len, 0);
+        file.read_exact(&mut buf)?;
+        let mut at = 0;
+        for row in group {
+            at += checked.frame(&buf[at..], row)?;
+        }
+        update(&mut digest, &buf);
+    }
+    if checked.next != end || file.read(&mut [0])? != 0 {
+        return Err(index::invalid("local pack does not end at its last frame"));
+    }
+    Ok(digest)
+}
+
+/// Digest `bytes` on the rayon pool, as one hasher would serially.
+fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    digest.update_rayon(bytes);
+    #[cfg(target_arch = "wasm32")]
+    digest.update(bytes);
+}
+
+/// Where the next frame must start, and where the frames must end.
+struct FrameChecker {
+    next: u64,
+    end: u64,
+}
+
+impl FrameChecker {
+    /// Check the frame at the start of `bytes` against its row and step to
+    /// the next one. Returns the frame's length in bytes, header included.
+    fn frame(&mut self, bytes: &[u8], row: &Frame) -> StoreResult<usize> {
+        let len = index::parse_frame_header(&bytes[..ENTRY_FRAME_LEN])?;
         let frame = Frame {
-            offset: next + ENTRY_FRAME_LEN as u64,
+            offset: self.next + ENTRY_FRAME_LEN as u64,
             len,
         };
         let (_, frame_end) = frame
-            .extent(end)
+            .extent(self.end)
             .ok_or_else(|| index::invalid("invalid raw frame extent"))?;
         if frame != *row {
             return Err(index::invalid("local pack frame disagrees with its row"));
         }
-        bytes.resize(len as usize, 0);
-        reader.read_exact(&mut bytes)?;
-        digest.update(&[0]);
-        digest.update(&len.to_le_bytes());
-        digest.update(&bytes);
-        next = frame_end;
+        self.next = frame_end;
+        Ok(ENTRY_FRAME_LEN + len as usize)
     }
-    if next != end || reader.read(&mut [0])? != 0 {
-        return Err(index::invalid("local pack does not end at its last frame"));
-    }
-    Ok(digest)
 }
 
 // Return the staged copy on collision so the caller can compare it with the
@@ -926,6 +1003,120 @@ mod tests {
         // The recorded end beyond the last frame.
         file.rewind().unwrap();
         assert!(check_frames(&mut file, &rows, end + 1).is_err());
+    }
+
+    /// A finished pack file with one distinct blob per size, its count
+    /// written as the seal does, with the rows and end the writer recorded.
+    fn unsealed(sizes: &[usize]) -> (fs::File, Vec<(Hash, Frame)>, u64, Vec<u8>) {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        for (n, size) in sizes.iter().enumerate() {
+            let data = (0..*size)
+                .map(|i| u8::try_from((i * 7 + n) % 251).unwrap())
+                .collect::<Vec<_>>();
+            writer
+                .write(&blob(&[&n.to_le_bytes()[..], &data].concat()))
+                .unwrap();
+        }
+        writer.pack.flush().unwrap();
+        let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
+        let path = writer.pack.get_ref().path().to_path_buf();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
+        file.write_all(&u32::try_from(rows.len()).unwrap().to_le_bytes())
+            .unwrap();
+        file.rewind().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        (file, rows, end, bytes)
+    }
+
+    #[test]
+    fn the_digest_is_the_serial_digest_across_chunk_and_subtree_boundaries() {
+        // Frame sizes around BLAKE3's 1 KiB chunks and power-of-two subtrees,
+        // and a frame of several subtrees, with the default buffer and with
+        // buffers that cut groups and frames at every size.
+        let sizes = [
+            1, 1000, 1018, 1019, 1020, 2043, 2044, 4091, 8185, 65_530, 131_072, 300_000, 7,
+        ];
+        let (mut file, rows, end, bytes) = unsealed(&sizes);
+        let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+        for segment in [16, 17, 1024, 1029, 4096, 70_000, 131_072, 1 << 20, SEGMENT] {
+            file.rewind().unwrap();
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            assert_eq!(digest.finalize(), serial, "segment {segment}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn the_checked_digest_equals_the_serial_digest_for_any_sizes_and_buffer(
+            sizes in proptest::collection::vec(
+                prop_oneof![0_usize..3000, 1015..1030_usize, 2040..2055_usize, 0..200_000_usize],
+                0..20,
+            ),
+            segment in 16_usize..300_000,
+        ) {
+            let (mut file, rows, end, bytes) = unsealed(&sizes);
+            let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            prop_assert_eq!(digest.finalize(), serial);
+        }
+    }
+
+    #[test]
+    fn a_bad_frame_in_any_position_of_any_group_fails_the_check() {
+        let sizes = [500, 900, 1300, 100, 40_000, 700, 800];
+        let (file, rows, end, bytes) = unsealed(&sizes);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            for (n, (_, row)) in rows.iter().enumerate() {
+                let start = usize::try_from(row.offset).unwrap() - ENTRY_FRAME_LEN;
+                for (offset, value) in [(0, 1_u8), (1, bytes[start + 1] ^ 1), (4, 0x7f)] {
+                    let mut damaged = bytes.clone();
+                    damaged[start + offset] = value;
+                    path.as_file_mut().set_len(0).unwrap();
+                    path.rewind().unwrap();
+                    path.write_all(&damaged).unwrap();
+                    path.rewind().unwrap();
+                    assert!(
+                        check_frames_in(path.as_file_mut(), &rows, end, segment).is_err(),
+                        "segment {segment}, frame {n}, byte {offset}"
+                    );
+                }
+            }
+        }
+        // The undamaged file passes every buffer.
+        drop(file);
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            path.as_file_mut().set_len(0).unwrap();
+            path.rewind().unwrap();
+            path.write_all(&bytes).unwrap();
+            path.rewind().unwrap();
+            check_frames_in(path.as_file_mut(), &rows, end, segment).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_short_or_long_pack_fails_the_check_with_any_buffer() {
+        let (_file, rows, end, bytes) = unsealed(&[500, 900, 1300]);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        let len = usize::try_from(end).unwrap();
+        for segment in [16, 600, SEGMENT] {
+            for damaged in [&bytes[..len - 1], &[&bytes[..], b"x"].concat()[..]] {
+                path.as_file_mut().set_len(0).unwrap();
+                path.rewind().unwrap();
+                path.write_all(damaged).unwrap();
+                path.rewind().unwrap();
+                assert!(check_frames_in(path.as_file_mut(), &rows, end, segment).is_err());
+            }
+        }
     }
 
     enum Corruption {

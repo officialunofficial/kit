@@ -446,6 +446,11 @@ pub(super) fn read_header_sized(
 pub(super) fn read_frame_header(reader: &mut impl Read) -> StoreResult<u32> {
     let mut header = [0; ENTRY_FRAME_LEN];
     reader.read_exact(&mut header)?;
+    parse_frame_header(&header)
+}
+
+/// The length a raw frame's header gives, if its reserved byte is 0.
+pub(super) fn parse_frame_header(header: &[u8]) -> StoreResult<u32> {
     if header[0] != 0 {
         return Err(invalid("local pack frame is not raw"));
     }
