@@ -105,7 +105,7 @@ fn a_commit_under_the_floor_runs_no_collection() {
     let repo = repo();
     build_up(repo.path(), 3);
     ok(repo.path(), &["commit", "-m", "one"]);
-    assert_eq!(stamp(repo.path()).map(|s| s.len()), Some(0));
+    assert_eq!(stamp(repo.path()), None, "no new file under the floor");
 }
 
 #[test]
@@ -123,7 +123,11 @@ fn a_loose_only_repository_runs_no_collection() {
     fs::write(repo.path().join("a"), b"one").unwrap();
     ok(repo.path(), &["add", "a"]);
     ok(repo.path(), &["commit", "-m", "one"]);
-    assert_eq!(stamp(repo.path()).map(|s| s.len()), Some(0));
+    assert_eq!(
+        stamp(repo.path()),
+        None,
+        "no new file in a loose repository"
+    );
 }
 
 #[test]
@@ -145,6 +149,9 @@ fn the_step_leaves_the_commit_output_and_exit_code_alone() {
 
 /// An old staging file in the pack directory: the step removes it and says so.
 fn old_leftover(repo: &Path) -> std::path::PathBuf {
+    // A repository that has fetched has a stamp; an unstamped one under the
+    // floor is left alone.
+    fs::write(repo.join(".kit/gc-auto"), b"").unwrap();
     let leftover = repo
         .join(".kit/objects/pack")
         .join(".11111111111111111111111111111111.tmp.pack");

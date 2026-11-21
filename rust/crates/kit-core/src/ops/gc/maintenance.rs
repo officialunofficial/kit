@@ -223,6 +223,33 @@ pub fn maintain_packs(
     maintain_with(layout, store, cancelled, BUDGET, || {})
 }
 
+/// [`maintain_packs`] for a command that writes objects, such as a commit.
+///
+/// A repository that has never run the step and holds fewer pairs than the
+/// floor gets no stamp file and no sweep: its `.kit` layout is unchanged and
+/// the step costs one listing of the pack directory. The first step runs once
+/// the store holds the floor, or after any fetch has created the stamp.
+#[doc(hidden)]
+#[must_use]
+pub fn maintain_packs_after_write(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    cancelled: &dyn Fn() -> bool,
+) -> MaintenanceReport {
+    let unstamped = matches!(
+        std::fs::symlink_metadata(layout.common_dir().join(AUTO_MAINTENANCE_STAMP)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    );
+    if unstamped
+        && !store
+            .plan_pack_leftovers(now_secs(), DEFAULT_GRACE_SECS)
+            .is_ok_and(|(_, pairs)| pairs >= MIN_PAIRS)
+    {
+        return MaintenanceReport::default();
+    }
+    maintain_packs(layout, store, cancelled)
+}
+
 fn maintain_with(
     layout: &RepoLayout,
     store: &ObjectStore,

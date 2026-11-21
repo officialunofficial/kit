@@ -484,7 +484,7 @@ standard output are unchanged; the step's only output is its maintenance line
 on standard error, which `--quiet` and `gc.auto = false` suppress. `kit add`
 alone does not run the step. It stages work that a commit follows, and the
 commit is where a version is published and the next step is due, so the add
-loop pays nothing. The commit installs no signal handler for the step, so an
+loop pays nothing. A commit in a repository whose `gc-auto` stamp does not exist and that holds fewer than 32 pairs does nothing and creates no file, so the `.kit` layout of a small repository is unchanged. The commit installs no signal handler for the step, so an
 interrupt during it ends the process with the usual interrupt status after
 the commit is durable. A step that is not due costs one lock try on the stamp, a
 read of it and a listing of the pack directory.

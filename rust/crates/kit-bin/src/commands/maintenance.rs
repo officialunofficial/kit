@@ -44,7 +44,8 @@ pub(super) fn after_write(
     if !cfg.gc_auto_enabled() {
         return;
     }
-    let report = kit_core::ops::gc::maintain_packs(layout, store, &crate::signal::is_shutdown);
+    let report =
+        kit_core::ops::gc::maintain_packs_after_write(layout, store, &crate::signal::is_shutdown);
     print(Some(&report), quiet);
 }
 

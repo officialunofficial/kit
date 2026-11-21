@@ -34,7 +34,7 @@ mod soft;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use maintenance::fuzz_maintenance_stamp;
-pub use maintenance::{Collection, MaintenanceReport, maintain_packs};
+pub use maintenance::{Collection, MaintenanceReport, maintain_packs, maintain_packs_after_write};
 
 /// Basename of the advisory stamp and lock for automatic maintenance.
 #[doc(hidden)]

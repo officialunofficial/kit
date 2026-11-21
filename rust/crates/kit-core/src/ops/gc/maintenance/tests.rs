@@ -606,6 +606,32 @@ fn a_step_that_has_never_run_is_due_at_the_floor() {
     assert_eq!(repo.run().collection, Collection::NotDue, "then it waits");
 }
 
+/// A command that writes objects leaves a repository that never ran the step
+/// as it is until the store holds the floor: no stamp file, no sweep.
+#[test]
+fn a_write_command_leaves_an_unstamped_repository_alone_under_the_floor() {
+    let repo = Repo::new();
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    fs::remove_file(&stamp).unwrap();
+    let old = repo.leftover(1, DEFAULT_GRACE_SECS + 86_400);
+    for n in 0..MIN_PAIRS - 1 {
+        repo.pack(&[format!("young {n}").as_bytes()]);
+    }
+    let run = || maintain_packs_after_write(&repo.layout, &repo.store, &|| false);
+    assert_eq!(run(), MaintenanceReport::default());
+    assert!(!stamp.exists() && old.exists());
+
+    repo.pack(&[b"the last pair"]);
+    assert_eq!(run().collection, Collection::Complete);
+    assert!(!old.exists());
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+
+    // With a stamp, the step is the one a fetch runs: it sweeps under the floor.
+    let again = repo.leftover(2, DEFAULT_GRACE_SECS + 86_400);
+    assert_eq!(run().leftovers_removed, 1);
+    assert!(!again.exists());
+}
+
 #[test]
 fn a_loose_only_repository_keeps_files_named_like_pack_leftovers() {
     let dir = tempfile::tempdir().unwrap();
