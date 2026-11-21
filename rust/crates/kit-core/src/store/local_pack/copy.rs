@@ -810,6 +810,23 @@ mod select_tests {
     }
 
     #[test]
+    fn only_an_early_end_or_invalid_data_in_a_read_is_damage() {
+        use std::io::{Error, ErrorKind};
+
+        for kind in [ErrorKind::UnexpectedEof, ErrorKind::InvalidData] {
+            assert!(is_damage(&StoreError::Io(Error::from(kind))), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::NotFound,
+            ErrorKind::TimedOut,
+            ErrorKind::Other,
+        ] {
+            assert!(!is_damage(&StoreError::Io(Error::from(kind))), "{kind:?}");
+        }
+    }
+
+    #[test]
     fn a_pack_is_small_below_sixteen_mib_and_below_sixteen_thousand_entries() {
         let (_dir, _layout, store) = fresh();
         let pair = pair(&store, "member");

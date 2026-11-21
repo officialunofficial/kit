@@ -252,6 +252,31 @@ fn a_young_pack_with_no_dead_entry_that_another_pack_covers_is_retired_as_covere
     assert_eq!(store.read(&ids[1]).unwrap(), b);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_covering_copy_that_cannot_be_read_stops_the_run_and_keeps_every_pack() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, layout, store) = fresh();
+    let a = obj("a", 500);
+    let b = obj("b", 500);
+    let (older, ids) = publish(&store, &[&a, &b], YOUNG - 1);
+    let (younger, _) = publish(&store, &[&b, &a], YOUNG);
+    keep(&layout, "a", &ids[0]);
+    keep(&layout, "b", &ids[1]);
+
+    fs::set_permissions(&younger.pack, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&younger.pack).is_err() {
+        let error = run_gc(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).unwrap_err();
+        assert!(
+            matches!(&error, crate::store::StoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "{error:?}"
+        );
+        assert!(exists(&older) && exists(&younger), "nothing was retired");
+    }
+    fs::set_permissions(&younger.pack, fs::Permissions::from_mode(0o644)).unwrap();
+}
+
 #[test]
 fn a_live_id_whose_only_other_copy_is_in_another_input_is_copied_once() {
     let (_dir, layout, store) = fresh();
