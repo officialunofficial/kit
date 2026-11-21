@@ -70,6 +70,15 @@ pub struct MaintenanceReport {
     pub leftovers_removed: usize,
     /// Wholly dead pack pairs retired.
     pub packs_retired: usize,
+    /// Pairs rewritten, their survivors copied into a new pack.
+    pub packs_rewritten: usize,
+    /// Small pairs merged into a new pack.
+    pub packs_merged: usize,
+    /// Pairs retired with no copy, because pairs that stay hold every live
+    /// entry.
+    pub packs_retired_covered: usize,
+    /// Payload bytes copied into the new pack.
+    pub bytes_copied: u64,
     /// Bytes of removed pack and index files, including leftovers.
     pub bytes_reclaimed: u64,
     /// Result of the collection decision.
@@ -176,7 +185,8 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Sweep old pack leftovers and, when due, retire wholly dead local packs.
+/// Sweep old pack leftovers and, when due, retire wholly dead local packs
+/// and copy-then-retire the rest, at most one output pack per step.
 ///
 /// Call after the last ref publish has released its worktree lock and prune
 /// guard. The step only tries locks and honors cancellation before removing
@@ -211,6 +221,10 @@ fn maintain_with(
     MaintenanceReport {
         leftovers_removed: gc_report.pack_leftovers_pruned,
         packs_retired: gc_report.packs_retired,
+        packs_rewritten: gc_report.packs_rewritten,
+        packs_merged: gc_report.packs_merged,
+        packs_retired_covered: gc_report.packs_retired_covered,
+        bytes_copied: gc_report.survivor_bytes_copied,
         bytes_reclaimed: gc_report.bytes_reclaimed,
         collection,
         elapsed: start.elapsed(),
@@ -281,7 +295,9 @@ fn run(
         attempted: now,
         outcome: collection,
         complete_pairs: if collection == Collection::Complete {
-            pairs.saturating_sub(gc.packs_retired) as u64
+            pairs.saturating_sub(
+                gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
+            ) as u64
         } else {
             stamp.complete_pairs
         },
@@ -341,14 +357,29 @@ fn collect(
         &|| Ok(budget.check()?),
         &|| Ok(check_deadline(start, limit)?),
     )?;
-    let retire =
+    let mut retire =
         store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, gc, &|| Ok(budget.check()?))?;
     budget.check()?;
     if !gc.skipped_pack_errors.is_empty() {
         return Ok(Collection::Failed);
     }
+    retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
+        Ok(budget.check()?)
+    })?;
+    budget.check()?;
     if retire.is_empty() {
         return Ok(Collection::Complete);
+    }
+
+    // Copying reads pack bodies, so it runs before any worktree lock: the
+    // step holds only the shared guard, and only inside the copy. Damage or
+    // a failed coverage check stops the step with nothing published. The
+    // budget ends the copy before it publishes; once published, the outputs
+    // are harmless duplicates that the next step retires as covered, so the
+    // retirement below is not on the clock.
+    let copied = retire.copy_survivors(store, gc, &|| Ok(budget.check()?), true)?;
+    if !gc.skipped_pack_errors.is_empty() {
+        return Ok(Collection::Failed);
     }
 
     before_locks();
@@ -375,7 +406,7 @@ fn collect(
         return Ok(Collection::RootsChanged);
     }
     budget.check_cancellation()?;
-    Ok(if retire.run_with(store, gc, || Ok(()))? {
+    Ok(if retire.retire(store, gc, copied.as_ref(), || Ok(()))? {
         Collection::Complete
     } else {
         Collection::Busy
