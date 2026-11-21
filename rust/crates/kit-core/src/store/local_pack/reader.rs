@@ -1,8 +1,9 @@
-use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{self, IoSliceMut, Read};
 use std::path::Path;
 use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
 
 use crate::hash::Hash;
 use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, MAGIC, read_spooled};
@@ -13,27 +14,69 @@ use super::index::{
 };
 use super::{StoreError, StoreResult, is_disappeared};
 
-// Keep room for loose objects, transports and other repository files.
-const HANDLE_LIMIT: usize = 96;
+/// Handles the cache keeps at least, whatever the open-file limit. This leaves
+/// room for loose objects, transports and other repository files.
+pub(super) const HANDLE_FLOOR: usize = 96;
+/// Handles the cache keeps at most.
+pub(super) const HANDLE_CEILING: usize = 1024;
+
+/// A quarter of the soft open-file limit `soft`, held between
+/// [`HANDLE_FLOOR`] and [`HANDLE_CEILING`]: a store with that many packs or
+/// fewer keeps a handle for each, so a scan that visits the packs in any order
+/// opens each once. The rest of the limit stays for loose objects, transports
+/// and other files.
+pub(super) fn handle_limit_for(soft: u64) -> usize {
+    usize::try_from(soft / 4)
+        .unwrap_or(usize::MAX)
+        .clamp(HANDLE_FLOOR, HANDLE_CEILING)
+}
+
+/// How many handles a cache keeps in this process. The soft limit is read
+/// once. Where it cannot be read, the cache keeps [`HANDLE_FLOOR`].
+fn handle_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            crate::batch::soft_open_file_limit().map_or(HANDLE_FLOOR, handle_limit_for)
+        }
+        #[cfg(not(unix))]
+        {
+            HANDLE_FLOOR
+        }
+    })
+}
+
 /// Most pairs a catalog keeps without rows or routes. Each pair may hold an
 /// index handle and a pack handle in the cache, and these must both fit.
 pub(super) const LAZY_PAIR_LIMIT: usize = 40;
-const _: () = assert!(2 * LAZY_PAIR_LIMIT <= HANDLE_LIMIT);
+const _: () = assert!(2 * LAZY_PAIR_LIMIT <= HANDLE_FLOOR);
 pub(super) const ROW_CACHE_BYTES: usize = 64 << 20;
 pub(super) const ROUTE_CACHE_BYTES: usize = 288 << 20;
 
-/// A small LRU of open pack and index files.
+/// An LRU of open pack and index files.
 ///
-/// The lock covers only the list. A miss opens and checks the file with the
-/// lock released, so one slow `open` never holds up probes of cached packs.
-#[derive(Debug, Default)]
+/// The lock covers only the table. A miss opens and checks the file with the
+/// lock released, so one slow `open` never holds up probes of cached packs,
+/// and the file an insert evicts closes after the lock is released. A hit
+/// looks the file up in a hash table and stamps it, so the lock is held for
+/// a few instructions however many files are cached.
+#[derive(Debug)]
 pub(super) struct Handles {
     cache: std::sync::Mutex<Cache>,
+    /// Files the cache keeps open at most.
+    limit: usize,
     #[cfg(test)]
     opens: std::sync::atomic::AtomicUsize,
     /// Runs once between a miss's open and its insert, with no lock held.
     #[cfg(test)]
     after_open: std::sync::Mutex<AfterOpen>,
+}
+
+impl Default for Handles {
+    fn default() -> Self {
+        Self::with_limit(handle_limit())
+    }
 }
 
 #[cfg(test)]
@@ -50,40 +93,99 @@ impl std::fmt::Debug for AfterOpen {
     }
 }
 
+/// One cached file. The locator is held so that its address, which keys the
+/// entry, is never reused by another locator.
+#[derive(Debug)]
+struct Entry {
+    locator: Arc<Locator>,
+    handle: Arc<File>,
+    /// The cache's clock at the last use: the lowest is the least recently used.
+    used: u64,
+}
+
 #[derive(Debug, Default)]
 struct Cache {
-    entries: VecDeque<(Arc<Locator>, Member, Arc<File>)>,
+    entries: FxHashMap<(usize, Member), Entry>,
+    /// Ticks at every use.
+    clock: u64,
     /// Bumped by `retain`, so a file opened before a retire is not cached after it.
     retains: u64,
 }
 
 impl Cache {
-    fn position(&self, locator: &Arc<Locator>, member: Member) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|(old, kind, _)| Arc::ptr_eq(old, locator) && *kind == member)
+    fn key(locator: &Arc<Locator>, member: Member) -> (usize, Member) {
+        (Arc::as_ptr(locator) as usize, member)
     }
 
-    /// Moves a cached entry to the front and returns its handle.
+    /// Marks a cached entry as just used and returns its handle.
     fn promote(&mut self, locator: &Arc<Locator>, member: Member) -> Option<Arc<File>> {
-        let position = self.position(locator, member)?;
-        let entry = self
-            .entries
-            .remove(position)
-            .expect("position in handle cache");
-        let handle = Arc::clone(&entry.2);
-        self.entries.push_front(entry);
-        Some(handle)
+        self.clock += 1;
+        let entry = self.entries.get_mut(&Self::key(locator, member))?;
+        entry.used = self.clock;
+        Some(Arc::clone(&entry.handle))
+    }
+
+    /// Caches `handle`, and returns the least recently used entry when that
+    /// was needed to stay within `limit`. The caller drops it with no lock
+    /// held, because dropping the last handle to a file closes it.
+    fn insert(
+        &mut self,
+        locator: &Arc<Locator>,
+        member: Member,
+        handle: Arc<File>,
+        limit: usize,
+    ) -> Option<Entry> {
+        let evicted = if self.entries.len() >= limit {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| *key)?;
+            self.entries.remove(&oldest)
+        } else {
+            None
+        };
+        self.clock += 1;
+        self.entries.insert(
+            Self::key(locator, member),
+            Entry {
+                locator: Arc::clone(locator),
+                handle,
+                used: self.clock,
+            },
+        );
+        evicted
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Member {
     Index,
     Pack,
 }
 
 impl Handles {
+    fn with_limit(limit: usize) -> Self {
+        Self {
+            cache: std::sync::Mutex::default(),
+            limit,
+            #[cfg(test)]
+            opens: std::sync::atomic::AtomicUsize::default(),
+            #[cfg(test)]
+            after_open: std::sync::Mutex::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn limited(limit: usize) -> Self {
+        Self::with_limit(limit)
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit(&self) -> usize {
+        self.limit
+    }
+
     #[cfg(test)]
     pub(super) fn cached(&self) -> usize {
         self.lock().entries.len()
@@ -132,19 +234,22 @@ impl Handles {
             // pack's, and caching it would hold a deleted file open.
             return Ok(handle);
         }
-        if cache.entries.len() == HANDLE_LIMIT {
-            cache.entries.pop_back();
-        }
-        cache
-            .entries
-            .push_front((Arc::clone(locator), member, Arc::clone(&handle)));
+        let evicted = cache.insert(locator, member, Arc::clone(&handle), self.limit);
+        drop(cache);
+        drop(evicted);
         Ok(handle)
     }
 
     pub(super) fn retain(&self, mut live: impl FnMut(&Arc<Locator>) -> bool) {
-        let mut cache = self.lock();
-        cache.retains += 1;
-        cache.entries.retain(|(locator, _, _)| live(locator));
+        let removed: Vec<_> = {
+            let mut cache = self.lock();
+            cache.retains += 1;
+            cache
+                .entries
+                .extract_if(|_, entry| !live(&entry.locator))
+                .collect()
+        };
+        drop(removed);
     }
 }
 
@@ -498,14 +603,20 @@ impl Locator {
         checked: bool,
         head: &mut [u8],
     ) -> StoreResult<Option<usize>> {
-        const HEAD_LIMIT: usize = 16;
+        /// A head this short reads through the stack. A longer one, a whole
+        /// small frame, reads through a buffer of its own size.
+        const STACK_HEAD: usize = 16;
         self.confirm_pack(file, checked)?;
         let start = self.frame_start(frame)?;
         let len = head.len().min(frame.len as usize);
-        assert!(len <= HEAD_LIMIT, "bounded frame head");
-        // Room for the frame header and `HEAD_LIMIT` bytes.
-        let mut bytes = [0; 32];
-        let bytes = &mut bytes[..ENTRY_FRAME_LEN + len];
+        let mut stack = [0; ENTRY_FRAME_LEN + STACK_HEAD];
+        let mut large;
+        let bytes = if len <= STACK_HEAD {
+            &mut stack[..ENTRY_FRAME_LEN + len]
+        } else {
+            large = vec![0; ENTRY_FRAME_LEN + len];
+            &mut large[..]
+        };
         if read_spooled(file, start, bytes).is_err() {
             return Ok(None);
         }

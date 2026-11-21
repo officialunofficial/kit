@@ -24,7 +24,7 @@
 // today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
 // `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
 // on macOS/iOS, and `batch::soft_open_file_limit` uses
-// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Linux. Every other module
+// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Unix. Every other module
 // remains under the same prohibition; a code-review gate (CONTRIBUTING)
 // requires SAFETY notes on any new `unsafe` block.
 #![deny(unsafe_code)]
