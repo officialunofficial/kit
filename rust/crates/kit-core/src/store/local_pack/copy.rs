@@ -22,7 +22,7 @@ use super::{Frame, Index, LocalPackWriter, Location, Pair, visit_pairs};
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet};
 use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, TRAILER_LEN};
-use crate::store::{ObjectStore, PruneGuard, StoreError, StoreResult};
+use crate::store::{ObjectStore, PruneGuard, StoreResult};
 
 use super::gc::Stamp;
 
