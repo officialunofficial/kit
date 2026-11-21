@@ -194,6 +194,8 @@ rayon-core
 reqwest
 rfc6979
 ring
+ruint
+ruint-macro
 rustc-hash
 rustc_version
 rustix

@@ -15,7 +15,7 @@ ignore = [
     # once commonware migrates off paste this ignore goes. Re-justify by
     # 2027-02-17.
     #
-    # Re-confirmed 2026-11-04 on the commonware 2026.10.0 train:
+    # Re-confirmed 2026-11-04 on the commonware 2026.11.0 train:
     # `cargo tree -i paste` shows v1.0.15 entering as a proc-macro via
     # commonware-codec -> kit-core.
     { id = "RUSTSEC-2024-0436", reason = "transitive via commonware-codec; macro-only, no runtime exposure. Re-justify by 2027-02-17." },

@@ -1006,8 +1006,9 @@ impl Proof {
         self.reconstruct_multi_root(&elements)
     }
 
-    /// Verify against the bare (pre-wrap) inner root — matches
-    /// `commonware_storage::bmt::Proof::verify_element_inclusion` exactly.
+    /// Verify against the bare (pre-wrap) inner root — accepts exactly what
+    /// `commonware_storage::bmt::Proof::verify_element_inclusion` accepts
+    /// (upstream takes the position first).
     /// `cfg(test)`: kept only for the commonware cross-check test
     /// (`tests::proofs_match_commonware`) and `tests::verify_chunk_rejects_meta_leaf`,
     /// which need to show the *bare* BMT proof accepts a position/leaf the
