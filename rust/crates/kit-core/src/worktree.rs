@@ -1406,7 +1406,7 @@ fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
 /// KiB `MAX_SIZE`) regardless of the file's total size — the same
 /// "independent of file size" bound that the streaming
 /// reader itself gives, just sized for a batch instead of one chunk.
-const STREAM_HASH_BATCH: usize = 64;
+pub(crate) const STREAM_HASH_BATCH: usize = 64;
 
 /// Number of chunks a large file stages before its sink makes them durable
 /// and visible with [`ObjectSink::checkpoint`]. A sink that stages a file per

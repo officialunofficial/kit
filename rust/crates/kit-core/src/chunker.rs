@@ -506,7 +506,7 @@ impl ChunkBuffers {
     const SPARE_WINDOWS: usize = 4;
     /// Chunk buffers kept: three batches of the streaming pipeline (one being
     /// cut, one handed over, one being hashed) of up to 64 chunks each.
-    const SPARE_CHUNKS: usize = 3 * 64;
+    const SPARE_CHUNKS: usize = 3 * crate::worktree::STREAM_HASH_BATCH;
 
     /// An empty buffer of the size of one window, zeroed when fresh and
     /// holding whatever the last reader left otherwise: a reader writes before
@@ -1053,6 +1053,11 @@ mod tests {
         );
         let chunk = buffers.chunk();
         assert!(chunk.is_empty() && chunk.capacity() >= 100);
+        assert_eq!(ChunkBuffers::SPARE_CHUNKS, 192);
+        assert_eq!(
+            format!("{buffers:?}"),
+            "ChunkBuffers { windows: 0, chunks: 191 }"
+        );
     }
 
     #[test]
