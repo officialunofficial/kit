@@ -313,7 +313,8 @@ fn a_pack_counts_as_small_below_sixteen_mib_and_below_sixteen_thousand_entries()
         let refs: Vec<&Vec<u8>> = edge.iter().collect();
         publish(&store, &refs, YOUNG);
 
-        let report = run(&store, &layout, false);
+        // A dry run classifies without copying 16 MiB or 16,384 objects.
+        let report = run(&store, &layout, true);
         assert_eq!(report.packs_merged, if merges { 8 } else { 0 }, "{label}");
     }
 }
