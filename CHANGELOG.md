@@ -59,6 +59,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
 - A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
 - A push to a file, ssh or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. Packs below 8 MiB and pushes to a remote that issues upload tickets are unchanged, and a failed existence check uploads the pack.
+- A push records the packs it sent without first flushing the object directories, so a one-commit push makes 12 flush calls where it made 18.
 
 ### Removed
 
