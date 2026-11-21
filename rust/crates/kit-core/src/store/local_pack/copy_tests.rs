@@ -683,10 +683,12 @@ fn outputs_roll_over_at_the_entry_cap_and_the_payload_cap() {
 
     assert_eq!(OUTPUT_ENTRIES, 65_536);
     assert_eq!(OUTPUT_PAYLOAD, 64 << 20);
+    let each = obj("object 0", 1000).len() as u64;
     for (entries, payload, expected) in [
         (3, u64::MAX, vec![3, 3, 1]),
-        (100, 2_500, vec![2, 2, 2]),
-        (100, 3_000, vec![3, 3]),
+        (100, each * 5 / 2, vec![2, 2, 2]),
+        // Exactly full: a third object that reaches the cap fits.
+        (100, each * 3, vec![3, 3]),
     ] {
         let (_dir, _layout, store) = fresh();
         store.try_activate_local_packs().unwrap();
