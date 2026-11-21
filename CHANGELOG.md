@@ -125,7 +125,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
 - Save selected file or directory paths with `stash push [--] <path>...`, preserving other
   worktree and staged changes.
-- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 256 MiB per fetch.
+- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 512 MiB per fetch.
 - Gc skips and reports attested subjects with missing objects or incomplete closures, sharing history scans across roots.
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
@@ -183,7 +183,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reduce full device flushes during batched object writes on macOS and iOS.
 - Skip rename content reads in status when there are no staged deletions.
 - Compact the applied-pack cache from 1 million digests to 900,000 per remote.
-- Keep up to 32 sparse witnesses per repository within a 256 MiB cache budget.
+- Keep up to 32 sparse witnesses per repository within a 512 MiB cache budget.
 - Read loose chunk headers into a fixed buffer and check remote snapshot membership without repeated searches.
 - Attestation readers ignore unrecognized Statement fields. New validity rules require a new predicate URI.
 - Reconnect between packs when a push over SSH reaches the session byte limit.
@@ -194,7 +194,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `cat-file --batch` streams blob content with bounded memory. An
   unreadable chunk can leave a partial record on stdout.
 - Probe reachable object types concurrently during garbage collection.
-- Bound fetched attestations per remote to 100,000 envelopes and 256 MiB.
+- Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
 - Stop empty attestation directories from keeping otherwise unreachable commits alive.
 - Stop push planning at the remote head for short linear advances.
 - Skip unrelated ignored directories during restore checks.
