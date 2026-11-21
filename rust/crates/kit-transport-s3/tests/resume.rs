@@ -295,6 +295,7 @@ fn a_refused_condition_or_range_reads_the_pack_again() {
         (400, RestartReason::Status),
         (405, RestartReason::Status),
         (501, RestartReason::Status),
+        (409, RestartReason::Status),
     ] {
         let (downloaded, verified, sink, requests) =
             download(&object, &key, move |n, _, answer| match n {
@@ -311,6 +312,33 @@ fn a_refused_condition_or_range_reads_the_pack_again() {
             [ResumeOutcome::Restarted { reason }],
             "{status}"
         );
+    }
+}
+
+#[test]
+fn a_throttled_or_failed_ranged_request_backs_off_and_continues() {
+    let (object, key) = pack();
+    for status in [429, 503, 404, 403] {
+        let (downloaded, verified, sink, requests) =
+            download(&object, &key, move |n, _, answer| match n {
+                0 => answer.cut_after(100),
+                1 => Response::new(status, b""),
+                _ => answer,
+            });
+        if matches!(status, 404 | 403) {
+            assert!(downloaded.is_err(), "{status}");
+            continue;
+        }
+        downloaded.unwrap();
+        verified.unwrap();
+        assert_eq!(requests.len(), 3, "{status}");
+        assert!(ranged(&requests[2]), "{status}: the range is kept");
+        assert_eq!(
+            sink.outcomes,
+            [ResumeOutcome::Resumed { bytes: 100 }],
+            "{status}"
+        );
+        assert_eq!(sink.begins, 1, "{status}: the body does not begin again");
     }
 }
 

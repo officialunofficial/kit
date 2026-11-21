@@ -590,15 +590,17 @@ impl S3Transport {
                         200 => sink.note_resume(ResumeOutcome::Restarted {
                             reason: RestartReason::Status,
                         }),
-                        _ => {
+                        status if refuses_range(status) => {
                             // A store that does not take a conditional range
-                            // (400, 405, 501) gets one plain read.
+                            // gets one plain read. Throttling and server
+                            // errors keep the retry's backoff and its range.
                             sink.note_resume(ResumeOutcome::Restarted {
                                 reason: RestartReason::Status,
                             });
                             resume = None;
                             continue;
                         }
+                        _ => {}
                     }
                 }
                 if status == 200 {
@@ -618,6 +620,13 @@ impl S3Transport {
             s => Err(TransportError::ServerError { status: s }),
         }
     }
+}
+
+/// Whether `status`, the answer to a ranged request, says the store does not
+/// take the range or its condition, as opposed to a refusal of the request
+/// itself (401, 403, 404) or a transient answer (408, 429, 5xx but 501).
+fn refuses_range(status: u16) -> bool {
+    status == 501 || ((400..500).contains(&status) && !matches!(status, 401 | 403 | 404 | 408 | 429))
 }
 
 /// The value of response header `name`, when it is text.
