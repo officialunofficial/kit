@@ -10,6 +10,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - Fetch and pull run best-effort local pack maintenance after applying packs or pruning remote-tracking refs. Set `gc.auto = false` to disable it.
+- Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
@@ -44,6 +45,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
+- Push flushes only the object directories of the packs it records, not all 256.
+- Fetch and clone write an object larger than 262,154 bytes loose straight from the decoded pack, without a second spool or a second hash.
 
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.

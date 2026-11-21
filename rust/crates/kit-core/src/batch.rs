@@ -376,8 +376,28 @@ impl<'s> WriteBatch<'s> {
         self.stage_prehashed(crate::object::object_id_from_bytes(bytes), &[bytes], false)
     }
 
+    /// Stage bytes of a fetched object under the id the pack decoder derived
+    /// from them, even if the loose path already holds a copy. The bytes are
+    /// not hashed again.
+    ///
+    /// The caller passes only an id and bytes that a decoder paired: the
+    /// bytes of an [`ObjectSpool`](crate::pack::ObjectSpool) entry read with
+    /// [`read_decoded`](crate::pack::ObjectSpool::read_decoded). Any other
+    /// pair would store an object under an id that is not its own.
+    ///
+    /// # Errors
+    /// An oversized object or a local write error.
+    #[doc(hidden)]
+    pub fn write_decoded(&self, id: Hash, bytes: &[u8]) -> StoreResult<Hash> {
+        if bytes.len() > crate::store::MAX_RAW_OBJECT_SIZE {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        self.stage_prehashed(id, &[bytes], false)
+    }
+
     /// Stage the loose entries of a verified fetch window, then join every
-    /// worker before returning. The caller commits the batch.
+    /// worker before returning. `read` gives each entry's id and bytes as
+    /// [`Self::write_decoded`] takes them. The caller commits the batch.
     ///
     /// # Errors
     /// An error reading or staging an entry.
@@ -385,11 +405,11 @@ impl<'s> WriteBatch<'s> {
     pub fn stage_fetched<T: Sync>(
         &self,
         entries: &[T],
-        read: impl Fn(&T) -> StoreResult<Vec<u8>> + Sync,
+        read: impl Fn(&T) -> StoreResult<(Hash, Vec<u8>)> + Sync,
     ) -> StoreResult<()> {
         crate::pack::stage_independent(entries, |entry| {
-            let bytes = read(entry)?;
-            self.write_fetched(&bytes).map(drop)
+            let (id, bytes) = read(entry)?;
+            self.write_decoded(id, &bytes).map(drop)
         })
         .into_iter()
         .collect()
@@ -2119,7 +2139,7 @@ mod tests {
                         .unwrap();
                     assert_eq!(*count, 2, "both staging workers must reach the gate");
                 }
-                Ok(bytes.to_vec())
+                Ok((hash::hash(bytes), bytes.to_vec()))
             })
             .unwrap();
         batch.commit().unwrap();
@@ -2357,6 +2377,40 @@ mod tests {
         assert_eq!(batch.write_fetched(&bytes).unwrap(), id);
         batch.commit().unwrap();
         assert_eq!(fs::read(store.path_for(&id)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_decoded_object_over_the_pack_limit_is_written_once_and_not_hashed_again() {
+        let (_dir, store, rec) = recording_store();
+        let batch = store.batch();
+        for (size, fill) in [(300usize << 10, 1u8), (1 << 20, 2u8)] {
+            let object = crate::object::Object::Blob(crate::object::Blob {
+                data: vec![fill; size],
+            });
+            let id = object.id().unwrap();
+            let bytes = crate::serialize::serialize(&object).unwrap();
+            let path = store.path_for(&id);
+            let before = rec.events().len();
+
+            assert_eq!(batch.write_decoded(id, &bytes).unwrap(), id);
+            // A repeat of the same object stays one staged file.
+            assert_eq!(batch.write_decoded(id, &bytes).unwrap(), id);
+            batch.checkpoint().unwrap();
+
+            let renames = rec.events()[before..]
+                .iter()
+                .filter(|event| matches!(event, Ev::Rename { dst, .. } if *dst == path))
+                .count();
+            assert_eq!(renames, 1, "{size}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+
+        // The id is the decoder's word: nothing hashes the bytes again.
+        let (decoded, bytes) = ([0x5a; 32], b"not the preimage of that id".to_vec());
+        assert_eq!(batch.write_decoded(decoded, &bytes).unwrap(), decoded);
+        batch.commit().unwrap();
+        assert_eq!(fs::read(store.path_for(&decoded)).unwrap(), bytes);
+        assert!(!store.path_for(&hash::hash(&bytes)).exists());
     }
 
     #[test]

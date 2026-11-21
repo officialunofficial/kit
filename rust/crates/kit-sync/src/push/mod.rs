@@ -10,7 +10,7 @@ use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 mod attestations;
 mod delete;
@@ -39,10 +39,36 @@ struct PreparedPlan {
     force: Option<force::Snapshot>,
 }
 
+/// The object shards of one pack: the first byte of the id of every object
+/// the pack carries. Each such object lives in the loose shard directory of
+/// that name or in a local pack, whose directory is flushed with them.
+type PackShards = BTreeSet<u8>;
+
 #[derive(Default)]
 struct PushRecord {
-    checked: HashSet<Hash>,
-    advanced: Vec<PackKey>,
+    /// Packs uploaded and checked, with their shards.
+    checked: HashMap<Hash, PackShards>,
+    /// Checked packs a ref now names, with their shards.
+    advanced: Vec<(PackKey, PackShards)>,
+}
+
+/// What the entries of one pack under construction carry, gathered for the
+/// push record.
+#[derive(Default)]
+struct PackEntries {
+    /// The commits, remixes and tags, with a bound of their size: checked
+    /// after the upload.
+    signed: Vec<(Hash, u32)>,
+    /// The shards of every object in the pack, whatever its kind and whether
+    /// it is a raw entry or the target of a delta.
+    shards: PackShards,
+}
+
+impl PackEntries {
+    fn clear(&mut self) {
+        self.signed.clear();
+        self.shards.clear();
+    }
 }
 
 struct PushContext<'a> {
@@ -89,8 +115,8 @@ impl PushContext<'_> {
         if let Some(record) = &self.record {
             let mut record = record.borrow_mut();
             for key in keys {
-                if record.checked.remove(&key) {
-                    record.advanced.push(PackKey::from_hash(key));
+                if let Some(shards) = record.checked.remove(&key) {
+                    record.advanced.push((PackKey::from_hash(key), shards));
                 }
             }
         }
@@ -106,12 +132,26 @@ impl PushContext<'_> {
             return;
         };
         let mut record = record.borrow_mut();
-        if record.advanced.is_empty() || store.sync_shards(0..=u8::MAX).is_err() {
+        // The record tells the next fetch that these packs' objects are in
+        // this store, so it can skip them. A visible object's bytes are
+        // durable, but the directory entry of a loose object another process
+        // renamed into place may not be (SPEC-OBJECTS §10.1), and nor may the
+        // pack pair of a packed one. Those entries are the objects of the
+        // advanced packs: each is in the shard directory its id starts with,
+        // or in the pack directory, which `sync_shards` flushes with any
+        // shard of a packed store. Nothing else this push read is named by
+        // the record, so no other directory is flushed.
+        let shards: PackShards = record
+            .advanced
+            .iter()
+            .flat_map(|(_, shards)| shards.iter().copied())
+            .collect();
+        if record.advanced.is_empty() || store.sync_shards(shards).is_err() {
             return;
         }
         let mut applied =
             crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
-        for key in record.advanced.drain(..) {
+        for (key, _) in record.advanced.drain(..) {
             if let Err(error) = applied.record_applied(&key) {
                 self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
                     remote: remote.to_owned(),
@@ -1164,7 +1204,7 @@ fn build_and_upload_packs(
     build_packs(
         SealKind::Upload,
         || PackWriter::spool(&tx.spool_dir).map_err(PushError::from),
-        |writer, ticketed, signed| {
+        |writer, ticketed, entries| {
             let spooled = writer.finish_spool()?;
             let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
             tx.upload_pack(&spooled, &PackKey::from_hash(spooled.key()), head_ref)
@@ -1175,9 +1215,12 @@ fn build_and_upload_packs(
                 bytes: spooled.len(),
             });
             if let Some(record) = &tx.record
-                && crate::verify::verify_new_object_signatures(store, signed, true).is_ok()
+                && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
             {
-                record.borrow_mut().checked.insert(spooled.key());
+                record
+                    .borrow_mut()
+                    .checked
+                    .insert(spooled.key(), entries.shards.clone());
             }
             pack_keys.push(spooled.key());
             Ok(is_ticketed)
@@ -1251,7 +1294,7 @@ fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool,
 fn build_packs<W: std::io::Write>(
     kind: SealKind,
     mut fresh: impl FnMut() -> Result<PackWriter<W>, PushError>,
-    mut seal: impl FnMut(PackWriter<W>, usize, &[(Hash, u32)]) -> Result<bool, PushError>,
+    mut seal: impl FnMut(PackWriter<W>, usize, &PackEntries) -> Result<bool, PushError>,
     store: &ObjectStore,
     plan: transfer::PackPlan,
     limits: UploadLimits,
@@ -1259,15 +1302,15 @@ fn build_packs<W: std::io::Write>(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<(), PushError> {
     let mut ticketed = 0;
-    let mut signed = Vec::new();
-    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize, signed: &mut Vec<_>| {
+    let mut entries = PackEntries::default();
+    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize, entries: &mut PackEntries| {
         if observer.cancelled() {
             return Err(PushError::Sync(SyncError::Interrupted));
         }
-        if seal(w, *ticketed, signed)? {
+        if seal(w, *ticketed, entries)? {
             *ticketed += 1;
         }
-        signed.clear();
+        entries.clear();
         Ok(())
     };
     let mut w = fresh()?;
@@ -1299,11 +1342,12 @@ fn build_packs<W: std::io::Write>(
                 seal_one(
                     std::mem::replace(&mut w, fresh()?),
                     &mut ticketed,
-                    &mut signed,
+                    &mut entries,
                 )?;
             }
+            entries.shards.insert(entry.hash()[0]);
             if signs {
-                signed.push((
+                entries.signed.push((
                     entry.hash(),
                     u32::try_from(entry.conservative_len()).expect("bounded object"),
                 ));
@@ -1329,9 +1373,13 @@ fn build_packs<W: std::io::Write>(
     let mut start = 0;
     for len in size_capped_batch_lens(&delta_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
+        let targets: Vec<u8> = chunk.iter().map(|delta| delta.target[0]).collect();
         let parallel = batch_fans_out(len, delta_sizes[start..start + len].iter().sum());
         start += len;
-        for entry in prepare_delta_batch(chunk, parallel)? {
+        for (at, entry) in prepare_delta_batch(chunk, parallel)?
+            .into_iter()
+            .enumerate()
+        {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -1342,15 +1390,16 @@ fn build_packs<W: std::io::Write>(
                 seal_one(
                     std::mem::replace(&mut w, fresh()?),
                     &mut ticketed,
-                    &mut signed,
+                    &mut entries,
                 )?;
             }
+            entries.shards.insert(targets[at]);
             w.push_prepared_delta(entry)?;
             report_packed(kind, observer);
         }
     }
 
-    seal_one(w, &mut ticketed, &mut signed)
+    seal_one(w, &mut ticketed, &mut entries)
 }
 
 /// Honest progress: one real object just got staged into the outgoing
