@@ -241,6 +241,10 @@ pub fn run(args: &[String]) -> u8 {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
+    // The commit is published and its locks are released. A repository that
+    // never fetches builds up packs, so the due step runs here, after the
+    // output, and cannot change the result.
+    super::maintenance::after_write(&layout, &store, &cfg, opts.quiet);
     exit::OK
 }
 

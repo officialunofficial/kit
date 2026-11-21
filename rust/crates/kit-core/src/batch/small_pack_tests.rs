@@ -253,6 +253,49 @@ fn a_repeated_file_is_written_once_and_a_stored_one_not_again() {
 }
 
 #[test]
+fn only_files_with_a_new_blob_count_toward_a_pack() {
+    let (_dir, _layout, store) = fresh_store();
+    let data = files(SMALL_PACK_AFTER + 100, 3000, 9000);
+    let first = store.batch();
+    for d in &data {
+        put_file(&first, d);
+    }
+    first.commit().unwrap();
+    assert_eq!((pairs(&store), loose(&store)), (1, SMALL_PACK_AFTER));
+
+    // Every file is stored, loose or packed, and one blob is new.
+    let second = store.batch();
+    for d in &data {
+        put_file(&second, d);
+    }
+    let fresh = bytes(1, 3000);
+    let id = put_file(&second, &fresh);
+    second.commit().unwrap();
+    assert_eq!((pairs(&store), loose(&store)), (1, SMALL_PACK_AFTER + 1));
+    assert_eq!(store.read(&id).unwrap(), blob_bytes(&fresh));
+}
+
+#[test]
+fn a_file_repeated_in_a_batch_counts_once() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    let data = files(SMALL_PACK_AFTER - 4, 3000, 9500);
+    for d in &data {
+        put_file(&batch, d);
+    }
+    // Ten more calls with a blob that is already staged count for nothing, so
+    // three new blobs after them are still under the count of a pack.
+    for _ in 0..10 {
+        put_file(&batch, &data[0]);
+    }
+    for d in files(3, 3000, 9900) {
+        put_file(&batch, &d);
+    }
+    batch.commit().unwrap();
+    assert_eq!((pairs(&store), loose(&store)), (0, SMALL_PACK_AFTER - 1));
+}
+
+#[test]
 fn an_aborted_large_batch_leaves_no_pack_and_no_staging_file() {
     let (_dir, _layout, store) = fresh_store();
     {

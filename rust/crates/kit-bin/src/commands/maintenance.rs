@@ -32,6 +32,23 @@ pub(super) fn print(report: Option<&MaintenanceReport>, quiet: bool) {
     }
 }
 
+/// Run the automatic step after a command that wrote objects, when it is due.
+/// The step only tries locks and runs within its own budget; it never changes
+/// the command's result, and its only output is the maintenance line.
+pub(super) fn after_write(
+    layout: &kit_core::layout::RepoLayout,
+    store: &kit_core::store::ObjectStore,
+    cfg: &libkit::config::Config,
+    quiet: bool,
+) {
+    if !cfg.gc_auto_enabled() {
+        return;
+    }
+    let report =
+        kit_core::ops::gc::maintain_packs_after_write(layout, store, &crate::signal::is_shutdown);
+    print(Some(&report), quiet);
+}
+
 pub(super) fn json_field(top: &mut JsonObject, report: Option<&MaintenanceReport>) {
     let Some(report) = report.filter(|r| r.collection != Collection::NotDue || changed(r)) else {
         return;

@@ -246,7 +246,7 @@ its last remote-tracking ref write, and writes each of those refs under
 tracking ref the push writes, even when the local branch is deleted first.
 
 A local batch that writes the chunks of a large file, or small files past
-the first 64 of the batch (`kit add`,
+the first 64 new ones of the batch (`kit add`,
 `kit stash`) publishes the packs it fills, at 64 MiB, at commit, and at a
 checkpoint that stages a manifest, tree or commit, before any ref or index
 names their objects. It holds `worktree.lock` from its
@@ -476,11 +476,25 @@ It first releases its prune guard and every `worktree.lock`. It reports
 the original command result even if maintenance fails or is interrupted.
 Set `gc.auto = false` or disable the embedder's option to skip the step.
 
+A `kit commit` runs the same step after it has published the commit, printed
+its output and released `worktree.lock`, because a repository that never
+fetches would otherwise never run it: each `kit add` of a large file or of
+more than 64 new small files leaves one pack pair. The commit's exit code and
+standard output are unchanged; the step's only output is its maintenance line
+on standard error, which `--quiet` and `gc.auto = false` suppress. `kit add`
+alone does not run the step. It stages work that a commit follows, and the
+commit is where a version is published and the next step is due, so the add
+loop pays nothing. A commit in a repository whose `gc-auto` stamp does not exist and that holds fewer than 32 pairs does nothing and creates no file, so the `.kit` layout of a small repository is unchanged. The commit installs no signal handler for the step, so an
+interrupt during it ends the process with the usual interrupt status after
+the commit is durable. A step that is not due costs one lock try on the stamp, a
+read of it and a listing of the pack directory.
+
 The step only tries locks. It stops at the first miss. It tries the
 exclusive lock of `<common_dir>/gc-auto` first. The holder rewrites that
 file in place with the last attempt's time and outcome and the pair count
-at the last complete collection. A missing or unreadable stamp means
-the step has never run. The first gated fetch writes the stamp and stops.
+at the last complete collection. An empty stamp means the step has never
+run, so it is due as soon as the listing shows 32 published pairs. An
+unreadable stamp is rewritten and the step stops.
 The stamp is advisory and never authorizes deletion.
 
 **Sweep.** List `objects/pack/` by name to count published pairs and

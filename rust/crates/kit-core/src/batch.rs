@@ -320,7 +320,7 @@ pub struct WriteBatch<'s> {
     // can no longer promise that a hash it returned is durable. Every later
     // write, checkpoint and commit fails.
     failed: AtomicBool,
-    // How many small blobs the batch has been given as inline files. Past
+    // How many new small blobs the batch has been given as inline files. Past
     // `SMALL_PACK_AFTER`, the next ones go to the local pack sink.
     small_files: AtomicUsize,
     // Windows and chunk buffers that each large file of this batch reuses.
@@ -667,6 +667,27 @@ impl<'s> WriteBatch<'s> {
         }
         fail.disarm();
         Ok(id)
+    }
+
+    /// Store a small file's blob in a batch that packs. A blob the store
+    /// already holds is reused and does not count. A new one counts toward
+    /// `SMALL_PACK_AFTER`: the first ones are staged loose and the rest go to
+    /// the open local pack, so a batch with few new blobs opens no pack.
+    fn put_small_blob(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let id = chunk.id();
+        let parts = chunk.parts();
+        let held = {
+            let _gate = self.gate.read().expect("batch gate poisoned");
+            self.check_not_failed()?;
+            self.pack_holds(&id) || self.copy_exists(&id, chunk.len() as u64)
+        };
+        if held {
+            return Ok(id);
+        }
+        if self.small_files.fetch_add(1, Ordering::Relaxed) >= SMALL_PACK_AFTER {
+            return WriteBatch::put_hashed_chunk(self, chunk);
+        }
+        self.write_prehashed(id, &parts)
     }
 
     /// Whether an object of exactly `len` bytes is already staged, loose or in
@@ -1261,7 +1282,8 @@ const MAX_SYNC_WORKERS: usize = 64;
 /// 64 KiB and 256 KiB were level, within 0.2%.
 const SMALL_OBJECT_BYTES: u64 = crate::chunker::MIN_SIZE as u64;
 
-/// How many small files a batch writes loose before it packs the rest.
+/// How many new small files a batch writes loose before it packs the rest. A
+/// file whose blob the store already holds does not count.
 ///
 /// A pack costs a fixed set of syncs and a read-back at seal, about 5 to 8 ms
 /// on Linux/ext4, which the syncs and files it saves repay from about 35
@@ -1400,10 +1422,10 @@ impl ObjectSink for WriteBatch<'_> {
 
     fn put_chunk_parts(&self, parts: &[&[u8]], origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         if let Some(data) = small_blob(parts)
-            && self.small_files.fetch_add(1, Ordering::Relaxed) >= SMALL_PACK_AFTER
+            && self.pack_guard().is_some()
             && let Ok(chunk) = HashedChunk::new(data)
         {
-            return WriteBatch::put_hashed_chunk(self, &chunk.at(origin));
+            return self.put_small_blob(&chunk.at(origin));
         }
         self.write_parts(parts)
     }
