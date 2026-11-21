@@ -295,7 +295,7 @@ fn run(
         attempted: now,
         outcome: collection,
         complete_pairs: if collection == Collection::Complete {
-            pairs.saturating_sub(
+            (pairs + gc.packs_written).saturating_sub(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
         } else {

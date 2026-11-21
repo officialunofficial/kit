@@ -167,7 +167,6 @@ fn collection_retires_wholly_dead_packs_and_copies_the_rest_past_grace() {
 
     let report = repo.run();
     assert_eq!(report.collection, Collection::Complete);
-    eprintln!("DBG {report:?}");
     assert_eq!(report.packs_retired, 1);
     assert!(!dead.exists() && !dead.with_extension("idx").exists());
     // The mixed pack is rewritten without its dead entry; the live pack and
