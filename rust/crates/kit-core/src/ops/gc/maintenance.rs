@@ -6,12 +6,12 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits,
+    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, LiveSet, MarkLimits,
     collect_root_sets, mark_live_checked, reject_symlink,
 };
 use crate::layout::{RepoLayout, all_state_layouts};
 use crate::repo_lock::{LockError, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK, acquire};
-use crate::store::{ObjectStore, StoreError, Verify};
+use crate::store::{ObjectStore, PackSweep, StoreError, Verify};
 
 const MIN_PAIRS: usize = 32;
 const BUDGET: Duration = Duration::from_secs(5);
@@ -413,6 +413,45 @@ fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
     Ok(())
 }
 
+/// Plan the wholly dead retirement. The budget bounds the verification of
+/// those packs, oldest first, by stopping before the next pack and never
+/// inside one. What was verified by then still retires, so each step makes
+/// progress on a large dead set.
+fn plan_retirement(
+    store: &ObjectStore,
+    budget: &Budget<'_>,
+    live: &LiveSet,
+    now: u64,
+    gc: &mut GcReport,
+) -> Result<PackSweep, GcRootsError> {
+    let room = || {
+        #[cfg(test)]
+        if let Some(left) = TEST_VERIFY_ROOM.get() {
+            TEST_VERIFY_ROOM.set(Some(left.saturating_sub(1)));
+            return left > 0;
+        }
+        budget.check().is_ok()
+    };
+    let scan = || Ok(budget.check_cancellation()?);
+    let retire = store.plan_pack_retirement_within(
+        live,
+        now,
+        DEFAULT_GRACE_SECS,
+        gc,
+        &|| Ok(budget.check()?),
+        &Verify {
+            room: &room,
+            scan: &scan,
+        },
+    )?;
+    if retire.verification_cut_short() {
+        budget.check_cancellation()?;
+    } else {
+        budget.check()?;
+    }
+    Ok(retire)
+}
+
 fn collect(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -437,35 +476,8 @@ fn collect(
         &|| Ok(budget.check()?),
         &|| Ok(check_deadline(start, limit)?),
     )?;
-    // The budget bounds the verification of wholly dead packs, oldest first,
-    // by stopping before the next pack, never inside one. What was verified
-    // by then still retires, so each step makes progress on a large dead set.
-    let room = || {
-        #[cfg(test)]
-        if let Some(left) = TEST_VERIFY_ROOM.get() {
-            TEST_VERIFY_ROOM.set(Some(left.saturating_sub(1)));
-            return left > 0;
-        }
-        budget.check().is_ok()
-    };
-    let scan = || Ok(budget.check_cancellation()?);
-    let mut retire = store.plan_pack_retirement_within(
-        &live,
-        now,
-        DEFAULT_GRACE_SECS,
-        gc,
-        &|| Ok(budget.check()?),
-        &Verify {
-            room: &room,
-            scan: &scan,
-        },
-    )?;
+    let mut retire = plan_retirement(store, budget, &live, now, gc)?;
     let cut = retire.verification_cut_short();
-    if cut {
-        budget.check_cancellation()?;
-    } else {
-        budget.check()?;
-    }
     if !gc.skipped_pack_errors.is_empty() {
         return Ok(Outcome::same(Collection::Failed));
     }

@@ -27,7 +27,7 @@ mod tests;
 mod writer;
 #[cfg(test)]
 pub(crate) use copy::set_test_output_entries;
-pub(crate) use gc::Verify;
+pub(crate) use gc::{PackSweep, Verify};
 pub(crate) use reader::Currency;
 use reader::{
     Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,

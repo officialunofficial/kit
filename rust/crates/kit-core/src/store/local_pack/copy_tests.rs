@@ -15,7 +15,7 @@ use super::tests::{
 use super::{Index, Pair};
 use crate::hash::Hash;
 use crate::layout::RepoLayout;
-use crate::ops::gc::{GcReport, run_gc};
+use crate::ops::gc::{GcReport, LiveSet, run_gc};
 use crate::store::ObjectStore;
 
 const NOW: u64 = 100;
@@ -900,7 +900,7 @@ fn planning_verifies_the_oldest_dead_packs_first_and_stops_when_told() {
     let mut report = GcReport::default();
     let sweep = store
         .plan_pack_retirement_within(
-            &Default::default(),
+            &LiveSet::default(),
             NOW,
             GRACE,
             &mut report,
