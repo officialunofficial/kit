@@ -109,7 +109,6 @@ impl<'a> LocalPackWriter<'a> {
     ///
     /// # Errors
     /// An oversized object, a full pack, or a staging write error.
-    #[cfg_attr(not(test), allow(dead_code))] // The batch's pack sink is its caller.
     pub(crate) fn write_hashed(&mut self, id: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
         debug_assert_eq!(
             index::canonical_id(&parts.concat()).ok(),
