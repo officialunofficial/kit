@@ -1224,7 +1224,7 @@ mod tests {
 
     #[test]
     fn the_default_segment_holds_many_frames_and_the_pool_takes_only_big_inputs() {
-        assert!(SEGMENT >= 1 << 20);
+        const { assert!(SEGMENT >= 1 << 20) };
         #[cfg(not(target_arch = "wasm32"))]
         {
             assert!(!worth_the_pool((128 << 10) - 1));
