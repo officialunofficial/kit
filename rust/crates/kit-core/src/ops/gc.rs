@@ -800,10 +800,31 @@ pub struct GcReport {
     pub packs_scanned: usize,
     /// Whole packs retired, or eligible for retirement in a dry run.
     pub packs_retired: usize,
+    /// Packs rewritten: their surviving entries were copied to new packs, and
+    /// the old pair was retired. Counted in a dry run as well.
+    pub packs_rewritten: usize,
+    /// Small packs merged into larger ones by copy-then-retire.
+    pub packs_merged: usize,
+    /// Packs retired with no copy, because a pair that stays holds a verified
+    /// copy of every entry the pack must keep.
+    pub packs_retired_covered: usize,
+    /// Payload bytes of surviving entries copied to new packs.
+    pub survivor_bytes_copied: u64,
+    /// Payload bytes of entries dropped from retired packs: unreachable
+    /// entries past grace, and live entries held by a verified copy in a pair
+    /// that stays.
+    pub duplicate_bytes_reclaimed: u64,
     /// Abandoned staging files or lone pack and index files reclaimed.
     pub pack_leftovers_pruned: usize,
     /// Loose files reclaimed because a verified packed copy remains.
     pub loose_duplicates_pruned: usize,
+    /// Why copy-then-retire stopped, such as a full disk. Gc kept every pack it
+    /// meant to copy and went on with the rest of the run.
+    pub pack_copy_error: Option<String>,
+    /// Milliseconds that pack retirement held the exclusive `format` lock,
+    /// from the successful try to the release; the longest hold if the run
+    /// took it more than once. A writer that starts then waits that long.
+    pub retire_hold_ms: u64,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,
 }

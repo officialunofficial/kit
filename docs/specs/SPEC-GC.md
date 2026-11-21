@@ -31,9 +31,10 @@ reachable from a root is live; everything else is reclaimable. An
 incomplete root set means deleting a live object &mdash; silent corruption.
 This spec pins that root set so gc has one normative definition to honor.
 
-Gc can reclaim a loose object individually. Local packs retain every
-object they contain, including unreachable objects, through lossless
-merges. The mark, including chunk type checks, uses the shared object
+Gc can reclaim a loose object individually. Gc reclaims packed objects
+by retiring whole packs. A pack that also holds live objects is first
+copied: its surviving entries go to new packs, and the old pair is
+retired. The mark, including chunk type checks, uses the shared object
 lookup (SPEC-OBJECTS §10). See
 [local pack maintenance](#local-pack-maintenance).
 
@@ -105,7 +106,9 @@ it. So a wrong locator or a damaged payload for a chunk passes the mark. It
 can also stop the mark with `ChunkNotBlob` when the locator names another
 kind of object, even though a good loose copy exists. Every step of gc that
 deletes or replaces a copy in reliance on a packed copy verifies that copy:
-loose-duplicate removal and the body check before retirement. The local
+loose-duplicate removal, the body check before retirement, and copy-then-retire,
+which hashes each covering copy and re-derives the id of each survivor it
+copies. The local
 writer's reuse of a packed copy by id and length does not, as before. An
 integrity scan reports a bad packed copy. An id that the walk also reaches as
 a file, and an id that the soft-root classification reaches as a node, stays
@@ -353,26 +356,54 @@ Gc aborts before sweeping on such an error. Enumeration skips a lone
 member, but existing hard-root closure checks still fail if any
 required object has no readable copy.
 
-Pack merging is not implemented yet. It is planned work, and until it
-lands gc does not bound the pack count. The rules below are the
-requirements that a merge MUST meet. A merge preserves every
-distinct id in the inputs, including unreachable ids. It verifies each
-copied object's canonical encoding and id, and fully verifies and
-publishes all replacements durably before retiring an input. An input
-whose coverage cannot be verified stays in place. If a merge cannot
-write some entries under its writer limits, it keeps packs containing
-those entries. An input key also used as an output key stays in place.
+Gc rewrites and merges local packs by copy-then-retire. After the
+retention mark, gc classifies every published pair that the wholly dead
+retirement below does not take. A pair whose live entries all have a
+verified copy in a pair that stays, and whose unreachable entries are all
+past grace, is retired without a copy. A pair past grace
+whose dead bytes, plus the bytes of live entries held by a pair that
+stays, reach a quarter of its payload is rewritten. Pairs smaller than
+16 MiB of payload and 16,384 entries are merged when at least eight exist.
+These thresholds are policy, not format.
+
+An input entry survives in two cases. An unreachable entry survives while
+its input pack is within grace, whatever other copies exist. A live entry
+survives when no pair that stays holds a verified copy of its id. Coverage
+never removes an unreachable entry inside grace, and it never shortens
+grace: a copy of an unreachable entry has the age of its new pack. A pair
+that stays is one that is neither a wholly dead candidate nor an input of
+the same run. Gc copies each survivor into a new pack, verifying the
+copied object's canonical encoding and id against the index. It closes an
+output before it would pass 64 MiB of payload or 65,536 entries; one
+object larger than the payload cap gets an output of its own. Gc never
+relies on a copy in a pair it retires in the same run, or on a loose copy.
+A covering copy in a pair that stays is read and verified before gc
+relies on it. An entry that cannot be read or verified keeps its input in
+place. An input key also used as an output key stays in place.
+
+Gc publishes every output durably (SPEC-OBJECTS §10.1) under the shared
+`format` guard and reopens each output index. It then releases the guard
+before retiring any input. Under the exclusive `format` try-lock, before
+the first input unlink, gc checks that both members of every output and
+covering pair are present under their final names with unchanged stamps. It
+then flushes those files, the pack directory and the objects directory.
+A missed try-lock retires nothing. The outputs stay as duplicates, and
+the next run takes them as coverage for the live entries. It copies again
+only the entries that coverage may not drop. If the copy itself fails, gc
+keeps every input, reports the error, and goes on with the rest of the run.
 
 Gc also retires a pack when every verified entry is unreachable and the
 pack has passed grace. Gc records the pack's mtime after the retention mark
 and before acquiring the exclusive `format` try-lock. Under the lock, it
 rescans the pack directory and keeps any pair whose identity or pack mtime
-changed. Live and mixed packs stay in place. If a candidate's body
+changed. Live packs, and mixed packs that copy-then-retire does not
+select, stay in place. If a candidate's body
 fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
-Retirement after a merge (once merging exists) takes the same try-lock and rechecks input
-identity and durable coverage by the verified replacement packs.
+Retirement after a copy takes the same try-lock and rechecks input
+identity and the file stamps of every output and covering pair it relies
+on, and durable coverage by the verified replacement packs.
 Keep an input when its replacements cannot be read independently of it.
 In either case, remove the pack name first.
 Make all such removals durable in the pack directory before removing
@@ -401,8 +432,9 @@ with both live and dead entries, and unreachable bytes old enough to
 pass grace. It also reports the live payload bytes in mixed packs
 with eligible dead bytes as the predicted survivor writes for
 rewriting those packs. These estimates exclude framing and index
-overhead. The sweep reclaims whole eligible packs. The dry run changes
-no files.
+overhead. It also reports the pairs it would rewrite, merge or retire as
+covered, and the survivor bytes it would copy. The sweep reclaims whole
+eligible packs. The dry run changes no files.
 
 ### Automatic maintenance
 
@@ -499,7 +531,7 @@ remains an error.
 
 | Invariant | Enforced by |
 |---|---|
-| No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and merge retirement require durable replacement coverage. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
+| No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and copy-then-retire require verified, durable coverage by a copy that is not retired in the same run. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
 | Automatic collection retires only wholly dead packs past the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |

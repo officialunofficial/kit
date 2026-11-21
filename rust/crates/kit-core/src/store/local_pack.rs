@@ -9,6 +9,7 @@ use crate::hash::{Hash, to_hex};
 
 use super::{ObjectStore, StoreError, StoreResult, format};
 
+mod copy;
 mod gc;
 mod index;
 #[cfg(feature = "fuzzing")]
@@ -16,6 +17,8 @@ pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
 pub(super) use index::{canonical_id, invalid_at, named};
 
+#[cfg(test)]
+mod copy_tests;
 mod reader;
 #[cfg(test)]
 mod tests;

@@ -109,7 +109,6 @@ impl<'a> LocalPackWriter<'a> {
     ///
     /// # Errors
     /// An oversized object, a full pack, or a staging write error.
-    #[cfg_attr(not(test), allow(dead_code))] // The batch's pack sink is its caller.
     pub(crate) fn write_hashed(&mut self, id: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
         debug_assert_eq!(
             index::canonical_id(&parts.concat()).ok(),
@@ -156,17 +155,26 @@ impl<'a> LocalPackWriter<'a> {
     /// # Errors
     /// An earlier write failed, or a staging or publication failure.
     pub fn publish(self) -> StoreResult<()> {
+        self.publish_pair().map(|_| ())
+    }
+
+    /// [`publish`](Self::publish), naming the published pair. An empty pack
+    /// publishes nothing.
+    pub(super) fn publish_pair(self) -> StoreResult<Option<Pair>> {
         if self.failed {
             return Err(failed_writer());
         }
-        if !self.ids.is_empty() {
-            let pack = self
-                .pack
-                .into_inner()
-                .map_err(std::io::IntoInnerError::into_error)?;
-            Staged::seal(self.store, pack, self.frames)?.publish(self.store)?;
+        if self.ids.is_empty() {
+            return Ok(None);
         }
-        Ok(())
+        let pack = self
+            .pack
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
+        let staged = Staged::seal(self.store, pack, self.frames)?;
+        let pair = staged.pair.clone();
+        staged.publish(self.store)?;
+        Ok(Some(pair))
     }
 }
 

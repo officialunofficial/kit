@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use super::copy::{Copied, CopyPlan};
 use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
@@ -15,6 +16,7 @@ use crate::store::{ObjectStore, StoreError, StoreResult};
 pub(crate) struct PackSweep {
     pairs: BTreeMap<Hash, Retirement>,
     leftovers: BTreeMap<PathBuf, Stamp>,
+    copy: Option<CopyPlan>,
 }
 
 struct Retirement {
@@ -22,10 +24,10 @@ struct Retirement {
     index: Stamp,
 }
 
-#[derive(PartialEq, Eq)]
-struct Stamp {
-    modified: SystemTime,
-    len: u64,
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Stamp {
+    pub(super) modified: SystemTime,
+    pub(super) len: u64,
     #[cfg(unix)]
     identity: (u64, u64, i64, i64),
     #[cfg(not(unix))]
@@ -33,7 +35,7 @@ struct Stamp {
 }
 
 impl Stamp {
-    fn read(path: &Path) -> Option<Self> {
+    pub(super) fn read(path: &Path) -> Option<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -51,13 +53,13 @@ impl Stamp {
         })
     }
 
-    fn old_enough(&self, now: u64, grace: u64) -> bool {
+    pub(super) fn old_enough(&self, now: u64, grace: u64) -> bool {
         self.modified
             .duration_since(std::time::UNIX_EPOCH)
             .is_ok_and(|mtime| now.saturating_sub(mtime.as_secs()) >= grace)
     }
 
-    fn unchanged(&self, path: &Path) -> bool {
+    pub(super) fn unchanged(&self, path: &Path) -> bool {
         Self::read(path).as_ref() == Some(self)
     }
 }
@@ -86,6 +88,9 @@ impl ObjectStore {
                     plan.add_old_leftover(path, now, grace);
                 }
             }
+        }
+        if self.local_packs_enabled()? {
+            plan.copy = CopyPlan::plan(self, live, now, grace, |key| plan.pairs.contains_key(key))?;
         }
         Ok(plan)
     }
@@ -304,11 +309,28 @@ impl PackSweep {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.pairs.is_empty() && self.leftovers.is_empty()
+        self.pairs.is_empty() && self.leftovers.is_empty() && self.copy.is_none()
     }
 
     pub(crate) fn run(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<()> {
         self.run_with(store, report, || Ok(())).map(|_| ())
+    }
+
+    /// Copy under the shared guard, which the copy releases before the
+    /// exclusive try that follows: the process would otherwise fail its own
+    /// try. A failed copy, such as a full disk, keeps every copy input and
+    /// still lets the wholly dead retirement free space.
+    fn copy_survivors(&self, store: &ObjectStore, report: &mut GcReport) -> Option<Copied> {
+        match &self.copy {
+            Some(copy) => match copy.execute(store, report) {
+                Ok(copied) => Some(copied),
+                Err(error) => {
+                    report.pack_copy_error = Some(error.to_string());
+                    None
+                }
+            },
+            None => None,
+        }
     }
 
     pub(crate) fn run_with(
@@ -326,16 +348,21 @@ impl PackSweep {
                 .map(|r| r.pack.len + r.index.len)
                 .sum::<u64>()
                 + self.leftovers.values().map(|s| s.len).sum::<u64>();
+            if let Some(copy) = &self.copy {
+                copy.preview(report);
+            }
             return Ok(true);
         }
         if self.is_empty() {
             return Ok(true);
         }
+        let copied = self.copy_survivors(store, report);
+        #[cfg(test)]
+        super::tests::after_copy_publish()?;
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
             return Ok(false);
         }
-        #[cfg(test)]
         let locked_at = std::time::Instant::now();
         let dir = store.pack_dir();
         let mut retire = Vec::new();
@@ -355,37 +382,90 @@ impl PackSweep {
             .iter()
             .filter(|(path, stamp)| is_leftover(path) && stamp.unchanged(path))
             .collect();
+        let copy_retire = copied
+            .as_ref()
+            .map(|copied| copied.select(&dir, &|key| self.pairs.contains_key(key)))
+            .unwrap_or_default();
 
-        for (pair, _) in &retire {
-            fs::remove_file(&pair.pack)?;
+        // Make every pair that a retired input relies on durable before the
+        // first unlink: a publisher may have died before its last directory
+        // flush, and so may an earlier run.
+        if !copy_retire.is_empty() {
+            for pair in copied.iter().flat_map(|copied| copied.deps(&copy_retire)) {
+                flush_file(&pair.pack)?;
+                flush_file(&pair.index)?;
+            }
+            flush_dir(store.objects_root())?;
+            flush_dir(&dir)?;
+        }
+
+        let any = !retire.is_empty() || !copy_retire.is_empty();
+        for pair in retire
+            .iter()
+            .map(|(pair, _)| pair)
+            .chain(copy_retire.iter().map(|input| &input.pair))
+        {
+            unlink(&pair.pack)?;
         }
         // Flush the missing pack names before unlinking any index. This also
         // covers an index left by a prior retirement that died before syncing.
-        if !retire.is_empty() || !leftovers.is_empty() {
-            sync_dir(&dir)?;
+        if any || !leftovers.is_empty() {
+            flush_dir(&dir)?;
         }
-        if !retire.is_empty() {
+        if any {
             after_pack_sync()?;
         }
         for (pair, r) in &retire {
-            fs::remove_file(&pair.index)?;
+            unlink(&pair.index)?;
             store.packs.forget(&pair.key);
             report.packs_retired += 1;
             report.bytes_reclaimed += r.pack.len + r.index.len;
         }
+        for input in &copy_retire {
+            unlink(&input.pair.index)?;
+            store.packs.forget(&input.pair.key);
+        }
+        if let Some(copied) = &copied {
+            copied.report(&copy_retire, report);
+        }
         for (path, stamp) in &leftovers {
-            fs::remove_file(path)?;
+            unlink(path)?;
             report.pack_leftovers_pruned += 1;
             report.bytes_reclaimed += stamp.len;
         }
-        if !retire.is_empty() || !leftovers.is_empty() {
-            sync_dir(&dir)?;
+        if any || !leftovers.is_empty() {
+            flush_dir(&dir)?;
         }
         drop(guard);
+        let held = locked_at.elapsed();
+        report.retire_hold_ms = report
+            .retire_hold_ms
+            .max(u64::try_from(held.as_millis()).unwrap_or(u64::MAX));
         #[cfg(test)]
-        SWEEP_HOLD.set(locked_at.elapsed());
+        SWEEP_HOLD.set(held);
         Ok(true)
     }
+}
+
+pub(super) fn flush_file(path: &Path) -> StoreResult<()> {
+    #[cfg(test)]
+    super::tests::note_io("sync", path);
+    crate::store::sync_reused_file(path)?;
+    Ok(())
+}
+
+pub(super) fn flush_dir(path: &Path) -> StoreResult<()> {
+    #[cfg(test)]
+    super::tests::note_io("sync-dir", path);
+    sync_dir(path)?;
+    Ok(())
+}
+
+fn unlink(path: &Path) -> StoreResult<()> {
+    #[cfg(test)]
+    super::tests::note_io("unlink", path);
+    fs::remove_file(path)?;
+    Ok(())
 }
 
 #[cfg(test)]
