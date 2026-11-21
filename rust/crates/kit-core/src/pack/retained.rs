@@ -21,6 +21,11 @@ use std::time::{Duration, SystemTime};
 /// The most packs the cache keeps. The oldest go first.
 const MAX_RETAINED_PACKS: usize = 4;
 
+/// The longest pack the cache keeps. A longer one is downloaded again, so the
+/// cache never holds more than four times this, and an interrupted or
+/// failed apply never waits on a copy of several gigabytes.
+const MAX_RETAINED_PACK_BYTES: u64 = 1 << 30;
+
 /// How long a pack stays in the cache.
 const MAX_RETAINED_AGE: Duration = Duration::from_hours(7 * 24);
 
@@ -59,12 +64,19 @@ impl RetainedPacks {
 
     /// Keep a copy of `pack`, which was verified against `key`, for a retry.
     /// The copy appears whole or not at all. A cache over its bounds drops
-    /// its oldest packs.
+    /// its oldest packs. A pack longer than 1 GiB is not kept.
     ///
     /// # Errors
     /// An I/O error, or a cache directory that is a symlink. The caller keeps
     /// going: a pack that was not kept is downloaded again.
     pub fn keep(&self, key: &PackKey, pack: &VerifiedPack) -> io::Result<()> {
+        self.keep_up_to(key, pack, MAX_RETAINED_PACK_BYTES)
+    }
+
+    fn keep_up_to(&self, key: &PackKey, pack: &VerifiedPack, max_bytes: u64) -> io::Result<()> {
+        if pack.len() > max_bytes {
+            return Ok(());
+        }
         ensure_dir(&self.dir)?;
         let mut copy = tempfile::Builder::new()
             .prefix(TMP_PREFIX)
@@ -356,6 +368,20 @@ mod tests {
         cache.trim();
         assert!(elsewhere.join("old").exists());
         assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn a_pack_over_the_byte_bound_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        let bytes = pack_bytes(5);
+        let (key, pack) = verified(&bytes, dir.path());
+        let len = bytes.len() as u64;
+        cache.keep_up_to(&key, &pack, len - 1).unwrap();
+        assert!(files(&cache).is_empty());
+        assert!(cache.take(&key).is_none());
+        cache.keep_up_to(&key, &pack, len).unwrap();
+        assert_eq!(read_all(&cache.take(&key).unwrap()), bytes);
     }
 
     #[test]

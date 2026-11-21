@@ -12,7 +12,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Fetch and pull run best-effort local pack maintenance after applying packs or pruning remote-tracking refs. Set `gc.auto = false` to disable it.
 - Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
-- Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first.
+- Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first. A pack is rewritten only when a quarter or more of its payload is garbage, so up to a quarter of a pack's bytes can stay dead after `kit gc`.
 - The maintenance step after fetch and pull also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
 - Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
@@ -24,7 +24,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the small files of a large batch (past the first 64, up to 16,384 serialized bytes each) into local packs in a repository that declares capability `P`, so adding 100,000 small files makes a few packs and about 150 syncs where it made one loose file and one sync each. Smaller batches and larger files keep the loose path.
 
 - Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
-- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days.
+- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days, and does not keep a pack longer than 1 GiB.
 - `FetchReport::savings` and the `DownloadResumed`, `DownloadRestarted` and `PackReused` events report the bytes a fetch did not download again.
 
 - Read and verify raw local object packs in repositories that declare capability `P`.
@@ -32,7 +32,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Fetch and clone of large files hash each packed object once on the way into a local pack, where each was hashed four more times, so a fresh fetch or clone of 1 GiB of large files on Linux no longer costs more CPU than 0.9.
+- Fetch and clone of large files hash each packed object once on the way into a local pack, where each was hashed four times in all, so a fresh fetch or clone of 1 GiB of large files on Linux no longer costs more CPU than 0.9.
 - A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
 - Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size.
 - Re-pushing a file that grew past 1 MiB sends the chunks it shares with its old single-object version as deltas against that version, within a per-file read and pair budget.
@@ -52,7 +52,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** Damage in a local pack or its index is `StoreError::LocalPackDamaged { pack, reason }`, not `StoreError::Io` with kind `InvalidData`. Match the variant instead of the I/O kind. A failed read of a pack or index stays `StoreError::Io`.
 - **Breaking:** `GcReport` and `UnpackReport` are `#[non_exhaustive]`. Build one with `Default::default()` and read its fields. `GcReport` also reports packed payload bytes, packs retired, leftovers and loose duplicates pruned, and damaged packs it kept.
 - **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
+- `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
+- A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
 
 ### Removed
 

@@ -590,7 +590,15 @@ impl S3Transport {
                         200 => sink.note_resume(ResumeOutcome::Restarted {
                             reason: RestartReason::Status,
                         }),
-                        _ => {}
+                        _ => {
+                            // A store that does not take a conditional range
+                            // (400, 405, 501) gets one plain read.
+                            sink.note_resume(ResumeOutcome::Restarted {
+                                reason: RestartReason::Status,
+                            });
+                            resume = None;
+                            continue;
+                        }
                     }
                 }
                 if status == 200 {

@@ -289,7 +289,13 @@ fn an_answer_that_is_not_the_rest_reads_the_pack_again() {
 #[test]
 fn a_refused_condition_or_range_reads_the_pack_again() {
     let (object, key) = pack();
-    for (status, reason) in [(412, RestartReason::Validator), (416, RestartReason::Range)] {
+    for (status, reason) in [
+        (412, RestartReason::Validator),
+        (416, RestartReason::Range),
+        (400, RestartReason::Status),
+        (405, RestartReason::Status),
+        (501, RestartReason::Status),
+    ] {
         let (downloaded, verified, sink, requests) =
             download(&object, &key, move |n, _, answer| match n {
                 0 => answer.cut_after(100),
