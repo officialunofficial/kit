@@ -519,14 +519,8 @@ fn find_holders(members: &[Member], live: &LiveSet) -> (HashMap<Hash, Vec<usize>
             }
         }
         rows.sort_unstable_by_key(|row| (row.0, row.1));
-        let mut start = 0;
-        while start < rows.len() {
-            let mut end = start + 1;
-            while end < rows.len() && rows[end].0 == rows[start].0 {
-                end += 1;
-            }
-            if end - start > 1 {
-                let run = &rows[start..end];
+        for run in rows.chunk_by(|a, b| a.0 == b.0) {
+            if run.len() > 1 {
                 let home = run
                     .iter()
                     .map(|row| row.1)
@@ -539,7 +533,6 @@ fn find_holders(members: &[Member], live: &LiveSet) -> (HashMap<Hash, Vec<usize>
                 }
                 holders.insert(run[0].0, run.iter().map(|row| row.1).collect());
             }
-            start = end;
         }
     }
     (holders, covered)
