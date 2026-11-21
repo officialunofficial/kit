@@ -379,7 +379,8 @@ impl PackReader {
     }
 
     /// Decode a verified wire pack into private staging. Earlier objects
-    /// in this pack and in the pending publication window can be bases.
+    /// in this pack and in the pending publication windows (the open one and any
+    /// still sealing) can be bases.
     ///
     /// # Errors
     /// The same decode errors as `read_verified`, or a local spool failure.
@@ -387,7 +388,7 @@ impl PackReader {
     pub fn stage_verified(
         pack: &VerifiedPack,
         store: &ObjectStore,
-        pending: Option<&ObjectSpool>,
+        pending: &[&ObjectSpool],
         spool: &ObjectSpool,
     ) -> Result<UnpackReport, PackError> {
         decode_file(
@@ -425,7 +426,7 @@ fn decode_file(
     store: &ObjectStore,
     shape: WindowShape,
     owned_bytes: Option<&AtomicU64>,
-    staging: Option<(Option<&ObjectSpool>, &ObjectSpool)>,
+    staging: Option<(&[&ObjectSpool], &ObjectSpool)>,
     #[cfg(test)] mut boundary: Option<BoundaryHook<'_>>,
 ) -> Result<UnpackReport, PackError> {
     let (version, count) = read_header(pack)?;
@@ -520,7 +521,7 @@ fn decode_file(
 /// in the publication window, or the durable store, in that order.
 struct FileBases<'a> {
     store: &'a ObjectStore,
-    staging: Option<(Option<&'a ObjectSpool>, &'a ObjectSpool)>,
+    staging: Option<(&'a [&'a ObjectSpool], &'a ObjectSpool)>,
     first_position: usize,
 }
 
@@ -540,10 +541,10 @@ impl DeltaBaseSource for FileBases<'_> {
             if let Some(bytes) = spool.read_before(id, self.first_position, &mut admit)? {
                 return Ok(Some(bytes));
             }
-            if let Some(pending) = pending
-                && let Some(bytes) = pending.read_before(id, usize::MAX, &mut admit)?
-            {
-                return Ok(Some(bytes));
+            for pending in pending {
+                if let Some(bytes) = pending.read_before(id, usize::MAX, &mut admit)? {
+                    return Ok(Some(bytes));
+                }
             }
         }
         self.store.base_with_retry_admission(id, admit)
