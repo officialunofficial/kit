@@ -113,9 +113,16 @@ impl<'a> LocalPackWriter<'a> {
     /// Whether appending one new object of `len` bytes stays inside the
     /// seal limits. An empty pack always has room.
     pub(crate) fn has_room(&self, len: usize) -> bool {
-        self.ids.is_empty()
-            || (self.ids.len() < crate::store::PACK_SEAL_ENTRIES
-                && self.payload + len as u64 <= crate::store::PACK_SEAL_BYTES as u64)
+        self.has_room_within(
+            len,
+            crate::store::PACK_SEAL_ENTRIES,
+            crate::store::PACK_SEAL_BYTES as u64,
+        )
+    }
+
+    /// [`Self::has_room`] for a caller that seals at its own, lower limits.
+    pub(crate) fn has_room_within(&self, len: usize, entries: usize, payload: u64) -> bool {
+        self.ids.is_empty() || (self.ids.len() < entries && self.payload + len as u64 <= payload)
     }
 
     /// Stage one canonical object, deduplicating only within this pack.
@@ -295,8 +302,12 @@ fn write_frame(mut writer: impl Write, len: usize, parts: &[&[u8]]) -> StoreResu
     Ok(())
 }
 
+/// A test builder of local packs. Unlike [`LocalPackWriter`], which refuses an
+/// object that does not fit and leaves the rollover to its owner (the batch
+/// and gc each have one), it seals the open pack and starts the next at the
+/// caps it is given, so a test can build many packs or tiny ones.
 #[cfg(test)]
-pub(super) struct Writer<'a> {
+pub(super) struct PackFixture<'a> {
     store: &'a ObjectStore,
     guard: PruneGuard,
     pack: tempfile::NamedTempFile,
@@ -308,7 +319,7 @@ pub(super) struct Writer<'a> {
 }
 
 #[cfg(test)]
-impl<'a> Writer<'a> {
+impl<'a> PackFixture<'a> {
     pub(super) fn new(
         store: &'a ObjectStore,
         max_entries: u32,

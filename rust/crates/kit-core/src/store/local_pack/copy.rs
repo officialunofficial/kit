@@ -33,9 +33,9 @@ const SMALL_ENTRIES: usize = 16_384;
 const SMALL_PAIRS: usize = 8;
 /// A pack is rewritten when a quarter of its payload is reclaimable.
 const RECLAIM_FRACTION: u64 = 4;
-/// Output caps, the same as the fetch window seals.
-pub(super) const OUTPUT_PAYLOAD: u64 = 64 << 20;
-pub(super) const OUTPUT_ENTRIES: usize = 65_536;
+/// Output caps, the same as the batch and fetch window seals.
+pub(super) const OUTPUT_PAYLOAD: u64 = super::PACK_SEAL_BYTES as u64;
+pub(super) const OUTPUT_ENTRIES: usize = super::PACK_SEAL_ENTRIES;
 
 /// The most one run copies.
 #[derive(Clone, Copy)]
@@ -763,8 +763,6 @@ pub(super) struct Rolling<'a> {
     writer: Option<LocalPackWriter<'a>>,
     max_entries: usize,
     max_payload: u64,
-    entries: usize,
-    payload: u64,
     /// By writer number: the published pair, none for an empty writer.
     pairs: Vec<Option<Pair>>,
     /// By writer number: the ids assigned to it.
@@ -790,8 +788,6 @@ impl<'a> Rolling<'a> {
             writer: None,
             max_entries,
             max_payload,
-            entries: 0,
-            payload: 0,
             pairs: Vec::new(),
             ids: Vec::new(),
             homes: HashMap::new(),
@@ -807,24 +803,22 @@ impl<'a> Rolling<'a> {
     /// Write one object whose id the caller has derived from `bytes`. An id
     /// counts once per run.
     pub(super) fn write(&mut self, id: &Hash, bytes: &[u8]) -> StoreResult<usize> {
-        let len = bytes.len() as u64;
-        if self.writer.is_some()
-            && (self.entries == self.max_entries || self.payload + len > self.max_payload)
+        let len = bytes.len();
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| !writer.has_room_within(len, self.max_entries, self.max_payload))
         {
             self.seal()?;
         }
         if self.writer.is_none() {
             self.writer = Some(LocalPackWriter::new(self.store, self.guard)?);
             self.ids.push(Vec::new());
-            self.entries = 0;
-            self.payload = 0;
         }
         let writer = self.writer.as_mut().expect("an open writer");
         writer.write_hashed(*id, &[bytes])?;
         let number = self.ids.len() - 1;
-        self.entries += 1;
-        self.payload += len;
-        self.copied += len;
+        self.copied += len as u64;
         self.ids[number].push(*id);
         self.homes.insert(*id, number);
         Ok(number)

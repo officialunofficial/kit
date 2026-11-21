@@ -9,7 +9,7 @@ use crate::pack::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 use crate::serialize::serialize;
 use crate::store::{ObjectStore, StoreError};
 
-use super::writer::Writer;
+use super::writer::PackFixture;
 use super::{Pair, index};
 
 pub(super) fn fresh() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
@@ -26,8 +26,8 @@ pub(super) fn blob(data: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
-fn writer(store: &ObjectStore) -> Writer<'_> {
-    Writer::new(store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap()
+fn writer(store: &ObjectStore) -> PackFixture<'_> {
+    PackFixture::new(store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap()
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn staged_pair_and_lone_pack_are_invisible_until_index_publication() {
     assert!(after_pack.is_err());
     assert!(!reader.contains(&id));
 
-    let mut retry = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
     retry.write(&bytes).unwrap();
     retry.finish().unwrap();
     assert_eq!(reader.read(&id).unwrap(), bytes);
@@ -456,7 +456,7 @@ fn unknown_live_pack_versions_refuse_lookup_and_repair() {
         incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
         incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
         incompatible(&still_open.check_local_packs(true).unwrap_err(), kind);
-        let mut retry = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
         retry.write(&bytes).unwrap();
         incompatible(&retry.finish().unwrap_err(), kind);
         assert_eq!(fs::read(path).unwrap(), newer);
@@ -876,10 +876,20 @@ fn concurrent_publishers_deduplicate_and_make_the_pair_readable() {
 }
 
 #[test]
+fn the_writer_limits_are_the_ones_the_spec_states() {
+    // SPEC-OBJECTS §10.1: 65,536 entries and 64 MiB of payload per pack, for
+    // the batch, fetch windows and gc outputs alike.
+    assert_eq!(super::PACK_SEAL_ENTRIES, 65_536);
+    assert_eq!(super::PACK_SEAL_BYTES, 64 << 20);
+    assert_eq!(super::copy::OUTPUT_ENTRIES, super::PACK_SEAL_ENTRIES);
+    assert_eq!(super::copy::OUTPUT_PAYLOAD, super::PACK_SEAL_BYTES as u64);
+}
+
+#[test]
 fn rolls_over_at_count_and_payload_caps() {
     for (max_entries, max_payload) in [(1, 1024), (2, 12)] {
         let (_dir, _layout, store) = fresh();
-        let mut writer = Writer::new(&store, max_entries, max_payload).unwrap();
+        let mut writer = PackFixture::new(&store, max_entries, max_payload).unwrap();
         let a = writer.write(&blob(b"a")).unwrap();
         assert_eq!(writer.write(&blob(b"a")).unwrap(), a);
         let b = writer.write(&blob(b"b")).unwrap();
@@ -1878,7 +1888,7 @@ fn cached_pack_handles_do_not_keep_unpublished_locations_visible() {
         assert_eq!(reader.read(&id).unwrap(), bytes);
         store.remove_object(&id).unwrap();
 
-        let mut replacement = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        let mut replacement = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
         replacement.write(&bytes).unwrap();
         replacement.write(&blob(b"new pack key")).unwrap();
         replacement.finish().unwrap();
@@ -1933,7 +1943,7 @@ fn pack_discovery_notices_publication_with_restored_directory_mtime() {
     let mtime = dir.metadata().unwrap().modified().unwrap();
 
     let bytes = blob(b"published with unchanged directory mtime");
-    let mut writer = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    let mut writer = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
     let id = writer.write(&bytes).unwrap();
     writer.finish().unwrap();
     dir.set_modified(mtime).unwrap();
