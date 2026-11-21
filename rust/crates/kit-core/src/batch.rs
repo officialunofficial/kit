@@ -2605,6 +2605,32 @@ mod tests {
     }
 
     #[test]
+    fn a_spooled_object_counts_as_small_up_to_the_limit() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        // The length is the caller's claim; only the count of small files
+        // depends on it.
+        for (fill, len, small) in [
+            (1u8, SMALL_OBJECT_BYTES, 1),
+            (2u8, SMALL_OBJECT_BYTES + 1, 1),
+            (3u8, 1, 2),
+        ] {
+            let object = crate::object::Object::Blob(crate::object::Blob {
+                data: vec![fill; 64],
+            });
+            let id = object.id().unwrap();
+            let bytes = crate::serialize::serialize(&object).unwrap();
+            let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+            fs::create_dir_all(&shard).unwrap();
+            let mut file = crate::atomic::temp_file_in(&shard).unwrap();
+            file.as_file_mut().write_all(&bytes).unwrap();
+            batch.stage_temp(id, file.into_temp_path(), len).unwrap();
+            assert_eq!(batch.inner.lock().unwrap().small_staged, small, "{len}");
+        }
+        batch.commit().unwrap();
+    }
+
+    #[test]
     fn a_temporary_file_is_renamed_into_place_once_even_over_a_loose_copy() {
         let (_dir, store, rec) = recording_store();
         let batch = store.batch();
