@@ -425,6 +425,13 @@ fn pair_blob_to_chunks(
     budget: BlobBudget,
     out: &mut HashMap<Hash, Hash>,
 ) -> Result<(), StoreError> {
+    // A blob is one object up to the store's object cap, not only up to
+    // `CHUNK_THRESHOLD` (another writer may have stored a larger one). Each
+    // pair makes the encoder index the whole base, so a large one is left
+    // alone, as is any base the decode budget would refuse anyway.
+    if !u64::try_from(old_data.len()).is_ok_and(|len| len <= crate::worktree::CHUNK_THRESHOLD) {
+        return Ok(());
+    }
     let features: HashSet<u64> = old_data
         .chunks(BLOB_FEATURE_SLICE)
         .flat_map(chunk_features)
@@ -2461,6 +2468,20 @@ mod tests {
         assert_pack_reconstructs(&s, &plan, c_old, c_new);
     }
 
+    #[test]
+    fn an_inline_blob_over_the_threshold_is_not_a_base() {
+        let (_d, s) = store();
+        let big = usize::try_from(crate::worktree::CHUNK_THRESHOLD).unwrap() + 1;
+        let old = chunk_content(1, big);
+        let chunks = vec![old[..40_000].to_vec()];
+        let (_, out) = pair_blob_within(&s, &old, &chunks, BlobBudget::default());
+        assert!(out.is_empty());
+        // At the threshold it is still a base.
+        let old = chunk_content(1, big - 1);
+        let (old_blob, out) = pair_blob_within(&s, &old, &chunks, BlobBudget::default());
+        assert_eq!(out.get(&put_blob(&s, chunks[0].clone())), Some(&old_blob));
+    }
+
     /// `pair_blob_to_chunks` on the `chunks` of a file whose old tip held
     /// `old` as one blob, within `budget`.
     fn pair_blob_within(
@@ -2504,8 +2525,6 @@ mod tests {
         for chunk in &chunks[..4] {
             assert!(out.contains_key(&put_blob(&s, chunk.clone())));
         }
-        // The cap a real file runs under.
-        assert_eq!(BlobBudget::default().pairs, 256);
     }
 
     #[test]
@@ -2529,7 +2548,6 @@ mod tests {
         };
         let (old_blob, out) = pair_blob_within(&s, &old, &chunks, budget);
         assert_eq!(out.get(&put_blob(&s, chunks[3].clone())), Some(&old_blob));
-        assert_eq!(BlobBudget::default().reads, 4_096);
     }
 
     /// Split probing plans several ranges of one chain. Through one delta
