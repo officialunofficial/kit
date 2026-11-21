@@ -5110,6 +5110,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unnecessary_wraps)] // the shape `on_both_restores` asks for
     fn no_check(_: &ObjectStore, _: &Hash, _: &Path, _: &RestoreOptions) -> RestoreResult<()> {
         Ok(())
     }
