@@ -33,7 +33,7 @@ pub enum Collection {
     Busy,
     /// Retention roots changed during the unlocked mark.
     RootsChanged,
-    /// The mark and plan ran out of time.
+    /// The mark, plan, verification or copy ran out of time before publish.
     OverBudget,
     /// The attempt stopped on unreadable state, damage or interruption.
     Failed,

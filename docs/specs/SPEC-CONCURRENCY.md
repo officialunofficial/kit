@@ -225,7 +225,9 @@ or push holding the prune guard can therefore wait for that command to release
 `worktree.lock` without a deadlock. The existing local-filesystem locking
 assumptions apply.
 
-Automatic maintenance never waits for a lock. The leftover sweep tries
+Automatic maintenance never waits for a worktree lock or for the exclusive
+`format` lock; the one wait is the copy's shared `format` guard, which waits
+at most for one retirement batch of another process. The leftover sweep tries
 the exclusive `format` lock only when it finds an eligible old leftover.
 A fetch or push arriving during the hold can wait for the recheck,
 unlinks and both directory flushes. During collection, when there is a

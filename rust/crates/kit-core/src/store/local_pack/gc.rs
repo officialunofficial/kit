@@ -465,15 +465,26 @@ impl PackSweep {
                 leftovers: &leftovers[leftover_batch],
             };
             if !self.retire_batch(store, report, copied, &batch, &mut run)? {
+                Self::count_copy_freed(report, copied, &run);
                 return Ok(false);
             }
             #[cfg(test)]
             super::tests::after_retire_batch(report.retire_batches)?;
         }
+        Self::count_copy_freed(report, copied, &run);
+        Ok(true)
+    }
+
+    /// Adds what retired copy inputs freed, net of the outputs, for the
+    /// batches that ran, including a run that a later batch ended early.
+    fn count_copy_freed<F: FnOnce() -> StoreResult<()>>(
+        report: &mut GcReport,
+        copied: Option<&Copied>,
+        run: &Run<F>,
+    ) {
         if let Some(copied) = copied {
             report.bytes_reclaimed += run.copy_freed.saturating_sub(copied.written());
         }
-        Ok(true)
     }
 
     fn retire_batch<F: FnOnce() -> StoreResult<()>>(

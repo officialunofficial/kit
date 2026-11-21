@@ -50,7 +50,10 @@ pub(super) fn json_field(top: &mut JsonObject, report: Option<&MaintenanceReport
 }
 
 fn copied(report: &MaintenanceReport) -> bool {
-    report.packs_rewritten != 0 || report.packs_merged != 0 || report.packs_retired_covered != 0
+    report.packs_rewritten != 0
+        || report.packs_merged != 0
+        || report.packs_retired_covered != 0
+        || report.bytes_copied != 0
 }
 
 fn changed(report: &MaintenanceReport) -> bool {

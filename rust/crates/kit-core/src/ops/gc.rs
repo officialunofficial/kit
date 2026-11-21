@@ -827,7 +827,7 @@ pub struct GcReport {
     /// from the successful try to the release; the longest of the holds. A
     /// writer that starts then waits that long.
     pub retire_hold_ms: u64,
-    /// How many exclusive holds retirement took: one per batch of at most 64
+    /// How many exclusive holds retirement took: one per batch of at most 32
     /// items (SPEC-GC).
     pub retire_batches: usize,
     /// Damage found in aged packs that were left in place because their body failed verification.
