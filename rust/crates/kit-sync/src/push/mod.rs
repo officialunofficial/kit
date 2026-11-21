@@ -1216,13 +1216,16 @@ fn build_and_upload_packs(
         |writer, ticketed, entries| {
             let spooled = writer.finish_spool()?;
             let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
-            tx.upload_pack(&spooled, &PackKey::from_hash(spooled.key()), head_ref)
-                .map_err(|error| repository_operation_error(tx, error))?;
-            // Upload is complete — report the real byte count handed to the
-            // transport, not an estimate.
-            tx.observer.event(&SyncEvent::PackUploaded {
-                bytes: spooled.len(),
-            });
+            let key = PackKey::from_hash(spooled.key());
+            if !already_stored(tx, &key, spooled.len(), head_ref, limits) {
+                tx.upload_pack(&spooled, &key, head_ref)
+                    .map_err(|error| repository_operation_error(tx, error))?;
+                // Upload is complete — report the real byte count handed to
+                // the transport, not an estimate.
+                tx.observer.event(&SyncEvent::PackUploaded {
+                    bytes: spooled.len(),
+                });
+            }
             if let Some(record) = &tx.record
                 && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
             {
@@ -1241,6 +1244,32 @@ fn build_and_upload_packs(
         tx.observer,
     )?;
     Ok(pack_keys)
+}
+
+/// Sealed packs smaller than this go straight to the upload, with no
+/// existence check: the common one-commit push makes no extra request, and a
+/// small pack costs less to send again than to ask about.
+const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
+
+/// Whether the remote already holds the sealed pack `key` of `len` bytes, so
+/// the upload can be skipped. A pack key is the hash of the pack's bytes, and
+/// every transport that is not ticketed stores a pack whole or not at all (a
+/// file or ssh remote renames a finished temp file into place, an S3 `PUT`
+/// takes effect when it completes), so a key that is there names a complete
+/// pack and a re-run of an interrupted push sends only the packs it missed.
+/// Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on a remote that
+/// issues no upload tickets is checked. Any answer but "present", an error
+/// included, is "not stored": the push uploads.
+fn already_stored(
+    tx: &PushContext<'_>,
+    key: &PackKey,
+    len: u64,
+    head_ref: &str,
+    limits: UploadLimits,
+) -> bool {
+    limits.data_packs_per_advance.is_none()
+        && len >= STORED_PACK_CHECK_MIN_BYTES
+        && tx.pack_exists(key, head_ref).unwrap_or(false)
 }
 
 /// The exact seal of `plan` that [`build_and_upload_packs`] would make, with
@@ -1925,6 +1954,33 @@ mod tests {
         assert_eq!(sent, expected);
         let expected_keys: Vec<Hash> = expected.iter().map(|p| pack::pack_key(p)).collect();
         assert_eq!(keys, expected_keys);
+    }
+
+    #[test]
+    fn a_stored_pack_is_skipped_only_from_the_check_size_on_a_remote_with_no_tickets() {
+        use kit_core::protocol::Transport as _;
+        let remote = kit_transport_memory::MemoryTransport::new();
+        let source = crate::source::TransportSource::new(&remote);
+        let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+        let key = PackKey::new([7; 32]);
+        let ticketed = UploadLimits {
+            data_packs_per_advance: Some(4),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        let none = UploadLimits::default();
+        let check = |len, limits| already_stored(&tx, &key, len, "refs/heads/main", limits);
+
+        // Not stored: every size uploads.
+        assert!(!check(STORED_PACK_CHECK_MIN_BYTES, none));
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
+        assert!(!check(STORED_PACK_CHECK_MIN_BYTES - 1, none));
+        assert!(check(STORED_PACK_CHECK_MIN_BYTES, none));
+        assert!(check(STORED_PACK_CHECK_MIN_BYTES + 1, none));
+        // A ticketed remote is never asked.
+        assert!(!check(STORED_PACK_CHECK_MIN_BYTES, ticketed));
     }
 
     #[test]
