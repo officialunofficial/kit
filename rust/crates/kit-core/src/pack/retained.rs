@@ -137,6 +137,10 @@ fn ensure_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Never follow a link, and never wait on a pipe.
+#[cfg(unix)]
+const OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
 /// Open the regular file at `path` for reading. A symlink, a pipe or any
 /// other kind of file is refused without blocking.
 fn open_regular(path: &Path) -> io::Result<File> {
@@ -145,7 +149,7 @@ fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        options.custom_flags(OPEN_FLAGS);
     }
     let file = options.open(path)?;
     if file.metadata()?.is_file() {
@@ -457,6 +461,48 @@ mod tests {
         ] {
             assert!(!unusable(&io::Error::from(kind)), "{kind:?}");
         }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_local_write_error_while_reading_leaves_the_kept_pack_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        let bytes = pack_bytes(6);
+        let (key, pack) = verified(&bytes, dir.path());
+        cache.keep(&key, &pack).unwrap();
+        {
+            let _full = crate::fault::fail_writes(crate::fault::Site::Spool);
+            assert!(cache.take(&key).is_none());
+        }
+        // The disk filled up; the pack is fine and serves once it has room.
+        assert_eq!(files(&cache).len(), 1);
+        assert_eq!(read_all(&cache.take(&key).unwrap()), bytes);
+    }
+
+    #[test]
+    fn a_file_exactly_at_the_age_bound_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        ensure_dir(&cache.dir).unwrap();
+        let now = SystemTime::now();
+        for (name, age) in [
+            ("pack", MAX_RETAINED_AGE),
+            (".tmpcopy", MAX_TMP_AGE),
+            ("old", MAX_RETAINED_AGE + Duration::from_secs(1)),
+            (".tmpold", MAX_TMP_AGE + Duration::from_secs(1)),
+        ] {
+            let path = cache.dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(now - age)
+                .unwrap();
+        }
+        trim_dir(&cache.dir, now);
+        assert_eq!(files(&cache), [".tmpcopy", "pack"]);
     }
 
     #[cfg(unix)]
