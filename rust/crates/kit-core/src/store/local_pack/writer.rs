@@ -535,8 +535,8 @@ fn check_frames_in(
     // frames: a small pack must not pay for a full segment.
     let frames_total = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
     let cap = segment.min(frames_total).max(ENTRY_FRAME_LEN);
-    let mut scratch = Scratch::take(cap);
-    let buf = &mut scratch.0[..cap];
+    let mut scratch = Scratch::take(&SPARE_BUFFER, cap);
+    let buf = &mut scratch.buf[..cap];
     let mut rows = rows.iter().peekable();
     while let Some((_, first)) = rows.peek() {
         let first_len = ENTRY_FRAME_LEN + first.len as usize;
@@ -588,42 +588,51 @@ fn check_frames_in(
 /// keeps one segment, plus one more for each check that runs at the same time.
 static SPARE_BUFFER: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
-struct Scratch(Vec<u8>);
+/// A check's buffer, returned to its spare slot when the check ends.
+struct Scratch<'a> {
+    buf: Vec<u8>,
+    spare: &'a std::sync::Mutex<Vec<u8>>,
+}
 
-impl Scratch {
-    /// A buffer of at least `len` bytes.
-    fn take(len: usize) -> Self {
-        let spare = std::mem::take(
-            &mut *SPARE_BUFFER
+impl<'a> Scratch<'a> {
+    /// A buffer of at least `len` bytes, the spare one if it is big enough.
+    fn take(spare: &'a std::sync::Mutex<Vec<u8>>, len: usize) -> Self {
+        let held = std::mem::take(
+            &mut *spare
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        Self(if spare.len() >= len {
-            spare
+        let buf = if held.len() >= len {
+            held
         } else {
             vec![0; len]
-        })
+        };
+        Self { buf, spare }
     }
 }
 
-impl Drop for Scratch {
+impl Drop for Scratch<'_> {
     fn drop(&mut self) {
-        let mut spare = SPARE_BUFFER
+        let mut spare = self
+            .spare
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.0.len() > spare.len() {
-            *spare = std::mem::take(&mut self.0);
+        if self.buf.len() > spare.len() {
+            *spare = std::mem::take(&mut self.buf);
         }
     }
 }
 
+/// Whether `len` bytes are worth a hand-off to the digest pool.
+#[cfg(not(target_arch = "wasm32"))]
+fn worth_the_pool(len: usize) -> bool {
+    len >= 128 << 10
+}
+
 /// Digest `bytes` on a few threads, as one hasher would serially.
 fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
-    /// Below this a hand-off to the pool costs more than it saves.
     #[cfg(not(target_arch = "wasm32"))]
-    const PARALLEL_FROM: usize = 128 << 10;
-    #[cfg(not(target_arch = "wasm32"))]
-    if bytes.len() >= PARALLEL_FROM
+    if worth_the_pool(bytes.len())
         && let Some(pool) = digest_pool()
     {
         pool.install(|| digest.update_rayon(bytes));
@@ -1191,6 +1200,39 @@ mod tests {
                 path.write_all(damaged).unwrap();
                 path.rewind().unwrap();
                 assert!(check_frames_in(path.as_file_mut(), &rows, end, segment).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn the_check_buffer_is_reused_and_only_ever_grows() {
+        let spare = std::sync::Mutex::new(Vec::new());
+        drop(Scratch::take(&spare, 100));
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A smaller request takes the spare buffer and gives it back whole.
+        let small = Scratch::take(&spare, 40);
+        assert_eq!(small.buf.len(), 100);
+        assert!(spare.lock().unwrap().is_empty());
+        drop(small);
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A larger one replaces it, and a concurrent smaller one does not.
+        let (big, other) = (Scratch::take(&spare, 300), Scratch::take(&spare, 200));
+        drop(big);
+        drop(other);
+        assert_eq!(spare.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn the_default_segment_holds_many_frames_and_the_pool_takes_only_big_inputs() {
+        assert!(SEGMENT >= 1 << 20);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert!(!worth_the_pool((128 << 10) - 1));
+            assert!(worth_the_pool(128 << 10));
+            let threads = std::thread::available_parallelism().map_or(1, usize::from);
+            assert_eq!(digest_pool().is_some(), threads > 1);
+            if let Some(pool) = digest_pool() {
+                assert_eq!(pool.current_num_threads(), threads.min(8));
             }
         }
     }
