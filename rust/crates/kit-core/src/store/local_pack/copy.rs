@@ -392,25 +392,24 @@ impl CopyPlan {
                     continue;
                 }
                 let location = Location::Packed(Arc::clone(&member.index), entry.frame);
-                let written = ObjectStore::raw_at(&location)
-                    .and_then(|bytes| rolling.write(&entry.id, &bytes));
-                match written {
-                    Ok(Some(output)) => {
-                        work[at].relies.insert(output);
-                    }
-                    Ok(None) => {
-                        let error = member.pair.error("frame does not match its index id");
+                // An input that cannot be read, or whose frame is not the
+                // object its index row names, stays as it is.
+                let bytes = match ObjectStore::raw_at(&location) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
                         report.skipped_pack_errors.push(error.to_string());
                         work[at].kept = true;
                         break;
                     }
-                    Err(error) if is_damage(&error) => {
-                        report.skipped_pack_errors.push(error.to_string());
-                        work[at].kept = true;
-                        break;
-                    }
-                    Err(error) => return Err(error),
+                };
+                if !matches!(super::index::canonical_id(&bytes), Ok(id) if id == entry.id) {
+                    let error = member.pair.error("frame does not match its index id");
+                    report.skipped_pack_errors.push(error.to_string());
+                    work[at].kept = true;
+                    break;
                 }
+                let output = rolling.write(&entry.id, &bytes)?;
+                work[at].relies.insert(output);
             }
         }
         let (pairs, ids, copied) = rolling.finish()?;
@@ -631,24 +630,6 @@ fn file_bytes(entries: u64, payload: u64) -> u64 {
         + entries * (ENTRY_FRAME_LEN + INDEX_ROW_LEN) as u64
 }
 
-/// An entry that cannot be read or verified is damage in its pack. Anything
-/// else, such as a failed disk read, stops the run.
-fn is_damage(error: &StoreError) -> bool {
-    use std::io::ErrorKind;
-    match error {
-        StoreError::LocalPackDamaged { .. }
-        | StoreError::HashMismatch { .. }
-        | StoreError::Decode(_) => true,
-        StoreError::Io(error) => {
-            matches!(
-                error.kind(),
-                ErrorKind::UnexpectedEof | ErrorKind::InvalidData
-            )
-        }
-        _ => false,
-    }
-}
-
 /// The pairs published by writer number, the ids assigned to each, and the
 /// payload bytes copied.
 pub(super) type Finished = (Vec<Option<Pair>>, Vec<Vec<Hash>>, u64);
@@ -701,9 +682,9 @@ impl<'a> Rolling<'a> {
         self.homes.get(id).copied()
     }
 
-    /// Write one object. `None` if the writer derives another id than the
-    /// index gave. An id counts once per run.
-    pub(super) fn write(&mut self, id: &Hash, bytes: &[u8]) -> StoreResult<Option<usize>> {
+    /// Write one object whose id the caller has derived from `bytes`. An id
+    /// counts once per run.
+    pub(super) fn write(&mut self, id: &Hash, bytes: &[u8]) -> StoreResult<usize> {
         let len = bytes.len() as u64;
         if self.writer.is_some()
             && (self.entries == self.max_entries || self.payload + len > self.max_payload)
@@ -717,16 +698,14 @@ impl<'a> Rolling<'a> {
             self.payload = 0;
         }
         let writer = self.writer.as_mut().expect("an open writer");
-        if &writer.write(bytes)? != id {
-            return Ok(None);
-        }
+        writer.write_hashed(*id, &[bytes])?;
         let number = self.ids.len() - 1;
         self.entries += 1;
         self.payload += len;
         self.copied += len;
         self.ids[number].push(*id);
         self.homes.insert(*id, number);
-        Ok(Some(number))
+        Ok(number)
     }
 
     fn seal(&mut self) -> StoreResult<()> {
@@ -807,23 +786,6 @@ mod select_tests {
             inputs: vec![relied(&spare, &[&covering], &[&spare])],
         };
         assert!(copied.select(&dir, &|_| false).is_empty());
-    }
-
-    #[test]
-    fn only_an_early_end_or_invalid_data_in_a_read_is_damage() {
-        use std::io::{Error, ErrorKind};
-
-        for kind in [ErrorKind::UnexpectedEof, ErrorKind::InvalidData] {
-            assert!(is_damage(&StoreError::Io(Error::from(kind))), "{kind:?}");
-        }
-        for kind in [
-            ErrorKind::PermissionDenied,
-            ErrorKind::NotFound,
-            ErrorKind::TimedOut,
-            ErrorKind::Other,
-        ] {
-            assert!(!is_damage(&StoreError::Io(Error::from(kind))), "{kind:?}");
-        }
     }
 
     #[test]

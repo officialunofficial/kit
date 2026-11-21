@@ -697,7 +697,7 @@ fn outputs_roll_over_at_the_entry_cap_and_the_payload_cap() {
         for n in 0..expected.iter().sum::<usize>() {
             let bytes = obj(&format!("object {n}"), 1000);
             let id = crate::object::object_id_from_bytes(&bytes);
-            assert!(rolling.write(&id, &bytes).unwrap().is_some());
+            rolling.write(&id, &bytes).unwrap();
         }
         let (pairs, ids, _) = rolling.finish().unwrap();
         drop(guard);
