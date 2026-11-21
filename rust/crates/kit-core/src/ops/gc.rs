@@ -639,13 +639,13 @@ fn mark_live_checked(
     ids.compact()?;
     let mut chunks = ids.ids;
     chunks.retain(|c| !objects.contains(c));
-    // Each check opens a chunk and reads its type, so on a cold disk the
-    // checks wait on the disk, and run many at a time.
+    // Each check opens a chunk and reads its head, not its payload, so on a
+    // cold disk the checks wait on the disk, and run many at a time.
     for window in chunks.chunks(16 * 1024) {
         checkpoint()?;
         let checked = super::chunk_heads::try_each_in_order(window, |chunk| {
             probe().map_err(|error| (*chunk, Some(error)))?;
-            match store.gc_object_type(chunk) {
+            match store.gc_chunk_type(chunk) {
                 Ok(ObjectType::Blob) => Ok(()),
                 Ok(_) => Err((*chunk, None)),
                 Err(error) => Err((*chunk, Some(error.into()))),
@@ -688,6 +688,15 @@ fn manifest_listing(
     Ok(hash::ZERO)
 }
 
+/// Classify one soft root as the soft mark does.
+#[cfg(test)]
+pub(crate) fn classify_soft_root(
+    store: &ObjectStore,
+    root: Hash,
+) -> Result<Option<Hash>, GcRootsError> {
+    soft::SoftGraph::new(store, MarkLimits::DEFAULT).classify(root)
+}
+
 /// `live_objects_with` at the default limits.
 #[cfg(test)]
 pub(crate) fn live_objects(
@@ -711,7 +720,8 @@ pub(crate) fn live_objects(
 /// no cap but [`MAX_LIVE_CHUNKS`], and each must be a blob.
 ///
 /// Loose leaves are probed by type. For packed leaves, verify the payload
-/// before trusting where the index points.
+/// before trusting where the index points. A packed id that only a manifest
+/// lists is checked by its head and frame length, without hashing it.
 ///
 /// # Errors
 ///
@@ -815,33 +825,15 @@ pub struct GcReport {
 /// The sweep lists one `objects/<2 hex>/` directory at a time, so it never
 /// holds the id of every loose object.
 ///
+/// `progress` receives a phase name, the objects completed so far and the
+/// bytes reclaimed so far. A caller with no use for it passes
+/// `&mut |_, _, _| {}`.
+///
 /// # Errors
 /// [`GcRootsError`] from `live_objects_with`, store enumeration, or a delete.
 /// An error from the sweep itself leaves the objects of earlier directories
 /// pruned, which is safe because only unreachable objects are.
 pub fn run_gc(
-    store: &ObjectStore,
-    layout: &RepoLayout,
-    now_secs: u64,
-    grace_secs: u64,
-    dry_run: bool,
-) -> Result<GcReport, GcRootsError> {
-    run_gc_observed(
-        store,
-        layout,
-        now_secs,
-        grace_secs,
-        dry_run,
-        &mut |_, _, _| {},
-    )
-}
-
-/// [`run_gc`] with progress reports. `progress` receives a phase name, the
-/// objects completed so far and the bytes reclaimed so far.
-///
-/// # Errors
-/// As [`run_gc`].
-pub fn run_gc_observed(
     store: &ObjectStore,
     layout: &RepoLayout,
     now_secs: u64,
@@ -1301,14 +1293,14 @@ mod tests {
             before_tree: before.tree_hash,
         };
         fs::write(linked_layout.pull_head_file(), state.encode()).unwrap();
-        run_gc(&store, &main, u64::MAX, 0, false).unwrap();
+        run_gc(&store, &main, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for hash in [target, target_blob, before.tree_hash, before_blob] {
             assert!(store.contains(&hash), "linked pull root must survive");
         }
         assert!(!store.contains(&before_commit));
         let orphan = write_blob(&store, b"cannot prune through corrupt state");
         fs::write(linked_layout.pull_head_file(), b"invalid").unwrap();
-        assert!(run_gc(&store, &main, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&store, &main, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
         assert!(store.contains(&orphan));
     }
 
@@ -1353,11 +1345,11 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         assert!(!collect_roots(&md).unwrap().contains(&subject));
-        run_gc(&store, &md, 0, 1, false).unwrap();
+        run_gc(&store, &md, 0, 1, false, &mut |_, _, _| {}).unwrap();
         assert!(dir.is_dir() && store.contains(&subject));
-        run_gc(&store, &md, u64::MAX, 0, true).unwrap();
+        run_gc(&store, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
         assert!(dir.is_dir() && store.contains(&subject));
-        run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(!dir.exists());
         assert!(!store.contains(&subject) && !store.contains(&blob));
     }
@@ -1377,7 +1369,7 @@ mod tests {
         let envelope = attested_dir.join(format!("{}.dsse", "11".repeat(32)));
         fs::write(&envelope, b"envelope fixture").unwrap();
 
-        run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(store.contains(&attested) && store.contains(&attested_blob));
         assert!(envelope.is_file() && orphan_dir.join("notes.txt").is_file());
         assert!(!store.contains(&orphan) && !store.contains(&orphan_blob));
@@ -1421,7 +1413,7 @@ mod tests {
         // Mark progress starts after GC has listed the empty directories
         // and before it attempts to remove them.
         let mut changed = false;
-        run_gc_observed(&store, &md, u64::MAX, 0, false, &mut |phase, _, _| {
+        run_gc(&store, &md, u64::MAX, 0, false, &mut |phase, _, _| {
             if phase == "gc_mark" && !changed {
                 fs::remove_dir(&gone).unwrap();
                 fs::write(&newcomer, b"keep").unwrap();
@@ -1483,12 +1475,12 @@ mod tests {
         refs::write_previous_head(&md, &refs::Head::Detached(previous)).unwrap();
         let missing = md.attestations_dir().join("99".repeat(32));
         write_attestation_fixture(&missing);
-        let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(store.contains(&previous) && store.contains(&blob));
         assert_eq!(report.skipped_state_files, [missing]);
         fs::remove_file(store.path_for(&blob)).unwrap();
         let orphan = write_blob(&store, b"must survive failed mark");
-        assert!(run_gc(&store, &md, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
         assert!(store.contains(&previous) && store.contains(&orphan));
     }
 
@@ -1577,7 +1569,7 @@ mod tests {
         for root in [good, bad] {
             write_attestation_fixture(&md.attestations_dir().join(hash::to_hex(&root)));
         }
-        let report = run_gc(&store, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(store.contains(&good) && store.contains(&chunk));
         assert!(!store.contains(&bad));
         assert_eq!(
@@ -1595,7 +1587,7 @@ mod tests {
         let orphan = write_blob(&store, b"orphan");
         write_attestation_fixture(&md.attestations_dir().join("99".repeat(32)));
         fs::remove_file(store.path_for(&blob)).unwrap();
-        assert!(run_gc(&store, &md, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&store, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
         assert!(store.contains(&hard) && store.contains(&orphan));
     }
 
@@ -1723,7 +1715,7 @@ mod tests {
         write_ref(&md, &format!("refs/heads/{name}"), &kept);
 
         assert!(collect_roots(&md).unwrap().contains(&kept));
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&kept) && s.contains(&kept_blob));
         assert!(!s.contains(&orphan) && !s.contains(&orphan_blob));
         drop(cleanup);
@@ -1751,7 +1743,7 @@ mod tests {
             Err(GcRootsError::RefTooDeep(_))
         ));
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::RefTooDeep(_))
         ));
         assert!(s.contains(&kept) && s.contains(&orphan));
@@ -1772,7 +1764,7 @@ mod tests {
         let (orphan, orphan_blob) = commit_one(&s, b"orphan", b"orphan", vec![]);
 
         // grace=0 → all unreachable objects are old enough to prune.
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
 
         // The safety invariant: every live object still present.
         for h in &live {
@@ -1839,7 +1831,7 @@ mod tests {
         .unwrap();
 
         // Every object is older than the grace period.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for h in [result_tree, result_blob, start, bad, good, skipped] {
             assert!(s.contains(&h), "{} was pruned", hash::to_hex(&h));
         }
@@ -1850,7 +1842,7 @@ mod tests {
         // With the state gone nothing keeps them.
         conflict_state::clear_merge_state(&md).unwrap();
         bisect::cleanup_bisect(&md).unwrap();
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         for h in [result_tree, result_blob, start, bad, good, skipped] {
             assert!(!s.contains(&h), "{} was kept", hash::to_hex(&h));
         }
@@ -1868,10 +1860,10 @@ mod tests {
         // A crash while the merge state was cleared leaves the file alone.
         conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
 
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(!s.contains(&result_tree) && !s.contains(&result_blob));
         // A second gc finds nothing left to read, and still succeeds.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&kept));
     }
 
@@ -1893,7 +1885,7 @@ mod tests {
             fs::write(md.orig_head_file(), format!("{}\n", hash::to_hex(&kept))).unwrap();
             conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
 
-            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
             assert!(
                 s.contains(&result_tree) && s.contains(&result_blob),
                 "{operation}: the result tree was pruned"
@@ -1901,7 +1893,7 @@ mod tests {
 
             // With the operation gone nothing keeps the tree.
             fs::remove_file(&head_file).unwrap();
-            run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
             assert!(
                 !s.contains(&result_tree) && !s.contains(&result_blob),
                 "{operation}: the result tree was kept"
@@ -2012,7 +2004,7 @@ mod tests {
             s.remove_object(&gone).unwrap();
         }
 
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         let mut expected = vec![
             md.bisect_file(),
             conflict_state::result_tree_path(&md.rebase_dir()),
@@ -2027,7 +2019,7 @@ mod tests {
         let (present, _) = commit_one(&s, b"present", b"present", vec![]);
         let present_tree = tree_of(&s, &present);
         conflict_state::write_result_tree(md.worktree_state_dir(), &present_tree).unwrap();
-        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
         assert!(
             !report
                 .skipped_state_files
@@ -2055,7 +2047,7 @@ mod tests {
         conflict_state::write_result_tree(md.worktree_state_dir(), &result_tree).unwrap();
         s.remove_object(&result_blob).unwrap();
 
-        let report = run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.skipped_state_files, [path]);
         assert!(s.contains(&kept) && s.contains(&kept_blob));
         // The rest of the closure is pruned, as the root is not one.
@@ -2068,7 +2060,7 @@ mod tests {
         conflict_state::write_result_tree(md.worktree_state_dir(), &tree_of(&s, &other)).unwrap();
         s.remove_object(&other_blob).unwrap();
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
         ));
     }
@@ -2096,12 +2088,12 @@ mod tests {
         s.remove_object(&tree).unwrap();
 
         assert!(matches!(
-            run_gc(&s, &md, u64::MAX, 0, false),
+            run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}),
             Err(GcRootsError::Store(StoreError::ObjectNotFound(_)))
         ));
         // A missing commit under a ref fails the same way.
         s.remove_object(&kept).unwrap();
-        assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+        assert!(run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
     }
 
     /// Only the roots that an older gc could prune are skipped when gone. The
@@ -2240,7 +2232,7 @@ mod tests {
             };
             setup(&md, kept, named);
             s.remove_object(&named).unwrap();
-            let result = run_gc(&s, &md, u64::MAX, 0, false);
+            let result = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {});
             assert!(
                 result.is_err(),
                 "a missing {name} must still fail gc, got {result:?}"
@@ -2275,7 +2267,7 @@ mod tests {
             "staged blob must be a retention root"
         );
         // grace=0 → anything unrooted is pruned immediately.
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             s.contains(&staged),
             "gc must never delete staged-but-uncommitted content"
@@ -2292,7 +2284,7 @@ mod tests {
 
         // Huge grace window with now=0 → nothing is "old", so the orphan
         // is kept despite being unreachable.
-        let report = run_gc(&s, &md, 0, u64::MAX, false).unwrap();
+        let report = run_gc(&s, &md, 0, u64::MAX, false, &mut |_, _, _| {}).unwrap();
         assert!(s.contains(&orphan), "recent orphan kept by grace window");
         assert_eq!(report.pruned, 0);
         assert!(report.kept_recent >= 1, "{report:?}");
@@ -2320,7 +2312,7 @@ mod tests {
         fs::remove_dir_all(&real_objects).unwrap();
         symlink(&external, &real_objects).unwrap();
 
-        let err = run_gc(&s, &md, u64::MAX, 0, false).unwrap_err();
+        let err = run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap_err();
         assert!(
             matches!(err, GcRootsError::SymlinkedStore(_)),
             "gc must refuse a symlinked objects dir, got {err:?}"
@@ -2335,7 +2327,7 @@ mod tests {
         write_ref(&md, "refs/heads/main", &kept);
         let (orphan, _) = commit_one(&s, b"o", b"o", vec![]);
 
-        let report = run_gc(&s, &md, u64::MAX, 0, true).unwrap();
+        let report = run_gc(&s, &md, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
         assert!(report.dry_run && report.pruned >= 1, "{report:?}");
         assert!(s.contains(&orphan), "dry run must not delete the orphan");
     }
@@ -2359,7 +2351,7 @@ mod tests {
         )
         .unwrap();
 
-        run_gc(&s, &md, u64::MAX, 0, false).unwrap();
+        run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             s.contains(&superseded) && s.contains(&superseded_blob),
             "a recovery-logged commit must not be pruned"
@@ -2398,7 +2390,7 @@ mod tests {
             b"KIDX\x04\0\0\0\0".to_vec(),
         ] {
             fs::write(md.index_file(), &bytes).unwrap();
-            assert!(run_gc(&s, &md, u64::MAX, 0, false).is_err());
+            assert!(run_gc(&s, &md, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
             assert!(s.contains(&staged));
         }
     }

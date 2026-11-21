@@ -1102,7 +1102,7 @@ fn set_pack_age(path: &std::path::Path, secs: u64) {
 
 #[test]
 fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let (live, live_ids) = publish_objects(&store, &[&blob(b"live pack")]);
@@ -1122,7 +1122,7 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
     set_pack_age(&young.pack, 8);
     set_pack_age(&old.index, 8);
 
-    let preview = run_gc_observed(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+    let preview = run_gc(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
     assert_eq!(
         preview.wholly_dead_bytes,
         (dead.len() + recent.len()) as u64
@@ -1137,7 +1137,7 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
     assert!(old.pack.exists() && old.index.exists());
 
     crate::atomic::testing::reset_dir_sync_calls();
-    let report = run_gc_observed(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.packs_retired, 1);
     assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
     assert_eq!(report.bytes_reclaimed, preview.bytes_reclaimed);
@@ -1151,14 +1151,14 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
 
 #[test]
 fn gc_rechecks_pack_mtime_and_leaves_a_concurrent_publication() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let (old, ids) = publish_objects(&store, &[&blob(b"reused object")]);
     set_pack_age(&old.pack, 1);
     let h = ids[0];
     let mut fresh_pack = None;
-    let packed = run_gc_observed(
+    let packed = run_gc(
         &store,
         &layout,
         u64::MAX,
@@ -1193,16 +1193,16 @@ fn gc_keeps_pack_files_while_a_fetch_holds_the_prune_guard() {
     let (_dir, layout, store) = fresh();
     let (pair, _) = publish_objects(&store, &[&blob(b"fetch is using this pack")]);
     let guard = store.prune_guard().unwrap();
-    run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
     assert!(pair.pack.exists() && pair.index.exists());
     drop(guard);
-    run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
     assert!(!pair.pack.exists() && !pair.index.exists());
 }
 
 #[test]
 fn gc_sweeps_only_aged_recognized_pack_leftovers() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let (retired, ids) = publish_objects(&store, &[&blob(b"no pack after interruption")]);
@@ -1247,12 +1247,12 @@ fn gc_sweeps_only_aged_recognized_pack_leftovers() {
         .iter()
         .map(|path| fs::metadata(path).unwrap().len())
         .sum();
-    let preview_totals = run_gc_observed(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+    let preview_totals = run_gc(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
     assert_eq!(preview_totals.pack_leftovers_pruned, 3);
     assert_eq!(preview_totals.bytes_reclaimed, expected_bytes);
     assert!(retired.index.exists());
     crate::atomic::testing::reset_dir_sync_calls();
-    let totals = run_gc_observed(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    let totals = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(totals.pack_leftovers_pruned, 3);
     assert_eq!(totals.bytes_reclaimed, expected_bytes);
     assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
@@ -1272,7 +1272,7 @@ fn gc_refuses_a_corrupt_index_before_pruning_loose_objects() {
     fs::write(&pair.index, data).unwrap();
 
     for dry_run in [true, false] {
-        assert!(run_gc(&store, &layout, u64::MAX, 0, dry_run).is_err());
+        assert!(run_gc(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {}).is_err());
         assert!(store.path_for(&loose).exists());
         assert!(pair.pack.exists() && pair.index.exists());
     }
@@ -1311,7 +1311,7 @@ fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
 
 #[test]
 fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     for (label, loose_age, pack_age, corrupt, keep) in [
@@ -1336,8 +1336,7 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         set_pack_age(&loose, loose_age);
 
         let expected_bytes = if keep { 0 } else { bytes.len() as u64 };
-        let preview_totals =
-            run_gc_observed(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
+        let preview_totals = run_gc(&store, &layout, 10, 5, true, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             preview_totals.loose_duplicates_pruned,
             usize::from(!keep),
@@ -1346,12 +1345,12 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         assert_eq!(preview_totals.bytes_reclaimed, expected_bytes, "{label}");
         assert!(loose.is_file());
         let guard = store.prune_guard().unwrap();
-        let blocked = run_gc_observed(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        let blocked = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(blocked.loose_duplicates_pruned, 0);
         assert!(loose.is_file());
         drop(guard);
         crate::atomic::testing::reset_dir_sync_calls();
-        let totals = run_gc_observed(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        let totals = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             totals.loose_duplicates_pruned,
             usize::from(!keep),
@@ -1401,7 +1400,7 @@ fn a_packed_leaf_probe_cannot_hide_edges_of_a_live_tree() {
 
         let gc = ObjectStore::open(&layout).unwrap();
         gc.iter_object_hashes().unwrap(); // Put the incorrect locator in the cache.
-        run_gc(&gc, &layout, u64::MAX, 0, false).unwrap();
+        run_gc(&gc, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(child_pack.pack.is_file());
         assert!(gc.read(&children[0]).is_ok());
     }
@@ -1409,14 +1408,14 @@ fn a_packed_leaf_probe_cannot_hide_edges_of_a_live_tree() {
 
 #[test]
 fn gc_preserves_a_pair_whose_missing_member_reappears_before_the_try_lock() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let bytes = blob(b"same-key publication");
     let (pair, ids) = publish_objects(&store, &[&bytes]);
     fs::remove_file(&pair.pack).unwrap();
     let mut republished = false;
-    let packed = run_gc_observed(
+    let packed = run_gc(
         &store,
         &layout,
         u64::MAX,
@@ -1439,13 +1438,13 @@ fn gc_preserves_a_pair_whose_missing_member_reappears_before_the_try_lock() {
 
 #[test]
 fn gc_preserves_a_candidate_whose_index_inode_changes_at_the_same_mtime() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let (pair, _) = publish_objects(&store, &[&blob(b"changed index inode")]);
     set_pack_age(&pair.index, 1);
     let mut replaced = false;
-    let packed = run_gc_observed(
+    let packed = run_gc(
         &store,
         &layout,
         u64::MAX,
@@ -1495,7 +1494,7 @@ fn same_key_publication_replaces_only_the_damaged_member_with_verified_bytes() {
 
 #[test]
 fn a_damaged_dead_pack_does_not_block_collection_of_verified_garbage() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let (damaged, _) = publish_objects(&store, &[&blob(b"damaged dead pack")]);
@@ -1506,8 +1505,7 @@ fn a_damaged_dead_pack_does_not_block_collection_of_verified_garbage() {
     fs::write(&damaged.pack, bytes).unwrap();
 
     for dry_run in [true, false] {
-        let report =
-            run_gc_observed(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {}).unwrap();
+        let report = run_gc(&store, &layout, u64::MAX, 0, dry_run, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.skipped_pack_errors.len(), 1);
         assert!(report.skipped_pack_errors[0].contains("invalid pack trailer"));
         assert_eq!(report.packs_retired, 1);
@@ -1535,7 +1533,7 @@ fn publishing_an_existing_pack_refreshes_its_mtime() {
 
 #[test]
 fn a_recent_loose_copy_replaced_by_a_newer_pack_is_not_counted_as_kept() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let bytes = blob(b"recent dead duplicate");
@@ -1546,7 +1544,7 @@ fn a_recent_loose_copy_replaced_by_a_newer_pack_is_not_counted_as_kept() {
     set_pack_age(&pair.pack, 9);
 
     for dry_run in [true, false] {
-        let report = run_gc_observed(&store, &layout, 10, 5, dry_run, &mut |_, _, _| {}).unwrap();
+        let report = run_gc(&store, &layout, 10, 5, dry_run, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.kept_recent, 0);
         assert_eq!(report.loose_duplicates_pruned, 1);
         assert_eq!(loose.exists(), dry_run);
@@ -1556,7 +1554,7 @@ fn a_recent_loose_copy_replaced_by_a_newer_pack_is_not_counted_as_kept() {
 
 #[test]
 fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     let (_dir, layout, store) = fresh();
     let live = blob(b"shared packed object");
@@ -1565,7 +1563,7 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
     publish_objects(&store, &[&live, &blob(b"first extra entry")]);
     publish_objects(&store, &[&live, &blob(b"second extra entry")]);
 
-    let report = run_gc_observed(&store, &layout, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
+    let report = run_gc(&store, &layout, u64::MAX, 0, true, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.packs_retired, 0);
     assert_eq!(report.loose_duplicates_pruned, 1);
     assert_eq!(report.bytes_reclaimed, live.len() as u64);
@@ -1597,7 +1595,7 @@ pub(super) fn pack_scan_error(key: Hash) -> std::io::Result<()> {
 
 #[test]
 fn gc_keeps_a_loose_duplicate_when_any_member_changes_before_the_try_lock() {
-    use crate::ops::gc::run_gc_observed;
+    use crate::ops::gc::run_gc;
 
     for member in ["pack", "index", "loose"] {
         let (_dir, layout, store) = fresh();
@@ -1629,7 +1627,7 @@ fn gc_keeps_a_loose_duplicate_when_any_member_changes_before_the_try_lock() {
             _ => set_pack_age(&path, 10),
         })));
 
-        let report = run_gc_observed(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+        let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
         assert!(BEFORE_DUPLICATE_TRY_LOCK.take().is_none());
         assert_eq!(report.loose_duplicates_pruned, 0, "{member} changed");
         assert_eq!(report.bytes_reclaimed, 0, "{member} changed");
@@ -1648,7 +1646,7 @@ fn a_pack_scan_io_error_aborts_gc_without_removing_other_garbage() {
     let kind = std::io::ErrorKind::PermissionDenied;
     PACK_SCAN_ERROR.set(Some((unreadable.key, kind)));
 
-    let result = run_gc(&store, &layout, u64::MAX, 0, false);
+    let result = run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {});
     assert!(PACK_SCAN_ERROR.get().is_none());
     assert!(matches!(
         result,
@@ -2148,4 +2146,286 @@ fn a_pack_retired_between_listing_and_open_is_absent() {
         reader.read(&ids[0]),
         Err(StoreError::ObjectNotFound(_))
     ));
+}
+
+/// A ref that names a manifest of `chunks`.
+fn manifest_root(store: &ObjectStore, layout: &RepoLayout, name: &str, chunks: &[Hash]) -> Hash {
+    let manifest = serialize(&Object::ChunkedBlob(
+        crate::object::testing::spread(chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
+    ))
+    .unwrap();
+    let root = store.write(&manifest).unwrap();
+    crate::refs::write_ref(layout, name, &root).unwrap();
+    root
+}
+
+/// Change one byte of an object's frame, `at` bytes into its bytes.
+fn damage_frame(pair: &Pair, id: &Hash, at: usize, change: impl FnOnce(&mut u8)) {
+    let frame = super::Index::open(pair).unwrap().find(id).unwrap();
+    let mut bytes = fs::read(&pair.pack).unwrap();
+    change(&mut bytes[usize::try_from(frame.offset).unwrap() + at]);
+    fs::write(&pair.pack, bytes).unwrap();
+}
+
+#[test]
+fn the_mark_checks_a_packed_chunk_by_its_head_and_hashes_none_of_it() {
+    let (_dir, layout, store) = fresh();
+    let (_, chunks) = publish_objects(&store, &[&blob(&[1; 4096]), &blob(&[2; 4096])]);
+    let root = manifest_root(&store, &layout, "live", &chunks);
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    assert!(
+        chunks.iter().all(|c| !gc.path_for(c).exists()),
+        "chunks are packed"
+    );
+    let live = crate::ops::gc::live_objects(&gc, &layout).unwrap();
+    assert!(live.contains(&root) && chunks.iter().all(|c| live.contains(c)));
+    assert_eq!(gc.gc_hashed_byte_count(), 0);
+}
+
+#[test]
+fn a_packed_chunk_with_a_bad_payload_passes_the_mark_and_is_reported_by_the_scan() {
+    let (_dir, layout, store) = fresh();
+    let (pair, chunks) = publish_objects(&store, &[&blob(&[3; 4096])]);
+    manifest_root(&store, &layout, "live", &chunks);
+    let orphan = store.write(&blob(b"unreachable")).unwrap();
+    damage_frame(&pair, &chunks[0], 10, |byte| *byte ^= 1);
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    assert!(crate::ops::gc::live_objects(&gc, &layout).is_ok());
+    assert!(matches!(
+        gc.check_local_packs(false),
+        Err(StoreError::LocalPackDamaged { .. })
+    ));
+    assert!(gc.read(&chunks[0]).is_err());
+
+    // Gc runs, keeps the live pack, and removes only what nothing reaches.
+    crate::ops::gc::run_gc(&gc, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+    assert!(pair.pack.is_file() && pair.index.is_file());
+    assert!(!gc.contains(&orphan));
+}
+
+#[test]
+fn an_index_row_that_locates_another_kind_of_object_is_not_a_chunk() {
+    use crate::object::Tree;
+    use crate::ops::gc::GcRootsError;
+
+    let (_dir, layout, store) = fresh();
+    let chunk = index::canonical_id(&blob(&[4; 4096])).unwrap();
+    let root = manifest_root(&store, &layout, "live", &[chunk]);
+    let tree = serialize(&Object::Tree(Tree { entries: vec![] })).unwrap();
+    let (decoy, ids) = publish_objects(&store, &[&tree]);
+    let frame = super::Index::open(&decoy).unwrap().find(&ids[0]).unwrap();
+    fs::write(&decoy.index, index::encode(decoy.key, &[(chunk, frame)])).unwrap();
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    let error = crate::ops::gc::live_objects(&gc, &layout).unwrap_err();
+    assert!(
+        matches!(error, GcRootsError::ChunkNotBlob { chunk: c, manifest } if c == chunk && manifest == root),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_packed_chunk_whose_head_disagrees_with_its_frame_length_fails_the_mark() {
+    use crate::ops::gc::GcRootsError;
+
+    let (_dir, layout, store) = fresh();
+    let (pair, chunks) = publish_objects(&store, &[&blob(&[5; 4096])]);
+    manifest_root(&store, &layout, "live", &chunks);
+    let orphan = store.write(&blob(b"kept after a failed mark")).unwrap();
+    damage_frame(&pair, &chunks[0], 6, |byte| *byte ^= 1);
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    let error = crate::ops::gc::live_objects(&gc, &layout).unwrap_err();
+    assert!(
+        matches!(&error, GcRootsError::Store(StoreError::LocalPackDamaged { reason, .. }) if reason.contains("blob header")),
+        "{error:?}"
+    );
+    assert!(crate::ops::gc::run_gc(&gc, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).is_err());
+    assert!(pair.pack.is_file() && gc.contains(&orphan));
+}
+
+#[test]
+fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+    use crate::ops::gc::GcRootsError;
+
+    let bytes = blob(&[6; 4096]);
+    for damaged in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&bytes]);
+        let tree = serialize(&Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"file".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: ids[0],
+            }],
+        }))
+        .unwrap();
+        let root = store.write(&tree).unwrap();
+        crate::refs::write_ref(&layout, "files", &root).unwrap();
+        manifest_root(&store, &layout, "chunked", &ids);
+        if damaged {
+            damage_frame(&pair, &ids[0], 10, |byte| *byte ^= 1);
+        }
+
+        let gc = ObjectStore::open(&layout).unwrap();
+        let result = crate::ops::gc::live_objects(&gc, &layout);
+        if damaged {
+            assert!(
+                matches!(
+                    result,
+                    Err(GcRootsError::Store(StoreError::HashMismatch { .. }))
+                ),
+                "{result:?}"
+            );
+        } else {
+            result.unwrap();
+        }
+        // The file probe hashes the blob once. The chunk pass skips it.
+        assert_eq!(gc.gc_hashed_byte_count(), bytes.len() as u64);
+    }
+}
+
+fn cut_pack_short(pair: &Pair) {
+    let cut = fs::metadata(&pair.pack).unwrap().len() - 100;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&pair.pack)
+        .unwrap()
+        .set_len(cut)
+        .unwrap();
+}
+
+#[test]
+fn a_pack_cut_short_before_a_read_is_damage_on_every_read_path() {
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[7; 4096]);
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.read(&ids[0]).unwrap(), bytes);
+    cut_pack_short(&pair);
+
+    for error in [
+        reader.read(&ids[0]).unwrap_err(),
+        reader.read_unverified(&ids[0]).unwrap_err(),
+        reader
+            .read_with_allocator::<StoreError>(&ids[0], |size| Ok(Vec::with_capacity(size)))
+            .unwrap_err(),
+        reader.read_object(&ids[0]).unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, StoreError::LocalPackDamaged { pack, .. } if **pack == *pair.pack.display().to_string()),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_pack_cut_short_after_its_handle_is_cached_is_damage_and_a_read_error_is_not() {
+    use std::io::Read;
+
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[8; 4096]);
+    let (pair, ids) = publish_objects(&store, &[&bytes]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.read(&ids[0]).unwrap(), bytes); // Caches the locator and handle.
+
+    // The pack ends early after the frame was opened and before it is read.
+    let error = reader
+        .packs
+        .lookup(&reader, &ids[0], false, |location| {
+            let mut contents = location.open()?;
+            cut_pack_short(&pair);
+            let mut read = vec![0; bytes.len()];
+            contents.read_exact(&mut read)?;
+            Ok(read)
+        })
+        .unwrap_err();
+    assert_damage(&error, &pair, "ends early");
+
+    for kind in [
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let error = reader
+            .packs
+            .lookup(&reader, &ids[0], false, |_| -> Result<(), StoreError> {
+                Err(std::io::Error::from(kind).into())
+            })
+            .unwrap_err();
+        assert!(
+            matches!(&error, StoreError::Io(e) if e.kind() == kind),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn a_good_loose_chunk_survives_gc_when_its_packed_copy_has_a_bad_payload() {
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(&[9; 4096]);
+    let (pair, chunks) = publish_objects(&store, &[&bytes]);
+    manifest_root(&store, &layout, "live", &chunks);
+    // The mark accepts the packed copy by its head, so only the duplicate
+    // check protects the loose copy.
+    let loose = store.path_for(&chunks[0]);
+    fs::create_dir_all(loose.parent().unwrap()).unwrap();
+    fs::write(&loose, &bytes).unwrap();
+    damage_frame(&pair, &chunks[0], 10, |byte| *byte ^= 1);
+
+    let gc = ObjectStore::open(&layout).unwrap();
+    let report =
+        crate::ops::gc::run_gc(&gc, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.loose_duplicates_pruned, 0);
+    assert_eq!(fs::read(&loose).unwrap(), bytes);
+    assert!(pair.pack.is_file());
+}
+
+#[test]
+fn the_soft_classification_hashes_an_id_it_reached_as_a_chunk_and_as_a_node() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    let bytes = blob(&[10; 4096]);
+    // The tree lists the manifest before and after the blob in turn, so the
+    // blob is seen first as a chunk in one run and first as a node in the other.
+    for (manifest_name, blob_name) in [("a", "b"), ("b", "a")] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&bytes]);
+        let manifest = serialize(&Object::ChunkedBlob(
+            crate::object::testing::spread(1, 0, ids.clone()).unwrap(),
+        ))
+        .unwrap();
+        let manifest = store.write(&manifest).unwrap();
+        let mut entries = vec![
+            TreeEntry {
+                name: manifest_name.into(),
+                mode: EntryMode::Blob,
+                object_hash: manifest,
+            },
+            TreeEntry {
+                name: blob_name.into(),
+                mode: EntryMode::Blob,
+                object_hash: ids[0],
+            },
+        ];
+        entries.sort_by(|x, y| x.name.cmp(&y.name));
+        let tree = store
+            .write(&serialize(&Object::Tree(Tree { entries })).unwrap())
+            .unwrap();
+        damage_frame(&pair, &ids[0], 10, |byte| *byte ^= 1);
+
+        let gc = ObjectStore::open(&layout).unwrap();
+        let result = crate::ops::gc::classify_soft_root(&gc, tree);
+        assert!(
+            matches!(
+                result,
+                Err(crate::ops::gc::GcRootsError::Store(
+                    StoreError::HashMismatch { .. }
+                ))
+            ),
+            "{manifest_name}/{blob_name}: {result:?}"
+        );
+    }
 }

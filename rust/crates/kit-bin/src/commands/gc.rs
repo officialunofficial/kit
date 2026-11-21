@@ -31,7 +31,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::{DEFAULT_GRACE_SECS, GcRootsError, run_gc_observed};
+use kit_core::ops::gc::{DEFAULT_GRACE_SECS, GcRootsError, run_gc};
 use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::store::{ObjectStore, StoreError};
 
@@ -144,7 +144,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
-    let report = match run_gc_observed(
+    let report = match run_gc(
         &store,
         &layout,
         now,

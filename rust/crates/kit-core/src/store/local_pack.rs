@@ -349,7 +349,10 @@ impl LocalPacks {
                 return Ok(None);
             };
             let file = self.handles.get(locator, Member::Pack)?;
-            use_location(Location::Cached(Arc::clone(locator), frame, file)).map(Some)
+            // A pack cut short after its handle was cached ends a read early.
+            use_location(Location::Cached(Arc::clone(locator), frame, file))
+                .map(Some)
+                .map_err(|e| named(&locator.pair.pack, e))
         })();
         if value.as_ref().is_err_and(is_disappeared) {
             errors.stale = true;

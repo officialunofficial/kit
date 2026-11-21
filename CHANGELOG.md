@@ -22,6 +22,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
 - Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
+- Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
+- **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
 
@@ -39,6 +41,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
 

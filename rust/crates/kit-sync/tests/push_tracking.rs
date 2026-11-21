@@ -337,7 +337,8 @@ impl Observer<SyncEvent> for GcDuringUpload<'_> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        kit_core::ops::gc::run_gc(&store, self.layout, now + 3600, 0, false).unwrap();
+        kit_core::ops::gc::run_gc(&store, self.layout, now + 3600, 0, false, &mut |_, _, _| {})
+            .unwrap();
     }
 }
 
@@ -374,7 +375,15 @@ fn a_gc_during_a_push_keeps_the_tip_its_tracking_ref_names() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    kit_core::ops::gc::run_gc(&store, &work.layout, now + 3600, 0, false).unwrap();
+    kit_core::ops::gc::run_gc(
+        &store,
+        &work.layout,
+        now + 3600,
+        0,
+        false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
     assert!(store.contains(&tip));
 }
 

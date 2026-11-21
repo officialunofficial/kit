@@ -37,13 +37,13 @@ fn gc_at_grace_zero_prunes_nothing_while_the_guard_is_held() {
     let ids = orphans(&store, 5);
 
     let guard = store.prune_guard().unwrap();
-    let report = run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    let report = run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.pruned, 0);
     assert_eq!(report.kept_recent, 5);
     assert!(ids.iter().all(|id| store.contains(id)));
 
     drop(guard);
-    let report = run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    let report = run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.pruned, 5);
     assert!(ids.iter().all(|id| !store.contains(id)));
 }
@@ -66,7 +66,7 @@ fn a_guard_held_from_another_thread_protects_the_store() {
         });
         held_rx.recv_timeout(Duration::from_secs(10)).unwrap();
 
-        let report = run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+        let report = run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(report.pruned, 0);
         assert!(ids.iter().all(|id| store.contains(id)));
 
@@ -74,7 +74,7 @@ fn a_guard_held_from_another_thread_protects_the_store() {
         holder.join().unwrap();
     });
 
-    let report = run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+    let report = run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.pruned, 3);
 }
 
@@ -121,11 +121,11 @@ fn gc_removes_a_temp_file_older_than_the_grace_period_and_keeps_a_younger_one() 
     let bulk = temp_file(&store, ".kit.tmp.77.2Abc", 10_000);
     let young = temp_file(&store, ".4567.tmp.77.3Def", 10);
 
-    let report = run_gc(&store, &layout, now_secs(), 1_000, true).unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 1_000, true, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.temp_files_pruned, 2);
     assert!(old.exists() && bulk.exists() && young.exists(), "dry run");
 
-    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.temp_files_pruned, 2);
     assert_eq!(report.bytes_reclaimed, 2 * 14);
     assert!(!old.exists() && !bulk.exists());
@@ -138,12 +138,12 @@ fn gc_keeps_an_old_temp_file_while_a_prune_guard_is_held() {
     let old = temp_file(&store, ".0123.tmp.77.1Xyz", 10_000);
 
     let guard = store.prune_guard().unwrap();
-    let report = run_gc(&store, &layout, now_secs(), 0, false).unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 0, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.temp_files_pruned, 0);
     assert!(old.exists());
 
     drop(guard);
-    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.temp_files_pruned, 1);
     assert!(!old.exists());
 }
@@ -163,7 +163,7 @@ fn gc_leaves_files_that_are_not_temp_files_alone() {
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(10_000))
         .unwrap();
 
-    let report = run_gc(&store, &layout, now_secs(), 1_000, false).unwrap();
+    let report = run_gc(&store, &layout, now_secs(), 1_000, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.temp_files_pruned, 0);
     assert!(stray.exists());
     assert!(store.contains(&ids[0]), "a young object stays too");

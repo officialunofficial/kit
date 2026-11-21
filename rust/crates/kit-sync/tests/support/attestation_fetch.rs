@@ -195,7 +195,7 @@ mod attestation_fetch {
         let hex = to_hex(&tree);
         std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             gc.skipped_state_files
                 .contains(&layout.attestations_dir().join(to_hex(&tip)))
