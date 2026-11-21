@@ -66,7 +66,7 @@
 //! inclusion-proof construction below are both stable
 //! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). [`Proof`]'s bytes and sibling
 //! selection are byte-identical to `commonware_storage::bmt::Proof` at the
-//! pinned `2026.10.0` train: a commonware-based verifier can decode a
+//! pinned `2026.11.0` train: a commonware-based verifier can decode a
 //! kit-produced proof with the upstream type and run its own
 //! `verify_element_inclusion` / `verify_range_inclusion` /
 //! `verify_multi_inclusion` against the **inner root** (see
@@ -777,7 +777,7 @@ impl BmtTree {
 ///
 /// Bytes are `u32 BE leaf_count ‖ LEB128-varint(n) ‖ n × 32-byte digest` —
 /// byte-identical to `commonware_storage::bmt::Proof<D>` at the pinned
-/// `2026.10.0` train (`tests::proofs_match_commonware` pins this; see also
+/// `2026.11.0` train (`tests::proofs_match_commonware` pins this; see also
 /// `rust/tests/golden/proofs/`). A commonware-based verifier can decode
 /// these bytes with the upstream type directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2295,7 +2295,7 @@ mod tests {
                 "single-proof bytes diverged at n={n} pos={pos}"
             );
             cw_proof
-                .verify_element_inclusion::<Blake3>(&Digest(leaves[pos as usize]), pos, &cw_root)
+                .verify_element_inclusion::<Blake3>(pos, &Digest(leaves[pos as usize]), &cw_root)
                 .expect("upstream must accept its own proof");
             our_proof
                 .verify_element_inclusion(&leaves[pos as usize], pos, &ours.root)
@@ -2316,7 +2316,7 @@ mod tests {
                 )
                 .unwrap();
             cw_decoded
-                .verify_element_inclusion::<Blake3>(&Digest(leaves[pos as usize]), pos, &cw_root)
+                .verify_element_inclusion::<Blake3>(pos, &Digest(leaves[pos as usize]), &cw_root)
                 .expect("upstream must accept our proof bytes");
 
             // --- mutation must be rejected by both ---
@@ -2383,9 +2383,9 @@ mod tests {
                     );
                     let elements: Vec<(Hash, u32)> =
                         positions.iter().map(|&p| (leaves[p as usize], p)).collect();
-                    let cw_elements: Vec<(Digest, u32)> = positions
+                    let cw_elements: Vec<(u32, Digest)> = positions
                         .iter()
-                        .map(|&p| (Digest(leaves[p as usize]), p))
+                        .map(|&p| (p, Digest(leaves[p as usize])))
                         .collect();
                     cw_multi
                         .verify_multi_inclusion::<Blake3>(&cw_elements, &cw_root)
@@ -2430,9 +2430,9 @@ mod tests {
                         );
                         let bad_elements: Vec<(Hash, u32)> =
                             bad.iter().map(|&p| (leaves[p as usize], p)).collect();
-                        let bad_cw_elements: Vec<(Digest, u32)> = bad
+                        let bad_cw_elements: Vec<(u32, Digest)> = bad
                             .iter()
-                            .map(|&p| (Digest(leaves[p as usize]), p))
+                            .map(|&p| (p, Digest(leaves[p as usize])))
                             .collect();
                         assert_eq!(
                             our_multi.verify_multi_inclusion(&bad_elements, &ours.root),

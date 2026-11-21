@@ -163,7 +163,7 @@ pub fn verify_inclusion(
 
     // Same bagging policy as the producer — see [`HISTORY_BAGGING`].
     let hasher = history_hasher();
-    proof.verify_element_inclusion(&hasher, leaf.as_ref(), loc, &root_digest)
+    proof.verify_element_inclusion(&hasher, loc, leaf.as_ref(), &root_digest)
 }
 
 fn digest_from_hash(h: &Hash) -> <Blake3 as CHasher>::Digest {
