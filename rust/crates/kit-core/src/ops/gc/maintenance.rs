@@ -102,6 +102,13 @@ struct Stamp {
 }
 
 impl Stamp {
+    /// The stamp of a step that has never run: due as soon as the floor is.
+    const NEVER: Self = Self {
+        attempted: 0,
+        outcome: Collection::Complete,
+        complete_pairs: 0,
+    };
+
     fn read(file: &mut File) -> Option<Self> {
         let mut bytes = [0; 17];
         file.read_exact(&mut bytes).ok()?;
@@ -258,22 +265,29 @@ fn run(
     {
         return Collection::NotDue;
     }
+    // A store with no packs has nothing to maintain and gets no stamp file.
+    if !matches!(store.try_packed_for_maintenance(), Ok(true)) {
+        return Collection::NotDue;
+    }
     let Ok(mut file) = lock_stamp(layout.common_dir()) else {
         return Collection::NotDue;
     };
     let now = now_secs();
-    let Some(stamp) = Stamp::read(&mut file) else {
-        let _ = Stamp {
-            attempted: now,
-            outcome: Collection::NotDue,
-            complete_pairs: 0,
+    let stamp = match Stamp::read(&mut file) {
+        Some(stamp) => stamp,
+        // A step that has never run is due once the store holds the floor,
+        // so a repository that never fetches is maintained too.
+        None if file.metadata().is_ok_and(|meta| meta.len() == 0) => Stamp::NEVER,
+        None => {
+            let _ = Stamp {
+                attempted: now,
+                outcome: Collection::NotDue,
+                complete_pairs: 0,
+            }
+            .write(&mut file);
+            return Collection::NotDue;
         }
-        .write(&mut file);
-        return Collection::NotDue;
     };
-    if !matches!(store.try_packed_for_maintenance(), Ok(true)) {
-        return Collection::NotDue;
-    }
     let Ok((sweep, pairs)) = store.plan_pack_leftovers(now, DEFAULT_GRACE_SECS) else {
         return Collection::NotDue;
     };
