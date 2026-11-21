@@ -30,6 +30,8 @@ exclude_re = [
   'signer_external\.rs:.*replace < with <= in spawn_stderr_drainer$',
   # Changing a test's fixed signing seed changes no production behavior.
   'signer_k256\.rs:.*replace tests::fixed_secret ',
+  # Each old index occurs once among the candidates, so < and <= pick the same chain position.
+  'transfer\.rs:[0-9]+:[0-9]+: replace < with <= in unmatched_runs$',
 ]
 
 exclude_globs = [
