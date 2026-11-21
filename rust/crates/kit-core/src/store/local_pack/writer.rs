@@ -187,19 +187,57 @@ impl<'a> LocalPackWriter<'a> {
     /// [`publish`](Self::publish), naming the published pair. An empty pack
     /// publishes nothing.
     pub(super) fn publish_pair(self) -> StoreResult<Option<Pair>> {
+        self.detach().publish_pair()
+    }
+
+    /// Take the writer's pack and rows as a [`SealJob`], which owns what it
+    /// needs and can run on another thread. The caller keeps the guard this
+    /// writer was checked against until the job finishes.
+    pub(crate) fn detach(self) -> SealJob {
+        SealJob {
+            store: self.store.clone(),
+            pack: self.pack,
+            frames: self.frames,
+            empty: self.ids.is_empty(),
+            failed: self.failed,
+        }
+    }
+}
+
+/// A full pack on its way to publication: everything [`LocalPackWriter`] knew
+/// that sealing needs, without its borrow of the store.
+#[derive(Debug)]
+pub(crate) struct SealJob {
+    store: ObjectStore,
+    pack: BufWriter<tempfile::NamedTempFile>,
+    frames: Frames,
+    empty: bool,
+    failed: bool,
+}
+
+impl SealJob {
+    /// Sync and publish the pack and index, as [`LocalPackWriter::publish`].
+    ///
+    /// # Errors
+    /// An earlier write failed, or a staging or publication failure.
+    pub(crate) fn publish(self) -> StoreResult<()> {
+        self.publish_pair().map(|_| ())
+    }
+
+    fn publish_pair(self) -> StoreResult<Option<Pair>> {
         if self.failed {
             return Err(failed_writer());
         }
-        if self.ids.is_empty() {
+        if self.empty {
             return Ok(None);
         }
         let pack = self
             .pack
             .into_inner()
             .map_err(std::io::IntoInnerError::into_error)?;
-        let staged = Staged::seal(self.store, pack, self.frames)?;
+        let staged = Staged::seal(&self.store, pack, self.frames)?;
         let pair = staged.pair.clone();
-        staged.publish(self.store)?;
+        staged.publish(&self.store)?;
         Ok(Some(pair))
     }
 }
