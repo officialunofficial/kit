@@ -55,6 +55,18 @@ impl Limit {
         entries: OUTPUT_ENTRIES,
     };
 
+    /// The automatic step's bound.
+    pub(super) fn automatic() -> Self {
+        #[cfg(test)]
+        if let Some(entries) = TEST_OUTPUT_ENTRIES.get() {
+            return Self {
+                payload: OUTPUT_PAYLOAD,
+                entries,
+            };
+        }
+        Self::ONE_OUTPUT
+    }
+
     /// Keep the inputs that fit, those that copy nothing first, then the
     /// smallest. A dropped input stays as it is and counts as a pair that
     /// stays for none of the others.
@@ -76,6 +88,17 @@ impl Limit {
             true
         });
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_OUTPUT_ENTRIES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test override of the entries one automatic step may copy.
+#[cfg(test)]
+pub(crate) fn set_test_output_entries(entries: Option<usize>) {
+    TEST_OUTPUT_ENTRIES.set(entries);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -159,6 +182,8 @@ impl Input {
 pub(super) struct CopyPlan {
     members: Vec<Member>,
     inputs: Vec<Input>,
+    /// Inputs the limit left out, which a later run plans again.
+    left: usize,
 }
 
 /// A pair that an input relies on, with the stamps seen when it was chosen.
@@ -294,11 +319,22 @@ impl CopyPlan {
                 inputs.push(input);
             }
         }
+        let planned = inputs.len();
         limit.apply(&mut inputs);
         if inputs.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Self { members, inputs }))
+        let left = planned - inputs.len();
+        Ok(Some(Self {
+            members,
+            inputs,
+            left,
+        }))
+    }
+
+    /// The limit left inputs out for a later run.
+    pub(super) fn left_inputs(&self) -> bool {
+        self.left != 0
     }
 
     /// Dry run: report what a real run would do, assuming every covering copy
@@ -538,6 +574,12 @@ impl Copied {
         (0..self.inputs.len())
             .filter(|&at| !outputs.contains(&self.inputs[at].key))
             .collect()
+    }
+
+    /// File bytes of input `at`: what retiring it unlinks.
+    pub(super) fn input_bytes(&self, at: usize) -> u64 {
+        let input = &self.inputs[at];
+        input.pack.len + input.locator.len
     }
 
     /// Of the candidates `among`, the inputs that are still safe to retire.

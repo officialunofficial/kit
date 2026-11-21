@@ -59,6 +59,9 @@ mod memory_overlay;
 mod source;
 pub(crate) use local_pack::Catalog as PackCatalog;
 pub(crate) use local_pack::SealJob;
+pub(crate) use local_pack::Verify;
+#[cfg(test)]
+pub(crate) use local_pack::set_test_output_entries;
 pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};

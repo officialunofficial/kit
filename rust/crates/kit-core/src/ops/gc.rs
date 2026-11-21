@@ -823,6 +823,11 @@ pub struct GcReport {
     /// Why copy-then-retire stopped, such as a full disk. Gc kept every pack it
     /// meant to copy and went on with the rest of the run.
     pub pack_copy_error: Option<String>,
+    /// Retirement could not take the exclusive `format` lock, because a
+    /// fetch, push or add held it, so it stopped before the rest of its
+    /// batches. Earlier batches stay done. Survivors that gc already copied
+    /// stay as duplicates, and the next gc retires what is left.
+    pub pack_retirement_cut_short: bool,
     /// Milliseconds that pack retirement held the exclusive `format` lock,
     /// from the successful try to the release; the longest of the holds. A
     /// writer that starts then waits that long.

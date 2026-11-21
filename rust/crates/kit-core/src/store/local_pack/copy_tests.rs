@@ -834,11 +834,88 @@ fn a_busy_try_in_a_later_batch_ends_the_run_and_the_next_run_finishes() {
 
     let report = run(&store, &layout, false);
     assert_eq!(report.packs_retired, 1, "the first batch only");
+    assert!(report.pack_retirement_cut_short, "gc reports the stop");
     assert_eq!(pairs.iter().filter(|pair| exists(pair)).count(), 2);
     drop(publisher.borrow_mut().take());
 
     super::tests::set_after_retire_batch(|_| Ok(()));
     let report = run(&store, &layout, false);
+    assert!(!report.pack_retirement_cut_short);
     assert_eq!(report.packs_retired, 2);
     assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_hold_is_bounded_by_bytes_as_well_as_by_items() {
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 6);
+    let one = fs::metadata(&pairs[0].pack).unwrap().len() + fs::metadata(&pairs[0].index).unwrap().len();
+    // Room for two packs by bytes, though the item count would allow 32.
+    let _batch = super::tests::set_retire_batch_limits(32, 2 * one + one / 2);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 6);
+    assert_eq!(report.retire_batches, 3, "2 + 2 + 2");
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_pack_larger_than_the_byte_cap_still_retires_alone() {
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 3);
+    let _batch = super::tests::set_retire_batch_limits(32, 1);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 3);
+    assert_eq!(report.retire_batches, 3, "one pack per hold");
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_run_that_retires_everything_does_not_report_a_stop() {
+    let (_dir, layout, store) = fresh();
+    dead_packs(&store, 3);
+    assert!(!run(&store, &layout, false).pack_retirement_cut_short);
+}
+
+/// Verification takes the oldest wholly dead packs first and stops before the
+/// next one when `room` says no: what it verified stays planned.
+#[test]
+fn planning_verifies_the_oldest_dead_packs_first_and_stops_when_told() {
+    use std::cell::Cell;
+
+    use super::Verify;
+
+    let (_dir, _layout, store) = fresh();
+    // Modification times, in the order the packs were created: not age order.
+    let mtimes = [5, 2, 7, 1, 9];
+    let pairs: Vec<Pair> = mtimes
+        .iter()
+        .enumerate()
+        .map(|(n, &mtime)| publish(&store, &[&obj(&format!("dead {n}"), 500)], mtime).0)
+        .collect();
+
+    let calls = Cell::new(0_usize);
+    let mut report = GcReport::default();
+    let sweep = store
+        .plan_pack_retirement_within(
+            &Default::default(),
+            NOW,
+            GRACE,
+            &mut report,
+            &|| Ok(()),
+            &Verify {
+                room: &|| {
+                    calls.set(calls.get() + 1);
+                    calls.get() <= 3
+                },
+                scan: &|| Ok(()),
+            },
+        )
+        .unwrap();
+    assert!(sweep.verification_cut_short());
+    assert_eq!(sweep.planned_packs(), 3);
+    // The three smallest modification times: 1, 2 and 5.
+    let planned: Vec<usize> = (0..5).filter(|&at| sweep.plans(&pairs[at])).collect();
+    assert_eq!(planned, [0, 1, 3]);
 }

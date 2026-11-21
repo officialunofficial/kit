@@ -176,6 +176,16 @@ pub fn run(args: &[String]) -> u8 {
             "warning: kept the local packs gc meant to rewrite or merge: {error}"
         );
     }
+    if report.pack_retirement_cut_short {
+        let _ = writeln!(
+            stderr,
+            "warning: gc stopped retiring local packs because a fetch, push or add held the store lock; {} retired, the rest stay until the next gc",
+            report.packs_retired
+                + report.packs_rewritten
+                + report.packs_merged
+                + report.packs_retired_covered,
+        );
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(
