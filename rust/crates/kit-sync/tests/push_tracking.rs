@@ -24,6 +24,9 @@ use kit_sync::push::{PushError, PushLease, PushOptions, PushTarget};
 use kit_sync::{CloneRemote, Observer, RemoteSource, SyncEvent, TransportSource, init_clone_dir};
 use kit_transport_memory::MemoryTransport;
 
+/// The sync hook is one per process, so the tests that set it run one at a time.
+static HOOK: Mutex<()> = Mutex::new(());
+
 const REMOTE: &str = "default";
 const MAIN: &str = "refs/heads/main";
 
@@ -198,6 +201,7 @@ fn successful_push_records_only_packs_with_verified_signatures() {
 /// in a packed store, the pack directory.
 #[test]
 fn a_push_flushes_only_the_shards_of_the_packs_it_records() {
+    let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
     let tx = MemoryTransport::new();
     let work = Work::new();
     let tip = work.commit(None);
@@ -252,6 +256,7 @@ fn a_push_flushes_only_the_shards_of_the_packs_it_records() {
 /// records them, leaves the next fetch to apply every one of them.
 #[test]
 fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
+    let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
     let tx = MemoryTransport::new();
     let work = Work::new();
     let tip = work.commit(None);

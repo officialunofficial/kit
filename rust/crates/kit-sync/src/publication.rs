@@ -87,6 +87,8 @@ impl<'a> Publication<'a> {
         // An object that ends as a loose file is not copied: the window adopts
         // it from `spool`, whose decoder already derived its id, and `seal`
         // reads it once to write it.
+        // The decoder's file stays on disk until the window seals, so a pack of
+        // mostly packed objects holds its bytes twice for that time.
         let mut loose = Vec::new();
         for (_, id, len, ty) in order {
             let size = len as usize;
@@ -184,15 +186,9 @@ impl<'a> Publication<'a> {
                 loose_ids.push(id);
             }
         }
-        // The decoder derived each of these ids from the bytes it staged, so
-        // they are written under it without a second hash.
-        loose.stage_fetched(&loose_ids, |id| {
-            let bytes = window
-                .spool
-                .read_decoded(id)?
-                .ok_or_else(|| StoreError::ObjectNotFound(to_hex(id)))?;
-            Ok((*id, bytes))
-        })?;
+        // One checked read of each, from the decoder's file for an adopted
+        // object, then a write under the checked id.
+        loose.stage_spooled(&window.spool, &loose_ids)?;
         if let Some(pack) = pack {
             pack.publish()?;
         }

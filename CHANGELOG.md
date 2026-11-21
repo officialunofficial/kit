@@ -46,7 +46,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
 - Push flushes only the object directories of the packs it records, not all 256.
-- Fetch and clone write an object larger than 262,154 bytes loose straight from the decoded pack, without a second spool or a second hash.
+- Fetch and clone write an object larger than 262,154 bytes loose from the decoder's spool, without copying it to a second spool and back.
 
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.

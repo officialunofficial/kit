@@ -12,9 +12,8 @@ use crate::store::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult};
 
 use super::{PackError, UnpackSink, read_spooled};
 
-/// An unnamed append-only file and its in-memory locator. Every read but
-/// [`ObjectSpool::read_decoded`] verifies the object id; offsets and lengths
-/// come from the decoder, never the file.
+/// An unnamed append-only file and its in-memory locator. Every read verifies
+/// the object id; offsets and lengths come from the decoder, never the file.
 ///
 /// A spool can also adopt objects another spool holds, by keeping a handle to
 /// that spool's file rather than copying the bytes ([`ObjectSpool::adopt`]).
@@ -197,32 +196,11 @@ impl ObjectSpool {
         self.read_before(id, usize::MAX, |_| Ok(()))
     }
 
-    /// Read a staged copy without hashing it again, if present. For an object
-    /// the decoder derived the id of when it staged it, whose bytes go
-    /// straight to a write that names them by that id: the loose write of a
-    /// fetched object, which is read here once and hashed once, at decode.
-    ///
-    /// # Errors
-    /// A local read error.
-    pub fn read_decoded(&self, id: &Hash) -> StoreResult<Option<Vec<u8>>> {
-        self.read_frame(id, usize::MAX, |_| Ok(()), false)
-    }
-
     pub(super) fn read_before<E: From<StoreError>>(
         &self,
         id: &Hash,
         before: usize,
         admit: impl FnOnce(usize) -> Result<(), E>,
-    ) -> Result<Option<Vec<u8>>, E> {
-        self.read_frame(id, before, admit, true)
-    }
-
-    fn read_frame<E: From<StoreError>>(
-        &self,
-        id: &Hash,
-        before: usize,
-        admit: impl FnOnce(usize) -> Result<(), E>,
-        verify: bool,
     ) -> Result<Option<Vec<u8>>, E> {
         let mut spool = self.inner.lock().expect("object spool mutex");
         let Some(frame) = spool
@@ -247,9 +225,6 @@ impl ObjectSpool {
         };
         read_spooled(file, frame.offset, &mut bytes).map_err(StoreError::from)?;
         drop(spool);
-        if !verify {
-            return Ok(Some(bytes));
-        }
         let actual = verified_id_and_object(&bytes).0;
         if actual != *id {
             return Err(StoreError::HashMismatch {
@@ -394,7 +369,7 @@ mod tests {
         assert_eq!(window.written_bytes(), own_bytes.len() as u64);
         assert!(window.contains(&big));
         assert_eq!(window.read(&big).unwrap(), Some(big_bytes.clone()));
-        assert_eq!(window.read_decoded(&twice).unwrap(), Some(twice_bytes));
+        assert_eq!(window.read(&twice).unwrap(), Some(twice_bytes));
         assert_eq!(window.read(&own).unwrap(), Some(own_bytes));
         let ids: Vec<_> = window
             .take_order()
@@ -423,20 +398,5 @@ mod tests {
             Err(StoreError::ObjectNotFound(_))
         ));
         assert!(!window.contains(&id));
-    }
-
-    #[test]
-    fn a_decoded_read_skips_the_hash_that_a_checked_read_refuses() {
-        let dir = tempfile::tempdir().unwrap();
-        let spool = ObjectSpool::new(dir.path()).unwrap();
-        let (claimed, _) = blob(b"claimed");
-        let (_, other) = blob(b"other bytes");
-        spool.append(0, claimed, ObjectType::Blob, &other).unwrap();
-        assert!(matches!(
-            spool.read(&claimed),
-            Err(StoreError::HashMismatch { .. })
-        ));
-        assert_eq!(spool.read_decoded(&claimed).unwrap(), Some(other));
-        assert_eq!(spool.read_decoded(&[0; 32]).unwrap(), None);
     }
 }
