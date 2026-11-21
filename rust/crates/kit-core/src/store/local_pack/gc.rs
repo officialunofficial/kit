@@ -31,10 +31,11 @@ pub(crate) const RETIRE_BATCH: usize = 32;
 
 /// The most file bytes one exclusive `format` hold unlinks, besides the item
 /// count. A hold of 32 packs of 64 MiB reached 130 ms on a shared VM, about
-/// 65 ms per GiB, so 512 MiB keeps a hold near 33 ms against a target of
-/// 50 ms. A batch always takes at least one item, so a pack larger than the
-/// cap still retires, alone. Policy, not format.
-pub(crate) const RETIRE_BATCH_BYTES: u64 = 512 << 20;
+/// 65 ms per GiB; a cap of 512 MiB still reached 51 and 311 ms in two runs,
+/// so 256 MiB is four packs of 64 MiB. A batch always takes at least one
+/// item, so a pack larger than the cap still retires, alone. Policy, not
+/// format.
+pub(crate) const RETIRE_BATCH_BYTES: u64 = 256 << 20;
 
 /// How planning verifies the body of each wholly dead pack past grace, before
 /// it may authorize an unlink.

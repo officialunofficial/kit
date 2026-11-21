@@ -415,15 +415,15 @@ fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
 Retirement takes the exclusive `format` try-lock once per batch of at most
-32 items and 512 MiB of pack and index files: pack pairs, copy inputs and
+32 items and 256 MiB of pack and index files: pack pairs, copy inputs and
 leftovers together. A batch always takes at least one item, so a pack larger
-than 512 MiB retires alone. Each batch is a
+than 256 MiB retires alone. Each batch is a
 complete retirement as described here: it rechecks its own items, makes what
 they rely on durable, unlinks the pack names, flushes, unlinks the indexes
 and flushes, then releases the lock, so a writer that waits for the lock waits
 for one batch. The two caps are policy, chosen so that a hold stays at or
 under about 50 ms on the reference VM: 32 packs of 64 MiB reached 130 ms,
-about 65 ms per GiB, and 512 MiB is a third of that. A failed try in any
+about 65 ms per GiB, and 256 MiB is an eighth of that. A failed try in any
 batch ends the run with the earlier batches done. `kit gc` then prints one
 line to standard error that says retirement stopped and how many packs it
 retired; the exit code does not change, and the next run retires the rest. A crash between batches leaves only pairs and

@@ -15,7 +15,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first.
 - The maintenance step after fetch and pull also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
 - Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
-- A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 512 MiB of pack and index files, so a hold stays near 50 ms on 64 MiB packs.
+- A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 256 MiB of pack and index files, so a hold stays near 50 ms on 64 MiB packs.
 - The maintenance step after fetch and pull verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
 - `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
@@ -125,7 +125,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Anchor leading-slash sparse patterns at the worktree root and descend into matching directories.
 - Save selected file or directory paths with `stash push [--] <path>...`, preserving other
   worktree and staged changes.
-- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 512 MiB per fetch.
+- Attestation pack codecs and synchronization record formats, with decoded-work limits of 64 MiB per pack and 256 MiB per fetch.
 - Gc skips and reports attested subjects with missing objects or incomplete closures, sharing history scans across roots.
 - Progress with counts, bytes, rate and known-total ETA, plus `KIT_PROGRESS=json`.
 - Additive observer hooks: `Observer::concurrent` defaults to no concurrent delivery; thread-safe observers can receive live download and hashing events. `SyncEvent` adds download, closure, signature, restore and push planning progress; `add::Event` adds hashed bytes. `restore_tree_to_worktree_progress` and `run_gc_observed` report local work; `check_closure_present_observed` reports completed objects.
@@ -183,7 +183,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reduce full device flushes during batched object writes on macOS and iOS.
 - Skip rename content reads in status when there are no staged deletions.
 - Compact the applied-pack cache from 1 million digests to 900,000 per remote.
-- Keep up to 32 sparse witnesses per repository within a 512 MiB cache budget.
+- Keep up to 32 sparse witnesses per repository within a 256 MiB cache budget.
 - Read loose chunk headers into a fixed buffer and check remote snapshot membership without repeated searches.
 - Attestation readers ignore unrecognized Statement fields. New validity rules require a new predicate URI.
 - Reconnect between packs when a push over SSH reaches the session byte limit.
@@ -194,7 +194,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `cat-file --batch` streams blob content with bounded memory. An
   unreadable chunk can leave a partial record on stdout.
 - Probe reachable object types concurrently during garbage collection.
-- Bound fetched attestations per remote to 100,000 envelopes and 512 MiB.
+- Bound fetched attestations per remote to 100,000 envelopes and 256 MiB.
 - Stop empty attestation directories from keeping otherwise unreachable commits alive.
 - Stop push planning at the remote head for short linear advances.
 - Skip unrelated ignored directories during restore checks.
