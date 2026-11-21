@@ -352,9 +352,14 @@ fn pair_entry(
         }
         // A file that grew past `CHUNK_THRESHOLD`: its old inline blob is the
         // base of the new chunks that share content with it.
-        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::Blob(old_blob))) => {
-            pair_blob_to_chunks(store, new_cb.chunks(), old_hash, &old_blob.data, out)
-        }
+        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::Blob(old_blob))) => pair_blob_to_chunks(
+            store,
+            new_cb.chunks(),
+            old_hash,
+            &old_blob.data,
+            BlobBudget::default(),
+            out,
+        ),
         // A missing object or the other kind mismatch (a chunked file that
         // shrank to a blob) just yields no pairing for this entry.
         (Err(StoreError::ObjectNotFound(_)), _) | (_, Err(StoreError::ObjectNotFound(_))) => Ok(()),
@@ -384,27 +389,40 @@ const ANCHOR_MARGIN: usize = 2;
 /// its smallest window hashes, so the blob is cut into slices small enough
 /// that a window that is among a chunk's smallest is also among its slice's.
 const BLOB_FEATURE_SLICE: usize = 4096;
-/// Most new chunks that one file crossing `CHUNK_THRESHOLD` reads to look for
-/// a share of its old blob: 4,096 chunks are about 256 MiB of content.
-const MAX_BLOB_SKETCH_READS: usize = 4_096;
-/// Most new chunks paired with the one old blob. Each pair costs the encoder
-/// an index of the whole blob, and a blob under `CHUNK_THRESHOLD` cannot
-/// cover more than a few dozen chunks of the new file.
-const MAX_BLOB_PAIRS: usize = 256;
+/// What pairing one file that crossed `CHUNK_THRESHOLD` may spend.
+#[derive(Clone, Copy)]
+struct BlobBudget {
+    /// Most new chunks read to look for a share of the old blob: 4,096
+    /// chunks are about 256 MiB of content.
+    reads: usize,
+    /// Most new chunks paired with the one old blob. Each pair costs the
+    /// encoder an index of the whole blob, and a blob under
+    /// `CHUNK_THRESHOLD` cannot cover more than a few dozen chunks.
+    pairs: usize,
+}
+
+impl Default for BlobBudget {
+    fn default() -> Self {
+        Self {
+            reads: 4_096,
+            pairs: 256,
+        }
+    }
+}
 
 /// Pair the new chunks of a file that grew past `CHUNK_THRESHOLD` with the
 /// inline blob it was at the old tip. A new chunk shares content with the
 /// blob when one of its min-hash features is one of the blob's, sampled per
 /// [`BLOB_FEATURE_SLICE`]; it then takes the blob as its base and the packed
 /// cost gate decides whether the delta is sent. A chunk is read once, at most
-/// [`MAX_BLOB_SKETCH_READS`] chunks per file, and at most [`MAX_BLOB_PAIRS`]
-/// are paired: what is left is sent raw. A pairing already made for a chunk
-/// stands.
+/// `budget.reads` chunks per file, and at most `budget.pairs` are paired:
+/// what is left is sent raw. A pairing already made for a chunk stands.
 fn pair_blob_to_chunks(
     store: &ObjectStore,
     new_chunks: &[Hash],
     old_blob: Hash,
     old_data: &[u8],
+    budget: BlobBudget,
     out: &mut HashMap<Hash, Hash>,
 ) -> Result<(), StoreError> {
     let features: HashSet<u64> = old_data
@@ -417,7 +435,7 @@ fn pair_blob_to_chunks(
     let mut seen: HashSet<&Hash> = HashSet::new();
     let (mut reads, mut pairs) = (0usize, 0usize);
     for nj in new_chunks {
-        if reads == MAX_BLOB_SKETCH_READS || pairs == MAX_BLOB_PAIRS {
+        if reads == budget.reads || pairs == budget.pairs {
             break;
         }
         if *nj == old_blob || out.contains_key(nj) || !seen.insert(nj) {
@@ -2376,7 +2394,8 @@ mod tests {
             let id = put_blob(&s, chunk.clone());
             let delta = plan.deltas.iter().find(|d| d.target == id).unwrap();
             assert_eq!(delta.base, old_blob);
-            assert!(hash::HASH_LEN + delta.stream.len() < chunk.len() / 100);
+            // The head is all copies; the tail adds 50 kB of new bytes.
+            assert!(hash::HASH_LEN + delta.stream.len() < chunk.len() - 140_000);
             assert!(!plan.raw.contains(&id));
         }
         assert!(plan.raw.contains(&put_blob(&s, unrelated)));
@@ -2442,48 +2461,75 @@ mod tests {
         assert_pack_reconstructs(&s, &plan, c_old, c_new);
     }
 
-    #[test]
-    fn inline_base_pairing_stops_at_its_pair_cap() {
-        let (_d, s) = store();
-        let (old, old_blob, c_old) = inline_old_tip(&s, 1, 100_000);
-        // More distinct chunks than the cap, each a slice of the blob with a
-        // byte changed, so every one shares features with it.
-        let chunks: Vec<Vec<u8>> = (0..MAX_BLOB_PAIRS + 20)
+    /// `pair_blob_to_chunks` on the `chunks` of a file whose old tip held
+    /// `old` as one blob, within `budget`.
+    fn pair_with_budget(
+        s: &ObjectStore,
+        old: &[u8],
+        chunks: &[Vec<u8>],
+        budget: BlobBudget,
+    ) -> (Hash, HashMap<Hash, Hash>) {
+        let old_blob = put_blob(s, old.to_vec());
+        let ids: Vec<Hash> = chunks.iter().map(|c| put_blob(s, c.clone())).collect();
+        let mut out = HashMap::new();
+        pair_blob_to_chunks(s, &ids, old_blob, old, budget, &mut out).unwrap();
+        (old_blob, out)
+    }
+
+    /// `n` distinct chunks, each a slice of `old` with one byte changed, so
+    /// every one shares features with it.
+    fn variants_of(old: &[u8], n: usize) -> Vec<Vec<u8>> {
+        (0..n)
             .map(|i| {
                 let mut chunk = old[20_000..60_000].to_vec();
                 chunk[i] ^= 0xFF;
                 chunk
             })
-            .collect();
-        let c_new = chunked_new_tip(&s, &chunks, c_old);
-        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
-        assert_eq!(bases.len(), MAX_BLOB_PAIRS);
-        assert!(bases.values().all(|base| *base == old_blob));
+            .collect()
+    }
+
+    #[test]
+    fn inline_base_pairing_stops_at_its_pair_cap() {
+        let (_d, s) = store();
+        let old = chunk_content(1, 100_000);
+        let chunks = variants_of(&old, 6);
+        let budget = BlobBudget {
+            reads: 100,
+            pairs: 4,
+        };
+        let (old_blob, out) = pair_with_budget(&s, &old, &chunks, budget);
+        assert_eq!(out.len(), 4);
+        assert!(out.values().all(|base| *base == old_blob));
         // The first chunks in file order are the ones paired.
-        for chunk in &chunks[..MAX_BLOB_PAIRS] {
-            assert!(bases.contains_key(&put_blob(&s, chunk.clone())));
+        for chunk in &chunks[..4] {
+            assert!(out.contains_key(&put_blob(&s, chunk.clone())));
         }
+        // The cap a real file runs under.
+        assert_eq!(BlobBudget::default().pairs, 256);
     }
 
     #[test]
     fn inline_base_sketching_stops_at_its_read_budget() {
         let (_d, s) = store();
-        let (old, old_blob, c_old) = inline_old_tip(&s, 1, 100_000);
+        let old = chunk_content(1, 100_000);
         // The budget goes on chunks with nothing in common with the blob; a
         // chunk past it is not read, even though it shares content.
-        let mut chunks: Vec<Vec<u8>> = (0..MAX_BLOB_SKETCH_READS)
-            .map(|i| {
-                let mut chunk = chunk_content(9, 64);
-                chunk[..8].copy_from_slice(&(i as u64).to_le_bytes());
-                chunk
-            })
-            .collect();
-        let late = old[..40_000].to_vec();
-        chunks.push(late.clone());
-        let c_new = chunked_new_tip(&s, &chunks, c_old);
-        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
-        assert!(!bases.contains_key(&put_blob(&s, late)));
-        assert!(bases.values().all(|base| *base != old_blob));
+        let mut chunks: Vec<Vec<u8>> = (0..3).map(|i| chunk_content(10 + i, 4_096)).collect();
+        chunks.push(old[..40_000].to_vec());
+        let budget = BlobBudget {
+            reads: 3,
+            pairs: 100,
+        };
+        let (_, out) = pair_with_budget(&s, &old, &chunks, budget);
+        assert!(out.is_empty());
+        // One more read and the same chunk pairs.
+        let budget = BlobBudget {
+            reads: 4,
+            pairs: 100,
+        };
+        let (old_blob, out) = pair_with_budget(&s, &old, &chunks, budget);
+        assert_eq!(out.get(&put_blob(&s, chunks[3].clone())), Some(&old_blob));
+        assert_eq!(BlobBudget::default().reads, 4_096);
     }
 
     /// Split probing plans several ranges of one chain. Through one delta
