@@ -674,6 +674,8 @@ fn a_copy_that_runs_out_of_budget_still_retires_the_wholly_dead(phase: CopyPhase
 
     // The next due step, with the budget back, does the copy.
     age_file(&mixed, DEFAULT_GRACE_SECS + 1);
+    drop(file);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
     Stamp {
         attempted: 1,
         outcome: Collection::Complete,
@@ -681,6 +683,7 @@ fn a_copy_that_runs_out_of_budget_still_retires_the_wholly_dead(phase: CopyPhase
     }
     .write(&mut file)
     .unwrap();
+    drop(file);
     let next = repo.run();
     assert_eq!(next.collection, Collection::Complete);
     assert!(next.bytes_copied > 0);
