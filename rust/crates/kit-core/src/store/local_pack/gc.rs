@@ -17,13 +17,43 @@ pub(crate) struct PackSweep {
     pairs: BTreeMap<Hash, Retirement>,
     leftovers: BTreeMap<PathBuf, Stamp>,
     copy: Option<CopyPlan>,
+    /// Planning stopped before it verified every wholly dead pack past grace,
+    /// because [`Verify::room`] said no. The rest stay for a later run.
+    cut_short: bool,
 }
 
 /// The most items one exclusive `format` hold retires: pack pairs, copy
 /// inputs and leftovers together. A run takes the lock again for the next
 /// batch, rechecking every stamp, so one hold stays short however many pairs
-/// retire. Policy, not format.
+/// retire. [`RETIRE_BATCH_BYTES`] bounds a hold by size as well. Policy, not
+/// format.
 pub(crate) const RETIRE_BATCH: usize = 32;
+
+/// The most file bytes one exclusive `format` hold unlinks, besides the item
+/// count. A hold of 32 packs of 64 MiB took 150 ms and more on a shared VM;
+/// 256 MiB, four such packs, took a median of 11 to 19 ms. The cap bounds the
+/// work that scales with size, not a stalled flush. A batch always takes at
+/// least one item, so a pack larger than the cap still retires, alone.
+/// Policy, not format.
+pub(crate) const RETIRE_BATCH_BYTES: u64 = 256 << 20;
+
+/// How planning verifies the body of each wholly dead pack past grace, before
+/// it may authorize an unlink.
+pub(crate) struct Verify<'a> {
+    /// Asked before each pack, oldest first. False stops verifying: the packs
+    /// verified so far stay planned and the rest wait for a later run.
+    pub(crate) room: &'a dyn Fn() -> bool,
+    /// Asked while one pack is read. An error ends planning with nothing
+    /// planned.
+    pub(crate) scan: &'a dyn Fn() -> StoreResult<()>,
+}
+
+/// A wholly dead pack past grace that planning has seen but not yet verified.
+struct Candidate {
+    pair: Pair,
+    pack: Stamp,
+    locator: Stamp,
+}
 
 struct Retirement {
     pack: Stamp,
@@ -109,11 +139,38 @@ impl ObjectStore {
         report: &mut GcReport,
         checkpoint: &dyn Fn() -> StoreResult<()>,
     ) -> StoreResult<PackSweep> {
+        self.plan_pack_retirement_within(
+            live,
+            now,
+            grace,
+            report,
+            checkpoint,
+            &Verify {
+                room: &|| true,
+                scan: checkpoint,
+            },
+        )
+    }
+
+    /// Plan the wholly dead retirement. A pass over every pair counts its
+    /// bytes and lists the wholly dead packs past grace. A second pass
+    /// verifies those, oldest first, while `verify.room` allows, so a run
+    /// that stops early has planned the packs it verified and nothing else.
+    pub(crate) fn plan_pack_retirement_within(
+        &self,
+        live: &LiveSet,
+        now: u64,
+        grace: u64,
+        report: &mut GcReport,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+        verify: &Verify<'_>,
+    ) -> StoreResult<PackSweep> {
         let mut plan = PackSweep::default();
         if !self.local_packs_enabled()? {
             return Ok(plan);
         }
         let dir = self.pack_dir();
+        let mut candidates = Vec::new();
         visit_pairs(&dir, |pair| {
             checkpoint()?;
             report.packs_scanned += 1;
@@ -139,31 +196,51 @@ impl ObjectStore {
                 && old
                 && let (Some(pack), Some(locator)) = (pack, locator)
             {
-                // An index checksum alone does not prove which ids the pack
-                // holds. Verify the body before authorizing any deletion.
-                let rows = match scan_pair_checked(&pair, checkpoint) {
-                    Ok(rows) => rows,
-                    Err(error @ StoreError::LocalPackDamaged { .. }) => {
-                        report.skipped_pack_errors.push(error.to_string());
-                        return Ok(());
-                    }
-                    Err(error) => return Err(error),
-                };
-                checkpoint()?;
-                if !index.matches(&rows) {
-                    return Err(pair.index_error("index does not match verified pack"));
-                }
-                plan.pairs.insert(
-                    pair.key,
-                    Retirement {
-                        pack,
-                        index: locator,
-                    },
-                );
+                candidates.push(Candidate {
+                    pair,
+                    pack,
+                    locator,
+                });
             }
             Ok(())
         })?;
         checkpoint()?;
+        candidates.sort_by_key(|candidate| (candidate.pack.modified, candidate.pair.key));
+        for candidate in candidates {
+            if !(verify.room)() {
+                plan.cut_short = true;
+                break;
+            }
+            let Candidate {
+                pair,
+                pack,
+                locator,
+            } = candidate;
+            // The stamps above came first, so a pair that changes after them
+            // fails its recheck at retirement.
+            let index = Index::open(&pair)?;
+            // An index checksum alone does not prove which ids the pack
+            // holds. Verify the body before authorizing any deletion.
+            let rows = match scan_pair_checked(&pair, verify.scan) {
+                Ok(rows) => rows,
+                Err(error @ StoreError::LocalPackDamaged { .. }) => {
+                    report.skipped_pack_errors.push(error.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            (verify.scan)()?;
+            if !index.matches(&rows) {
+                return Err(pair.index_error("index does not match verified pack"));
+            }
+            plan.pairs.insert(
+                pair.key,
+                Retirement {
+                    pack,
+                    index: locator,
+                },
+            );
+        }
         Ok(plan)
     }
 
@@ -337,6 +414,28 @@ impl PackSweep {
         self.pairs.is_empty() && self.leftovers.is_empty() && self.copy.is_none()
     }
 
+    /// Verification stopped before every wholly dead pack past grace was
+    /// verified: the rest wait for a later run.
+    pub(crate) fn verification_cut_short(&self) -> bool {
+        self.cut_short
+    }
+
+    /// Whole packs planned for retirement.
+    pub(crate) fn planned_packs(&self) -> usize {
+        self.pairs.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn plans(&self, pair: &Pair) -> bool {
+        self.pairs.contains_key(&pair.key)
+    }
+
+    /// The copy plan left inputs for a later run, because one output pack
+    /// could not hold their survivors as well.
+    pub(crate) fn copy_left_inputs(&self) -> bool {
+        self.copy.as_ref().is_some_and(CopyPlan::left_inputs)
+    }
+
     pub(crate) fn run(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<()> {
         self.run_with(store, report, || Ok(())).map(|_| ())
     }
@@ -373,7 +472,7 @@ impl PackSweep {
         grace: u64,
         checkpoint: &dyn Fn() -> StoreResult<()>,
     ) -> StoreResult<()> {
-        self.plan_copy(store, live, now, grace, Limit::ONE_OUTPUT, checkpoint)
+        self.plan_copy(store, live, now, grace, Limit::automatic(), checkpoint)
     }
 
     /// Verify coverage, copy and publish, under the shared `format` guard
@@ -433,12 +532,12 @@ impl PackSweep {
         self.retire(store, report, copied.as_ref(), after_pack_sync)
     }
 
-    fn batch() -> usize {
+    fn batch() -> (usize, u64) {
         #[cfg(test)]
-        if let Some(size) = super::tests::retire_batch() {
-            return size;
+        if let Some(limits) = super::tests::retire_batch() {
+            return limits;
         }
-        RETIRE_BATCH
+        (RETIRE_BATCH, RETIRE_BATCH_BYTES)
     }
 
     /// Retire the planned pairs, the copy inputs that `copied` covers and the
@@ -459,7 +558,17 @@ impl PackSweep {
         let whole: Vec<&Hash> = self.pairs.keys().collect();
         let inputs = copied.map(Copied::candidates).unwrap_or_default();
         let leftovers: Vec<(&PathBuf, &Stamp)> = self.leftovers.iter().collect();
-        let size = Self::batch();
+        let whole_bytes: Vec<u64> = whole
+            .iter()
+            .map(|key| self.pairs[*key].pack.len + self.pairs[*key].index.len)
+            .collect();
+        let input_bytes: Vec<u64> = inputs
+            .iter()
+            .map(|&at| copied.map_or(0, |copied| copied.input_bytes(at)))
+            .collect();
+        let leftover_bytes: Vec<u64> = leftovers.iter().map(|(_, stamp)| stamp.len).collect();
+        let (size, byte_cap) = Self::batch();
+        debug_assert!(size > 0, "a batch needs room for one item");
         let mut run = Run {
             hook: Some(after_pack_sync),
             flushed: BTreeSet::new(),
@@ -467,23 +576,29 @@ impl PackSweep {
         };
         let (mut at_whole, mut at_input, mut at_leftover) = (0, 0, 0);
         while at_whole < whole.len() || at_input < inputs.len() || at_leftover < leftovers.len() {
-            let take = |from: &mut usize, len: usize, room: &mut usize| {
-                let end = (*from + *room).min(len);
-                let range = *from..end;
-                *room -= end - *from;
-                *from = end;
-                range
-            };
+            // A batch holds at most `size` items and `byte_cap` file bytes,
+            // and always at least one item, so every batch makes progress.
             let mut room = size;
-            let whole_batch = take(&mut at_whole, whole.len(), &mut room);
-            let input_batch = take(&mut at_input, inputs.len(), &mut room);
-            let leftover_batch = take(&mut at_leftover, leftovers.len(), &mut room);
+            let mut bytes = byte_cap;
+            let mut take = |from: &mut usize, sizes: &[u64]| {
+                let start = *from;
+                while *from < sizes.len() && room > 0 && (room == size || sizes[*from] <= bytes) {
+                    room -= 1;
+                    bytes = bytes.saturating_sub(sizes[*from]);
+                    *from += 1;
+                }
+                start..*from
+            };
+            let whole_batch = take(&mut at_whole, &whole_bytes);
+            let input_batch = take(&mut at_input, &input_bytes);
+            let leftover_batch = take(&mut at_leftover, &leftover_bytes);
             let batch = Batch {
                 whole: &whole[whole_batch],
                 inputs: &inputs[input_batch],
                 leftovers: &leftovers[leftover_batch],
             };
             if !self.retire_batch(store, report, copied, &batch, &mut run)? {
+                report.pack_retirement_cut_short = true;
                 Self::count_copy_freed(report, copied, &run);
                 return Ok(false);
             }

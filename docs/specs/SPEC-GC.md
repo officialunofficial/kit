@@ -415,12 +415,20 @@ fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
 Retirement takes the exclusive `format` try-lock once per batch of at most
-32 items: pack pairs, copy inputs and leftovers together. Each batch is a
+32 items and 256 MiB of pack and index files: pack pairs, copy inputs and
+leftovers together. A batch always takes at least one item, so a pack larger
+than 256 MiB retires alone. Each batch is a
 complete retirement as described here: it rechecks its own items, makes what
 they rely on durable, unlinks the pack names, flushes, unlinks the indexes
 and flushes, then releases the lock, so a writer that waits for the lock waits
-for one batch. The size is policy. A failed try in any batch ends the run
-with the earlier batches done. A crash between batches leaves only pairs and
+for one batch. The two caps are policy. The target is a hold of about 50 ms
+or less for the work that scales with size: 32 packs of 64 MiB took 150 ms
+and more on the reference VM, and 256 MiB (four packs of 64 MiB) took a
+median of 11 to 19 ms. A stalled flush on a busy disk can still stretch one
+hold to a few hundred ms, which no size cap bounds. A failed try in any
+batch ends the run with the earlier batches done. `kit gc` then prints one
+line to standard error that says retirement stopped and how many packs it
+retired; the exit code does not change, and the next run retires the rest. A crash between batches leaves only pairs and
 inputs that the next run reconsiders; an input whose survivors have an output
 is then covered by it and retires without a copy. No input relies on a pair
 that the same run retires, whichever batch takes it.
@@ -488,20 +496,42 @@ wait for the rest of the exclusive hold, including the recheck,
 unlinks and both directory flushes. The sweep remains effective if the
 collection that follows stops without retiring any pack.
 
-**Collection.** The listing must show at least 32 published pairs.
-The stamp allows a new collection 7 days after a complete collection
-or an error, 1 hour after a lock miss or changed roots, or 30 days
-after an attempt that ran out of budget before retirement. These
-intervals are policy.
+**Collection.** The listing must show at least 32 published pairs, or the
+stamp must record a step that made progress (below). The stamp allows a new
+collection 7 days after a complete collection or an error, 1 hour after a
+lock miss, changed roots or a step that made progress, or 30 days after an
+attempt that ran out of budget before it retired anything. These intervals
+are policy.
+
+A step *made progress* when it retired or rewrote at least one pack and left
+planned work for the next step: wholly dead packs it had no time to verify,
+or copy inputs that did not fit in its one output pack. The step then stamps
+`progress`, which is due after an hour and ignores the 32-pair floor, because
+a store that a step brings under the floor can still hold garbage that the
+next step plans to remove. A lock miss or changed roots right after a
+step of progress keeps the `progress` stamp, so the retry is due in the same
+hour and still ignores the floor. A step that left work but retired nothing
+keeps the interval of its own outcome, so work that cannot be done never
+repeats every hour. A store under the floor with no stamp of progress is left
+alone until a manual `kit gc`: its garbage is bounded by the size of fewer
+than 32 packs, and the step costs a mark of the whole history.
 
 1. Read `now` and collect retention roots without the worktree locks.
 2. Mark the roots under a wall-clock budget of 5 seconds that also covers
    retirement planning, coverage verification and the copy. A missing
    object or skipped soft root stops collection.
 3. Plan retirement at the default grace. Validate the indexes, account
-   for each entry against the mark, verify the body of each wholly dead
-   pair past grace, and record each candidate's file stamps. A damaged
-   pair or expired budget ends collection before retirement. Then plan
+   for each entry against the mark, and record each wholly dead pair past
+   grace with its file stamps. Verify the body of those pairs oldest first.
+   The budget is checked before each pack and never inside one, so a pack
+   that has started is read to its end. When the budget ends, the packs
+   verified so far stay planned and the rest wait for the next step; the
+   step then skips the copy and, once it has retired at least one of them,
+   reports `progress`. If it ended before one pack was verified, nothing is
+   planned and the step reports `over_budget` with the 30-day interval. If
+   every verified pack fails its recheck before retirement, the step
+   reports `over_budget` and keeps the 7-day interval of a finished step. A damaged pair or cancellation ends collection
+   before retirement. Then plan
    copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
    keep only the inputs whose survivors fit in one output pack: at most
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
@@ -510,9 +540,12 @@ intervals are policy.
    verification or in the copy, or an I/O error such as a full disk there,
    defers only the copy: the wholly dead pairs planned above still retire
    (steps 5 to 7), as they do without a copy. The collection reports
-   `over_budget` or `failed`, and the stamp keeps the interval of a complete
-   collection. If no pair is left to retire after a budget deferral, the
-   interval is the same. Interruption and damage still stop the step.
+   `over_budget` or `failed`, and the stamp keeps the 7-day interval of a
+   complete collection, not the 30 days of a step that ran out of budget
+   before it retired anything: the step did retire the wholly dead pairs, and
+   a longer wait would postpone the retirement that a step without a copy
+   did every week. If no pair is left to retire after a budget deferral,
+   the interval is the same. Interruption and damage still stop the step.
 4. Copy. Verify each covering copy that an input relies on, copy the
    survivors into one output pack and publish it durably under the shared
    `format` guard, which the step takes after planning and releases before

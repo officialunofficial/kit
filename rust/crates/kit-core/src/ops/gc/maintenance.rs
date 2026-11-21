@@ -6,12 +6,12 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{
-    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, MarkLimits,
+    AUTO_MAINTENANCE_STAMP, DEFAULT_GRACE_SECS, GcReport, GcRootsError, LiveSet, MarkLimits,
     collect_root_sets, mark_live_checked, reject_symlink,
 };
 use crate::layout::{RepoLayout, all_state_layouts};
 use crate::repo_lock::{LockError, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK, acquire};
-use crate::store::{ObjectStore, StoreError};
+use crate::store::{ObjectStore, PackSweep, StoreError, Verify};
 
 const MIN_PAIRS: usize = 32;
 const BUDGET: Duration = Duration::from_secs(5);
@@ -35,6 +35,10 @@ pub enum Collection {
     RootsChanged,
     /// The mark, plan, verification or copy ran out of time before publish.
     OverBudget,
+    /// The step retired or copied what its limits allowed and left planned
+    /// work for the next step, which is due in an hour and ignores the
+    /// 32-pack floor.
+    Progress,
     /// The attempt stopped on unreadable state, damage or interruption, or a
     /// copy failed with an I/O error after the wholly dead retirement
     /// finished.
@@ -51,13 +55,14 @@ impl Collection {
             Self::Busy => "busy",
             Self::RootsChanged => "roots_changed",
             Self::OverBudget => "over_budget",
+            Self::Progress => "progress",
             Self::Failed => "failed",
         }
     }
 
     const fn interval(self) -> u64 {
         match self {
-            Self::Busy | Self::RootsChanged => HOUR,
+            Self::Busy | Self::RootsChanged | Self::Progress => HOUR,
             Self::OverBudget => 30 * 24 * HOUR,
             Self::Complete | Self::Failed | Self::NotDue => 7 * 24 * HOUR,
         }
@@ -114,6 +119,7 @@ impl Stamp {
             4 => Collection::RootsChanged,
             5 => Collection::OverBudget,
             6 => Collection::Failed,
+            7 => Collection::Progress,
             _ => return None,
         };
         Some(Self {
@@ -133,6 +139,7 @@ impl Stamp {
             Collection::RootsChanged => 4,
             Collection::OverBudget => 5,
             Collection::Failed => 6,
+            Collection::Progress => 7,
         };
         bytes[9..].copy_from_slice(&self.complete_pairs.to_le_bytes());
         bytes
@@ -144,8 +151,11 @@ impl Stamp {
         file.write_all(&self.encode())
     }
 
+    /// A step that left planned work is due again whatever the pair count: a
+    /// store can fall under the floor with garbage still planned, and the
+    /// step that made progress is the proof that the next one will too.
     fn due(self, now: u64, pairs: usize) -> bool {
-        pairs >= MIN_PAIRS
+        (pairs >= MIN_PAIRS || self.outcome == Collection::Progress)
             && (now < self.attempted || now - self.attempted >= self.outcome.interval())
     }
 }
@@ -271,7 +281,7 @@ fn run(
         return Collection::NotDue;
     }
     let due = stamp.due(now, pairs);
-    let collection = match sweep.run_with(store, gc, || Ok(())) {
+    let mut collection = match sweep.run_with(store, gc, || Ok(())) {
         Ok(true) if due => {
             let clock = Budget {
                 start: Instant::now(),
@@ -294,6 +304,31 @@ fn run(
         Err(_) if due => Outcome::same(Collection::Failed),
         _ => return Collection::NotDue,
     };
+    // A step that left planned work, and retired or rewrote something, is
+    // due again in an hour whatever the pair count. A step that did nothing
+    // keeps its own interval, so the work cannot loop.
+    let progressed =
+        gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered > 0;
+    if collection.left
+        && progressed
+        && collection.stamped == Collection::Complete
+        && matches!(
+            collection.reported,
+            Collection::Complete | Collection::OverBudget
+        )
+    {
+        collection.reported = Collection::Progress;
+        collection.stamped = Collection::Progress;
+    }
+    // A lock miss or changed roots after a step of progress keeps the work in
+    // view: the retry is due in the same hour and still ignores the floor.
+    if matches!(
+        collection.stamped,
+        Collection::Busy | Collection::RootsChanged
+    ) && stamp.outcome == Collection::Progress
+    {
+        collection.stamped = Collection::Progress;
+    }
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
@@ -317,6 +352,9 @@ fn run(
 struct Outcome {
     reported: Collection,
     stamped: Collection,
+    /// The step left planned work for the next one: wholly dead packs it did
+    /// not verify in time, or copy inputs that one output pack could not hold.
+    left: bool,
 }
 
 impl Outcome {
@@ -324,6 +362,7 @@ impl Outcome {
         Self {
             reported: collection,
             stamped: collection,
+            left: false,
         }
     }
 
@@ -332,13 +371,14 @@ impl Outcome {
     /// the weekly interval of a finished collection either way, because a
     /// step that does less than the one before the copy existed would be a
     /// regression.
-    const fn finished(deferred: Option<Collection>) -> Self {
+    const fn finished(deferred: Option<Collection>, left: bool) -> Self {
         Self {
             reported: match deferred {
                 Some(reason) => reason,
                 None => Collection::Complete,
             },
             stamped: Collection::Complete,
+            left,
         }
     }
 }
@@ -382,6 +422,45 @@ fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
     Ok(())
 }
 
+/// Plan the wholly dead retirement. The budget bounds the verification of
+/// those packs, oldest first, by stopping before the next pack and never
+/// inside one. What was verified by then still retires, so each step makes
+/// progress on a large dead set.
+fn plan_retirement(
+    store: &ObjectStore,
+    budget: &Budget<'_>,
+    live: &LiveSet,
+    now: u64,
+    gc: &mut GcReport,
+) -> Result<PackSweep, GcRootsError> {
+    let room = || {
+        #[cfg(test)]
+        if let Some(left) = TEST_VERIFY_ROOM.get() {
+            TEST_VERIFY_ROOM.set(Some(left.saturating_sub(1)));
+            return left > 0;
+        }
+        budget.check().is_ok()
+    };
+    let scan = || Ok(budget.check_cancellation()?);
+    let retire = store.plan_pack_retirement_within(
+        live,
+        now,
+        DEFAULT_GRACE_SECS,
+        gc,
+        &|| Ok(budget.check()?),
+        &Verify {
+            room: &room,
+            scan: &scan,
+        },
+    )?;
+    if retire.verification_cut_short() {
+        budget.check_cancellation()?;
+    } else {
+        budget.check()?;
+    }
+    Ok(retire)
+}
+
 fn collect(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -406,26 +485,36 @@ fn collect(
         &|| Ok(budget.check()?),
         &|| Ok(check_deadline(start, limit)?),
     )?;
-    let mut retire =
-        store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, gc, &|| Ok(budget.check()?))?;
-    budget.check()?;
+    let mut retire = plan_retirement(store, budget, &live, now, gc)?;
+    let cut = retire.verification_cut_short();
     if !gc.skipped_pack_errors.is_empty() {
         return Ok(Outcome::same(Collection::Failed));
+    }
+    if cut && retire.planned_packs() == 0 {
+        // The budget ended before one pack was verified: no progress, so the
+        // long interval of an attempt that ran out of budget stands.
+        return Ok(Outcome::same(Collection::OverBudget));
     }
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
     // wholly dead retirement planned above still runs, as it does today.
     // Cancellation and every other error still stop the step.
-    let planned = retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
-        #[cfg(test)]
-        if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Plan) {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
-        }
-        Ok(budget.check()?)
-    });
-    let mut deferred = deferral(retire.defer_copy_on_io_error(planned)?);
+    // A verification that was cut short has used the whole budget, so the
+    // copy waits for the next step.
+    let mut deferred = if cut {
+        Some(Collection::OverBudget)
+    } else {
+        let planned = retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
+            #[cfg(test)]
+            if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Plan) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+            }
+            Ok(budget.check()?)
+        });
+        deferral(retire.defer_copy_on_io_error(planned)?)
+    };
     if retire.is_empty() {
-        return Ok(Outcome::finished(deferred));
+        return Ok(Outcome::finished(deferred, false));
     }
 
     // Copying reads pack bodies, so it runs before any worktree lock: the
@@ -460,7 +549,7 @@ fn collect(
             return Ok(Outcome::same(Collection::Failed));
         }
         if deferred.is_some() && retire.is_empty() {
-            return Ok(Outcome::finished(deferred));
+            return Ok(Outcome::finished(deferred, false));
         }
     }
 
@@ -488,8 +577,9 @@ fn collect(
         return Ok(Outcome::same(Collection::RootsChanged));
     }
     budget.check_cancellation()?;
+    let left = cut || retire.copy_left_inputs();
     Ok(if retire.retire(store, gc, copied.as_ref(), || Ok(()))? {
-        Outcome::finished(deferred)
+        Outcome::finished(deferred, left)
     } else {
         Outcome::same(Collection::Busy)
     })
@@ -521,6 +611,9 @@ thread_local! {
     static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static TEST_COPY_EXPIRES: std::cell::Cell<Option<CopyPhase>> =
         const { std::cell::Cell::new(None) };
+    /// How many wholly dead packs verification may still start before the
+    /// budget ends, in place of the clock.
+    static TEST_VERIFY_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

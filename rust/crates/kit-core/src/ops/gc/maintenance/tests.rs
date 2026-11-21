@@ -609,6 +609,7 @@ fn stamp_intervals_and_report_names_match_the_collection_outcomes() {
         (Collection::Busy, HOUR, "busy"),
         (Collection::RootsChanged, HOUR, "roots_changed"),
         (Collection::OverBudget, 30 * 24 * HOUR, "over_budget"),
+        (Collection::Progress, HOUR, "progress"),
         (Collection::Failed, 7 * 24 * HOUR, "failed"),
     ] {
         let stamp = Stamp {
@@ -925,4 +926,269 @@ fn roots_that_change_after_the_copy_retire_nothing() {
     );
     assert!(report.bytes_copied > 0);
     assert!(repo.store.read(&ids[0]).is_ok());
+}
+
+fn stamp_of(repo: &Repo) -> Stamp {
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    Stamp::read(&mut file).unwrap()
+}
+
+fn step_later(repo: &Repo) -> MaintenanceReport {
+    TEST_NOW.set(Some(TEST_NOW.get().unwrap() + HOUR + 1));
+    repo.run()
+}
+
+/// A step whose verification ends before every wholly dead pack is checked
+/// retires the oldest ones it did check, stamps progress, and the next step
+/// is due in an hour and takes the rest.
+#[test]
+fn a_step_that_runs_out_of_time_retires_what_it_verified_oldest_first() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let dead: Vec<_> = (0..5)
+        .map(|n| {
+            let (path, _) = repo.old_pack(&[format!("dead {n}").as_bytes()]);
+            // Packs 0 and 1 are the youngest, 4 the oldest.
+            age_file(&path, DEFAULT_GRACE_SECS + 86_400 * (n + 1));
+            path
+        })
+        .collect();
+    let before = repo.pack_count();
+
+    TEST_VERIFY_ROOM.set(Some(2));
+    let first = repo.run();
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(first.collection, Collection::Progress);
+    assert_eq!(first.packs_retired, 2);
+    assert!(
+        !dead[4].exists() && !dead[3].exists(),
+        "the oldest go first"
+    );
+    assert!(dead[..3].iter().all(|path| path.exists()));
+    assert_eq!(repo.pack_count(), before - 2);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert!(!stamp.due(stamp.attempted + HOUR - 1, 3));
+    assert!(
+        stamp.due(stamp.attempted + HOUR, 3),
+        "the pair floor does not apply"
+    );
+    assert_eq!(repo.run().collection, Collection::NotDue, "not due yet");
+
+    TEST_VERIFY_ROOM.set(Some(2));
+    let second = step_later(&repo);
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(
+        (second.collection, second.packs_retired),
+        (Collection::Progress, 2)
+    );
+    let third = step_later(&repo);
+    assert_eq!(
+        (third.collection, third.packs_retired),
+        (Collection::Complete, 1)
+    );
+    assert!(dead.iter().all(|path| !path.exists()));
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+    for id in &ids {
+        assert!(repo.store.read(id).is_ok());
+    }
+}
+
+/// With no time to verify one pack, nothing is retired and the long interval
+/// of an attempt that ran out of budget stands: the step cannot loop on
+/// work it never does.
+#[test]
+fn a_step_that_verifies_no_pack_keeps_the_long_interval() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let (dead, _) = repo.old_pack(&[b"dead"]);
+    TEST_VERIFY_ROOM.set(Some(0));
+    let report = repo.run();
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(report.packs_retired, 0);
+    assert!(dead.exists());
+    assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
+}
+
+/// Every step on a large dead set that retires at least one pack leaves the
+/// store closer to the manual gc state: the set empties in a bounded number
+/// of steps.
+#[test]
+fn a_large_dead_set_empties_in_a_bounded_number_of_steps() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    let dead: Vec<_> = (0..40)
+        .map(|n| {
+            let (path, _) = repo.old_pack(&[format!("dead {n}").as_bytes()]);
+            age_file(&path, DEFAULT_GRACE_SECS + 86_400 * (n + 1));
+            path
+        })
+        .collect();
+
+    let mut steps = 0;
+    loop {
+        TEST_VERIFY_ROOM.set(Some(7));
+        let report = if steps == 0 {
+            repo.run()
+        } else {
+            step_later(&repo)
+        };
+        TEST_VERIFY_ROOM.set(None);
+        steps += 1;
+        assert!(steps <= 6, "40 packs at 7 a step take 6 steps");
+        if report.collection != Collection::Progress {
+            assert_eq!(report.collection, Collection::Complete);
+            break;
+        }
+        assert_eq!(report.packs_retired, 7, "every step makes progress");
+    }
+    assert!(dead.iter().all(|path| !path.exists()));
+}
+
+/// A step whose one output could not hold every input leaves work: it is due
+/// again in an hour, under the pair floor, until the inputs are done.
+#[test]
+fn a_copy_capped_to_one_output_leaves_work_and_runs_again_under_the_floor() {
+    TEST_NOW.set(Some(now_secs()));
+    crate::store::set_test_output_entries(Some(8));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let before = repo.pack_count();
+
+    let first = repo.run();
+    assert_eq!(first.collection, Collection::Progress);
+    assert_eq!(first.packs_merged, 8);
+    assert!(
+        repo.pack_count() < MIN_PAIRS,
+        "{before} -> {}",
+        repo.pack_count()
+    );
+    assert_eq!(stamp_of(&repo).outcome, Collection::Progress);
+
+    let mut steps = 1;
+    loop {
+        let report = step_later(&repo);
+        steps += 1;
+        assert!(steps <= 6, "bounded: each step merges 8 of 32");
+        if report.collection == Collection::Complete {
+            break;
+        }
+        assert_eq!(report.collection, Collection::Progress);
+        assert!(report.packs_merged > 0);
+    }
+    crate::store::set_test_output_entries(None);
+    for id in &ids {
+        assert!(repo.store.read(id).is_ok());
+    }
+}
+
+/// A step that has left work but retired nothing keeps the interval of its
+/// own outcome: a refresh of every verified pack cannot make the step loop
+/// every hour.
+#[test]
+fn a_step_that_retires_nothing_is_never_stamped_progress() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    repo.old_pack(&[b"dead one"]);
+    repo.old_pack(&[b"dead two"]);
+    // Room for one of the two: verification is cut with one pack planned.
+    TEST_VERIFY_ROOM.set(Some(1));
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        // A writer refreshes every pack before the locks, so the planned
+        // pair fails its recheck and nothing retires.
+        for entry in fs::read_dir(repo.pack_dir()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "pack") {
+                File::open(&path)
+                    .unwrap()
+                    .set_modified(SystemTime::now())
+                    .unwrap();
+            }
+        }
+    });
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(report.packs_retired, 0, "{report:?}");
+    assert_eq!(report.collection, Collection::OverBudget, "{report:?}");
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+}
+
+/// A lock miss after a step of progress keeps the floor bypass: the store may
+/// have fallen under 32 pairs with work still planned.
+#[test]
+fn a_lock_miss_after_progress_still_ignores_the_pair_floor() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    for n in 0..2 {
+        repo.old_pack(&[format!("dead {n}").as_bytes()]);
+    }
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    Stamp {
+        attempted: 1,
+        outcome: Collection::Progress,
+        complete_pairs: 0,
+    }
+    .write(&mut file)
+    .unwrap();
+    drop(file);
+    let lock = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Busy);
+    drop(lock);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert!(stamp.due(stamp.attempted + HOUR, 3));
+}
+
+/// A cancellation during the verification of a pack stops the step with
+/// nothing retired: it is not a deadline, so it never reads as progress.
+#[test]
+fn a_cancellation_while_a_dead_pack_is_verified_retires_nothing() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let dead: Vec<_> = (0..3)
+        .map(|n| repo.old_pack(&[format!("dead {n}").as_bytes()]).0)
+        .collect();
+    TEST_VERIFY_ROOM.set(Some(5));
+    // The first verification start moves the counter, and every check after
+    // it is a cancellation.
+    let report = maintain_with(
+        &repo.layout,
+        &repo.store,
+        &|| TEST_VERIFY_ROOM.get() != Some(5),
+        BUDGET,
+        || panic!("a cancelled step must not reach the locks"),
+    );
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(report.collection, Collection::Failed, "{report:?}");
+    assert_eq!(report.packs_retired, 0);
+    assert!(dead.iter().all(|path| path.exists()));
+    assert_eq!(stamp_of(&repo).outcome, Collection::Failed);
+}
+
+#[test]
+fn the_progress_stamp_round_trips_and_an_unknown_one_is_unreadable() {
+    let stamp = Stamp {
+        attempted: 7,
+        outcome: Collection::Progress,
+        complete_pairs: 3,
+    };
+    assert_eq!(
+        Stamp::decode(&stamp.encode()).unwrap().outcome,
+        Collection::Progress
+    );
+    let mut bytes = stamp.encode();
+    bytes[8] = 8;
+    assert!(Stamp::decode(&bytes).is_none());
 }

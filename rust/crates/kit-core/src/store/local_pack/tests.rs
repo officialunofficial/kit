@@ -1587,7 +1587,7 @@ type AfterCopy = Box<dyn FnOnce() -> crate::store::StoreResult<()>>;
 type AfterBatch = Box<dyn FnMut(usize) -> crate::store::StoreResult<()>>;
 
 thread_local! {
-    static RETIRE_BATCH: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static RETIRE_BATCH: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
     static AFTER_RETIRE_BATCH: std::cell::RefCell<Option<AfterBatch>> =
         const { std::cell::RefCell::new(None) };
     static AFTER_COPY_PUBLISH: std::cell::Cell<Option<AfterCopy>> =
@@ -1600,11 +1600,15 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Test override of the batch size; reset when the guard drops.
+/// Test override of the batch limits; reset when the guard drops.
 pub(super) struct RetireBatch;
 
 pub(super) fn set_retire_batch(size: usize) -> RetireBatch {
-    RETIRE_BATCH.set(Some(size));
+    set_retire_batch_limits(size, super::gc::RETIRE_BATCH_BYTES)
+}
+
+pub(super) fn set_retire_batch_limits(size: usize, bytes: u64) -> RetireBatch {
+    RETIRE_BATCH.set(Some((size, bytes)));
     RetireBatch
 }
 
@@ -1615,7 +1619,7 @@ impl Drop for RetireBatch {
     }
 }
 
-pub(super) fn retire_batch() -> Option<usize> {
+pub(super) fn retire_batch() -> Option<(usize, u64)> {
     RETIRE_BATCH.get()
 }
 

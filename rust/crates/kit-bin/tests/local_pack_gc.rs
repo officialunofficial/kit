@@ -135,3 +135,73 @@ fn a_damaged_pack_warns_in_dry_run_and_clears_fetch_records_on_collection() {
         assert_eq!(applied.is_file(), dry_run);
     }
 }
+
+/// A repository with two old, wholly dead packs and nothing else.
+fn two_dead_packs() -> (tempfile::TempDir, ObjectStore, Vec<std::path::PathBuf>) {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    let store = ObjectStore::init(&layout).unwrap();
+    refs::init(&layout).unwrap();
+    store.try_activate_local_packs().unwrap();
+    let guard = store.prune_guard().unwrap();
+    for n in 0..2 {
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        writer
+            .write(
+                &serialize(&Object::Blob(Blob {
+                    data: format!("garbage {n}").into_bytes(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        writer.publish().unwrap();
+    }
+    drop(guard);
+    let packs: Vec<_> = fs::read_dir(layout.objects_dir().join("pack"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    for path in &packs {
+        fs::File::open(path)
+            .unwrap()
+            .set_modified(UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+    }
+    (dir, store, packs)
+}
+
+#[test]
+fn a_gc_that_cannot_take_the_lock_for_retirement_says_so_and_still_exits_zero() {
+    let (dir, store, packs) = two_dead_packs();
+    // A fetch, push or add in flight holds the shared lock.
+    let writer = store.prune_guard().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kit"))
+        .current_dir(dir.path())
+        .arg("gc")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("gc stopped retiring local packs because a fetch, push or add held the store lock; 0 retired, the rest stay until the next gc"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("stopped retiring").count(), 1, "{stderr}");
+    assert!(packs.iter().all(|path| path.exists()));
+    drop(writer);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kit"))
+        .current_dir(dir.path())
+        .arg("gc")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("stopped retiring"), "{stderr}");
+    assert!(
+        stderr.contains("retired 2 wholly dead local pack"),
+        "{stderr}"
+    );
+    assert!(packs.iter().all(|path| !path.exists()));
+}
