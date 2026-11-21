@@ -72,7 +72,7 @@ fn build_up(repo: &Path, count: u64) {
     for n in 0..count {
         add_large(repo, n);
     }
-    assert_eq!(pairs(repo), count as usize);
+    assert_eq!(pairs(repo), usize::try_from(count).unwrap());
 }
 
 #[test]
@@ -93,7 +93,11 @@ fn a_commit_runs_the_due_step_and_a_second_commit_does_not() {
     ok(repo.path(), &["add", "g"]);
     let second = ok(repo.path(), &["commit", "-m", "two"]);
     assert_eq!(stamp(repo.path()), Some(stamp_after), "not due: untouched");
-    assert!(!String::from_utf8(second.stderr).unwrap().contains("maintenance:"));
+    assert!(
+        !String::from_utf8(second.stderr)
+            .unwrap()
+            .contains("maintenance:")
+    );
 }
 
 #[test]

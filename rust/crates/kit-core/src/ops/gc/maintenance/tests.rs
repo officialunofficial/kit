@@ -594,7 +594,11 @@ fn a_step_that_has_never_run_is_due_at_the_floor() {
         repo.pack(&[format!("young {n}").as_bytes()]);
     }
     assert_eq!(repo.run().collection, Collection::NotDue);
-    assert_eq!(fs::metadata(&stamp).unwrap().len(), 0, "nothing was stamped");
+    assert_eq!(
+        fs::metadata(&stamp).unwrap().len(),
+        0,
+        "nothing was stamped"
+    );
 
     repo.pack(&[b"the last pair"]);
     assert_eq!(repo.run().collection, Collection::Complete);
