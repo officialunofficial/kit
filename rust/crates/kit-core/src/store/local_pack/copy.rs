@@ -520,19 +520,19 @@ fn find_holders(members: &[Member], live: &LiveSet) -> (HashMap<Hash, Vec<usize>
         }
         rows.sort_unstable_by_key(|row| (row.0, row.1));
         for run in rows.chunk_by(|a, b| a.0 == b.0) {
-            if run.len() > 1 {
-                let home = run
-                    .iter()
-                    .map(|row| row.1)
-                    .max_by(|&a, &b| prefer(&members[a], &members[b]))
-                    .expect("a run holds a row");
-                for &(_, at, len) in run {
-                    if at != home {
-                        covered[at] += u64::from(len);
-                    }
+            // An id with one holder has no other copy.
+            let [first, _, ..] = run else { continue };
+            let home = run
+                .iter()
+                .map(|row| row.1)
+                .max_by(|&a, &b| prefer(&members[a], &members[b]))
+                .expect("a run holds a row");
+            for &(_, at, len) in run {
+                if at != home {
+                    covered[at] += u64::from(len);
                 }
-                holders.insert(run[0].0, run.iter().map(|row| row.1).collect());
             }
+            holders.insert(first.0, run.iter().map(|row| row.1).collect());
         }
     }
     (holders, covered)
