@@ -43,7 +43,10 @@ fn files_in_pack_dir(store: &ObjectStore, suffix: &str) -> Vec<PathBuf> {
     };
     let mut files: Vec<PathBuf> = entries
         .map(|entry| entry.unwrap().path())
-        .filter(|path| path.to_string_lossy().ends_with(suffix))
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            !name.starts_with('.') && name.ends_with(suffix)
+        })
         .collect();
     files.sort();
     files
@@ -55,8 +58,23 @@ fn pairs(store: &ObjectStore) -> usize {
     packs
 }
 
+/// Loose object files, which the pack directory does not count.
 fn loose(store: &ObjectStore) -> usize {
-    store.iter_object_hashes().unwrap().len()
+    let mut count = 0;
+    for shard in fs::read_dir(store.objects_root()).unwrap() {
+        let shard = shard.unwrap().path();
+        let two_hex = shard
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()));
+        if two_hex && shard.is_dir() {
+            count += fs::read_dir(&shard)
+                .unwrap()
+                .filter(|entry| !entry.as_ref().unwrap().file_name().to_string_lossy().starts_with('.'))
+                .count();
+        }
+    }
+    count
 }
 
 /// Staging files left in the pack directory.
@@ -65,10 +83,7 @@ fn staging(store: &ObjectStore) -> usize {
         .map(|entries| {
             entries
                 .map(|entry| entry.unwrap().path())
-                .filter(|path| {
-                    let name = path.to_string_lossy();
-                    !name.ends_with(".pack") && !name.ends_with(".idx")
-                })
+                .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with('.'))
                 .count()
         })
         .unwrap_or(0)
