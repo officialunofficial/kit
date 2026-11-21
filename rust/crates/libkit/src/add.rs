@@ -1597,6 +1597,21 @@ mod tests {
         out
     }
     #[test]
+    fn the_progress_sink_forwards_the_buffers_and_ordering_of_its_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let batch = store.batch();
+        let sink = HashProgressSink::new(&batch, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_some());
+        assert_eq!(sink.orders_chunks(), batch.orders_chunks());
+
+        let sink = HashProgressSink::new(&store, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_none());
+        assert!(!sink.orders_chunks());
+    }
+
+    #[test]
     fn oversized_request_leaves_no_objects_temps_or_partial_index() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

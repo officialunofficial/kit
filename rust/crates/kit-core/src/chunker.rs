@@ -484,10 +484,21 @@ const WINDOW_MULTIPLE: usize = 4;
 /// The allocator keeps freed blocks in the arena of the thread that took them,
 /// and gives a finished thread's arena to whichever thread starts next, so a
 /// sequence of files leaves one retained arena per file.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ChunkBuffers {
     windows: std::sync::Mutex<Vec<Vec<u8>>>,
     chunks: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for ChunkBuffers {
+    // The counts only: the buffers hold tens of MiB of file bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (windows, chunks) = self.spare();
+        f.debug_struct("ChunkBuffers")
+            .field("windows", &windows)
+            .field("chunks", &chunks)
+            .finish()
+    }
 }
 
 impl ChunkBuffers {
@@ -508,8 +519,32 @@ impl ChunkBuffers {
         if let Some(at) = spare.iter().position(|window| window.len() == len) {
             return spare.swap_remove(at);
         }
+        // Windows of another size cannot serve a reader of this size, which
+        // means the cutter thread count changed: let them go.
+        spare.clear();
         drop(spare);
         vec![0u8; len]
+    }
+
+    /// How many windows and chunk buffers are kept.
+    fn spare(&self) -> (usize, usize) {
+        let windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        let chunks = self
+            .chunks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        (windows, chunks)
+    }
+
+    /// [`Self::spare`] for tests of other modules.
+    #[cfg(test)]
+    pub(crate) fn spare_counts(&self) -> (usize, usize) {
+        self.spare()
     }
 
     fn give_window(&self, window: Vec<u8>) {
@@ -971,7 +1006,8 @@ mod tests {
         let mut second = vec![0u8; 3 * 1024 * 1024 + 777];
         Prng::new(0xB0F2).fill(&mut second);
 
-        for data in [&first, &second, &first] {
+        let empty = Vec::new();
+        for data in [&first, &second, &empty, &first] {
             let fresh = drain(
                 ChunkReader::new(FastCdc::v1(), std::io::Cursor::new(data)),
                 true,
@@ -1003,17 +1039,12 @@ mod tests {
             buffers.windows.lock().unwrap().len(),
             ChunkBuffers::SPARE_WINDOWS
         );
-        // A window of another size is not taken for the one asked for.
-        assert_eq!(buffers.window(32).len(), 32);
-        assert_eq!(
-            buffers.windows.lock().unwrap().len(),
-            ChunkBuffers::SPARE_WINDOWS
-        );
         assert_eq!(buffers.window(16).len(), 16);
-        assert_eq!(
-            buffers.windows.lock().unwrap().len(),
-            ChunkBuffers::SPARE_WINDOWS - 1
-        );
+        assert_eq!(buffers.spare().0, ChunkBuffers::SPARE_WINDOWS - 1);
+        // Windows of another size are no use to a reader of this size, so they
+        // are let go and the reader gets a fresh one.
+        assert_eq!(buffers.window(32).len(), 32);
+        assert_eq!(buffers.spare().0, 0);
 
         buffers.give_chunks(vec![vec![7; 100]; 2 * ChunkBuffers::SPARE_CHUNKS]);
         assert_eq!(

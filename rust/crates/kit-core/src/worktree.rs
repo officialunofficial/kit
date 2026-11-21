@@ -2705,6 +2705,10 @@ mod tests {
                 .unwrap()
             })
             .collect();
+        // Both windows and the chunk buffers of the last batches came back.
+        let (windows, chunks) = batch.chunk_buffers().unwrap().spare_counts();
+        assert_eq!(windows, 2);
+        assert!(chunks > 0, "no chunk buffer came back");
         batch.commit().unwrap();
 
         let (_plain_dir, plain) = fresh_store();
