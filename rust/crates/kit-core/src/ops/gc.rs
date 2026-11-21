@@ -805,6 +805,8 @@ pub struct GcReport {
     pub packs_rewritten: usize,
     /// Small packs merged into larger ones by copy-then-retire.
     pub packs_merged: usize,
+    /// New packs that copy-then-retire published.
+    pub packs_written: usize,
     /// Packs retired with no copy, because a pair that stays holds a verified
     /// copy of every entry the pack must keep.
     pub packs_retired_covered: usize,

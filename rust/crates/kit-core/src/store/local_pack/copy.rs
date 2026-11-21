@@ -357,6 +357,7 @@ impl CopyPlan {
             return Ok(Copied::none());
         };
         report.survivor_bytes_copied += copied;
+        report.packs_written += outputs.iter().flatten().count();
 
         let mut inputs = Vec::new();
         for (input, work) in self.inputs.iter().zip(&work) {
@@ -916,6 +917,91 @@ mod select_tests {
                 .select(&dir, &|_| false, &copied.candidates())
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn an_input_is_blocked_by_a_candidate_whichever_batch_takes_it() {
+        let (_dir, _layout, store) = fresh();
+        let (input, covering, other, output) = (
+            pair(&store, "input"),
+            pair(&store, "covering"),
+            pair(&store, "other"),
+            pair(&store, "output"),
+        );
+        let dir = store.pack_dir();
+        let copied = Copied {
+            outputs: vec![Dep::of(&output).unwrap()],
+            inputs: vec![
+                relied(&input, &[&covering], &[&output]),
+                relied(&covering, &[&other], &[&output]),
+            ],
+        };
+        assert!(copied.select(&dir, &|_| false, &[0]).is_empty());
+        let selected = copied.select(&dir, &|_| false, &[1]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pair.key, covering.key);
+    }
+
+    fn input_of(member: usize, sizes: &[u32]) -> Input {
+        Input {
+            member,
+            class: Class::Mixed,
+            survivors: sizes
+                .iter()
+                .map(|&len| Entry {
+                    id: [member as u8; 32],
+                    frame: Frame { offset: 0, len },
+                })
+                .collect(),
+            dropped: Vec::new(),
+            dead_dropped: 0,
+        }
+    }
+
+    #[test]
+    fn the_limit_keeps_the_inputs_that_copy_least_and_that_fit() {
+        let mut inputs = vec![
+            input_of(0, &[30]),
+            input_of(1, &[10]),
+            input_of(2, &[]),
+            input_of(3, &[20]),
+        ];
+        Limit {
+            payload: 35,
+            entries: usize::MAX,
+        }
+        .apply(&mut inputs);
+        assert_eq!(
+            inputs.iter().map(|i| i.member).collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
+
+        // The payload limit is inclusive.
+        let mut inputs = vec![input_of(0, &[20]), input_of(1, &[15])];
+        Limit {
+            payload: 35,
+            entries: usize::MAX,
+        }
+        .apply(&mut inputs);
+        assert_eq!(inputs.len(), 2);
+
+        // The entry limit counts entries, and is inclusive too.
+        let mut inputs = vec![
+            input_of(0, &[1, 1]),
+            input_of(1, &[1, 1]),
+            input_of(2, &[1]),
+        ];
+        Limit {
+            payload: u64::MAX,
+            entries: 3,
+        }
+        .apply(&mut inputs);
+        assert_eq!(inputs.iter().map(|i| i.member).collect::<Vec<_>>(), [2, 0]);
+
+        // No limit keeps every input in order.
+        let mut inputs = vec![input_of(5, &[9]), input_of(4, &[1])];
+        Limit::NONE.apply(&mut inputs);
+        assert_eq!(inputs.iter().map(|i| i.member).collect::<Vec<_>>(), [5, 4]);
     }
 
     #[test]

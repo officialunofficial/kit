@@ -17,9 +17,6 @@ pub(crate) struct PackSweep {
     pairs: BTreeMap<Hash, Retirement>,
     leftovers: BTreeMap<PathBuf, Stamp>,
     copy: Option<CopyPlan>,
-    /// Test override of [`RETIRE_BATCH`]; zero means the policy.
-    #[cfg(test)]
-    batch: usize,
 }
 
 /// The most items one exclusive `format` hold retires: pack pairs, copy
@@ -417,10 +414,10 @@ impl PackSweep {
         self.retire(store, report, copied.as_ref(), after_pack_sync)
     }
 
-    fn batch(&self) -> usize {
+    fn batch() -> usize {
         #[cfg(test)]
-        if self.batch != 0 {
-            return self.batch;
+        if let Some(size) = super::tests::retire_batch() {
+            return size;
         }
         RETIRE_BATCH
     }
@@ -443,7 +440,7 @@ impl PackSweep {
         let whole: Vec<&Hash> = self.pairs.keys().collect();
         let inputs = copied.map(Copied::candidates).unwrap_or_default();
         let leftovers: Vec<(&PathBuf, &Stamp)> = self.leftovers.iter().collect();
-        let size = self.batch();
+        let size = Self::batch();
         let mut run = Run {
             hook: Some(after_pack_sync),
             flushed: BTreeSet::new(),
@@ -470,6 +467,8 @@ impl PackSweep {
             if !self.retire_batch(store, report, copied, &batch, &mut run)? {
                 return Ok(false);
             }
+            #[cfg(test)]
+            super::tests::after_retire_batch(report.retire_batches)?;
         }
         if let Some(copied) = copied {
             report.bytes_reclaimed += run.copy_freed.saturating_sub(copied.written());

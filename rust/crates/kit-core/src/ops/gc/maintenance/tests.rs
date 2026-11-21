@@ -34,6 +34,20 @@ impl Repo {
         maintain_packs(&self.layout, &self.store, &|| false)
     }
 
+    fn pack_count(&self) -> usize {
+        fs::read_dir(self.pack_dir())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "pack")
+            })
+            .count()
+    }
+
     fn pack_dir(&self) -> std::path::PathBuf {
         self.store.objects_root().join("pack")
     }
@@ -139,7 +153,7 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
 }
 
 #[test]
-fn collection_retires_only_wholly_dead_packs_past_grace() {
+fn collection_retires_wholly_dead_packs_and_copies_the_rest_past_grace() {
     TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
@@ -155,15 +169,22 @@ fn collection_retires_only_wholly_dead_packs_past_grace() {
     assert_eq!(report.collection, Collection::Complete);
     assert_eq!(report.packs_retired, 1);
     assert!(!dead.exists() && !dead.with_extension("idx").exists());
-    for path in [live, mixed, young] {
-        assert!(path.is_file() && path.with_extension("idx").is_file());
+    // The mixed pack is rewritten without its dead entry; the live pack and
+    // every small young pack are merged. Nothing unreachable inside grace goes.
+    assert_eq!(report.packs_rewritten, 1);
+    assert_eq!(report.packs_merged, MIN_PAIRS + 2);
+    for path in [&live, &mixed, &young] {
+        assert!(!path.exists() && !path.with_extension("idx").exists());
     }
+    assert!(report.bytes_copied > 0);
     assert!(repo.store.read(&live_ids[0]).is_ok());
     assert!(repo.store.read(&mixed_ids[0]).is_ok());
+    assert!(repo.store.read(&mixed_ids[1]).is_err());
+    assert_eq!(repo.pack_count(), 1, "one output holds everything kept");
 
     let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
     let stamp = Stamp::read(&mut file).unwrap();
-    assert_eq!(stamp.complete_pairs, (MIN_PAIRS + 3) as u64);
+    assert_eq!(stamp.complete_pairs, 1);
 }
 
 #[test]
@@ -446,15 +467,20 @@ fn a_due_collection_backs_off_when_the_orphan_sweep_cannot_lock() {
 }
 
 #[test]
-fn an_empty_sweep_leaves_the_format_lock_to_the_publisher() {
+fn a_publisher_holding_the_format_lock_keeps_the_retirement_waiting() {
     let repo = Repo::new();
     repo.due();
     let _publisher = repo.store.prune_guard().unwrap();
 
+    // The small pairs are merged: the copy runs under the shared guard, the
+    // exclusive try then fails, and the inputs stay beside the output.
     let report = repo.run();
-    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.collection, Collection::Busy);
     assert_eq!(report.leftovers_removed, 0);
     assert_eq!(report.packs_retired, 0);
+    assert_eq!(report.packs_merged, 0);
+    assert_eq!(report.packs_written, 1);
+    assert_eq!(repo.pack_count(), MIN_PAIRS + 1);
 }
 
 #[test]
