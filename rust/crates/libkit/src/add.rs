@@ -956,7 +956,7 @@ fn hash_pending(
                 let hashed = fanout::try_map_seq_or_par(
                     batch,
                     chunk_fanout_threshold(),
-                    |chunk: &Vec<u8>| worktree::hash_chunk(chunk),
+                    |chunk| worktree::hash_chunk(chunk),
                 )?;
                 worktree::put_hashed_chunks(sink, &hashed)
             } else {
