@@ -791,6 +791,20 @@ impl ObjectSink for HashProgressSink<'_> {
         self.note(parts);
         Ok(hash)
     }
+    fn put_hashed_chunk(
+        &self,
+        chunk: &kit_core::store::HashedChunk<'_>,
+    ) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put_hashed_chunk(chunk)?;
+        self.note(&chunk.parts());
+        Ok(hash)
+    }
+    fn orders_chunks(&self) -> bool {
+        self.inner.orders_chunks()
+    }
+    fn chunk_buffers(&self) -> Option<&kit_core::chunker::ChunkBuffers> {
+        self.inner.chunk_buffers()
+    }
     fn has(&self, hash: &Hash) -> bool {
         self.inner.has(hash)
     }
@@ -939,9 +953,19 @@ fn hash_pending(
     }
     let result = if chunk_fanout {
         worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
-            fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
-                worktree::store_chunk_blob(sink, chunk)
-            })
+            if sink.orders_chunks() {
+                // Hash the batch in parallel, then hand it over in file order
+                // on this thread, so a packing sink writes the file in order.
+                let hashed =
+                    fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                        worktree::hash_chunk(chunk)
+                    })?;
+                worktree::put_hashed_chunks(sink, &hashed)
+            } else {
+                fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                    worktree::store_chunk_blob(sink, chunk)
+                })
+            }
         })
     } else {
         // Every file has a busy worker. Borrow each chunk from the reader,
@@ -1572,6 +1596,21 @@ mod tests {
         out.sort();
         out
     }
+    #[test]
+    fn the_progress_sink_forwards_the_buffers_and_ordering_of_its_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let batch = store.batch();
+        let sink = HashProgressSink::new(&batch, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_some());
+        assert_eq!(sink.orders_chunks(), batch.orders_chunks());
+
+        let sink = HashProgressSink::new(&store, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_none());
+        assert!(!sink.orders_chunks());
+    }
+
     #[test]
     fn oversized_request_leaves_no_objects_temps_or_partial_index() {
         let dir = tempfile::tempdir().unwrap();

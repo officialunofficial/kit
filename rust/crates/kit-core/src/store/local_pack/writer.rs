@@ -63,7 +63,9 @@ impl Limits {
 #[derive(Debug)]
 pub struct LocalPackWriter<'a> {
     store: &'a ObjectStore,
-    _guard: &'a PruneGuard,
+    /// Ties a writer built by [`Self::new`] to its guard. A batch checks the
+    /// guard once and holds it itself, so its writer keeps no borrow.
+    _guard: Option<&'a PruneGuard>,
     pack: BufWriter<tempfile::NamedTempFile>,
     ids: HashSet<Hash>,
     frames: Frames,
@@ -78,11 +80,22 @@ impl<'a> LocalPackWriter<'a> {
     /// # Errors
     /// The packed marker could not be validated or synced, or staging failed.
     pub fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> StoreResult<Self> {
+        Ok(Self {
+            _guard: Some(guard),
+            ..Self::for_batch(store, guard)?
+        })
+    }
+
+    /// [`Self::new`] for a writer that lives beside its guard in one struct.
+    /// It checks the guard once and keeps no borrow of it, so the owner must
+    /// hold the guard until this writer is published or dropped, and must drop
+    /// the writer first.
+    pub(crate) fn for_batch(store: &'a ObjectStore, guard: &PruneGuard) -> StoreResult<Self> {
         store.check_prune_guard(guard)?;
         prepare_dir(store, guard)?;
         Ok(Self {
             store,
-            _guard: guard,
+            _guard: None,
             pack: BufWriter::with_capacity(256 << 10, new_pack(store)?),
             ids: HashSet::new(),
             frames: Frames::new(),
@@ -90,6 +103,19 @@ impl<'a> LocalPackWriter<'a> {
             limits: Limits::PACK,
             failed: false,
         })
+    }
+
+    /// True when this pack already holds `id`.
+    pub(crate) fn holds(&self, id: &Hash) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Whether appending one new object of `len` bytes stays inside the
+    /// seal limits. An empty pack always has room.
+    pub(crate) fn has_room(&self, len: usize) -> bool {
+        self.ids.is_empty()
+            || (self.ids.len() < crate::store::PACK_SEAL_ENTRIES
+                && self.payload + len as u64 <= crate::store::PACK_SEAL_BYTES as u64)
     }
 
     /// Stage one canonical object, deduplicating only within this pack.
