@@ -282,6 +282,24 @@ fn small_packs_merge_only_from_eight_and_a_large_pack_is_never_an_input() {
 }
 
 #[test]
+fn a_pack_of_sixteen_thousand_entries_is_not_small() {
+    // 16,383 entries are small and 16,384 are not. Seven small packs beside
+    // the edge pack make eight only when it counts. A dry run classifies
+    // without copying the entries.
+    for (entries, merges) in [(16_383, true), (16_384, false)] {
+        let (_dir, layout, store) = fresh();
+        for n in 0..7 {
+            publish(&store, &[&obj(&format!("tiny{n}"), 500)], YOUNG);
+        }
+        let edge: Vec<_> = (0..entries).map(|n| obj(&format!("e{n}"), 20)).collect();
+        publish(&store, &edge.iter().collect::<Vec<_>>(), YOUNG);
+
+        let report = run(&store, &layout, true);
+        assert_eq!(report.packs_merged, if merges { 8 } else { 0 }, "{entries}");
+    }
+}
+
+#[test]
 fn a_damaged_input_frame_keeps_that_input_and_the_others_proceed() {
     // The mark refuses a damaged live blob, so the damage sits in an
     // unreachable entry that survives inside grace.
