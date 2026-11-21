@@ -438,7 +438,7 @@ impl<'s> WriteBatch<'s> {
             }
             // The type of a spooled object is not known here, so it may name others.
             SyncPolicy::Batch => {
-                self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES, true)
+                self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES, true);
             }
         }
         Ok(())
