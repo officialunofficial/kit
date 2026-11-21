@@ -490,3 +490,21 @@ fn restore_directory_without_tracked_files_is_refused() {
     let out = fail(repo.path(), repo.xdg(), &["restore", "nope"]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("did not match"));
 }
+
+/// A pathspec names a path from the repository root and what lies below it. A
+/// one-component pathspec such as `Makefile` does not also select a file with
+/// that name in another directory the command reaches through a second
+/// pathspec.
+#[test]
+fn restore_one_component_pathspec_selects_only_the_top_level_path() {
+    let repo = repo_with_deleted_tree();
+    ok(
+        repo.path(),
+        repo.xdg(),
+        &["restore", "Makefile", "u/five.txt", "t/one.txt"],
+    );
+    assert_eq!(
+        worktree_files(&repo),
+        ["Makefile", "t/one.txt", "u/five.txt"]
+    );
+}

@@ -5028,12 +5028,11 @@ mod tests {
 
     #[test]
     fn sparse_restore_pattern_per_file_selects_those_files() {
-        // What `kit restore <paths>` hands the restore: one pattern per
-        // selected file, a directory's files and a lone file together. A
-        // pattern without a slash also matches that name in every directory
-        // the other patterns lead into, so `Makefile` brings back
-        // `src/Makefile` and `sub/Makefile` as well; the selection keeps
-        // doing that.
+        // One unanchored pattern per selected file. A pattern without a
+        // slash also matches that name in every directory the other
+        // patterns lead into, so `Makefile` brings back `src/Makefile` and
+        // `sub/Makefile` as well. Callers that mean a path anchor it with a
+        // leading slash, as the next test does.
         let paths = [
             "guide/deep/y.md",
             "guide/x.md",
@@ -5053,6 +5052,35 @@ mod tests {
                     "src/Makefile",
                     "src/lib/util.rs",
                     "sub/Makefile",
+                    "sub/other.txt",
+                ],
+                "clean={clean}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_restore_anchored_pattern_per_file_selects_only_those_paths() {
+        let paths = [
+            "guide/deep/y.md",
+            "guide/x.md",
+            "src/lib/util.rs",
+            "sub/other.txt",
+            "Makefile",
+        ];
+        let patterns: Vec<SparsePattern> = paths
+            .iter()
+            .map(|p| sparse(&format!("/{p}"), false, false))
+            .collect();
+        for clean in [false, true] {
+            let got = restored_with(patterns.clone(), clean);
+            assert_eq!(
+                got,
+                [
+                    "Makefile",
+                    "guide/deep/y.md",
+                    "guide/x.md",
+                    "src/lib/util.rs",
                     "sub/other.txt",
                 ],
                 "clean={clean}"
