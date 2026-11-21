@@ -533,8 +533,8 @@ fn check_frames_in(
     };
     // One buffer for the whole check, never grown, and no larger than the
     // frames: a small pack must not pay for a full segment.
-    let frames_len = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
-    let cap = segment.min(frames_len).max(ENTRY_FRAME_LEN);
+    let frames_total = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
+    let cap = segment.min(frames_total).max(ENTRY_FRAME_LEN);
     let mut scratch = Scratch::take(cap);
     let buf = &mut scratch.0[..cap];
     let mut rows = rows.iter().peekable();
@@ -560,11 +560,11 @@ fn check_frames_in(
         let mut group = Vec::new();
         let mut len = 0;
         while let Some((_, row)) = rows.peek() {
-            let frame_len = ENTRY_FRAME_LEN + row.len as usize;
-            if len + frame_len > cap {
+            let size = ENTRY_FRAME_LEN + row.len as usize;
+            if len + size > cap {
                 break;
             }
-            len += frame_len;
+            len += size;
             group.push(&rows.next().expect("peeked").1);
         }
         file.read_exact(&mut buf[..len])?;
