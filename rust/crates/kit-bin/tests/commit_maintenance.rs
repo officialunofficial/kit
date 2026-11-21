@@ -43,9 +43,9 @@ fn repo() -> tempfile::TempDir {
     repo
 }
 
-/// Add one file large enough to be chunked, which leaves one pack pair.
+/// Add one file above the chunking threshold, which leaves one pack pair.
 fn add_large(repo: &Path, n: u64) {
-    fs::write(repo.join(format!("f{n}")), bytes(n, 64 * 1024)).unwrap();
+    fs::write(repo.join(format!("f{n}")), bytes(n, 1024 * 1024 + 4096)).unwrap();
     ok(repo, &["add", &format!("f{n}")]);
 }
 
@@ -114,12 +114,12 @@ fn gc_auto_false_skips_the_step() {
 }
 
 #[test]
-fn a_loose_only_repository_gets_no_stamp() {
+fn a_loose_only_repository_runs_no_collection() {
     let repo = repo();
     fs::write(repo.path().join("a"), b"one").unwrap();
     ok(repo.path(), &["add", "a"]);
     ok(repo.path(), &["commit", "-m", "one"]);
-    assert_eq!(stamp(repo.path()), None);
+    assert_eq!(stamp(repo.path()).map(|s| s.len()), Some(0));
 }
 
 #[test]

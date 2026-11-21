@@ -265,10 +265,6 @@ fn run(
     {
         return Collection::NotDue;
     }
-    // A store with no packs has nothing to maintain and gets no stamp file.
-    if !matches!(store.try_packed_for_maintenance(), Ok(true)) {
-        return Collection::NotDue;
-    }
     let Ok(mut file) = lock_stamp(layout.common_dir()) else {
         return Collection::NotDue;
     };
@@ -288,6 +284,9 @@ fn run(
             return Collection::NotDue;
         }
     };
+    if !matches!(store.try_packed_for_maintenance(), Ok(true)) {
+        return Collection::NotDue;
+    }
     let Ok((sweep, pairs)) = store.plan_pack_leftovers(now, DEFAULT_GRACE_SECS) else {
         return Collection::NotDue;
     };

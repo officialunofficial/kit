@@ -584,6 +584,24 @@ fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
     assert!(!old.exists());
 }
 
+/// A step that has never run is due as soon as the store holds the floor, so
+/// a repository that never fetches does not wait a week for its first step.
+#[test]
+fn a_step_that_has_never_run_is_due_at_the_floor() {
+    let repo = Repo::new();
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    for n in 0..MIN_PAIRS - 1 {
+        repo.pack(&[format!("young {n}").as_bytes()]);
+    }
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_eq!(fs::metadata(&stamp).unwrap().len(), 0, "nothing was stamped");
+
+    repo.pack(&[b"the last pair"]);
+    assert_eq!(repo.run().collection, Collection::Complete);
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+    assert_eq!(repo.run().collection, Collection::NotDue, "then it waits");
+}
+
 #[test]
 fn a_loose_only_repository_keeps_files_named_like_pack_leftovers() {
     let dir = tempfile::tempdir().unwrap();
