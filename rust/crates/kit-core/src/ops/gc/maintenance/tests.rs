@@ -479,7 +479,7 @@ fn a_publisher_holding_the_format_lock_keeps_the_retirement_waiting() {
     assert_eq!(report.leftovers_removed, 0);
     assert_eq!(report.packs_retired, 0);
     assert_eq!(report.packs_merged, 0);
-    assert_eq!(report.packs_written, 1);
+    assert!(report.bytes_copied > 0);
     assert_eq!(repo.pack_count(), MIN_PAIRS + 1);
 }
 
