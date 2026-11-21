@@ -244,19 +244,17 @@ fn gc_reclaims_the_small_files_of_a_large_add_after_an_amend() {
         "commit"
     );
     let packs = |root: &Path| {
-        fs::read_dir(root.join(".kit/objects/pack"))
-            .map(|entries| {
-                entries
-                    .filter(|e| {
-                        e.as_ref()
-                            .unwrap()
-                            .path()
-                            .extension()
-                            .is_some_and(|ext| ext == "pack")
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
+        fs::read_dir(root.join(".kit/objects/pack")).map_or(0, |entries| {
+            entries
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "pack")
+                })
+                .count()
+        })
     };
     assert!(
         packs(root) >= 1,
@@ -291,7 +289,7 @@ fn gc_reclaims_the_small_files_of_a_large_add_after_an_amend() {
     let status = run_in(root, &["status"]);
     assert!(
         String::from_utf8_lossy(&status.stdout).contains("nothing to commit"),
-        "the tree is still clean after gc"
+        "the tree is still clean after gc: {status:?}"
     );
     // Every file reads back from the store, packed or not.
     for n in 0..300 {
