@@ -105,6 +105,7 @@ fn a_hashed_chunk_has_the_id_of_the_blob_it_describes() {
         assert_eq!(chunk.id(), store.write(&stored).unwrap());
         assert_eq!(chunk.parts().concat(), stored);
         assert_eq!(chunk.len(), stored.len());
+        assert!(!chunk.is_empty());
     }
 }
 
