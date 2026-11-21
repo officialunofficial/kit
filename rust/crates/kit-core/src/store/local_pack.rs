@@ -33,7 +33,7 @@ use reader::{
     Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,
 };
 pub use writer::LocalPackWriter;
-pub(crate) use writer::SealJob;
+pub use writer::SealJob;
 
 /// Payload bytes at which a local pack is sealed and a new one begins.
 pub const PACK_SEAL_BYTES: usize = 64 << 20;

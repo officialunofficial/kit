@@ -200,7 +200,9 @@ impl<'a> LocalPackWriter<'a> {
     /// Take the writer's pack and rows as a [`SealJob`], which owns what it
     /// needs and can run on another thread. The caller keeps the guard this
     /// writer was checked against until the job finishes.
-    pub(crate) fn detach(self) -> SealJob {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detach(self) -> SealJob {
         SealJob {
             store: self.store.clone(),
             pack: self.pack,
@@ -214,7 +216,8 @@ impl<'a> LocalPackWriter<'a> {
 /// A full pack on its way to publication: everything [`LocalPackWriter`] knew
 /// that sealing needs, without its borrow of the store.
 #[derive(Debug)]
-pub(crate) struct SealJob {
+#[doc(hidden)]
+pub struct SealJob {
     store: ObjectStore,
     pack: BufWriter<tempfile::NamedTempFile>,
     frames: Frames,
@@ -227,7 +230,7 @@ impl SealJob {
     ///
     /// # Errors
     /// An earlier write failed, or a staging or publication failure.
-    pub(crate) fn publish(self) -> StoreResult<()> {
+    pub fn publish(self) -> StoreResult<()> {
         self.publish_pair().map(|_| ())
     }
 

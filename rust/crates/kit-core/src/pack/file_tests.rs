@@ -939,7 +939,7 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
     writer.push_raw(base, &base_bytes).unwrap();
     let first = verified(&writer.finish().unwrap(), dir.path());
     let pending = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&first, &store, None, &pending).unwrap();
+    let report = PackReader::stage_verified(&first, &store, &[], &pending).unwrap();
     assert_eq!(report.raw_count, 1);
     assert!(!store.contains(&base));
 
@@ -953,15 +953,39 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
     let second = verified(&writer.finish().unwrap(), dir.path());
     let staged = ObjectSpool::new(dir.path()).unwrap();
     assert!(matches!(
-        PackReader::stage_verified(&second, &store, None, &staged),
+        PackReader::stage_verified(&second, &store, &[], &staged),
         Err(PackError::DeltaBaseMissing(_)),
     ));
     let staged = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&second, &store, Some(&pending), &staged).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&pending], &staged).unwrap();
     assert_eq!((report.raw_count, report.delta_count), (1, 1));
     assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
     assert!(!store.contains(&base));
     assert!(!store.contains(&target));
+}
+
+#[test]
+fn a_delta_base_may_be_in_any_of_the_pending_windows() {
+    let (dir, store) = fresh_store();
+    let (base, base_bytes) = blob(b"base contents");
+    let (target, target_bytes) = blob(b"changed contents");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(base, &base_bytes).unwrap();
+    let first = verified(&writer.finish().unwrap(), dir.path());
+    let sealing = ObjectSpool::new(dir.path()).unwrap();
+    PackReader::stage_verified(&first, &store, &[], &sealing).unwrap();
+    // The open window holds something else.
+    let open = ObjectSpool::new(dir.path()).unwrap();
+
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base, &delta::encode(&base_bytes, &target_bytes).unwrap())
+        .unwrap();
+    let second = verified(&writer.finish().unwrap(), dir.path());
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&open, &sealing], &staged).unwrap();
+    assert_eq!(report.delta_count, 1);
+    assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
 }
 
 #[test]

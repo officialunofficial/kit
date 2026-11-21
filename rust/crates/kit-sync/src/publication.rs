@@ -10,8 +10,9 @@ use kit_core::protocol::PackKey;
 use kit_core::serialize;
 use kit_core::store::{
     ClosureSource, GuardedStore, LocalPackWriter, ObjectSource, ObjectStore, PACK_SEAL_BYTES,
-    PACK_SEAL_ENTRIES, PruneGuard, StoreError, StoreResult,
+    PACK_SEAL_ENTRIES, PruneGuard, SealJob, StoreError, StoreResult,
 };
+use std::thread::JoinHandle;
 
 use crate::applied_packs::AppliedPacks;
 use crate::observer::{Observer, SyncEvent};
@@ -35,6 +36,19 @@ pub(crate) struct Publication<'a> {
     guard: &'a PruneGuard,
     pack: bool,
     window: Option<Window>,
+    /// The window whose pack is being sealed on a worker thread while the
+    /// next window is received. At most one.
+    sealing: Option<Sealing>,
+}
+
+/// A window whose local pack is sealing, and what finishing it needs. Its
+/// spool stays readable until then: the objects of the window are neither in
+/// the store nor in `Publication::window`, and a later wire pack may name
+/// one as a delta base.
+struct Sealing {
+    window: Window,
+    loose: Vec<(Hash, u32)>,
+    seal: Seal,
 }
 
 struct Window {
@@ -54,6 +68,7 @@ impl<'a> Publication<'a> {
             guard,
             pack: store.local_packs_active(guard)?,
             window: None,
+            sealing: None,
         })
     }
 
@@ -68,20 +83,33 @@ impl<'a> Publication<'a> {
         )
     }
 
-    pub(crate) fn pending(&self) -> Option<&ObjectSpool> {
-        self.window.as_ref().map(|window| &window.spool)
+    /// The spools of the windows that are not in the store yet, newest first.
+    pub(crate) fn pending(&self) -> Vec<&ObjectSpool> {
+        self.window
+            .iter()
+            .chain(self.sealing.iter().map(|sealing| &sealing.window))
+            .map(|window| &window.spool)
+            .collect()
     }
 
     /// The pending objects over the store, for a walk that runs under this
-    /// publication's guard.
+    /// publication's guard. No seal may be in flight: [`Self::finish`] first.
     pub(crate) fn view(&self) -> StoreResult<PendingView<'_>> {
-        PendingView::guarded(self.store, self.pending(), self.guard)
+        if self.sealing.is_some() {
+            return Err(std::io::Error::other("a seal is still in flight").into());
+        }
+        PendingView::guarded(
+            self.store,
+            self.window.as_ref().map(|window| &window.spool),
+            self.guard,
+        )
     }
 
     pub(crate) fn completed(&self, key: &PackKey) -> bool {
         self.window
-            .as_ref()
-            .is_some_and(|window| window.completed_set.contains(key))
+            .iter()
+            .chain(self.sealing.iter().map(|sealing| &sealing.window))
+            .any(|window| window.completed_set.contains(key))
     }
 
     pub(crate) fn accept(
@@ -116,7 +144,7 @@ impl<'a> Publication<'a> {
                 // no reason to copy: its file holds no more than the window.
                 sealed_here |= !loose.is_empty() || !packed.is_empty();
                 self.adopt(spool, &mut loose, &mut packed, false)?;
-                self.seal(observer, remote, applied)?;
+                self.seal_window(observer, remote, applied)?;
             }
             let packs = self.packs(size);
             let window = self.window()?;
@@ -137,7 +165,7 @@ impl<'a> Publication<'a> {
         window.completed.push(key);
         window.completed_set.insert(key);
         if !pack || window.bytes >= PACK_SEAL_BYTES || window.entries == PACK_SEAL_ENTRIES {
-            self.seal(observer, remote, applied)?;
+            self.seal_window(observer, remote, applied)?;
         }
         Ok(())
     }
@@ -193,7 +221,57 @@ impl<'a> Publication<'a> {
         Ok(self.window.as_mut().expect("created publication window"))
     }
 
+    /// Seal the open window and wait for every seal: when this returns, all
+    /// accepted packs are in the store and recorded.
     pub(crate) fn seal(
+        &mut self,
+        observer: &dyn Observer<SyncEvent>,
+        remote: &str,
+        applied: &mut AppliedPacks,
+    ) -> Result<(), PackError> {
+        // The window in flight finishes even when the open one cannot be built.
+        let sealed = self.seal_window(observer, remote, applied);
+        let finished = self.finish(observer, remote, applied);
+        sealed.and(finished)
+    }
+
+    /// Wait for the seal in flight and finish its window.
+    pub(crate) fn finish(
+        &mut self,
+        observer: &dyn Observer<SyncEvent>,
+        remote: &str,
+        applied: &mut AppliedPacks,
+    ) -> Result<(), PackError> {
+        let Some(sealing) = self.sealing.take() else {
+            return Ok(());
+        };
+        sealing.seal.wait()?;
+        self.publish_loose(sealing.window, &sealing.loose, observer, remote, applied)
+    }
+
+    /// Finish the seal in flight when its worker has already ended, so the
+    /// window is recorded without waiting for the next one to fill.
+    pub(crate) fn finish_if_done(
+        &mut self,
+        observer: &dyn Observer<SyncEvent>,
+        remote: &str,
+        applied: &mut AppliedPacks,
+    ) -> Result<(), PackError> {
+        if self
+            .sealing
+            .as_ref()
+            .is_some_and(|sealing| sealing.seal.is_done())
+        {
+            self.finish(observer, remote, applied)?;
+        }
+        Ok(())
+    }
+
+    /// Write the open window's objects to a local pack and hand the pack to a
+    /// worker, which seals it while the caller receives the next window. A
+    /// window whose seal is in flight finishes first, so a window is never
+    /// recorded before the one before it, and at most one seal runs.
+    fn seal_window(
         &mut self,
         observer: &dyn Observer<SyncEvent>,
         remote: &str,
@@ -202,7 +280,6 @@ impl<'a> Publication<'a> {
         let Some(window) = self.window.take() else {
             return Ok(());
         };
-        let loose = self.store.batch();
         let mut loose_ids = Vec::new();
         let mut seen = HashSet::new();
         let mut pack = None;
@@ -218,17 +295,42 @@ impl<'a> Publication<'a> {
                 loose_ids.push((id, len));
             }
         }
-        // The decoder hashed each of these bytes once and wrote them under
-        // that id. They are renamed into place at commit, not read again.
-        for (id, len) in loose_ids {
+        // The pack is complete in its file. The previous window finishes
+        // before this one starts sealing.
+        let job = pack.map(LocalPackWriter::detach);
+        self.finish(observer, remote, applied)?;
+        match job {
+            Some(job) => {
+                self.sealing = Some(Sealing {
+                    window,
+                    loose: loose_ids,
+                    seal: Seal::start(job),
+                });
+                Ok(())
+            }
+            // Only loose objects: nothing to seal.
+            None => self.publish_loose(window, &loose_ids, observer, remote, applied),
+        }
+    }
+
+    /// The decoder hashed each loose object once and wrote it under its id.
+    /// They are renamed into place at commit, not read again, and only after
+    /// the window's pack is in the store. Then the window is recorded.
+    fn publish_loose(
+        &self,
+        window: Window,
+        loose_ids: &[(Hash, u32)],
+        observer: &dyn Observer<SyncEvent>,
+        remote: &str,
+        applied: &mut AppliedPacks,
+    ) -> Result<(), PackError> {
+        let loose = self.store.batch();
+        for &(id, len) in loose_ids {
             let file = window
                 .spool
                 .take_loose(&id)
                 .ok_or_else(|| StoreError::ObjectNotFound(to_hex(&id)))?;
             loose.stage_temp(id, file, u64::from(len))?;
-        }
-        if let Some(pack) = pack {
-            pack.publish()?;
         }
         loose.commit()?;
         for key in window.completed {
@@ -236,6 +338,71 @@ impl<'a> Publication<'a> {
         }
         crate::fetch::persist_record(applied, observer, remote);
         Ok(())
+    }
+}
+
+impl Drop for Publication<'_> {
+    fn drop(&mut self) {
+        // An abandoned fetch: the seal in flight must not outlive the guard
+        // that keeps the pack directory in place. Its window is not recorded.
+        if let Some(sealing) = self.sealing.take() {
+            sealing.seal.discard();
+        }
+    }
+}
+
+/// The seal of one pack, on its own thread.
+enum Seal {
+    Running(JoinHandle<StoreResult<()>>),
+    /// No thread could be started: the pack was sealed on the caller's.
+    Done(StoreResult<()>),
+}
+
+impl Seal {
+    fn start(job: SealJob) -> Self {
+        let job = std::sync::Arc::new(std::sync::Mutex::new(Some(job)));
+        let handed = std::sync::Arc::clone(&job);
+        let take = move || {
+            handed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("a seal job runs once")
+        };
+        let again = take.clone();
+        match std::thread::Builder::new()
+            .name("kit-seal".into())
+            .spawn(move || take().publish())
+        {
+            Ok(handle) => Self::Running(handle),
+            // The job stays reachable when the thread never starts.
+            Err(_) => Self::Done(again().publish()),
+        }
+    }
+
+    fn is_done(&self) -> bool {
+        match self {
+            Self::Running(handle) => handle.is_finished(),
+            Self::Done(_) => true,
+        }
+    }
+
+    /// Wait for the seal and drop its outcome, a panic included.
+    fn discard(self) {
+        if let Self::Running(handle) = self {
+            let _ = handle.join();
+        }
+    }
+
+    /// Wait for the seal. A panic of the worker resumes here.
+    fn wait(self) -> StoreResult<()> {
+        match self {
+            Self::Running(handle) => match handle.join() {
+                Ok(sealed) => sealed,
+                Err(panic) => std::panic::resume_unwind(panic),
+            },
+            Self::Done(sealed) => sealed,
+        }
     }
 }
 
@@ -382,8 +549,11 @@ mod tests {
         publication
             .accept(&spool, key, &NoopObserver, "origin", &mut applied)
             .unwrap();
+        publication
+            .finish(&NoopObserver, "origin", &mut applied)
+            .unwrap();
 
-        assert!(publication.pending().is_none());
+        assert!(publication.pending().is_empty());
         assert!(applied.contains(&key));
         assert_eq!(store.read(&first_id).unwrap(), first);
         assert_eq!(store.read(&last_id).unwrap(), last);
@@ -503,7 +673,7 @@ mod tests {
 
         // The window took the files over: only the packed object was copied,
         // for a wire pack with that little to pack is not kept open.
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.written_bytes(), small.1.len() as u64);
         assert_eq!(pending.donor_files(), 0);
         assert_eq!(staged_files(&layout), staged);
@@ -631,7 +801,7 @@ mod tests {
             .unwrap();
         // The first window sealed on the way and holds the first copy.
         assert_eq!(store.read(&first.0).unwrap(), first.1);
-        assert!(publication.pending().is_some());
+        assert!(!publication.pending().is_empty());
         publication
             .seal(&NoopObserver, "origin", &mut applied)
             .unwrap();
@@ -695,7 +865,7 @@ mod tests {
                 .accept(&spool, key, &NoopObserver, "origin", &mut applied)
                 .unwrap();
         }
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.donor_files(), 0);
         assert!(pending.written_bytes() > 0);
         publication
@@ -730,7 +900,7 @@ mod tests {
             .unwrap();
         drop(spool);
 
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.donor_files(), 1);
         assert_eq!(pending.written_bytes(), 0);
         assert_eq!(
@@ -767,7 +937,7 @@ mod tests {
                 .accept(&spool, key, &NoopObserver, "origin", &mut applied)
                 .unwrap();
         }
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.donor_files(), 2);
         assert_eq!(pending.written_bytes(), 0);
         publication
@@ -805,7 +975,7 @@ mod tests {
         let window_bytes: usize = first.iter().map(|object| object.1.len()).sum();
         assert!(window_bytes + second[0].1.len() > PACK_SEAL_BYTES);
         assert_eq!(packs_on_disk(&layout), 1);
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.donor_files(), 1);
         assert_eq!(pending.written_bytes(), 0);
         publication
@@ -839,13 +1009,16 @@ mod tests {
             .accept(&spool, key, &NoopObserver, "origin", &mut applied)
             .unwrap();
         drop(spool);
+        publication
+            .finish(&NoopObserver, "origin", &mut applied)
+            .unwrap();
 
         // The first window sealed on the way. The open one holds the tail's
         // bytes, not the wire pack's file, which is gone with the spool.
         assert_eq!(packs_on_disk(&layout), 1);
         assert!(store.contains(&objects[0].0));
         assert!(!store.contains(&objects[359].0));
-        let pending = publication.pending().unwrap();
+        let pending = publication.pending()[0];
         assert_eq!(pending.donor_files(), 0);
         assert!(pending.written_bytes() > 0);
         assert_eq!(
@@ -969,13 +1142,306 @@ mod tests {
         publication
             .accept(&spool, key, &NoopObserver, "origin", &mut applied)
             .unwrap();
+        publication
+            .finish(&NoopObserver, "origin", &mut applied)
+            .unwrap();
 
-        assert!(publication.pending().is_none());
+        assert!(publication.pending().is_empty());
         assert_eq!(store.read(&id).unwrap(), bytes);
         assert!(
             AppliedPacks::load(&layout, "origin")
                 .unwrap()
                 .contains(&key)
         );
+    }
+
+    #[test]
+    fn a_full_window_seals_in_the_background_and_is_recorded_when_it_finishes() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        // Two wire packs of 40 MB: the second one fills the window with its
+        // first 24 MB and leaves the rest in the next window.
+        let objects: Vec<_> = (0..400).map(|n| numbered_blob(n, 200_000)).collect();
+        let keys: Vec<_> = (0..2_u8)
+            .map(|n| PackKey::from_hash(kit_core::hash::hash(&[n])))
+            .collect();
+        for (n, key) in keys.iter().enumerate() {
+            let spool = publication.decode_spool().unwrap();
+            stage(
+                &spool,
+                &objects[n * 200..(n + 1) * 200].iter().collect::<Vec<_>>(),
+            );
+            publication
+                .accept(&spool, *key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+        }
+        // The first window is sealing, and its objects stay readable as bases
+        // through the pending spools. Nothing names it before it finishes.
+        assert!(publication.sealing.is_some());
+        assert_eq!(publication.pending().len(), 2);
+        assert!(publication.completed(&keys[0]));
+        assert!(!applied.contains(&keys[0]));
+        assert!(
+            publication
+                .pending()
+                .iter()
+                .any(|spool| spool.contains(&objects[0].0))
+        );
+
+        publication
+            .finish(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(publication.sealing.is_none());
+        assert_eq!(publication.pending().len(), 1);
+        assert!(applied.contains(&keys[0]));
+        assert!(!applied.contains(&keys[1]));
+        assert!(store.contains(&objects[0].0));
+        assert!(!store.contains(&objects[399].0));
+
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(applied.contains(&keys[1]));
+        for (id, bytes) in &objects {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
+        assert_eq!(packs_on_disk(&layout), 2);
+    }
+
+    /// A window whose pack cannot be sealed: its writer already failed.
+    fn failing_sealing(store: &ObjectStore, guard: &PruneGuard, key: PackKey) -> Sealing {
+        let mut writer = LocalPackWriter::new(store, guard).unwrap();
+        writer.write(&numbered_blob(1, 1000).1).unwrap();
+        assert!(writer.write(b"not an object").is_err());
+        let window = Window {
+            spool: ObjectSpool::new(&store.spool_dir()).unwrap(),
+            bytes: 0,
+            entries: 1,
+            completed: vec![key],
+            completed_set: HashSet::from([key]),
+        };
+        Sealing {
+            window,
+            loose: Vec::new(),
+            seal: Seal::start(writer.detach()),
+        }
+    }
+
+    #[test]
+    fn a_failed_background_seal_fails_the_next_step_and_records_nothing_of_its_window() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let sealed = numbered_blob(7, 5000);
+        let sealed_key = PackKey::from_hash(kit_core::hash::hash(b"sealed"));
+        let spool = publication.decode_spool().unwrap();
+        stage(&spool, &[&sealed]);
+        publication
+            .accept(&spool, sealed_key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+
+        let failed_key = PackKey::from_hash(kit_core::hash::hash(b"failed"));
+        publication.sealing = Some(failing_sealing(&store, &guard, failed_key));
+        // The next window's seal finishes the one in flight first, and fails.
+        let next = numbered_blob(8, 5000);
+        let spool = publication.decode_spool().unwrap();
+        stage(&spool, &[&next]);
+        let next_key = PackKey::from_hash(kit_core::hash::hash(b"next"));
+        publication
+            .accept(&spool, next_key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(
+            publication
+                .seal(&NoopObserver, "origin", &mut applied)
+                .is_err()
+        );
+
+        // What was sealed before stays; nothing else is named or published.
+        assert!(applied.contains(&sealed_key));
+        assert!(!applied.contains(&failed_key));
+        assert!(!applied.contains(&next_key));
+        assert!(store.contains(&sealed.0));
+        assert!(!store.contains(&next.0));
+        assert_eq!(packs_on_disk(&layout), 1);
+        assert!(
+            AppliedPacks::load(&layout, "origin")
+                .unwrap()
+                .contains(&sealed_key)
+        );
+    }
+
+    #[test]
+    fn a_dropped_publication_waits_for_its_worker() {
+        let Fixture { store, _dir, .. } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&done);
+        let mut sealing = failing_sealing(
+            &store,
+            &guard,
+            PackKey::from_hash(kit_core::hash::hash(b"slow")),
+        );
+        sealing.seal = Seal::Running(std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        publication.sealing = Some(sealing);
+        drop(publication);
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A window sealed by `seal`, which is the outcome of its worker.
+    fn sealing_with(store: &ObjectStore, key: PackKey, seal: Seal) -> Sealing {
+        Sealing {
+            window: Window {
+                spool: ObjectSpool::new(&store.spool_dir()).unwrap(),
+                bytes: 0,
+                entries: 1,
+                completed: vec![key],
+                completed_set: HashSet::from([key]),
+            },
+            loose: Vec::new(),
+            seal,
+        }
+    }
+
+    #[test]
+    fn a_seal_that_has_ended_is_finished_without_waiting_for_the_next_window() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let key = PackKey::from_hash(kit_core::hash::hash(b"running"));
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        publication.sealing = Some(sealing_with(
+            &store,
+            key,
+            Seal::Running(std::thread::spawn(move || {
+                wait.recv().unwrap();
+                Ok(())
+            })),
+        ));
+        // The worker is still running: nothing is waited for or recorded.
+        publication
+            .finish_if_done(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(publication.sealing.is_some());
+        assert!(!applied.contains(&key));
+
+        release.send(()).unwrap();
+        while !publication.sealing.as_ref().unwrap().seal.is_done() {
+            std::thread::yield_now();
+        }
+        publication
+            .finish_if_done(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(publication.sealing.is_none());
+        assert!(applied.contains(&key));
+
+        // A seal that ran on the caller's thread is always done.
+        let key = PackKey::from_hash(kit_core::hash::hash(b"inline"));
+        publication.sealing = Some(sealing_with(&store, key, Seal::Done(Ok(()))));
+        publication
+            .finish_if_done(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(applied.contains(&key));
+    }
+
+    #[test]
+    fn a_walk_is_refused_while_a_seal_is_in_flight() {
+        let Fixture { store, _dir, .. } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        assert!(publication.view().is_ok());
+        publication.sealing = Some(sealing_with(
+            &store,
+            PackKey::from_hash(kit_core::hash::hash(b"busy")),
+            Seal::Done(Ok(())),
+        ));
+        assert!(publication.view().is_err());
+    }
+
+    #[test]
+    fn a_worker_that_panics_fails_the_finish_and_does_not_panic_the_drop() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let key = PackKey::from_hash(kit_core::hash::hash(b"panic"));
+        let panicking = || {
+            Seal::Running(std::thread::spawn(|| -> StoreResult<()> {
+                std::panic::resume_unwind(Box::new("worker"))
+            }))
+        };
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        publication.sealing = Some(sealing_with(&store, key, panicking()));
+        let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publication.finish(&NoopObserver, "origin", &mut applied);
+        }));
+        assert!(finished.is_err());
+        assert!(!applied.contains(&key));
+
+        // An abandoned fetch swallows it: the drop is not the place to fail.
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        publication.sealing = Some(sealing_with(&store, key, panicking()));
+        drop(publication);
+    }
+
+    #[test]
+    fn a_window_that_fails_to_build_still_lets_the_one_before_finish() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let key = PackKey::from_hash(kit_core::hash::hash(b"before"));
+        publication.sealing = Some(sealing_with(&store, key, Seal::Done(Ok(()))));
+        // The next window cannot start a pack: its directory is a file.
+        let packs = layout.objects_dir().join("pack");
+        let next = numbered_blob(9, 200_000);
+        let spool = publication.decode_spool().unwrap();
+        stage(&spool, &[&next]);
+        let next_key = PackKey::from_hash(kit_core::hash::hash(b"after"));
+        publication
+            .accept(&spool, next_key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&packs);
+        std::fs::write(&packs, b"not a directory").unwrap();
+        assert!(
+            publication
+                .seal(&NoopObserver, "origin", &mut applied)
+                .is_err()
+        );
+        // The window in flight was finished by the failed seal itself.
+        assert!(publication.sealing.is_none());
+        assert!(applied.contains(&key));
+        assert!(!applied.contains(&next_key));
     }
 }

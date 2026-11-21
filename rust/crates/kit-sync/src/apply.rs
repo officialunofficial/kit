@@ -354,7 +354,14 @@ fn apply_chain(
                 break;
             }
         };
-        publication.accept(&spool, key, observer, remote, applied)?;
+        let accepted = publication
+            .accept(&spool, key, observer, remote, applied)
+            .and_then(|()| publication.finish_if_done(observer, remote, applied));
+        if let Err(error) = accepted {
+            // The seal in flight still finishes, so its window is recorded.
+            let _ = publication.finish(observer, remote, applied);
+            return Err(error.into());
+        }
         settle(unsettled, applied, retained);
         release_older(unsettled);
         if unpacked > 0 {
@@ -369,6 +376,8 @@ fn apply_chain(
         publication.seal(observer, remote, applied)?;
         return Err(error);
     }
+    // Every accepted pack must be in the store before the walk.
+    publication.finish(observer, remote, applied)?;
     let checked = publication
         .view()
         .map_err(SyncError::from)
@@ -387,7 +396,7 @@ fn decode_pack(
         let dir = store.spool_dir();
         spool_error(&dir, e.kind(), &e.to_string())
     })?;
-    let report = PackReader::stage_verified(pack, store, publication.pending(), &spool)?;
+    let report = PackReader::stage_verified(pack, store, &publication.pending(), &spool)?;
     verify_new_object_signatures(
         &PendingView::new(store, Some(&spool)),
         &report.signed,
@@ -1126,5 +1135,88 @@ mod tests {
         assert_eq!(unsettled.len(), 1);
         assert!(unsettled[0].origin == Origin::Remote);
         assert!(retained.take(&kept_key).is_none(), "the kept copy is gone");
+    }
+
+    /// A blob of 200 kB that no other of the chain equals.
+    fn large_blob(n: u16) -> Vec<u8> {
+        let mut data = vec![0x5a; 200_000];
+        data[..2].copy_from_slice(&n.to_le_bytes());
+        data
+    }
+
+    /// Two wire packs of 40 MB: the second fills the first window, which
+    /// seals in the background, and leaves its tail in the next window.
+    fn two_large_packs(tx: &MemoryTransport) -> ([Hash; 2], Vec<Vec<u8>>) {
+        let blobs: Vec<_> = (0..400).map(large_blob).collect();
+        let keys = [0, 1].map(|n| {
+            let refs: Vec<&[u8]> = blobs[n * 200..(n + 1) * 200]
+                .iter()
+                .map(Vec::as_slice)
+                .collect();
+            upload_blob_pack(tx, &refs)
+        });
+        (keys, blobs)
+    }
+
+    #[test]
+    fn the_closure_walk_runs_after_the_window_in_flight_is_in_the_store() {
+        let tx = MemoryTransport::new();
+        let (keys, blobs) = two_large_packs(&tx);
+        let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
+        let first = blob(&blobs[0]).id().unwrap();
+        let last = blob(&blobs[399]).id().unwrap();
+        apply_pack_chain(
+            &store,
+            &TransportSource::new(&tx),
+            &NoopObserver,
+            "origin",
+            "refs/heads/main",
+            &keys,
+            &mut applied,
+            false,
+            &mut ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |view| {
+                // The first window is sealed and recorded, the second is open.
+                assert!(store.contains(&first));
+                assert!(view.contains(&first));
+                assert!(view.contains(&last));
+                assert!(!store.contains(&last));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let reloaded = AppliedPacks::load(&layout, "origin").unwrap();
+        for key in keys {
+            assert!(reloaded.contains(&PackKey::from_hash(key)));
+        }
+        for data in &blobs {
+            assert!(store.contains(&blob(data).id().unwrap()));
+        }
+    }
+
+    #[test]
+    fn a_failure_after_a_window_began_sealing_keeps_both_windows() {
+        let tx = MemoryTransport::new();
+        let (keys, blobs) = two_large_packs(&tx);
+        let (_td, layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
+        let error = apply(
+            &store,
+            &TransportSource::new(&tx),
+            &[keys[0], keys[1], h("not uploaded")],
+            &mut applied,
+            &mut ChainApplied::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, SyncError::AdvertisedPackMissing { .. }));
+        let reloaded = AppliedPacks::load(&layout, "origin").unwrap();
+        for key in keys {
+            assert!(reloaded.contains(&PackKey::from_hash(key)));
+        }
+        for data in &blobs {
+            assert!(store.contains(&blob(data).id().unwrap()));
+        }
     }
 }
