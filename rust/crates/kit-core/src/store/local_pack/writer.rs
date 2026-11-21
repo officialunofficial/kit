@@ -816,13 +816,19 @@ mod tests {
         let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
         let path = writer.pack.get_ref().path().to_path_buf();
         // The count is written at seal time, before the check.
-        let mut file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
         file.write_all(&count.to_le_bytes()).unwrap();
 
+        file.rewind().unwrap();
         check_frames(&mut file, &rows, end).unwrap();
         file.seek(SeekFrom::End(0)).unwrap();
         file.write_all(b"x").unwrap();
+        file.rewind().unwrap();
         assert!(matches!(
             check_frames(&mut file, &rows, end),
             Err(StoreError::LocalPackDamaged { .. })
@@ -830,10 +836,12 @@ mod tests {
 
         // A row for a frame that is not in the file.
         file.set_len(end).unwrap();
+        file.rewind().unwrap();
         let mut missing = rows.clone();
         missing.push((rows[0].0, rows[1].1));
         assert!(check_frames(&mut file, &missing, end).is_err());
         // The recorded end beyond the last frame.
+        file.rewind().unwrap();
         assert!(check_frames(&mut file, &rows, end + 1).is_err());
     }
 
