@@ -288,7 +288,7 @@ fn gc_reclaims_the_small_files_of_a_large_add_after_an_amend() {
     }
     let status = run_in(root, &["status"]);
     assert!(
-        String::from_utf8_lossy(&status.stdout).contains("nothing to commit"),
+        String::from_utf8_lossy(&status.stderr).contains("nothing to commit"),
         "the tree is still clean after gc: {status:?}"
     );
     // Every file reads back from the store, packed or not.
