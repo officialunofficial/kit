@@ -445,6 +445,9 @@ fn collect(
                 Some(CopyPhase::DiskFull) => {
                     return Err(io::Error::from(io::ErrorKind::StorageFull).into());
                 }
+                Some(CopyPhase::Interrupt) => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, INTERRUPTED).into());
+                }
                 _ => {}
             }
             Ok(budget.check()?)
@@ -510,6 +513,7 @@ enum CopyPhase {
     Plan,
     Copy,
     DiskFull,
+    Interrupt,
 }
 
 #[cfg(test)]

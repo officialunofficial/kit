@@ -746,6 +746,24 @@ fn a_copy_that_runs_out_of_budget_with_nothing_wholly_dead_never_tries_the_locks
 }
 
 #[test]
+fn an_interruption_in_the_copy_stops_the_step_and_is_not_deferred() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Interrupt));
+    let repo = Repo::new();
+    repo.due_live();
+    let (dead, _) = repo.old_pack(&[b"dead"]);
+    let before = repo.pack_count();
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::Failed);
+    assert_eq!(report.packs_retired, 0);
+    assert!(dead.exists());
+    assert_eq!(repo.pack_count(), before);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(Stamp::read(&mut file).unwrap().outcome, Collection::Failed);
+}
+
+#[test]
 fn a_stop_at_any_checkpoint_leaves_nothing_half_done() {
     use std::cell::Cell;
 
