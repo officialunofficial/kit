@@ -323,6 +323,33 @@ impl Outcome {
             stamped: collection,
         }
     }
+
+    /// The retirement of the wholly dead packs finished, with the copy done
+    /// or deferred. A deferral is reported as it happened; the stamp keeps
+    /// the weekly interval of a finished collection either way, because a
+    /// step that does less than the one before the copy existed would be a
+    /// regression.
+    const fn finished(deferred: Option<Collection>) -> Self {
+        Self {
+            reported: match deferred {
+                Some(reason) => reason,
+                None => Collection::Complete,
+            },
+            stamped: Collection::Complete,
+        }
+    }
+}
+
+/// How a deferred copy is reported: a timeout is the budget, any other I/O
+/// error, such as a full disk, a failure.
+fn deferral(kind: Option<io::ErrorKind>) -> Option<Collection> {
+    kind.map(|kind| {
+        if kind == io::ErrorKind::TimedOut {
+            Collection::OverBudget
+        } else {
+            Collection::Failed
+        }
+    })
 }
 
 struct Budget<'a> {
@@ -393,13 +420,9 @@ fn collect(
         }
         Ok(budget.check()?)
     });
-    let mut deferred = retire.defer_copy_on_timeout(planned)?;
+    let mut deferred = deferral(retire.defer_copy_on_io_error(planned)?);
     if retire.is_empty() {
-        return Ok(Outcome::same(if deferred {
-            Collection::OverBudget
-        } else {
-            Collection::Complete
-        }));
+        return Ok(Outcome::finished(deferred));
     }
 
     // Copying reads pack bodies, so it runs before any worktree lock: the
@@ -409,17 +432,23 @@ fn collect(
     // are harmless duplicates that the next step retires as covered, so the
     // retirement below is not on the clock.
     let mut copied = None;
-    if !deferred {
+    if deferred.is_none() {
         let checkpoint = || {
             #[cfg(test)]
-            if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Copy) {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+            match TEST_COPY_EXPIRES.get() {
+                Some(CopyPhase::Copy) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+                }
+                Some(CopyPhase::DiskFull) => {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull).into());
+                }
+                _ => {}
             }
             Ok(budget.check()?)
         };
         match retire.copy_survivors(store, gc, &checkpoint, true) {
             Ok(done) => copied = done,
-            Err(error) => deferred = retire.defer_copy_on_timeout(Err(error))?,
+            Err(error) => deferred = deferral(retire.defer_copy_on_io_error(Err(error))?),
         }
         if !gc.skipped_pack_errors.is_empty() {
             return Ok(Outcome::same(Collection::Failed));
@@ -451,14 +480,7 @@ fn collect(
     }
     budget.check_cancellation()?;
     Ok(if retire.retire(store, gc, copied.as_ref(), || Ok(()))? {
-        Outcome {
-            reported: if deferred {
-                Collection::OverBudget
-            } else {
-                Collection::Complete
-            },
-            stamped: Collection::Complete,
-        }
+        Outcome::finished(deferred)
     } else {
         Outcome::same(Collection::Busy)
     })
@@ -474,12 +496,14 @@ pub fn fuzz_maintenance_stamp(bytes: &[u8]) {
     }
 }
 
-/// Where a test makes the budget run out, after the wholly dead plan.
+/// Where a test makes the copy part run out of budget or fail, after the
+/// wholly dead plan.
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyPhase {
     Plan,
     Copy,
+    DiskFull,
 }
 
 #[cfg(test)]

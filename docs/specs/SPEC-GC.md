@@ -490,7 +490,8 @@ collection that follows stops without retiring any pack.
 **Collection.** The listing must show at least 32 published pairs.
 The stamp allows a new collection 7 days after a complete collection
 or an error, 1 hour after a lock miss or changed roots, or 30 days
-after an attempt that ran out of budget. These intervals are policy.
+after an attempt that ran out of budget before retirement. These
+intervals are policy.
 
 1. Read `now` and collect retention roots without the worktree locks.
 2. Mark the roots under a wall-clock budget of 5 seconds that also covers
@@ -505,11 +506,12 @@ after an attempt that ran out of budget. These intervals are policy.
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
    then the smallest. With no candidate and no input, record a complete
    collection and stop. A budget that expires in this copy planning, in the
-   verification or in the copy defers only the copy: the wholly dead pairs
-   planned above still retire (steps 5 to 7), and the collection reports
-   `over_budget`. If no pair is left to retire, the stamp keeps the
-   `over_budget` interval; if the retirement finished, it keeps the interval
-   of a complete collection.
+   verification or in the copy, or an I/O error such as a full disk there,
+   defers only the copy: the wholly dead pairs planned above still retire
+   (steps 5 to 7), as they do without a copy. The collection reports
+   `over_budget` or `failed`, and the stamp keeps the interval of a complete
+   collection. If no pair is left to retire after a budget deferral, the
+   interval is the same. Interruption and damage still stop the step.
 4. Copy. Verify each covering copy that an input relies on, copy the
    survivors into one output pack and publish it durably under the shared
    `format` guard, which the step takes after planning and releases before

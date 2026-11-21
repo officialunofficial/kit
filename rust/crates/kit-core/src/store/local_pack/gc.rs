@@ -314,15 +314,20 @@ impl PackSweep {
         }
     }
 
-    /// For a copy step that returned `result`: true after dropping the
-    /// planned copy when the budget ran out of time, so that only wholly dead
-    /// pairs and leftovers retire. Any other error passes on.
-    pub(crate) fn defer_copy_on_timeout(&mut self, result: StoreResult<()>) -> StoreResult<bool> {
+    /// For a copy step that returned `result`: when it failed with an I/O
+    /// error, such as a full disk or an expired budget, drop the planned copy
+    /// so that only wholly dead pairs and leftovers retire, as they do
+    /// without a copy, and return the error kind. Interruption, damage and
+    /// every other error pass on.
+    pub(crate) fn defer_copy_on_io_error(
+        &mut self,
+        result: StoreResult<()>,
+    ) -> StoreResult<Option<std::io::ErrorKind>> {
         match result {
-            Ok(()) => Ok(false),
-            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+            Ok(()) => Ok(None),
+            Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::Interrupted => {
                 self.copy = None;
-                Ok(true)
+                Ok(Some(error.kind()))
             }
             Err(error) => Err(error),
         }
