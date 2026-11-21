@@ -505,6 +505,8 @@ pub(in crate::store) fn canonical_id(bytes: &[u8]) -> StoreResult<Hash> {
     Ok(id_from_object(&object, bytes))
 }
 
+/// The reference the writer's recorded rows must equal, in tests.
+#[cfg(test)]
 pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
     scan_checked(pack, &|| Ok(()))
 }
