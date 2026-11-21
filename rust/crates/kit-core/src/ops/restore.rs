@@ -4890,9 +4890,12 @@ mod tests {
             sparse("src//", false, false),
             sparse("//src", false, true),
             sparse("", false, false),
+            sparse("/lib/", false, false),
         ];
         let matcher = SparseMatcher::new(&patterns);
-        for path in ["", "/", "src", "src/", "src//a", "/src", "a//b", "//src/x"] {
+        for path in [
+            "", "/", "src", "src/", "src//a", "/src", "a//b", "//src/x", "lib", "lib/a",
+        ] {
             for is_dir in [false, true] {
                 assert_eq!(
                     matcher.matches(path, is_dir),
@@ -5053,6 +5056,169 @@ mod tests {
                     "sub/other.txt",
                 ],
                 "clean={clean}"
+            );
+        }
+    }
+
+    /// Run `check` once through [`restore_tree`] and once through the
+    /// worktree restore, each on a fresh store and target.
+    fn on_both_restores(
+        mut check: impl FnMut(&ObjectStore, &Hash, &Path, &RestoreOptions) -> RestoreResult<()>,
+        tree: impl Fn(&ObjectStore) -> Hash,
+        prepare: impl Fn(&Path),
+        options: &RestoreOptions,
+    ) -> Vec<RestoreResult<Vec<String>>> {
+        let mut results = Vec::new();
+        for worktree in [false, true] {
+            let (_d, store) = fresh_store();
+            let root = tree(&store);
+            let target = TempDir::new().unwrap();
+            prepare(target.path());
+            let outcome = if worktree {
+                restore_tree_to_worktree_with(
+                    &store,
+                    &root,
+                    None,
+                    target.path(),
+                    options,
+                    &sequential_read_chunks,
+                )
+                .map(|_| ())
+            } else {
+                restore_tree(&store, root, target.path(), options)
+            };
+            let outcome = outcome.and_then(|()| check(&store, &root, target.path(), options));
+            results.push(outcome.map(|()| files_under(target.path())));
+        }
+        results
+    }
+
+    fn file_entry(store: &ObjectStore, name: &str) -> TreeEntry {
+        TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: put_blob(store, name.as_bytes()),
+        }
+    }
+
+    fn dir_entry(store: &ObjectStore, name: &str, mut entries: Vec<TreeEntry>) -> TreeEntry {
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: put_tree_with(store, entries),
+        }
+    }
+
+    fn no_check(_: &ObjectStore, _: &Hash, _: &Path, _: &RestoreOptions) -> RestoreResult<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sparse_restore_creates_only_the_selected_symlinks() {
+        let tree = |store: &ObjectStore| {
+            let link = TreeEntry {
+                name: b"link".to_vec(),
+                mode: EntryMode::Symlink,
+                object_hash: put_blob(store, b"README.md"),
+            };
+            put_tree_with(store, vec![file_entry(store, "README.md"), link])
+        };
+        for (selected, expected) in [("README.md", "README.md"), ("link", "link")] {
+            let options = RestoreOptions {
+                clean: false,
+                sparse_patterns: Some(vec![sparse(selected, false, false)]),
+            };
+            for result in on_both_restores(no_check, tree, |_| {}, &options) {
+                assert_eq!(result.unwrap(), [expected], "selected {selected}");
+            }
+        }
+    }
+
+    /// A sparse restore refuses to write over a directory that holds a
+    /// repository only for the entries it selects.
+    #[test]
+    fn sparse_restore_checks_nested_repositories_only_under_selected_entries() {
+        let tree = |store: &ObjectStore| {
+            put_tree_with(
+                store,
+                vec![
+                    file_entry(store, "a"),
+                    file_entry(store, "b"),
+                    dir_entry(store, "t", vec![file_entry(store, "sub")]),
+                ],
+            )
+        };
+        let prepare = |root: &Path| {
+            for repo in ["a/.kit", "t/sub/.kit"] {
+                let path = root.join(repo);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"").unwrap();
+            }
+        };
+        let restore = |selected: &str| {
+            let options = RestoreOptions {
+                clean: false,
+                sparse_patterns: Some(vec![sparse(selected, false, false)]),
+            };
+            on_both_restores(no_check, tree, prepare, &options)
+        };
+        for result in restore("b") {
+            assert_eq!(result.unwrap(), ["a/.kit", "b", "t/sub/.kit"]);
+        }
+        for (selected, named) in [("a", "a/.kit"), ("t/sub", "t/sub/.kit")] {
+            for result in restore(selected) {
+                assert!(
+                    matches!(&result, Err(RestoreError::NestedRepository(p)) if p == named),
+                    "selected {selected}: {result:?}"
+                );
+            }
+        }
+    }
+
+    /// The sweep of a clean restore removes untracked files the patterns
+    /// select, walks only directories that can hold selected paths, and leaves
+    /// the rest alone.
+    #[test]
+    fn sparse_clean_restore_sweeps_only_selected_untracked_paths() {
+        let tree = |store: &ObjectStore| put_tree_with(store, vec![file_entry(store, "top.txt")]);
+        let prepare = |root: &Path| {
+            for file in [
+                "gone.txt",
+                "q.txt",
+                "d/x/gone.txt",
+                "d/x/stay.txt",
+                "d/y/any.txt",
+                "d/w.txt",
+            ] {
+                let path = root.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"untracked").unwrap();
+            }
+            fs::create_dir_all(root.join("d/z")).unwrap();
+            fs::create_dir_all(root.join("e")).unwrap();
+        };
+        let options = RestoreOptions {
+            clean: true,
+            sparse_patterns: Some(
+                ["top.txt", "gone.txt", "d/x/gone.txt", "d/y"]
+                    .into_iter()
+                    .map(|p| sparse(p, false, false))
+                    .collect(),
+            ),
+        };
+        let check = |_: &ObjectStore, _: &Hash, root: &Path, _: &RestoreOptions| {
+            // Directories are not listed by `files_under`; these must stay.
+            assert!(root.join("d/z").is_dir(), "an unselected empty directory");
+            assert!(root.join("e").is_dir(), "an unselected top-level directory");
+            assert!(!root.join("d/y").exists(), "a selected directory, emptied");
+            Ok(())
+        };
+        for result in on_both_restores(check, tree, prepare, &options) {
+            assert_eq!(
+                result.unwrap(),
+                ["d/w.txt", "d/x/stay.txt", "q.txt", "top.txt"]
             );
         }
     }
