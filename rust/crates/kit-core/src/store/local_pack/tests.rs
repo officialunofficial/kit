@@ -1574,10 +1574,11 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
 }
 
 type AfterCopy = Box<dyn FnOnce() -> crate::store::StoreResult<()>>;
+type AfterBatch = Box<dyn FnMut(usize) -> crate::store::StoreResult<()>>;
 
 thread_local! {
     static RETIRE_BATCH: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    static AFTER_RETIRE_BATCH: std::cell::RefCell<Option<Box<dyn FnMut(usize) -> crate::store::StoreResult<()>>>> =
+    static AFTER_RETIRE_BATCH: std::cell::RefCell<Option<AfterBatch>> =
         const { std::cell::RefCell::new(None) };
     static AFTER_COPY_PUBLISH: std::cell::Cell<Option<AfterCopy>> =
         const { std::cell::Cell::new(None) };

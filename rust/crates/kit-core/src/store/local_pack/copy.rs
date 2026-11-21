@@ -611,6 +611,8 @@ impl Copied {
     }
 }
 
+type Holders = (HashMap<Hash, Vec<usize>>, Vec<u64>);
+
 /// The ids of live entries that two or more pairs hold, with those pairs, and
 /// for each pair the live bytes whose home is another pair. The home of an id
 /// is its holder with the youngest pack, then the lowest key. Streams one
@@ -619,7 +621,7 @@ fn find_holders(
     members: &[Member],
     live: &LiveSet,
     checkpoint: &dyn Fn() -> StoreResult<()>,
-) -> StoreResult<(HashMap<Hash, Vec<usize>>, Vec<u64>)> {
+) -> StoreResult<Holders> {
     let mut holders = HashMap::new();
     let mut covered = vec![0_u64; members.len()];
     let mut rows: Vec<(Hash, usize, u32)> = Vec::new();
@@ -949,7 +951,7 @@ mod select_tests {
             survivors: sizes
                 .iter()
                 .map(|&len| Entry {
-                    id: [member as u8; 32],
+                    id: [u8::try_from(member).unwrap(); 32],
                     frame: Frame { offset: 0, len },
                 })
                 .collect(),
