@@ -580,12 +580,12 @@ fn check_frames_in(
     Ok(digest)
 }
 
-/// The buffer a finished check leaves for the next one. Each seal runs on its
-/// own thread, and a buffer allocated and freed there stays in that thread's
-/// malloc arena, so one fresh buffer per seal would add up to a segment of
-/// resident memory per seal. The buffer is taken for the length of a check
-/// and put back, so a process keeps at most one segment, plus one more for
-/// each check that runs at the same time.
+/// The buffer a finished check leaves for the next one, so each check does
+/// not allocate its own segment. Seals run on many threads, and a buffer
+/// freed on a thread can stay resident in that thread's malloc arena, so one
+/// fresh buffer per seal added up to a segment of resident memory per seal.
+/// The buffer is taken for the length of a check and put back, so a process
+/// keeps one segment, plus one more for each check that runs at the same time.
 static SPARE_BUFFER: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
 struct Scratch(Vec<u8>);
@@ -619,8 +619,13 @@ impl Drop for Scratch {
 
 /// Digest `bytes` on a few threads, as one hasher would serially.
 fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
+    /// Below this a hand-off to the pool costs more than it saves.
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(pool) = digest_pool() {
+    const PARALLEL_FROM: usize = 128 << 10;
+    #[cfg(not(target_arch = "wasm32"))]
+    if bytes.len() >= PARALLEL_FROM
+        && let Some(pool) = digest_pool()
+    {
         pool.install(|| digest.update_rayon(bytes));
         return;
     }
@@ -1070,8 +1075,16 @@ mod tests {
 
     /// A finished pack file with one distinct blob per size, its count
     /// written as the seal does, with the rows and end the writer recorded.
-    fn unsealed(sizes: &[usize]) -> (fs::File, Vec<(Hash, Frame)>, u64, Vec<u8>) {
-        let (_dir, _layout, store) = packed_store();
+    fn unsealed(
+        sizes: &[usize],
+    ) -> (
+        tempfile::TempDir,
+        fs::File,
+        Vec<(Hash, Frame)>,
+        u64,
+        Vec<u8>,
+    ) {
+        let (dir, _layout, store) = packed_store();
         let guard = store.prune_guard().unwrap();
         let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
         for (n, size) in sizes.iter().enumerate() {
@@ -1095,7 +1108,7 @@ mod tests {
             .unwrap();
         file.rewind().unwrap();
         let bytes = fs::read(&path).unwrap();
-        (file, rows, end, bytes)
+        (dir, file, rows, end, bytes)
     }
 
     #[test]
@@ -1106,7 +1119,7 @@ mod tests {
         let sizes = [
             1, 1000, 1018, 1019, 1020, 2043, 2044, 4091, 8185, 65_530, 131_072, 300_000, 7,
         ];
-        let (mut file, rows, end, bytes) = unsealed(&sizes);
+        let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
         let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
         for segment in [16, 17, 1024, 1029, 4096, 70_000, 131_072, 1 << 20, SEGMENT] {
             file.rewind().unwrap();
@@ -1126,7 +1139,7 @@ mod tests {
             ),
             segment in 16_usize..300_000,
         ) {
-            let (mut file, rows, end, bytes) = unsealed(&sizes);
+            let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
             let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
             let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
             prop_assert_eq!(digest.finalize(), serial);
@@ -1136,7 +1149,7 @@ mod tests {
     #[test]
     fn a_bad_frame_in_any_position_of_any_group_fails_the_check() {
         let sizes = [500, 900, 1300, 100, 40_000, 700, 800];
-        let (file, rows, end, bytes) = unsealed(&sizes);
+        let (_dir, file, rows, end, bytes) = unsealed(&sizes);
         let mut path = tempfile::NamedTempFile::new().unwrap();
         for segment in [16, 700, 2000, 50_000, SEGMENT] {
             for (n, (_, row)) in rows.iter().enumerate() {
@@ -1168,7 +1181,7 @@ mod tests {
 
     #[test]
     fn a_short_or_long_pack_fails_the_check_with_any_buffer() {
-        let (_file, rows, end, bytes) = unsealed(&[500, 900, 1300]);
+        let (_dir, _file, rows, end, bytes) = unsealed(&[500, 900, 1300]);
         let mut path = tempfile::NamedTempFile::new().unwrap();
         let len = usize::try_from(end).unwrap();
         for segment in [16, 600, SEGMENT] {
