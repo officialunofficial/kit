@@ -38,6 +38,22 @@ impl Frames {
     }
 }
 
+/// The most a pack and each object in it may hold.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    object: usize,
+    entries: usize,
+    payload: u64,
+}
+
+impl Limits {
+    const PACK: Self = Self {
+        object: MAX_RAW_OBJECT_SIZE,
+        entries: MAX_ENTRIES as usize,
+        payload: MAX_TOTAL_PAYLOAD,
+    };
+}
+
 /// Write a private local pack, then make it durable and discoverable.
 ///
 /// Any error inside a write leaves the writer unusable: the staging file may
@@ -52,6 +68,7 @@ pub struct LocalPackWriter<'a> {
     ids: HashSet<Hash>,
     frames: Frames,
     payload: u64,
+    limits: Limits,
     failed: bool,
 }
 
@@ -70,6 +87,7 @@ impl<'a> LocalPackWriter<'a> {
             ids: HashSet::new(),
             frames: Frames::new(),
             payload: 0,
+            limits: Limits::PACK,
             failed: false,
         })
     }
@@ -113,12 +131,12 @@ impl<'a> LocalPackWriter<'a> {
 
     fn append(&mut self, id: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
         let len = parts.iter().map(|part| part.len()).sum::<usize>();
-        if len > MAX_RAW_OBJECT_SIZE {
+        if len > self.limits.object {
             return Err(StoreError::ObjectTooLarge);
         }
         if !self.ids.contains(&id) {
-            if self.ids.len() == MAX_ENTRIES as usize
-                || self.payload + len as u64 > MAX_TOTAL_PAYLOAD
+            if self.ids.len() == self.limits.entries
+                || self.payload + len as u64 > self.limits.payload
             {
                 return Err(StoreError::ObjectTooLarge);
             }
@@ -674,6 +692,78 @@ mod tests {
         assert!(writer.write(&blob(b"fine")).is_err());
         assert!(writer.publish().is_err());
         assert!(pairs(&store).is_empty());
+    }
+
+    fn small_writer<'a>(
+        store: &'a ObjectStore,
+        guard: &'a PruneGuard,
+        limits: Limits,
+    ) -> LocalPackWriter<'a> {
+        let mut writer = LocalPackWriter::new(store, guard).unwrap();
+        writer.limits = limits;
+        writer
+    }
+
+    #[test]
+    fn a_pack_takes_objects_up_to_its_limits_and_no_more() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let (a, b, c) = (blob(&[1; 40]), blob(&[2; 40]), blob(&[3; 40]));
+        let object = a.len();
+        let limits = Limits {
+            object,
+            entries: 2,
+            payload: 2 * object as u64,
+        };
+
+        // Exactly at every limit is accepted, and a duplicate costs nothing.
+        let mut writer = small_writer(&store, &guard, limits);
+        writer.write(&a).unwrap();
+        writer.write(&b).unwrap();
+        writer.write(&a).unwrap();
+        writer.publish().unwrap();
+        assert_eq!(pairs(&store).len(), 1);
+
+        // A third distinct object passes neither the entry nor payload limit.
+        for limits in [
+            Limits {
+                payload: u64::MAX / 2,
+                ..limits
+            },
+            Limits {
+                entries: 9,
+                ..limits
+            },
+        ] {
+            let mut writer = small_writer(&store, &guard, limits);
+            writer.write(&a).unwrap();
+            writer.write(&b).unwrap();
+            assert!(matches!(writer.write(&c), Err(StoreError::ObjectTooLarge)));
+            assert!(writer.publish().is_err());
+        }
+
+        // One byte over the payload limit with entries to spare.
+        let mut writer = small_writer(
+            &store,
+            &guard,
+            Limits {
+                payload: 2 * object as u64 - 1,
+                ..limits
+            },
+        );
+        writer.write(&a).unwrap();
+        assert!(matches!(writer.write(&b), Err(StoreError::ObjectTooLarge)));
+
+        // One byte over the object limit, through the prehashed entry.
+        let mut writer = small_writer(&store, &guard, Limits { object: object - 1, ..limits });
+        let id = index::canonical_id(&a).unwrap();
+        assert!(matches!(
+            writer.write_hashed(id, &[&a]),
+            Err(StoreError::ObjectTooLarge)
+        ));
+        let mut writer = small_writer(&store, &guard, limits);
+        let id = index::canonical_id(&a).unwrap();
+        writer.write_hashed(id, &[&a]).unwrap();
     }
 
     #[test]
