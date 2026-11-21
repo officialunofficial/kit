@@ -927,15 +927,12 @@ impl Sealing {
             let (job, run) = take();
             run(job)
         }));
-        match started {
-            Ok(handle) => {
-                *worker = Some(handle);
-                Ok(())
-            }
-            Err(_) => {
-                let (job, run) = again();
-                run(job)
-            }
+        if let Ok(handle) = started {
+            *worker = Some(handle);
+            Ok(())
+        } else {
+            let (job, run) = again();
+            run(job)
         }
     }
 
