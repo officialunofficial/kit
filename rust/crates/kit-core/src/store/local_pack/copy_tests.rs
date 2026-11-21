@@ -683,7 +683,11 @@ fn outputs_roll_over_at_the_entry_cap_and_the_payload_cap() {
 
     assert_eq!(OUTPUT_ENTRIES, 65_536);
     assert_eq!(OUTPUT_PAYLOAD, 64 << 20);
-    for (entries, payload, expected) in [(3, u64::MAX, [3, 3, 1]), (100, 2_500, [2, 2, 2])] {
+    for (entries, payload, expected) in [
+        (3, u64::MAX, vec![3, 3, 1]),
+        (100, 2_500, vec![2, 2, 2]),
+        (100, 3_000, vec![3, 3]),
+    ] {
         let (_dir, _layout, store) = fresh();
         store.try_activate_local_packs().unwrap();
         let guard = store.prune_guard().unwrap();
