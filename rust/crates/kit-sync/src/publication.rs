@@ -20,6 +20,16 @@ use crate::observer::{Observer, SyncEvent};
 // Every object of at most this size is packed, whatever its kind.
 const PACK_OBJECT_BYTES: usize = chunker::MAX_SIZE + serialize::BLOB_PROLOGUE_LEN;
 
+/// The bytes a wire pack must contribute to a window before the window reads
+/// them from the wire pack's file. Absorbing keeps that file open until the
+/// window seals, so a window of at most `PACK_SEAL_BYTES` holds at most
+/// `PACK_SEAL_BYTES / ABSORB_MIN_BYTES` files, whatever the pack chain is.
+/// Smaller contributions are copied, which costs less than the open file.
+const ABSORB_MIN_BYTES: u64 = 1 << 20;
+
+/// An object as the decoder staged it: position, id, length and type.
+type Entry = (usize, Hash, u32, ObjectType);
+
 pub(crate) struct Publication<'a> {
     store: &'a ObjectStore,
     guard: &'a PruneGuard,
@@ -28,8 +38,8 @@ pub(crate) struct Publication<'a> {
 }
 
 struct Window {
-    /// The objects to pack, copied here, and the objects to write loose,
-    /// whose files are adopted from the spools they were decoded into.
+    /// The objects to pack and the objects to write loose, which stay in the
+    /// files of the spools they were decoded into.
     spool: ObjectSpool,
     bytes: usize,
     entries: usize,
@@ -85,40 +95,46 @@ impl<'a> Publication<'a> {
             record(key, observer, remote, applied);
             return Ok(());
         }
-        // An object that ends as a loose file is not copied: `spool` wrote it
-        // to a temporary file of its own when the decoder derived its id, the
-        // window takes that file over, and `seal` renames it into place.
-        // The decoder's file stays on disk until the window seals, so a pack of
-        // mostly packed objects holds its bytes twice for that time.
+        // An object that ends as a loose file is in a
+        // temporary file of its own, which `spool` wrote when the decoder
+        // derived its id: the window takes that file over, and `seal` renames it
+        // into place. An object that ends in a pack stays in `spool`'s file when
+        // the wire pack holds enough of them, and the window reads it from there
+        // until `seal` writes it to the pack; a few are copied (`adopt`). The
+        // files stay on disk until the window seals.
         let mut loose = Vec::new();
+        let mut packed = Vec::new();
+        let mut sealed_here = false;
         for (_, id, len, ty) in order {
             let size = len as usize;
             if self.window.as_ref().is_some_and(|window| {
                 window.bytes + size > PACK_SEAL_BYTES || window.entries == PACK_SEAL_ENTRIES
             }) {
-                self.adopt(spool, &mut loose)?;
+                // A seal before this wire pack put anything into the window is
+                // no reason to copy: its file holds no more than the window.
+                sealed_here |= !loose.is_empty() || !packed.is_empty();
+                self.adopt(spool, &mut loose, &mut packed, false)?;
                 self.seal(observer, remote, applied)?;
             }
-            let copied = if self.packs(size) {
-                Some(staged(spool, &id)?)
-            } else {
-                None
-            };
+            let packs = self.packs(size);
             let window = self.window()?;
-            if let Some(bytes) = copied {
-                window.spool.append(window.entries, id, ty, &bytes)?;
+            if packs {
+                packed.push((window.entries, id, len, ty));
             } else {
                 loose.push((window.entries, id, len, ty));
             }
             window.bytes += size;
             window.entries += 1;
         }
-        self.adopt(spool, &mut loose)?;
-        let packed = self.pack;
+        // A wire pack that filled a window holds more than a window in its file,
+        // and the window it leaves open would hold the file until the next wire
+        // pack was decoded. What is left of it is copied.
+        self.adopt(spool, &mut loose, &mut packed, sealed_here)?;
+        let pack = self.pack;
         let window = self.window()?;
         window.completed.push(key);
         window.completed_set.insert(key);
-        if !packed || window.bytes >= PACK_SEAL_BYTES || window.entries == PACK_SEAL_ENTRIES {
+        if !pack || window.bytes >= PACK_SEAL_BYTES || window.entries == PACK_SEAL_ENTRIES {
             self.seal(observer, remote, applied)?;
         }
         Ok(())
@@ -130,17 +146,35 @@ impl<'a> Publication<'a> {
         self.pack && len <= PACK_OBJECT_BYTES
     }
 
-    /// Hand the window the temporary files of the `loose` entries of `from`.
+    /// Hand the window the temporary files of the `loose` entries of `from`,
+    /// and its `packed` entries: their frames if there are enough of them and
+    /// `copy` is not set, their bytes otherwise.
     fn adopt(
         &mut self,
         from: &ObjectSpool,
-        loose: &mut Vec<(usize, Hash, u32, ObjectType)>,
+        loose: &mut Vec<Entry>,
+        packed: &mut Vec<Entry>,
+        copy: bool,
     ) -> Result<(), PackError> {
-        if loose.is_empty() {
-            return Ok(());
+        if !loose.is_empty() {
+            self.window()?.spool.adopt(from, &loose[..])?;
+            loose.clear();
         }
-        self.window()?.spool.adopt(from, &loose[..])?;
-        loose.clear();
+        if !packed.is_empty() {
+            let bytes: u64 = packed.iter().map(|entry| u64::from(entry.2)).sum();
+            let window = self.window()?;
+            if bytes >= ABSORB_MIN_BYTES && !copy {
+                window.spool.absorb(from, &packed[..])?;
+            } else {
+                let mut scratch = Vec::new();
+                for &(position, id, _, ty) in packed.iter() {
+                    window
+                        .spool
+                        .append_from(from, position, id, ty, &mut scratch)?;
+                }
+            }
+            packed.clear();
+        }
         Ok(())
     }
 
@@ -170,13 +204,14 @@ impl<'a> Publication<'a> {
         let mut loose_ids = Vec::new();
         let mut seen = HashSet::new();
         let mut pack = None;
+        let mut scratch = Vec::new();
         for (_, id, len, _) in window.spool.take_order() {
             if self.packs(len as usize) {
                 if pack.is_none() {
                     pack = Some(LocalPackWriter::new(self.store, self.guard)?);
                 }
-                let bytes = staged(&window.spool, &id)?;
-                pack.as_mut().expect("created local pack").write(&bytes)?;
+                let pack = pack.as_mut().expect("created local pack");
+                window.spool.write_to_pack(&id, pack, &mut scratch)?;
             } else if seen.insert(id) {
                 loose_ids.push((id, len));
             }
@@ -200,12 +235,6 @@ impl<'a> Publication<'a> {
         crate::fetch::persist_record(applied, observer, remote);
         Ok(())
     }
-}
-
-fn staged(spool: &ObjectSpool, id: &Hash) -> StoreResult<Vec<u8>> {
-    spool
-        .read(id)?
-        .ok_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
 }
 
 fn record(
@@ -441,12 +470,15 @@ mod tests {
             .unwrap();
         drop(spool);
 
-        // The window took the files over: only the packed object was copied.
+        // The window took the files over: only the packed object was copied,
+        // for a wire pack with that little to pack is not kept open.
         let pending = publication.pending().unwrap();
         assert_eq!(pending.written_bytes(), small.1.len() as u64);
+        assert_eq!(pending.donor_files(), 0);
         assert_eq!(staged_files(&layout), staged);
         let view = publication.view();
         assert!(view.contains(&mid.0) && view.contains(&large.0));
+        assert_eq!(view.read(&small.0).unwrap(), small.1);
         assert_eq!(view.read(&mid.0).unwrap(), mid.1);
         assert_eq!(view.read(&large.0).unwrap(), large.1);
         // The closure check asks for a head, which reads ten bytes.
@@ -582,6 +614,221 @@ mod tests {
             .filter(|file| file.file_name().is_some_and(|name| name.len() != 62))
             .collect();
         assert_eq!(leftovers, Vec::<std::path::PathBuf>::new());
+    }
+
+    /// A blob of `len` bytes that no other `n` shares.
+    fn numbered_blob(n: u32, len: usize) -> (Hash, Vec<u8>) {
+        let mut data: Vec<u8> = (0..len)
+            .map(|i| {
+                u8::try_from(i % 251)
+                    .unwrap()
+                    .wrapping_add(n.to_le_bytes()[0])
+            })
+            .collect();
+        data[..4].copy_from_slice(&n.to_le_bytes());
+        let object = Object::Blob(kit_core::object::Blob { data });
+        (object.id().unwrap(), serialize::serialize(&object).unwrap())
+    }
+
+    fn packs_on_disk(layout: &RepoLayout) -> usize {
+        std::fs::read_dir(layout.objects_dir().join("pack"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "pack")
+            })
+            .count()
+    }
+
+    #[test]
+    fn small_wire_packs_are_copied_so_a_long_chain_keeps_no_file_open() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        let objects: Vec<_> = (0..300).map(|n| numbered_blob(n, 2000)).collect();
+        for (n, object) in objects.iter().enumerate() {
+            let spool = publication.decode_spool().unwrap();
+            stage(&spool, &[object]);
+            let key = PackKey::from_hash(kit_core::hash::hash(&n.to_le_bytes()));
+            publication
+                .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+        }
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.donor_files(), 0);
+        assert!(pending.written_bytes() > 0);
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        for (id, bytes) in &objects {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
+        assert_eq!(packs_on_disk(&layout), 1);
+    }
+
+    #[test]
+    fn a_wire_pack_with_enough_to_pack_is_read_from_its_own_file() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        let objects: Vec<_> = (0..10).map(|n| numbered_blob(n, 200_000)).collect();
+        let packed_bytes: usize = objects.iter().map(|object| object.1.len()).sum();
+        assert!(packed_bytes as u64 >= ABSORB_MIN_BYTES);
+        assert!(objects[0].1.len() <= PACK_OBJECT_BYTES);
+        let spool = publication.decode_spool().unwrap();
+        stage(&spool, &objects.iter().collect::<Vec<_>>());
+        let key = PackKey::from_hash(kit_core::hash::hash(b"enough"));
+        publication
+            .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        drop(spool);
+
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.donor_files(), 1);
+        assert_eq!(pending.written_bytes(), 0);
+        assert_eq!(
+            publication.view().read(&objects[9].0).unwrap(),
+            objects[9].1
+        );
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(applied.contains(&key));
+        assert_eq!(packs_on_disk(&layout), 1);
+        for (id, bytes) in &objects {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn each_wire_pack_with_enough_to_pack_keeps_its_file_until_the_window_seals() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        let objects: Vec<_> = (0..20).map(|n| numbered_blob(n, 200_000)).collect();
+        for (n, chunk) in objects.chunks(10).enumerate() {
+            let spool = publication.decode_spool().unwrap();
+            stage(&spool, &chunk.iter().collect::<Vec<_>>());
+            let key = PackKey::from_hash(kit_core::hash::hash(&[u8::try_from(n).unwrap()]));
+            publication
+                .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+        }
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.donor_files(), 2);
+        assert_eq!(pending.written_bytes(), 0);
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert_eq!(packs_on_disk(&layout), 1);
+        for (id, bytes) in &objects {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_seal_before_a_wire_pack_adds_anything_does_not_make_it_copy() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        // A first wire pack leaves its window one object short of full, and
+        // the second wire pack's first object does not fit.
+        let first: Vec<_> = (0..335).map(|n| numbered_blob(n, 200_000)).collect();
+        let second: Vec<_> = (400..410).map(|n| numbered_blob(n, 200_000)).collect();
+        for (n, objects) in [&first, &second].into_iter().enumerate() {
+            let spool = publication.decode_spool().unwrap();
+            stage(&spool, &objects.iter().collect::<Vec<_>>());
+            let key = PackKey::from_hash(kit_core::hash::hash(&[u8::try_from(n).unwrap()]));
+            publication
+                .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+        }
+        let window_bytes: usize = first.iter().map(|object| object.1.len()).sum();
+        assert!(window_bytes + second[0].1.len() > PACK_SEAL_BYTES);
+        assert_eq!(packs_on_disk(&layout), 1);
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.donor_files(), 1);
+        assert_eq!(pending.written_bytes(), 0);
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert_eq!(packs_on_disk(&layout), 2);
+        for (id, bytes) in first.iter().chain(&second) {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn the_tail_of_a_wire_pack_that_filled_a_window_is_copied_so_its_file_is_not_held() {
+        let Fixture {
+            layout,
+            store,
+            _dir,
+        } = fixture();
+        let guard = store.prune_guard().unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        // 360 objects of 200,000 bytes are packed, and more than one window.
+        let objects: Vec<_> = (0..360).map(|n| numbered_blob(n, 200_000)).collect();
+        assert!(objects[0].1.len() <= PACK_OBJECT_BYTES);
+        assert!(objects.len() * objects[0].1.len() > PACK_SEAL_BYTES);
+        let spool = publication.decode_spool().unwrap();
+        stage(&spool, &objects.iter().collect::<Vec<_>>());
+        let key = PackKey::from_hash(kit_core::hash::hash(b"two windows"));
+        publication
+            .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        drop(spool);
+
+        // The first window sealed on the way. The open one holds the tail's
+        // bytes, not the wire pack's file, which is gone with the spool.
+        assert_eq!(packs_on_disk(&layout), 1);
+        assert!(store.contains(&objects[0].0));
+        assert!(!store.contains(&objects[359].0));
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.donor_files(), 0);
+        assert!(pending.written_bytes() > 0);
+        assert_eq!(
+            publication.view().read(&objects[359].0).unwrap(),
+            objects[359].1
+        );
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(applied.contains(&key));
+        assert_eq!(packs_on_disk(&layout), 2);
+        for (id, bytes) in &objects {
+            assert_eq!(&store.read(id).unwrap(), bytes);
+        }
     }
 
     #[test]
