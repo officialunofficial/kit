@@ -309,9 +309,7 @@ impl PackSweep {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.pairs.is_empty()
-            && self.leftovers.is_empty()
-            && self.copy.as_ref().is_none_or(CopyPlan::is_empty)
+        self.pairs.is_empty() && self.leftovers.is_empty() && self.copy.is_none()
     }
 
     pub(crate) fn run(&self, store: &ObjectStore, report: &mut GcReport) -> StoreResult<()> {

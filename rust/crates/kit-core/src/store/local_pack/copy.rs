@@ -243,10 +243,6 @@ impl CopyPlan {
         Ok(Some(Self { members, inputs }))
     }
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.inputs.is_empty()
-    }
-
     /// Dry run: report what a real run would do, assuming every covering copy
     /// verifies.
     pub(super) fn preview(&self, report: &mut GcReport) {
