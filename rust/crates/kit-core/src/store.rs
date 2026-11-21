@@ -73,6 +73,77 @@ pub struct ChunkOrigin<'a> {
     pub offset: u64,
 }
 
+/// A canonical blob chunk whose id is already computed, with its prologue and
+/// payload in order.
+///
+/// The fields are private and [`Self::new`] hashes the bytes, so code outside
+/// kit-core can make a chunk only by hashing it, and a sink may trust the id.
+/// The bytes are an owned buffer or a borrow of a reader window, never a
+/// mapping, so they cannot change between the hash and the write.
+#[derive(Debug, Clone, Copy)]
+pub struct HashedChunk<'a> {
+    id: Hash,
+    prologue: [u8; serialize::BLOB_PROLOGUE_LEN],
+    data: &'a [u8],
+    origin: Option<ChunkOrigin<'a>>,
+}
+
+impl<'a> HashedChunk<'a> {
+    /// Build the canonical blob of `data` and hash it, with the same id
+    /// dispatch as [`WriteBatch::write_parts`].
+    ///
+    /// # Errors
+    /// [`KitError`] when `data` is longer than a blob may be.
+    pub fn new(data: &'a [u8]) -> Result<Self, KitError> {
+        let prologue = serialize::blob_prologue(data.len())?;
+        let id = crate::object::object_id_from_parts(&[&prologue, data]);
+        Ok(Self {
+            id,
+            prologue,
+            data,
+            origin: None,
+        })
+    }
+
+    /// Record where the chunk sits in a worktree file, for a sink that keeps
+    /// the location instead of the bytes.
+    #[must_use]
+    pub fn at(mut self, origin: ChunkOrigin<'a>) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The content address of the blob.
+    #[must_use]
+    pub fn id(&self) -> Hash {
+        self.id
+    }
+
+    /// The prologue and the payload, in order.
+    #[must_use]
+    pub fn parts(&self) -> [&[u8]; 2] {
+        [&self.prologue, self.data]
+    }
+
+    /// The serialized length of the blob.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.prologue.len() + self.data.len()
+    }
+
+    /// Never true: a blob has a prologue.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Where the chunk sits in its worktree file, if the caller said.
+    #[must_use]
+    pub fn origin(&self) -> Option<ChunkOrigin<'a>> {
+        self.origin
+    }
+}
+
 /// Top-level repository directory name.
 pub const KIT_DIR: &str = ".kit";
 /// Subdirectory under `.kit/` that holds raw object files.
@@ -1387,6 +1458,23 @@ pub trait ObjectSink {
     /// stores the bytes.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
+    }
+    /// Store a chunk whose id is already computed. The default stores its
+    /// bytes through [`Self::put_chunk_parts`] when the chunk has an origin,
+    /// and through [`Self::put_parts`] when it has none.
+    fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let parts = chunk.parts();
+        match chunk.origin() {
+            Some(origin) => self.put_chunk_parts(&parts, origin),
+            None => self.put_parts(&parts),
+        }
+    }
+    /// True when this sink wants the chunks of a file in file order through
+    /// [`Self::put_hashed_chunk`], hashed once. A caller that can hash its
+    /// chunks in parallel hashes them first, then hands them over in order.
+    /// The default is false: such a sink takes chunks in any order.
+    fn orders_chunks(&self) -> bool {
+        false
     }
     /// Make the objects stored so far durable and visible, so a writer of many
     /// objects keeps its staged set bounded. The default does nothing, for a

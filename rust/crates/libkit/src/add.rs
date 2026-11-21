@@ -791,6 +791,17 @@ impl ObjectSink for HashProgressSink<'_> {
         self.note(parts);
         Ok(hash)
     }
+    fn put_hashed_chunk(
+        &self,
+        chunk: &kit_core::store::HashedChunk<'_>,
+    ) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put_hashed_chunk(chunk)?;
+        self.note(&chunk.parts());
+        Ok(hash)
+    }
+    fn orders_chunks(&self) -> bool {
+        self.inner.orders_chunks()
+    }
     fn has(&self, hash: &Hash) -> bool {
         self.inner.has(hash)
     }
@@ -939,9 +950,20 @@ fn hash_pending(
     }
     let result = if chunk_fanout {
         worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
-            fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
-                worktree::store_chunk_blob(sink, chunk)
-            })
+            if sink.orders_chunks() {
+                // Hash the batch in parallel, then hand it over in file order
+                // on this thread, so a packing sink writes the file in order.
+                let hashed = fanout::try_map_seq_or_par(
+                    batch,
+                    chunk_fanout_threshold(),
+                    |chunk: &Vec<u8>| worktree::hash_chunk(chunk),
+                )?;
+                worktree::put_hashed_chunks(sink, &hashed)
+            } else {
+                fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                    worktree::store_chunk_blob(sink, chunk)
+                })
+            }
         })
     } else {
         // Every file has a busy worker. Borrow each chunk from the reader,

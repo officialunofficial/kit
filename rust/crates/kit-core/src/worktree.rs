@@ -26,7 +26,7 @@ use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{ChunkOrigin, ObjectSink, ObjectStore};
+use crate::store::{ChunkOrigin, HashedChunk, ObjectSink, ObjectStore};
 
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
@@ -1433,6 +1433,31 @@ pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> Workt
     Ok(sink.put_parts(&[&prologue, chunk])?)
 }
 
+/// Hash one chunk into the token of [`ObjectSink::put_hashed_chunk`]. It is the
+/// per-chunk unit a caller fans out over, for a sink whose
+/// [`ObjectSink::orders_chunks`] is true.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn hash_chunk(chunk: &[u8]) -> WorktreeResult<HashedChunk<'_>> {
+    Ok(HashedChunk::new(chunk)?)
+}
+
+/// Hand hashed chunks to `sink` one by one, in order.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn put_hashed_chunks<S: ObjectSink + ?Sized>(
+    sink: &S,
+    chunks: &[HashedChunk<'_>],
+) -> WorktreeResult<Vec<Hash>> {
+    let mut ids = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        ids.push(sink.put_hashed_chunk(chunk)?);
+    }
+    Ok(ids)
+}
+
 /// Store a blob with its worktree location. An inline file is one blob at
 /// offset zero.
 fn store_chunk_blob_at<S: ObjectSink + ?Sized>(
@@ -1472,6 +1497,9 @@ fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
 ) -> WorktreeResult<Hash> {
     let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
+    // A sink that wants ordered chunks gets each one hashed once, as a token.
+    // Any other sink keeps its own hashing and sees no token.
+    let ordered = sink.orders_chunks();
     while let Some(chunk) = chunker.next_chunk_ref()? {
         let origin = ChunkOrigin {
             path,
@@ -1479,7 +1507,12 @@ fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
-        chunks.ids.push(store_chunk_blob_at(sink, chunk, origin)?);
+        let id = if ordered {
+            sink.put_hashed_chunk(&HashedChunk::new(chunk)?.at(origin))?
+        } else {
+            store_chunk_blob_at(sink, chunk, origin)?
+        };
+        chunks.ids.push(id);
         chunks.ends.push(total_size);
         if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
