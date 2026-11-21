@@ -335,7 +335,7 @@ fn pair_entry(
             store,
             new_cb.chunks(),
             old_cb.chunks(),
-            MAX_PAIRED_CHUNKS,
+            MAX_SKETCHED_CHUNKS,
             out,
         ),
         // A changed same-path small blob: the old blob at this path is a
@@ -361,11 +361,15 @@ const FEATURE_WINDOW: usize = 16;
 /// index cheap; the delta size-gate in [`plan_pack_with`] is the final judge of a
 /// pick, so a few features are enough signal to rank candidates.
 const FEATURE_COUNT: usize = 4;
-/// Most chunks of either manifest for which a shifted file is paired by
-/// content. Pairing reads every chunk of both manifests and indexes four
-/// features per old chunk, so its cost grows with the file. Above this (a
-/// file of about 4 GiB) the changed chunks are sent raw.
-const MAX_PAIRED_CHUNKS: usize = 65_536;
+/// Most chunk reads, old and new together, that pairing one shifted file may
+/// spend sketching content. A run of unmatched chunks that does not fit in
+/// what is left is sent raw. Pairing reads every sketched chunk and indexes
+/// four features per old chunk, so this caps its cost for any one file at
+/// roughly 8 GiB of chunk content.
+const MAX_SKETCHED_CHUNKS: usize = 131_072;
+/// Old chunks on each side of an unmatched run that may also serve as a base,
+/// so a new chunk can still pair with a neighbour of the run it replaces.
+const ANCHOR_MARGIN: usize = 2;
 
 /// Pair each changed new chunk against a base chunk in the old manifest.
 /// Skips chunks already present byte-identically in the old manifest (those
@@ -378,20 +382,24 @@ const MAX_PAIRED_CHUNKS: usize = 65_536;
 ///   same-length edit), so same-index pairing lands the new chunk on its own
 ///   prior version. This is the common case and reads no chunk content.
 /// * **Differing counts** ⇒ an insert/delete shifted indices, so position is
-///   unreliable. We match by **content similarity**: index every old chunk's
-///   min-hash super-features, then pick, for each changed new chunk, the old
-///   chunk sharing the most features (deterministic tiebreak: lowest hash),
-///   falling back to the clamped same-index chunk when there is no overlap.
-///   This reads the changed file's chunk content (`O(file size)`), but only
-///   when there actually was a shift — and it trades those local reads for a
-///   much smaller upload than re-sending the shifted chunks raw. A manifest
-///   of more than [`MAX_PAIRED_CHUNKS`] chunks is not paired: its changed
-///   chunks are sent raw.
+///   unreliable. Chunk ids present exactly once in both manifests, in the
+///   same order, anchor the two files to each other: everything between two
+///   anchors is an unmatched run on each side. A changed new chunk is
+///   matched by **content similarity** against the old chunks of its own run
+///   (and [`ANCHOR_MARGIN`] neighbours) only: index their min-hash
+///   super-features, then pick the old chunk sharing the most features
+///   (deterministic tiebreak: lowest hash). No overlap means no base and the
+///   chunk is sent raw, with no position fallback. Content is read only for
+///   the unmatched runs, so a small edit to a large file costs in proportion
+///   to the edit; at most [`MAX_SKETCHED_CHUNKS`] chunk reads are spent per
+///   file and a run that does not fit is sent raw. A chunk that moved far
+///   from where its old version sits and was edited too is outside its run's
+///   window and goes raw.
 fn pair_chunks(
     store: &ObjectStore,
     new_chunks: &[Hash],
     old_chunks: &[Hash],
-    max_chunks: usize,
+    max_reads: usize,
     out: &mut HashMap<Hash, Hash>,
 ) -> Result<(), StoreError> {
     if old_chunks.is_empty() {
@@ -412,16 +420,135 @@ fn pair_chunks(
         return Ok(());
     }
 
-    // Shifted, in a file too large to read twice for a plan: no pairing.
-    if new_chunks.len().max(old_chunks.len()) > max_chunks {
-        return Ok(());
+    // Each run reads its old chunks plus a margin on either side. Runs whose
+    // windows touch are one run, so a chunk is read once however many runs
+    // border it.
+    let mut windows: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> = Vec::new();
+    for (new_run, old_run) in unmatched_runs(new_chunks, old_chunks) {
+        // A run with no new chunk to pair reads nothing.
+        if new_chunks[new_run.clone()]
+            .iter()
+            .all(|nj| old_set.contains(nj))
+        {
+            continue;
+        }
+        let lo = old_run.start.saturating_sub(ANCHOR_MARGIN);
+        let hi = (old_run.end + ANCHOR_MARGIN).min(old_chunks.len());
+        match windows.last_mut() {
+            Some((new_prev, old_prev)) if lo <= old_prev.end => {
+                new_prev.end = new_run.end;
+                old_prev.end = hi;
+            }
+            _ => windows.push((new_run, lo..hi)),
+        }
     }
 
-    // Shifted: index old chunks by their super-features once. An unreadable
-    // old chunk (absent / non-blob) contributes no features and can't be a
-    // base — it is simply absent from the index.
+    let mut budget = max_reads;
+    for (new_run, window) in windows {
+        let changed = new_chunks[new_run.clone()]
+            .iter()
+            .filter(|nj| !old_set.contains(*nj))
+            .count();
+        let reads = changed + window.len();
+        if reads > budget {
+            continue;
+        }
+        budget -= reads;
+        pair_run(
+            store,
+            &new_chunks[new_run],
+            &old_chunks[window],
+            &old_set,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
+/// Split two manifests, whose chunk counts differ, into the runs between
+/// their anchors: chunk ids that occur exactly once in each manifest and
+/// keep the same relative order in both (the longest such chain). Each item
+/// is a run of new indices with the run of old indices between the same two
+/// anchors; either side may be empty. Runs come back in file order.
+fn unmatched_runs(
+    new_chunks: &[Hash],
+    old_chunks: &[Hash],
+) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+    // Position of each id in the old manifest, or `None` once it repeats.
+    let mut old_pos: HashMap<&Hash, Option<usize>> = HashMap::with_capacity(old_chunks.len());
+    for (j, oc) in old_chunks.iter().enumerate() {
+        old_pos
+            .entry(oc)
+            .and_modify(|p| *p = None)
+            .or_insert(Some(j));
+    }
+    let mut new_count: HashMap<&Hash, u32> = HashMap::with_capacity(new_chunks.len());
+    for nc in new_chunks {
+        *new_count.entry(nc).or_default() += 1;
+    }
+    // (new index, old index) of every id unique on both sides, in new order.
+    let candidates: Vec<(usize, usize)> = new_chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, nc)| match (old_pos.get(nc), new_count.get(nc)) {
+            (Some(Some(j)), Some(1)) => Some((i, *j)),
+            _ => None,
+        })
+        .collect();
+
+    // Longest strictly increasing chain of old indices (patience sorting).
+    let mut tails: Vec<usize> = Vec::new(); // index into `candidates`
+    let mut prev: Vec<Option<usize>> = vec![None; candidates.len()];
+    for (k, &(_, j)) in candidates.iter().enumerate() {
+        let at = tails.partition_point(|&t| candidates[t].1 < j);
+        prev[k] = at.checked_sub(1).map(|p| tails[p]);
+        if at == tails.len() {
+            tails.push(k);
+        } else {
+            tails[at] = k;
+        }
+    }
+    let mut anchors: Vec<(usize, usize)> = Vec::with_capacity(tails.len());
+    let mut cur = tails.last().copied();
+    while let Some(k) = cur {
+        anchors.push(candidates[k]);
+        cur = prev[k];
+    }
+    anchors.reverse();
+
+    // Runs sit between consecutive anchors, with sentinels at both ends.
+    let mut runs = Vec::new();
+    let (mut ni, mut oj) = (0usize, 0usize);
+    for (ai, aj) in anchors
+        .into_iter()
+        .chain(std::iter::once((new_chunks.len(), old_chunks.len())))
+    {
+        if ni < ai || oj < aj {
+            runs.push((ni..ai, oj..aj));
+        }
+        (ni, oj) = (ai + 1, aj + 1);
+    }
+    runs
+}
+
+/// Pair the changed chunks of one unmatched run against the old chunks
+/// `candidates`, by shared min-hash super-features.
+fn pair_run(
+    store: &ObjectStore,
+    new_run: &[Hash],
+    candidates: &[Hash],
+    old_set: &HashSet<&Hash>,
+    out: &mut HashMap<Hash, Hash>,
+) -> Result<(), StoreError> {
+    // Index the candidates by their super-features once. An unreadable old
+    // chunk (absent / non-blob) contributes no features and can't be a base —
+    // it is simply absent from the index.
     let mut feature_index: HashMap<u64, Vec<Hash>> = HashMap::new();
-    for oc in old_chunks {
+    let mut seen: HashSet<&Hash> = HashSet::with_capacity(candidates.len());
+    for oc in candidates {
+        if !seen.insert(oc) {
+            continue;
+        }
         if let Some(content) = chunk_bytes(store, oc)? {
             for f in chunk_features(&content) {
                 feature_index.entry(f).or_default().push(*oc);
@@ -429,7 +556,7 @@ fn pair_chunks(
         }
     }
 
-    for nj in new_chunks {
+    for nj in new_run {
         if old_set.contains(nj) || out.contains_key(nj) {
             continue;
         }
@@ -1664,10 +1791,11 @@ mod tests {
     }
 
     #[test]
-    fn a_shifted_file_over_the_pairing_bound_sends_its_changed_chunks_raw() {
+    fn a_shifted_file_over_the_read_budget_sends_its_changed_chunks_raw() {
         // old = [A,B,C,D,E]; new = [B,C,D,E']: counts differ, and E' is E with
-        // one byte changed. Within the bound E' pairs with E; one chunk over
-        // the bound on either side, nothing pairs. The bound is inclusive.
+        // one byte changed. The one unmatched run is E' against E and the two
+        // old chunks before it: four chunk reads. With that many reads E'
+        // pairs with E; one fewer, nothing pairs. The budget is inclusive.
         let (_d, s) = store();
         let chunks: Vec<Vec<u8>> = (1..=5).map(|i| chunk_content(i, 400)).collect();
         let mut e_mod = chunks[4].clone();
@@ -1687,9 +1815,9 @@ mod tests {
             pair_chunks(&s, &new, &old, max, &mut out).unwrap();
             out
         };
-        assert_eq!(pair(5), HashMap::from([(new[3], old[4])]));
-        assert!(pair(4).is_empty());
-        // Equal counts need no content reads, so the bound does not apply.
+        assert_eq!(pair(4), HashMap::from([(new[3], old[4])]));
+        assert!(pair(3).is_empty());
+        // Equal counts need no content reads, so the budget does not apply.
         let mut out = HashMap::new();
         pair_chunks(&s, &new, &new, 0, &mut out).unwrap();
         assert!(out.is_empty());
@@ -1697,6 +1825,342 @@ mod tests {
         same_count[4] = new[3];
         pair_chunks(&s, &same_count, &old, 0, &mut out).unwrap();
         assert_eq!(out, HashMap::from([(new[3], old[4])]));
+    }
+
+    /// `n` distinct chunks of `len` bytes, seeded from `base`.
+    fn distinct_chunks(base: u8, n: usize, len: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| chunk_content(base.wrapping_add(u8::try_from(i).unwrap()), len))
+            .collect()
+    }
+
+    /// `chunk` with one byte flipped near the middle: similar, not identical.
+    fn tweaked(chunk: &[u8]) -> Vec<u8> {
+        let mut c = chunk.to_vec();
+        c[chunk.len() / 2] ^= 0xFF;
+        c
+    }
+
+    /// Bytes the pairing `bases` would put on the wire for the new chunks it
+    /// names: each target as its delta when that is smaller, else raw.
+    fn pairing_cost(s: &ObjectStore, bases: &HashMap<Hash, Hash>) -> usize {
+        bases
+            .iter()
+            .map(|(&target, &base)| {
+                let raw = s.read(&target).unwrap().len();
+                encode_delta_candidate(s, DeltaCandidate { target, base })
+                    .unwrap()
+                    .map_or(raw, |d| d.stream.bytes().unwrap().len())
+            })
+            .sum()
+    }
+
+    /// Wire bytes of every new chunk `bases` leaves out: sent raw.
+    fn unpaired_cost(
+        s: &ObjectStore,
+        new: &[Hash],
+        old: &[Hash],
+        bases: &HashMap<Hash, Hash>,
+    ) -> usize {
+        let old: HashSet<&Hash> = old.iter().collect();
+        let mut seen = HashSet::new();
+        new.iter()
+            .filter(|h| !old.contains(h) && !bases.contains_key(*h) && seen.insert(**h))
+            .map(|h| s.read(h).unwrap().len())
+            .sum()
+    }
+
+    /// Pair `new` against `old` with the anchored algorithm and with the
+    /// whole-manifest sketch it replaced, and require the anchored result to
+    /// send no more bytes. Returns the anchored pairing.
+    fn assert_anchored_pairing_is_no_worse(
+        s: &ObjectStore,
+        new: &[Vec<u8>],
+        old: &[Vec<u8>],
+    ) -> HashMap<Hash, Hash> {
+        let new: Vec<Hash> = new.iter().map(|c| put_blob(s, c.clone())).collect();
+        let old: Vec<Hash> = old.iter().map(|c| put_blob(s, c.clone())).collect();
+        let mut anchored = HashMap::new();
+        pair_chunks(s, &new, &old, MAX_SKETCHED_CHUNKS, &mut anchored).unwrap();
+        let mut full = HashMap::new();
+        let old_set: HashSet<&Hash> = old.iter().collect();
+        pair_run(s, &new, &old, &old_set, &mut full).unwrap();
+        let cost = |b: &HashMap<Hash, Hash>| pairing_cost(s, b) + unpaired_cost(s, &new, &old, b);
+        assert!(
+            cost(&anchored) <= cost(&full),
+            "anchored pairing sends {} bytes, whole-manifest sketch {}",
+            cost(&anchored),
+            cost(&full)
+        );
+        anchored
+    }
+
+    #[test]
+    fn an_edit_in_the_middle_pairs_inside_its_run_and_reads_only_that_run() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 40, 2_000);
+        // C20 is replaced by two chunks that each keep half of it, so the
+        // count differs and the manifests are shifted.
+        let mut new = old.clone();
+        let (lo, hi) = old[20].split_at(1_000);
+        new.splice(20..21, [tweaked(lo), tweaked(hi)]);
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(bases.len(), 2, "both halves pair");
+        let c20 = put_blob(&s, old[20].clone());
+        assert!(bases.values().all(|b| *b == c20));
+
+        // Two new chunks and the old run plus its margin: 2 + 5 reads. A
+        // whole-manifest sketch would need 80.
+        let new_ids: Vec<Hash> = new.iter().map(|c| put_blob(&s, c.clone())).collect();
+        let old_ids: Vec<Hash> = old.iter().map(|c| put_blob(&s, c.clone())).collect();
+        let mut tight = HashMap::new();
+        pair_chunks(&s, &new_ids, &old_ids, 7, &mut tight).unwrap();
+        assert_eq!(tight, bases);
+        let mut starved = HashMap::new();
+        pair_chunks(&s, &new_ids, &old_ids, 6, &mut starved).unwrap();
+        assert!(starved.is_empty());
+    }
+
+    /// Pair `new` against `old` with a read budget of `max_reads`.
+    fn pair_with_budget(
+        s: &ObjectStore,
+        new: &[Vec<u8>],
+        old: &[Vec<u8>],
+        max_reads: usize,
+    ) -> HashMap<Hash, Hash> {
+        let ids = |chunks: &[Vec<u8>]| -> Vec<Hash> {
+            chunks.iter().map(|c| put_blob(s, c.clone())).collect()
+        };
+        let mut out = HashMap::new();
+        pair_chunks(s, &ids(new), &ids(old), max_reads, &mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn runs_whose_windows_overlap_read_each_old_chunk_once() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 40, 2_000);
+        // C10 and C12 are each followed by a fresh chunk and edited: two runs
+        // two chunks apart, so their margins share old chunks 10 and 11.
+        let mut new = old.clone();
+        new.splice(12..13, [tweaked(&old[12]), chunk_content(150, 2_000)]);
+        new.splice(10..11, [tweaked(&old[10]), chunk_content(151, 2_000)]);
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(bases.len(), 2);
+        // One window of old chunks 8..15 (7) and four changed chunks: 11
+        // reads. Charged per run it would be 14.
+        assert_eq!(pair_with_budget(&s, &new, &old, 11), bases);
+        assert!(pair_with_budget(&s, &new, &old, 10).is_empty());
+    }
+
+    #[test]
+    fn runs_far_apart_are_read_separately_and_share_one_budget() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 40, 2_000);
+        // Each of C5 and C30 is edited and followed by a fresh chunk. Each
+        // run reads 2 new chunks and 5 old ones.
+        let mut new = old.clone();
+        new.splice(30..31, [tweaked(&old[30]), chunk_content(150, 2_000)]);
+        new.splice(5..6, [tweaked(&old[5]), chunk_content(151, 2_000)]);
+        let both = pair_with_budget(&s, &new, &old, 14);
+        assert_eq!(both.len(), 2);
+        // Merged into one window the two would read 34 chunks; and the first
+        // run's reads come out of the budget the second draws on.
+        let first_only = pair_with_budget(&s, &new, &old, 13);
+        assert_eq!(first_only.len(), 1);
+        let c5 = put_blob(&s, old[5].clone());
+        assert_eq!(first_only.values().next(), Some(&c5));
+        assert!(pair_with_budget(&s, &new, &old, 6).is_empty());
+    }
+
+    #[test]
+    fn an_edit_at_the_start_pairs_inside_its_run() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 30, 2_000);
+        let mut new = old.clone();
+        let (lo, hi) = old[0].split_at(900);
+        new.splice(0..1, [tweaked(lo), tweaked(hi)]);
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(bases.len(), 2);
+        // Two new chunks and old chunks 0..3: five reads, not the file's 62.
+        assert_eq!(pair_with_budget(&s, &new, &old, 5), bases);
+        assert!(pair_with_budget(&s, &new, &old, 4).is_empty());
+    }
+
+    #[test]
+    fn an_edit_at_the_end_pairs_inside_its_run() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 30, 2_000);
+        let mut new = old.clone();
+        let (lo, hi) = old[29].split_at(900);
+        new.splice(29..30, [tweaked(lo), tweaked(hi)]);
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(bases.len(), 2);
+        // Two new chunks and old chunks 27..30: five reads.
+        assert_eq!(pair_with_budget(&s, &new, &old, 5), bases);
+        assert!(pair_with_budget(&s, &new, &old, 4).is_empty());
+    }
+
+    #[test]
+    fn an_insertion_that_shifts_every_later_chunk_sends_only_the_new_chunk() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 30, 2_000);
+        let fresh = chunk_content(200, 2_000);
+        let mut new = old.clone();
+        new.insert(12, fresh.clone());
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        // Nothing resembles the inserted chunk, so it goes raw and every
+        // other chunk dedups.
+        assert!(bases.is_empty());
+    }
+
+    #[test]
+    fn an_insertion_resembling_a_neighbour_pairs_with_it() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 30, 2_000);
+        let mut new = old.clone();
+        // A new chunk between C11 and C12 that is a copy of C11 with an edit:
+        // the old run is empty, so the margin is what supplies the base.
+        new.insert(12, tweaked(&old[11]));
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(
+            bases.get(&put_blob(&s, tweaked(&old[11]))),
+            Some(&put_blob(&s, old[11].clone()))
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_shared_chunks_pairs_like_the_whole_manifest_sketch() {
+        let (_d, s) = store();
+        let old = distinct_chunks(1, 20, 2_000);
+        // Every chunk changed a little, and the count differs.
+        let new: Vec<Vec<u8>> = old.iter().take(18).map(|c| tweaked(c)).collect();
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        assert_eq!(bases.len(), 18);
+        // Wholly unrelated content pairs with nothing.
+        let unrelated = distinct_chunks(100, 25, 2_000);
+        let bases = assert_anchored_pairing_is_no_worse(&s, &unrelated, &old);
+        assert!(bases.is_empty());
+    }
+
+    #[test]
+    fn repeated_and_reordered_chunks_pair_without_a_wrong_base() {
+        let (_d, s) = store();
+        let c = distinct_chunks(1, 6, 2_000);
+        // A repeated id is never an anchor; swapped neighbours keep only one
+        // of the two as an anchor. The result must still be a valid pairing:
+        // every base is a chunk of the old manifest and no target is a base.
+        let old = vec![
+            c[0].clone(),
+            c[1].clone(),
+            c[1].clone(),
+            c[2].clone(),
+            c[3].clone(),
+            c[4].clone(),
+        ];
+        let new = vec![
+            c[0].clone(),
+            c[3].clone(),
+            c[2].clone(),
+            tweaked(&c[1]),
+            c[4].clone(),
+            c[5].clone(),
+            c[5].clone(),
+        ];
+        let bases = assert_anchored_pairing_is_no_worse(&s, &new, &old);
+        let old_ids: HashSet<Hash> = old.iter().map(|x| put_blob(&s, x.clone())).collect();
+        assert!(bases.values().all(|b| old_ids.contains(b)));
+        assert!(bases.keys().all(|t| !old_ids.contains(t)));
+    }
+
+    #[test]
+    fn a_manifest_of_one_repeated_chunk_has_no_anchors_and_stays_bounded() {
+        let (_d, s) = store();
+        let a = put_blob(&s, chunk_content(1, 2_000));
+        let b = put_blob(&s, tweaked(&chunk_content(1, 2_000)));
+        let old = vec![a; 500];
+        let new = vec![b; 700];
+        let mut out = HashMap::new();
+        // One run of 700 new and 500 old chunks: over a budget of 1,000.
+        pair_chunks(&s, &new, &old, 1_000, &mut out).unwrap();
+        assert!(out.is_empty());
+        pair_chunks(&s, &new, &old, 1_200, &mut out).unwrap();
+        assert_eq!(out, HashMap::from([(b, a)]));
+    }
+
+    #[test]
+    fn unmatched_runs_lie_between_the_longest_ordered_chain_of_shared_ids() {
+        let h = |n: u8| [n; 32];
+        // old: 1 2 3 4 5; new: 1 9 3 2 4 5 — 2 and 3 cross, so one of them
+        // anchors with 1, 4 and 5.
+        let old = [h(1), h(2), h(3), h(4), h(5)];
+        let new = [h(1), h(9), h(3), h(2), h(4), h(5)];
+        let runs = unmatched_runs(&new, &old);
+        // The longest chain is 1, 2, 4, 5 (old positions 0, 1, 3, 4): the
+        // run 9, 3 sits against nothing, and old 3 against nothing.
+        assert_eq!(runs, vec![(1..3, 1..1), (4..4, 2..3)]);
+        // Identical manifests have no runs; disjoint ones are one run.
+        assert!(unmatched_runs(&old, &old).is_empty());
+        assert_eq!(unmatched_runs(&[h(7), h(8)], &old), vec![(0..2, 0..5)]);
+    }
+
+    #[test]
+    fn a_re_push_after_an_edit_round_trips_for_every_edit_position() {
+        let v1 = big_buffer()[..1 << 20].to_vec();
+        let edit_len = 20_000;
+        let cases: Vec<(&str, Vec<u8>)> = {
+            let patch: Vec<u8> = chunk_content(77, edit_len);
+            let mut start = v1.clone();
+            start.splice(0..edit_len, patch.clone());
+            let mut end = v1.clone();
+            let at = end.len() - edit_len;
+            end.splice(at.., patch.clone());
+            let mut middle = v1.clone();
+            let mid = middle.len() / 2;
+            middle.splice(mid..mid + edit_len, patch.clone());
+            let mut insert = v1.clone();
+            let mid = insert.len() / 2;
+            insert.splice(mid..mid, patch.clone());
+            let mut delete = v1.clone();
+            delete.drain(mid..mid + edit_len);
+            let unrelated = chunk_content(78, v1.len());
+            vec![
+                ("start", start),
+                ("end", end),
+                ("middle", middle),
+                ("insert", insert),
+                ("delete", delete),
+                ("unrelated", unrelated),
+            ]
+        };
+        for (name, v2) in cases {
+            let (_d, s) = store();
+            let file1 = put_chunked(&s, &v1);
+            let c1 = commit_with_file(&s, file1, vec![], "v1");
+            let file2 = put_chunked(&s, &v2);
+            let c2 = commit_with_file(&s, file2, vec![c1], name);
+            let plan = plan_pack(&s, c2, Some(c1)).unwrap();
+            assert_pack_reconstructs(&s, &plan, c1, c2);
+            if name == "insert" || name == "delete" {
+                // The chunk at the edit is cut in two, so the counts differ
+                // and its halves delta against it.
+                assert!(!plan.deltas.is_empty(), "{name}: expected a delta");
+            }
+            // Never more than sending every new chunk raw.
+            let mut w = PackWriter::new();
+            for h in &plan.raw {
+                w.push_raw(*h, &s.read(h).unwrap()).unwrap();
+            }
+            for d in &plan.deltas {
+                w.push_delta(&d.base, &d.stream.bytes().unwrap()).unwrap();
+            }
+            let sent = w.finish().unwrap().len();
+            assert!(
+                sent <= v2.len() + 4_096,
+                "{name}: pack of {sent} bytes for a {} byte file",
+                v2.len()
+            );
+        }
     }
 
     #[test]
