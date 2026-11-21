@@ -156,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn a_validator_gives_back_its_tag_and_length() {
+        let held = validator();
+        assert_eq!(held.etag(), "\"abc\"");
+        assert_eq!(held.total(), 100);
+        let other = Validator::new(Some(" \"x-7\" "), Some(4096)).unwrap();
+        assert_eq!(other.etag(), "\"x-7\"");
+        assert_eq!(other.total(), 4096);
+    }
+
+    #[test]
     fn range_asks_for_the_rest() {
         assert_eq!(Validator::range(40), "bytes=40-");
     }
