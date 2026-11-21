@@ -14,6 +14,9 @@ use super::{PackError, UnpackSink, read_spooled};
 
 /// An unnamed append-only file and its in-memory locator. Every read verifies
 /// the object id; offsets and lengths come from the decoder, never the file.
+///
+/// A spool can also adopt objects another spool holds, by keeping a handle to
+/// that spool's file rather than copying the bytes ([`ObjectSpool::adopt`]).
 #[derive(Debug)]
 pub struct ObjectSpool {
     inner: Mutex<Spool>,
@@ -22,6 +25,9 @@ pub struct ObjectSpool {
 #[derive(Debug, Clone, Copy)]
 struct Frame {
     position: usize,
+    /// Zero for the spool's own file, else one past the index in
+    /// `Spool::adopted`.
+    segment: u32,
     offset: u64,
     len: u32,
 }
@@ -30,6 +36,8 @@ struct Frame {
 struct Spool {
     writer: BufWriter<File>,
     end: u64,
+    /// Files of other spools whose frames this spool adopted.
+    adopted: Vec<File>,
     by_id: HashMap<Hash, Frame>,
     order: Vec<(usize, Hash, u32, ObjectType)>,
 }
@@ -44,6 +52,7 @@ impl ObjectSpool {
             inner: Mutex::new(Spool {
                 writer: BufWriter::with_capacity(256 << 10, tempfile::tempfile_in(dir)?),
                 end: 0,
+                adopted: Vec::new(),
                 by_id: HashMap::new(),
                 order: Vec::new(),
             }),
@@ -76,6 +85,7 @@ impl ObjectSpool {
         {
             let frame = Frame {
                 position,
+                segment: 0,
                 offset: spool.end,
                 len,
             };
@@ -85,6 +95,73 @@ impl ObjectSpool {
         }
         spool.order.push((position, id, len, ty));
         Ok(())
+    }
+
+    /// Adopt the objects `entries` names, each `(position, id, length, type)`
+    /// as [`Self::take_order`] of `from` returned it, without copying their
+    /// bytes: this spool keeps a handle to `from`'s file, so the bytes stay
+    /// readable here after `from` is dropped. The entries join this spool's
+    /// own, under the same rules as [`Self::append`].
+    ///
+    /// # Errors
+    /// An entry `from` does not hold, or a local I/O error.
+    ///
+    /// # Panics
+    /// If `from` is this spool, or a previous spool operation panicked while
+    /// holding its lock.
+    pub fn adopt(
+        &self,
+        from: &Self,
+        entries: &[(usize, Hash, u32, ObjectType)],
+    ) -> StoreResult<()> {
+        assert!(!std::ptr::eq(self, from), "a spool cannot adopt itself");
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let (file, offsets) = {
+            let mut other = from.inner.lock().expect("object spool mutex");
+            other.writer.flush()?;
+            let offsets = entries
+                .iter()
+                .map(|(_, id, len, _)| match other.by_id.get(id) {
+                    Some(frame) if frame.segment == 0 && frame.len == *len => Ok(frame.offset),
+                    _ => Err(StoreError::ObjectNotFound(to_hex(id))),
+                })
+                .collect::<StoreResult<Vec<_>>>()?;
+            (other.writer.get_ref().try_clone()?, offsets)
+        };
+        let mut spool = self.inner.lock().expect("object spool mutex");
+        spool.adopted.push(file);
+        let segment = u32::try_from(spool.adopted.len()).expect("bounded segment count");
+        for (&(position, id, len, ty), offset) in entries.iter().zip(offsets) {
+            if spool
+                .by_id
+                .get(&id)
+                .is_none_or(|frame| frame.position > position)
+            {
+                spool.by_id.insert(
+                    id,
+                    Frame {
+                        position,
+                        segment,
+                        offset,
+                        len,
+                    },
+                );
+            }
+            spool.order.push((position, id, len, ty));
+        }
+        Ok(())
+    }
+
+    /// Bytes this spool wrote to its own file. Objects it adopted are not
+    /// counted.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
+    #[must_use]
+    pub fn written_bytes(&self) -> u64 {
+        self.inner.lock().expect("object spool mutex").end
     }
 
     /// Take the list of staged ids and lengths in wire order.
@@ -119,6 +196,32 @@ impl ObjectSpool {
         self.read_before(id, usize::MAX, |_| Ok(()))
     }
 
+    /// The type and, for a blob, the payload length of a staged object, read
+    /// from its ten-byte head alone, as [`crate::store::ObjectStore::object_head`]
+    /// reads a stored one. The rest of the object is neither read nor hashed.
+    ///
+    /// # Errors
+    /// A local read error, or a head that is not an object's.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
+    pub fn head(&self, id: &Hash) -> StoreResult<Option<(ObjectType, Option<u64>)>> {
+        let mut spool = self.inner.lock().expect("object spool mutex");
+        let Some(frame) = spool.by_id.get(id).copied() else {
+            return Ok(None);
+        };
+        let mut head = [0; 10];
+        let len = head.len().min(frame.len as usize);
+        spool.writer.flush()?;
+        let file = match frame.segment {
+            0 => spool.writer.get_ref(),
+            segment => &spool.adopted[segment as usize - 1],
+        };
+        read_spooled(file, frame.offset, &mut head[..len])?;
+        drop(spool);
+        Ok(Some(crate::store::head_at(&mut &head[..len])?))
+    }
+
     pub(super) fn read_before<E: From<StoreError>>(
         &self,
         id: &Hash,
@@ -142,7 +245,11 @@ impl ObjectSpool {
             .map_err(|_| StoreError::ObjectTooLarge)?;
         bytes.resize(len, 0);
         spool.writer.flush().map_err(StoreError::from)?;
-        read_spooled(spool.writer.get_ref(), frame.offset, &mut bytes).map_err(StoreError::from)?;
+        let file = match frame.segment {
+            0 => spool.writer.get_ref(),
+            segment => &spool.adopted[segment as usize - 1],
+        };
+        read_spooled(file, frame.offset, &mut bytes).map_err(StoreError::from)?;
         drop(spool);
         let actual = verified_id_and_object(&bytes).0;
         if actual != *id {
@@ -261,5 +368,133 @@ mod tests {
             .collect();
         assert_eq!(ids, [a, c, b]);
         assert!(spool.take_order().is_empty());
+    }
+
+    #[test]
+    fn an_adopted_object_is_read_from_the_donor_file_after_the_donor_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let window = ObjectSpool::new(dir.path()).unwrap();
+        let (own, own_bytes) = blob(b"copied");
+        window.append(5, own, ObjectType::Blob, &own_bytes).unwrap();
+        let (big, big_bytes) = blob(&vec![7; 300_000]);
+        let (twice, twice_bytes) = blob(&vec![9; 300_001]);
+
+        let donor = ObjectSpool::new(dir.path()).unwrap();
+        donor.append(0, big, ObjectType::Blob, &big_bytes).unwrap();
+        donor
+            .append(1, twice, ObjectType::Blob, &twice_bytes)
+            .unwrap();
+        donor
+            .append(2, twice, ObjectType::Blob, &twice_bytes)
+            .unwrap();
+        let order = donor.take_order();
+        assert_eq!(order.len(), 3);
+        window.adopt(&donor, &order[..]).unwrap();
+        drop(donor);
+
+        assert_eq!(window.written_bytes(), own_bytes.len() as u64);
+        assert!(window.contains(&big));
+        assert_eq!(window.read(&big).unwrap(), Some(big_bytes.clone()));
+        assert_eq!(window.read(&twice).unwrap(), Some(twice_bytes));
+        assert_eq!(window.read(&own).unwrap(), Some(own_bytes));
+        let ids: Vec<_> = window
+            .take_order()
+            .into_iter()
+            .map(|(position, id, _, _)| (position, id))
+            .collect();
+        assert_eq!(ids, [(0, big), (1, twice), (2, twice), (5, own)]);
+    }
+
+    #[test]
+    fn adopting_an_object_the_donor_never_held_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let window = ObjectSpool::new(dir.path()).unwrap();
+        let donor = ObjectSpool::new(dir.path()).unwrap();
+        let (id, bytes) = blob(b"absent");
+        let len = u32::try_from(bytes.len()).unwrap();
+        let entry = (0, id, len, ObjectType::Blob);
+        assert!(matches!(
+            window.adopt(&donor, &[entry]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        donor.append(0, id, ObjectType::Blob, &bytes).unwrap();
+        let wrong_len = (0, id, len + 1, ObjectType::Blob);
+        assert!(matches!(
+            window.adopt(&donor, &[wrong_len]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert!(!window.contains(&id));
+    }
+
+    #[test]
+    fn the_head_of_a_staged_object_comes_from_its_first_ten_bytes() {
+        use crate::object::Tree;
+        let dir = tempfile::tempdir().unwrap();
+        let window = ObjectSpool::new(dir.path()).unwrap();
+        let (blob_id, blob_bytes) = blob(&vec![3; 70_000]);
+        let tree = Object::Tree(Tree {
+            entries: Vec::new(),
+        });
+        let (tree_id, tree_bytes) = (tree.id().unwrap(), serialize(&tree).unwrap());
+
+        let donor = ObjectSpool::new(dir.path()).unwrap();
+        donor
+            .append(0, blob_id, ObjectType::Blob, &blob_bytes)
+            .unwrap();
+        window
+            .append(1, tree_id, ObjectType::Tree, &tree_bytes)
+            .unwrap();
+        window.adopt(&donor, &donor.take_order()).unwrap();
+        drop(donor);
+
+        assert_eq!(
+            window.head(&blob_id).unwrap(),
+            Some((ObjectType::Blob, Some(70_000)))
+        );
+        assert_eq!(
+            window.head(&tree_id).unwrap(),
+            Some((ObjectType::Tree, None))
+        );
+        assert_eq!(window.head(&[0; 32]).unwrap(), None);
+
+        // A frame too short for a head is refused, not read past.
+        let (short, _) = blob(b"short");
+        window
+            .append(2, short, ObjectType::Blob, &[1, 2, 3])
+            .unwrap();
+        assert!(window.head(&short).is_err());
+    }
+
+    #[test]
+    fn an_adopted_frame_replaces_a_staged_one_only_at_an_earlier_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let (id, good) = blob(b"the staged copy");
+        let (_, bad) = blob(b"another object");
+        let entry = |position| {
+            (
+                position,
+                id,
+                u32::try_from(bad.len()).unwrap(),
+                ObjectType::Blob,
+            )
+        };
+        // The donor's copy is bad, so a read tells which frame won.
+        let adopt_at = |staged_at: usize, adopted_at: usize| {
+            let window = ObjectSpool::new(dir.path()).unwrap();
+            window
+                .append(staged_at, id, ObjectType::Blob, &good)
+                .unwrap();
+            let donor = ObjectSpool::new(dir.path()).unwrap();
+            donor.append(0, id, ObjectType::Blob, &bad).unwrap();
+            window.adopt(&donor, &[entry(adopted_at)]).unwrap();
+            window.read(&id)
+        };
+
+        assert!(matches!(
+            adopt_at(5, 2),
+            Err(StoreError::HashMismatch { .. })
+        ));
+        assert_eq!(adopt_at(2, 2).unwrap(), Some(good.clone()));
+        assert_eq!(adopt_at(2, 9).unwrap(), Some(good));
     }
 }

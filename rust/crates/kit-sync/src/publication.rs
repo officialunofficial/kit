@@ -24,6 +24,10 @@ const WINDOW_ENTRIES: usize = 1 << 16;
 // The largest object a kit writer cuts as a chunk, with its blob prologue.
 // Every object of at most this size is packed, whatever its kind.
 const PACK_OBJECT_BYTES: usize = chunker::MAX_SIZE + serialize::BLOB_PROLOGUE_LEN;
+// A window holds one open handle for each wire pack whose loose objects it
+// adopted. Seal at this many, so a window never holds enough to reach a low
+// descriptor limit.
+const WINDOW_ADOPTED_PACKS: usize = 32;
 
 pub(crate) struct Publication<'a> {
     store: &'a ObjectStore,
@@ -33,9 +37,12 @@ pub(crate) struct Publication<'a> {
 }
 
 struct Window {
+    /// The objects to pack, copied here, and the objects to write loose,
+    /// adopted from the spools they were decoded into.
     spool: ObjectSpool,
     bytes: usize,
     entries: usize,
+    adopted_packs: usize,
     completed: Vec<PackKey>,
     completed_set: HashSet<PackKey>,
 }
@@ -77,26 +84,68 @@ impl<'a> Publication<'a> {
             record(key, observer, remote, applied);
             return Ok(());
         }
+        // An object that ends as a loose file is not copied: the window adopts
+        // it from `spool`, whose decoder already derived its id, and `seal`
+        // reads it once to write it.
+        // The decoder's file stays on disk until the window seals, so a pack of
+        // mostly packed objects holds its bytes twice for that time.
+        let mut loose = Vec::new();
         for (_, id, len, ty) in order {
-            let len = len as usize;
+            let size = len as usize;
             if self.window.as_ref().is_some_and(|window| {
-                window.bytes + len > WINDOW_BYTES || window.entries == WINDOW_ENTRIES
+                window.bytes + size > WINDOW_BYTES || window.entries == WINDOW_ENTRIES
             }) {
+                self.adopt(spool, &mut loose)?;
                 self.seal(observer, remote, applied)?;
             }
-            let bytes = staged(spool, &id)?;
+            let copied = if self.packs(size) {
+                Some(staged(spool, &id)?)
+            } else {
+                None
+            };
             let window = self.window()?;
-            window.spool.append(window.entries, id, ty, &bytes)?;
-            window.bytes += len;
+            if let Some(bytes) = copied {
+                window.spool.append(window.entries, id, ty, &bytes)?;
+            } else {
+                loose.push((window.entries, id, len, ty));
+            }
+            window.bytes += size;
             window.entries += 1;
         }
+        self.adopt(spool, &mut loose)?;
         let packed = self.pack;
         let window = self.window()?;
         window.completed.push(key);
         window.completed_set.insert(key);
-        if !packed || window.bytes >= WINDOW_BYTES || window.entries == WINDOW_ENTRIES {
+        if !packed
+            || window.bytes >= WINDOW_BYTES
+            || window.entries == WINDOW_ENTRIES
+            || window.adopted_packs >= WINDOW_ADOPTED_PACKS
+        {
             self.seal(observer, remote, applied)?;
         }
+        Ok(())
+    }
+
+    /// Whether an object of `len` bytes goes into a local pack. Any other
+    /// object is written as a loose file.
+    fn packs(&self, len: usize) -> bool {
+        self.pack && len <= PACK_OBJECT_BYTES
+    }
+
+    /// Hand the window the `loose` entries of `from`.
+    fn adopt(
+        &mut self,
+        from: &ObjectSpool,
+        loose: &mut Vec<(usize, Hash, u32, ObjectType)>,
+    ) -> Result<(), PackError> {
+        if loose.is_empty() {
+            return Ok(());
+        }
+        let window = self.window()?;
+        window.spool.adopt(from, &loose[..])?;
+        window.adopted_packs += 1;
+        loose.clear();
         Ok(())
     }
 
@@ -106,6 +155,7 @@ impl<'a> Publication<'a> {
                 spool: ObjectSpool::new(&self.store.spool_dir())?,
                 bytes: 0,
                 entries: 0,
+                adopted_packs: 0,
                 completed: Vec::new(),
                 completed_set: HashSet::new(),
             });
@@ -124,19 +174,22 @@ impl<'a> Publication<'a> {
         };
         let loose = self.store.batch();
         let mut loose_ids = Vec::new();
+        let mut seen = HashSet::new();
         let mut pack = None;
         for (_, id, len, _) in window.spool.take_order() {
-            if self.pack && len as usize <= PACK_OBJECT_BYTES {
+            if self.packs(len as usize) {
                 if pack.is_none() {
                     pack = Some(LocalPackWriter::new(self.store, self.guard)?);
                 }
                 let bytes = staged(&window.spool, &id)?;
                 pack.as_mut().expect("created local pack").write(&bytes)?;
-            } else {
+            } else if seen.insert(id) {
                 loose_ids.push(id);
             }
         }
-        loose.stage_fetched(&loose_ids, |id| staged(&window.spool, id))?;
+        // One checked read of each, from the decoder's file for an adopted
+        // object, then a write under the checked id.
+        loose.stage_spooled(&window.spool, &loose_ids)?;
         if let Some(pack) = pack {
             pack.publish()?;
         }
@@ -170,6 +223,8 @@ fn record(
 }
 
 /// Hash-check private reads and fall through to the durable store on a miss.
+/// The type and head of a private object are read from its first bytes alone;
+/// `seal` checks the bytes before anything is committed or recorded.
 pub(crate) struct PendingView<'a> {
     store: &'a ObjectStore,
     spool: Option<&'a ObjectSpool>,
@@ -182,6 +237,12 @@ impl<'a> PendingView<'a> {
 
     fn pending(&self, id: &Hash) -> StoreResult<Option<Vec<u8>>> {
         self.spool.map_or(Ok(None), |spool| spool.read(id))
+    }
+
+    /// The head of a staged object. A staged object's bytes are checked when
+    /// they are written out, so a head read does not read the rest.
+    fn pending_head(&self, id: &Hash) -> StoreResult<Option<(ObjectType, Option<u64>)>> {
+        self.spool.map_or(Ok(None), |spool| spool.head(id))
     }
 
     pub(crate) fn contains(&self, id: &Hash) -> bool {
@@ -204,21 +265,16 @@ impl ObjectSource for PendingView<'_> {
 }
 impl ClosureSource for PendingView<'_> {
     fn object_type(&self, id: &Hash) -> StoreResult<ObjectType> {
-        if let Some(bytes) = self.pending(id)? {
-            Ok(serialize::deserialize_owned(bytes)?.object_type())
+        if let Some((ty, _)) = self.pending_head(id)? {
+            Ok(ty)
         } else {
             self.store.object_type(id)
         }
     }
 
     fn object_head(&self, id: &Hash) -> StoreResult<(ObjectType, Option<u64>)> {
-        if let Some(bytes) = self.pending(id)? {
-            let object = serialize::deserialize_owned(bytes)?;
-            let len = match &object {
-                Object::Blob(blob) => Some(blob.data.len() as u64),
-                _ => None,
-            };
-            Ok((object.object_type(), len))
+        if let Some(head) = self.pending_head(id)? {
+            Ok(head)
         } else {
             self.store.object_head(id)
         }
@@ -275,6 +331,105 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    fn big_blob(len: usize, seed: u8) -> (Hash, Vec<u8>) {
+        let object = Object::Blob(kit_core::object::Blob {
+            data: (0..len)
+                .map(|i| seed.wrapping_add(u8::try_from(i % 251).unwrap()))
+                .collect(),
+        });
+        (object.id().unwrap(), serialize::serialize(&object).unwrap())
+    }
+
+    fn loose_path(layout: &RepoLayout, id: &Hash) -> std::path::PathBuf {
+        let hex = to_hex(id);
+        layout.objects_dir().join(&hex[..2]).join(&hex[2..])
+    }
+
+    #[test]
+    fn objects_over_the_pack_limit_are_written_loose_straight_from_the_decoder_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        let guard = store.prune_guard().unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+        let (small_id, small) = big_blob(1000, 1);
+        let (mid_id, mid) = big_blob(300 << 10, 2);
+        let (large_id, large) = big_blob(1 << 20, 3);
+        assert!(mid.len() > PACK_OBJECT_BYTES);
+
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        for (position, (id, bytes)) in [(small_id, &small), (mid_id, &mid), (large_id, &large)]
+            .into_iter()
+            .enumerate()
+        {
+            spool.append(position, id, ObjectType::Blob, bytes).unwrap();
+        }
+        let key = PackKey::from_hash(kit_core::hash::hash(b"over the pack limit"));
+        publication
+            .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+            .unwrap();
+        drop(spool);
+
+        // Only the packed object was copied into the window's own file. The
+        // loose ones are readable, checked, from the decoder's file.
+        let pending = publication.pending().unwrap();
+        assert_eq!(pending.written_bytes(), small.len() as u64);
+        let view = publication.view();
+        assert!(view.contains(&mid_id) && view.contains(&large_id));
+        assert_eq!(view.read(&mid_id).unwrap(), mid);
+        assert_eq!(view.read(&large_id).unwrap(), large);
+        // The closure check asks for a head, which reads ten bytes.
+        assert_eq!(
+            view.object_head(&mid_id).unwrap(),
+            (ObjectType::Blob, Some(300 << 10))
+        );
+        assert_eq!(view.object_type(&large_id).unwrap(), ObjectType::Blob);
+
+        publication
+            .seal(&NoopObserver, "origin", &mut applied)
+            .unwrap();
+        assert!(applied.contains(&key));
+        assert_eq!(std::fs::read(loose_path(&layout, &mid_id)).unwrap(), mid);
+        assert_eq!(
+            std::fs::read(loose_path(&layout, &large_id)).unwrap(),
+            large
+        );
+        assert!(!loose_path(&layout, &small_id).exists());
+        for (id, bytes) in [(small_id, small), (mid_id, mid), (large_id, large)] {
+            assert_eq!(store.read(&id).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_window_seals_before_it_holds_too_many_decoder_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        let guard = store.prune_guard().unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let mut publication = Publication::new(&store, &guard).unwrap();
+        let mut applied = AppliedPacks::load(&layout, "origin").unwrap();
+
+        for n in 0..WINDOW_ADOPTED_PACKS {
+            let byte = u8::try_from(n).unwrap();
+            let (id, bytes) = big_blob(PACK_OBJECT_BYTES + 1, byte);
+            let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+            spool.append(0, id, ObjectType::Blob, &bytes).unwrap();
+            let key = PackKey::from_hash(kit_core::hash::hash(&[byte]));
+            publication
+                .accept(&spool, key, &NoopObserver, "origin", &mut applied)
+                .unwrap();
+            // Each pack stays in the window until the last one fills it.
+            let last = n + 1 == WINDOW_ADOPTED_PACKS;
+            assert_eq!(publication.pending().is_none(), last, "pack {n}");
+            assert_eq!(applied.contains(&key), last, "pack {n}");
+        }
     }
 
     #[test]

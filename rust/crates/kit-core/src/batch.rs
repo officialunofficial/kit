@@ -395,6 +395,29 @@ impl<'s> WriteBatch<'s> {
         .collect()
     }
 
+    /// Stage the objects `ids` of `spool` as loose files, even where the loose
+    /// path already holds a copy, then join every worker before returning.
+    /// The caller commits the batch.
+    ///
+    /// Each object is read with the spool's checked read, which hashes it
+    /// once and refuses bytes that are not the object `id` names. The
+    /// checked id is then the write's name, so the bytes are not hashed again.
+    ///
+    /// # Errors
+    /// An id the spool does not hold, bytes that fail the check, or a local
+    /// write error.
+    #[doc(hidden)]
+    pub fn stage_spooled(&self, spool: &crate::pack::ObjectSpool, ids: &[Hash]) -> StoreResult<()> {
+        crate::pack::stage_independent(ids, |id| {
+            let bytes = spool
+                .read(id)?
+                .ok_or_else(|| StoreError::ObjectNotFound(crate::hash::to_hex(id)))?;
+            self.stage_prehashed(*id, &[&bytes], false).map(drop)
+        })
+        .into_iter()
+        .collect()
+    }
+
     fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_existing: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
@@ -2357,6 +2380,52 @@ mod tests {
         assert_eq!(batch.write_fetched(&bytes).unwrap(), id);
         batch.commit().unwrap();
         assert_eq!(fs::read(store.path_for(&id)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn spooled_objects_over_the_pack_limit_are_written_once_after_one_check() {
+        let (dir, store, rec) = recording_store();
+        let spool = crate::pack::ObjectSpool::new(dir.path()).unwrap();
+        let batch = store.batch();
+        for (size, fill) in [(300usize << 10, 1u8), (1 << 20, 2u8)] {
+            let object = crate::object::Object::Blob(crate::object::Blob {
+                data: vec![fill; size],
+            });
+            let id = object.id().unwrap();
+            let bytes = crate::serialize::serialize(&object).unwrap();
+            let path = store.path_for(&id);
+            let before = rec.events().len();
+            spool
+                .append(0, id, crate::object::ObjectType::Blob, &bytes)
+                .unwrap();
+
+            // A repeat of the same object stays one staged file.
+            batch.stage_spooled(&spool, &[id, id]).unwrap();
+            batch.checkpoint().unwrap();
+
+            let renames = rec.events()[before..]
+                .iter()
+                .filter(|event| matches!(event, Ev::Rename { dst, .. } if *dst == path))
+                .count();
+            assert_eq!(renames, 1, "{size}");
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        batch.commit().unwrap();
+
+        // Bytes that are not the object the id names are refused.
+        let claimed = hash::hash(b"claimed");
+        spool
+            .append(0, claimed, crate::object::ObjectType::Blob, b"other")
+            .unwrap();
+        let batch = store.batch();
+        assert!(matches!(
+            batch.stage_spooled(&spool, &[claimed]),
+            Err(StoreError::HashMismatch { .. })
+        ));
+        assert!(matches!(
+            batch.stage_spooled(&spool, &[[0; 32]]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     #[test]

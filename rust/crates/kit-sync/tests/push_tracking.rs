@@ -4,9 +4,13 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use kit_core::fault::{self, SyncStep};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
@@ -19,6 +23,9 @@ use kit_core::store::ObjectStore;
 use kit_sync::push::{PushError, PushLease, PushOptions, PushTarget};
 use kit_sync::{CloneRemote, Observer, RemoteSource, SyncEvent, TransportSource, init_clone_dir};
 use kit_transport_memory::MemoryTransport;
+
+/// The sync hook is one per process, so the tests that set it run one at a time.
+static HOOK: Mutex<()> = Mutex::new(());
 
 const REMOTE: &str = "default";
 const MAIN: &str = "refs/heads/main";
@@ -187,6 +194,115 @@ fn successful_push_records_only_packs_with_verified_signatures() {
             assert_eq!(report.objects_unpacked, 0);
         }
     }
+}
+
+/// A push makes the directory entries of the objects its recorded packs carry
+/// durable before it records them, and no others: the shard of each object and,
+/// in a packed store, the pack directory.
+#[test]
+fn a_push_flushes_only_the_shards_of_the_packs_it_records() {
+    let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
+    let tx = MemoryTransport::new();
+    let work = Work::new();
+    let tip = work.commit(None);
+    work.branch("main", tip);
+    let objects = work.layout.objects_dir();
+    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let hook = {
+        let (objects, barriers) = (objects.clone(), Arc::clone(&barriers));
+        fault::on_sync(move |step| {
+            if let SyncStep::DirBarrier(dir) = step
+                && dir.starts_with(&objects)
+            {
+                barriers
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(dir.clone());
+            }
+        })
+    };
+    work.push(
+        &TransportSource::new(&tx),
+        "main",
+        PushLease::FastForward,
+        None,
+    )
+    .unwrap();
+    drop(hook);
+
+    let Object::Commit(commit) = work.store.read_object(&tip).unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(tree) = work.store.read_object(&commit.tree_hash).unwrap() else {
+        panic!("expected a tree");
+    };
+    let ids = [tip, commit.tree_hash]
+        .into_iter()
+        .chain(tree.entries.iter().map(|entry| entry.object_hash));
+    let expected: BTreeSet<PathBuf> = ids
+        .map(|id| objects.join(format!("{:02x}", id[0])))
+        .collect();
+    let flushed = barriers.lock().unwrap().clone();
+    let shards: BTreeSet<PathBuf> = flushed
+        .iter()
+        .filter(|dir| !dir.ends_with("pack"))
+        .cloned()
+        .collect();
+    assert_eq!(shards, expected);
+    assert!(flushed.len() <= expected.len() + 1, "{flushed:?}");
+}
+
+/// A push killed after its packs are uploaded and its ref is written, before it
+/// records them, leaves the next fetch to apply every one of them.
+#[test]
+fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
+    let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
+    let tx = MemoryTransport::new();
+    let work = Work::new();
+    let tip = work.commit(None);
+    work.branch("main", tip);
+    let objects = work.layout.objects_dir();
+    let killed = {
+        let _hook = fault::on_sync(move |step| {
+            if let SyncStep::DeviceFlush(at) = step
+                && *at == objects
+            {
+                panic!("the push is killed before it records its packs");
+            }
+        });
+        catch_unwind(AssertUnwindSafe(|| {
+            work.push(
+                &TransportSource::new(&tx),
+                "main",
+                PushLease::FastForward,
+                None,
+            )
+        }))
+    };
+
+    assert!(killed.is_err());
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    let map = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
+    let bytes = tx
+        .download_blob(&PackKey::from_hash(map), None, u64::MAX)
+        .unwrap();
+    let packs = kit_core::transfer::decode_packlist(&bytes).unwrap().packs;
+    assert!(!packs.is_empty());
+    let applied = kit_sync::AppliedPacks::load(&work.layout, REMOTE).unwrap();
+    assert!(
+        packs
+            .iter()
+            .all(|pack| !applied.contains(&PackKey::from_hash(*pack)))
+    );
+    let report = kit_sync::fetch(
+        &work.path,
+        &TransportSource::new(&tx),
+        REMOTE,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )
+    .unwrap();
+    assert_eq!(report.packs_already_applied, 0);
 }
 
 /// A plain push of a tip that does not descend from the tracking ref is
