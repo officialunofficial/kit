@@ -1028,6 +1028,13 @@ fn connect_reads_env_credentials() {
     assert!(ok.is_ok());
 }
 
+/// A direct `kit+s3` remote takes a manifest delta.
+#[test]
+fn an_s3_remote_accepts_manifest_deltas() {
+    let transport = S3Transport::connect("kit+s3://host.example/my-bucket").unwrap();
+    assert!(Transport::accepts_manifest_deltas(&transport));
+}
+
 #[test]
 fn with_parts_rejects_invalid_url_prefixes() {
     let server = mockito::Server::new();

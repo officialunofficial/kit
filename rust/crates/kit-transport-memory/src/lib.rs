@@ -115,6 +115,11 @@ impl MemoryTransport {
 }
 
 impl Transport for MemoryTransport {
+    /// An in-process remote is kit's own reference store, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }
@@ -318,6 +323,12 @@ mod tests {
     // ------------------------------------------------------------------
     // Pack verb tests (5 tests)
     // ------------------------------------------------------------------
+
+    /// The in-process remote takes a manifest delta.
+    #[test]
+    fn a_memory_remote_accepts_manifest_deltas() {
+        assert!(MemoryTransport::new().accepts_manifest_deltas());
+    }
 
     /// A delete removes the ref only while it holds the expected value, and
     /// counts as a write for the cursor.

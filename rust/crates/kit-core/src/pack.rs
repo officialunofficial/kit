@@ -1267,6 +1267,31 @@ impl<W> PackWriter<W> {
     }
 }
 
+/// Bytes a raw entry for `bytes` takes in a pack, its frame included: what
+/// [`PackWriter::push_raw`] writes, compressed or not. A planner that picks
+/// between a full entry and a delta compares these, since an object that
+/// compresses well is cheaper in full than its raw length says.
+#[must_use]
+pub fn raw_entry_len(bytes: &[u8]) -> u64 {
+    let payload = match maybe_compress(bytes, 0) {
+        Some(frame) => ZSTD_LEN_PREFIX + frame.len(),
+        None => bytes.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
+}
+
+/// Bytes a delta entry holding `stream` takes in a pack, its frame and base
+/// id included: what [`PackWriter::push_delta`] writes. See
+/// [`raw_entry_len`].
+#[must_use]
+pub fn delta_entry_len(stream: &[u8]) -> u64 {
+    let payload = match maybe_compress(stream, DELTA_BASE_LEN) {
+        Some(frame) => DELTA_BASE_LEN + ZSTD_LEN_PREFIX + frame.len(),
+        None => DELTA_BASE_LEN + stream.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
+}
+
 /// Compute the on-disk pack key: BLAKE3 of the entire packfile bytes
 /// (including the trailer). SPEC-PACKFILE §7. Returns the bare digest;
 /// callers prepend `packs/` and lower-hex-encode for the storage path.
@@ -3801,6 +3826,45 @@ mod tests {
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
             .unwrap();
+    }
+
+    #[test]
+    fn entry_len_matches_what_the_writer_writes() {
+        // The planner compares these lengths, so each must be exact for a
+        // body that compresses (the zstd frame) and one that does not.
+        let squeezes = vec![b'a'; 8 * 1024];
+        let mut noise = vec![0u8; 8 * 1024];
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        for b in &mut noise {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x.to_le_bytes()[0];
+        }
+        for body in [&squeezes[..], &noise[..], &noise[..10]] {
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_raw(hash::hash(body), body).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(raw_entry_len(body)).unwrap()
+            );
+        }
+        let base = noise.clone();
+        let mut grown = noise.clone();
+        grown.extend(vec![b'z'; 8 * 1024]);
+        let mut edited = noise.clone();
+        edited[100] ^= 1;
+        for target in [&grown, &edited] {
+            let stream = delta::encode(&base, target).unwrap();
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_delta(&hash::hash(&base), &stream).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(delta_entry_len(&stream)).unwrap()
+            );
+        }
     }
 
     #[test]
