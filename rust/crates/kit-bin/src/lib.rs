@@ -51,9 +51,9 @@ use std::io::Write;
 #[must_use]
 #[allow(clippy::too_many_lines)] // flat command-dispatch match; splitting it would only hurt readability
 pub fn dispatch(argv: &[String]) -> u8 {
-    // Consume leading global flags (`-C <path>`, `-c <key>=<val>`, and the
-    // accepted-as-no-op pager flags) BEFORE resolving the subcommand, so
-    // they apply to every command and to repo discovery — like git.
+    // Consume leading global flags (`-C <path>` and `-c <key>=<val>`) BEFORE
+    // resolving the subcommand, so they apply to every command and to repo
+    // discovery, like git.
     let (cmd_idx, overrides) = match parse_global_flags(argv) {
         Ok(parsed) => parsed,
         Err(code) => return code,

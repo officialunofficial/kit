@@ -666,6 +666,17 @@ against the writer's records when it is published, and an index entry or
 ref is written only after the batch's last pack is published. Per-object writes, loose stores, and a
 writer that cannot activate the marker keep every chunk loose.
 
+**Writer limit on entries.** Every writer of local packs seals a pack before
+it would hold more than 65,536 entries. The `kit add` batch above, a fetch
+publication window ([SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch)) and
+a gc output ([SPEC-GC](SPEC-GC.md)) share this limit, and they share the
+payload limit of 64 MiB of serialized bytes, with one exception: gc gives one
+object that alone passes 64 MiB an output pack of its own. These limits are
+writer policy and bound the locators, batch paths and index workspace of one
+pack. A reader accepts any pack within the format caps of 10,000,000 entries
+and 4 GiB of payload (§10, SPEC-PACKFILE §3.1.1), so a pack from a writer with
+other limits stays readable.
+
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
 flush, the pack name or the complete pair can survive a power loss.
