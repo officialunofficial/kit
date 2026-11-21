@@ -10,7 +10,7 @@ use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashSet;
 use std::path::Path;
 mod attestations;
 mod delete;
@@ -39,17 +39,12 @@ struct PreparedPlan {
     force: Option<force::Snapshot>,
 }
 
-/// The object shards of one pack: the first byte of the id of every object
-/// the pack carries. Each such object lives in the loose shard directory of
-/// that name or in a local pack, whose directory is flushed with them.
-type PackShards = BTreeSet<u8>;
-
 #[derive(Default)]
 struct PushRecord {
-    /// Packs uploaded and checked, with their shards.
-    checked: HashMap<Hash, PackShards>,
-    /// Checked packs a ref now names, with their shards.
-    advanced: Vec<(PackKey, PackShards)>,
+    /// Packs uploaded and checked.
+    checked: HashSet<Hash>,
+    /// Checked packs a ref now names.
+    advanced: Vec<PackKey>,
 }
 
 /// What the entries of one pack under construction carry, gathered for the
@@ -59,15 +54,11 @@ struct PackEntries {
     /// The commits, remixes and tags, with a bound of their size: checked
     /// after the upload.
     signed: Vec<(Hash, u32)>,
-    /// The shards of every object in the pack, whatever its kind and whether
-    /// it is a raw entry or the target of a delta.
-    shards: PackShards,
 }
 
 impl PackEntries {
     fn clear(&mut self) {
         self.signed.clear();
-        self.shards.clear();
     }
 }
 
@@ -124,43 +115,30 @@ impl PushContext<'_> {
         if let Some(record) = &self.record {
             let mut record = record.borrow_mut();
             for key in keys {
-                if let Some(shards) = record.checked.remove(&key) {
-                    record.advanced.push((PackKey::from_hash(key), shards));
+                if record.checked.remove(&key) {
+                    record.advanced.push(PackKey::from_hash(key));
                 }
             }
         }
     }
 
-    fn persist_advances(
-        &self,
-        store: &ObjectStore,
-        layout: &kit_core::layout::RepoLayout,
-        remote: &str,
-    ) {
+    fn persist_advances(&self, layout: &kit_core::layout::RepoLayout, remote: &str) {
         let Some(record) = &self.record else {
             return;
         };
         let mut record = record.borrow_mut();
-        // The record tells the next fetch that these packs' objects are in
-        // this store, so it can skip them. A visible object's bytes are
-        // durable, but the directory entry of a loose object another process
-        // renamed into place may not be (SPEC-OBJECTS §10.1), and nor may the
-        // pack pair of a packed one. Those entries are the objects of the
-        // advanced packs: each is in the shard directory its id starts with,
-        // or in the pack directory, which `sync_shards` flushes with any
-        // shard of a packed store. Nothing else this push read is named by
-        // the record, so no other directory is flushed.
-        let shards: PackShards = record
-            .advanced
-            .iter()
-            .flat_map(|(_, shards)| shards.iter().copied())
-            .collect();
-        if record.advanced.is_empty() || store.sync_shards(shards).is_err() {
+        if record.advanced.is_empty() {
             return;
         }
+        // The record tells the next fetch that these packs' objects are in
+        // this store, so it can skip them. Every object a pack carries is
+        // reachable from a ref this push published or read, and a ref only
+        // names objects whose bytes and locations are durable
+        // (SPEC-OBJECTS §10.1), so the record needs no flush of the object
+        // directories before it is written.
         let mut applied =
             crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
-        for (key, _) in record.advanced.drain(..) {
+        for key in record.advanced.drain(..) {
             if let Err(error) = applied.record_applied(&key) {
                 self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
                     remote: remote.to_owned(),
@@ -331,7 +309,7 @@ pub fn push(
         // never names a tip gc removed (see `ObjectStore::prune_guard`).
         let _prune_guard = store.prune_guard()?;
         let result = push_refs(&layout, &store, &tx, options);
-        tx.persist_advances(&store, &layout, options.remote_name);
+        tx.persist_advances(&layout, options.remote_name);
         result?
     };
     if options.attestations {
@@ -1229,10 +1207,7 @@ fn build_and_upload_packs(
             if let Some(record) = &tx.record
                 && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
             {
-                record
-                    .borrow_mut()
-                    .checked
-                    .insert(spooled.key(), entries.shards.clone());
+                record.borrow_mut().checked.insert(spooled.key());
             }
             pack_keys.push(spooled.key());
             Ok(is_ticketed)
@@ -1383,7 +1358,6 @@ fn build_packs<W: std::io::Write>(
                     &mut entries,
                 )?;
             }
-            entries.shards.insert(entry.hash()[0]);
             if signs {
                 entries.signed.push((
                     entry.hash(),
@@ -1412,13 +1386,9 @@ fn build_packs<W: std::io::Write>(
     let mut start = 0;
     for len in size_capped_batch_lens(&delta_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
-        let targets: Vec<u8> = chunk.iter().map(|delta| delta.target[0]).collect();
         let parallel = batch_fans_out(len, delta_sizes[start..start + len].iter().sum());
         start += len;
-        for (at, entry) in prepare_delta_batch(chunk, parallel)?
-            .into_iter()
-            .enumerate()
-        {
+        for entry in prepare_delta_batch(chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -1432,7 +1402,6 @@ fn build_packs<W: std::io::Write>(
                     &mut entries,
                 )?;
             }
-            entries.shards.insert(targets[at]);
             w.push_prepared_delta(entry)?;
             report_packed(kind, observer);
         }
