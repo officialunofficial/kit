@@ -153,9 +153,12 @@ impl Stamp {
     }
 
     fn write(self, file: &mut File) -> io::Result<()> {
+        // Never truncate first: a failed write leaves a torn stamp, which is
+        // rewritten and stops the step, and not an empty one, which means the
+        // step has never run.
         file.rewind()?;
-        file.set_len(0)?;
-        file.write_all(&self.encode())
+        file.write_all(&self.encode())?;
+        file.set_len(17)
     }
 
     /// A step that left planned work is due again whatever the pair count: a

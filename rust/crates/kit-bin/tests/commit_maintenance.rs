@@ -142,3 +142,47 @@ fn the_step_leaves_the_commit_output_and_exit_code_alone() {
     assert_eq!(keys(&a), keys(&b));
     assert_eq!(a.status.code(), b.status.code());
 }
+
+/// An old staging file in the pack directory: the step removes it and says so.
+fn old_leftover(repo: &Path) -> std::path::PathBuf {
+    let leftover = repo
+        .join(".kit/objects/pack")
+        .join(".11111111111111111111111111111111.tmp.pack");
+    fs::write(&leftover, b"old stage").unwrap();
+    fs::File::open(&leftover)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+        .unwrap();
+    leftover
+}
+
+#[test]
+fn the_maintenance_line_goes_to_stderr_and_quiet_hides_it() {
+    let loud = repo();
+    add_large(loud.path(), 1);
+    let leftover = old_leftover(loud.path());
+    let out = ok(loud.path(), &["commit", "--format=json", "-m", "one"]);
+    assert!(!leftover.exists());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("maintenance: retired 0 dead local pack(s), removed 1 leftover"),
+        "stderr: {stderr}"
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout.lines().count(), 1, "stdout: {stdout}");
+    assert!(!stdout.contains("maintenance"));
+
+    let quiet = repo();
+    add_large(quiet.path(), 1);
+    let leftover = old_leftover(quiet.path());
+    let out = ok(quiet.path(), &["commit", "-q", "-m", "one"]);
+    assert!(!leftover.exists(), "quiet still runs the step");
+    assert!(out.stderr.is_empty() && out.stdout.is_empty(), "{out:?}");
+
+    let off = repo();
+    ok(off.path(), &["config", "--local", "gc.auto", "false"]);
+    add_large(off.path(), 1);
+    let leftover = old_leftover(off.path());
+    ok(off.path(), &["commit", "-m", "one"]);
+    assert!(leftover.exists(), "gc.auto=false leaves it");
+}

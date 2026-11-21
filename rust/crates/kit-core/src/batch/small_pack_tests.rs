@@ -279,12 +279,20 @@ fn only_files_with_a_new_blob_count_toward_a_pack() {
 fn a_file_repeated_in_a_batch_counts_once() {
     let (_dir, _layout, store) = fresh_store();
     let batch = store.batch();
-    let same = bytes(5, 3000);
-    for _ in 0..SMALL_PACK_AFTER + 50 {
-        put_file(&batch, &same);
+    let data = files(SMALL_PACK_AFTER - 4, 3000, 9500);
+    for d in &data {
+        put_file(&batch, d);
+    }
+    // Ten more calls with a blob that is already staged count for nothing, so
+    // three new blobs after them are still under the count of a pack.
+    for _ in 0..10 {
+        put_file(&batch, &data[0]);
+    }
+    for d in files(3, 3000, 9900) {
+        put_file(&batch, &d);
     }
     batch.commit().unwrap();
-    assert_eq!((pairs(&store), loose(&store)), (0, 1));
+    assert_eq!((pairs(&store), loose(&store)), (0, SMALL_PACK_AFTER - 1));
 }
 
 #[test]
