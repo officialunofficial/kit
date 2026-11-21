@@ -34,7 +34,10 @@ pub(super) struct Handles {
 
 #[cfg(test)]
 #[derive(Default)]
-pub(super) struct AfterOpen(Option<Box<dyn FnOnce(&Handles) + Send>>);
+pub(super) struct AfterOpen(Option<Hook>);
+
+#[cfg(test)]
+type Hook = Box<dyn FnOnce(&Handles) + Send>;
 
 #[cfg(test)]
 impl std::fmt::Debug for AfterOpen {
