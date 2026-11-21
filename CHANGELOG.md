@@ -37,6 +37,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Commonware crates move to 2026.11.0. Roots, proofs and ids do not change. The new `ruint` and `ruint-macro` crates enter the dependency tree through `commonware-codec`. A program that builds kit-core with the `history-mmr` feature or that cross-checks kit proofs with the upstream verifiers must use Commonware 2026.11.0 too, because the upstream inclusion verifiers take their arguments in a new order.
 - Fetch and clone of large files hash each packed object once on the way into a local pack, where each was hashed four times in all, so a fresh fetch or clone of 1 GiB of large files on Linux no longer costs more CPU than 0.9.
 - A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
 - Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size. A run that needs more than 4,096 chunk reads (about 256 MiB) is sent without deltas, and a push spends at most 32,768 such reads in all.

@@ -93,7 +93,7 @@ Its public fields, normatively:
 kit has no inactivity floor: producers (`CommitHistory::root`,
 `CommitHistory::prove`) pass zero inactive peaks, so every proof kit
 emits has `inactive_peaks = 0`. A verifier MUST reject a proof whose
-`inactive_peaks` is nonzero. With commonware-storage 2026.10.0 this
+`inactive_peaks` is nonzero. With commonware-storage 2026.11.0 this
 follows from the root computation rather than from a separate check:
 the decoder accepts any value, but a nonzero `inactive_peaks` adds
 `u64_be(inactive_peaks)` to the root preimage (commonware's
@@ -138,7 +138,7 @@ always writes `inactive_peaks = 0`, that field is the single byte `0x00`
 immediately after the `leaves` varint. For example, a proof of position
 0 in a 2-leaf history encodes as `02 00 01` followed by one 32-byte
 digest (35 bytes). Kit does NOT re-frame this; consumers MUST use
-commonware-codec at the same pinned version (2026.10.0, pinned in
+commonware-codec at the same pinned version (2026.11.0, pinned in
 `rust/Cargo.toml`).
 
 ### 2.3 Root
