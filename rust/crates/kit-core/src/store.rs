@@ -1488,7 +1488,7 @@ pub trait ObjectSink {
     /// Make the loose objects stored so far durable and visible, so a writer
     /// of many objects keeps its staged set bounded. An object in an open
     /// local pack becomes visible when the pack seals or at commit, so a
-    /// caller must not read a chunk back before its commit. A checkpoint never
+    /// caller must not read a chunk or small file back before its commit. A checkpoint never
     /// makes an object visible before the objects it names. The default does
     /// nothing, for a sink that is durable or keeps no state per object.
     fn checkpoint(&self) -> StoreResult<()> {

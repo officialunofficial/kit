@@ -204,7 +204,8 @@ oversized allocations; the FastCDC chunker is fully deterministic
 The local store resolves ids from raw indexed packs and loose files. The
 common directory's `format` inode declares packed-read capability `P`.
 Once the store is packed, fetch and clone write small non-chunk objects
-into local packs and leave the rest loose. Local pack format and durability are specified in [SPEC-OBJECTS §10](specs/SPEC-OBJECTS.md#10-storage).
+into local packs and leave the rest loose. A batched add packs the chunks
+of large files and, past its first 64, its small files. Local pack format and durability are specified in [SPEC-OBJECTS §10](specs/SPEC-OBJECTS.md#10-storage).
 
 ---
 

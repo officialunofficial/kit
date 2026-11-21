@@ -297,7 +297,7 @@ fn a_checkpoint_that_shows_a_tree_seals_the_small_files_first() {
 }
 
 #[test]
-fn identical_files_across_threads_land_once() {
+fn identical_files_across_threads_are_all_stored() {
     let (_dir, _layout, store) = fresh_store();
     let data = files(SMALL_PACK_AFTER + 200, 1200, 9000);
     let batch = store.batch();
@@ -316,4 +316,37 @@ fn identical_files_across_threads_land_once() {
         let id = crate::object::object_id_from_parts(&[&blob_bytes(d)]);
         assert!(store.contains(&id));
     }
+}
+
+#[test]
+fn a_file_staged_loose_in_the_first_files_is_not_written_again_past_the_threshold() {
+    let (_dir, _layout, store) = fresh_store();
+    let data = files(SMALL_PACK_AFTER + 10, 700, 10_000);
+    let batch = store.batch();
+    for d in &data {
+        put_file(&batch, d);
+    }
+    // The first files are staged loose; the same content again must be found
+    // there, not written to the pack.
+    for d in &data[..SMALL_PACK_AFTER] {
+        put_file(&batch, d);
+    }
+    batch.commit().unwrap();
+    assert_eq!((pairs(&store), loose(&store)), (1, SMALL_PACK_AFTER));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_seal_of_small_files_fails_the_commit_and_publishes_nothing() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    for d in files(SMALL_PACK_AFTER + 20, 600, 11_000) {
+        put_file(&batch, &d);
+    }
+    // Unlink the open pack's staging file, so its publication cannot find it.
+    for path in fs::read_dir(store.pack_dir()).unwrap() {
+        fs::remove_file(path.unwrap().path()).unwrap();
+    }
+    assert!(batch.commit().is_err());
+    assert_eq!(pairs(&store), 0);
 }
