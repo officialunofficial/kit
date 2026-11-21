@@ -244,6 +244,13 @@ pub fn run(args: &[String]) -> u8 {
             report.duplicate_bytes_reclaimed,
         );
     }
+    if !report.dry_run && report.retire_hold_ms != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: pack retirement held the exclusive lock for {} ms",
+            report.retire_hold_ms,
+        );
+    }
     if report.pack_leftovers_pruned != 0 {
         let _ = writeln!(
             stderr,

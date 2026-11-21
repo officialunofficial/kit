@@ -365,7 +365,6 @@ impl PackSweep {
         if guard.try_lock().is_err() {
             return Ok(false);
         }
-        #[cfg(test)]
         let locked_at = std::time::Instant::now();
         let dir = store.pack_dir();
         let mut retire = Vec::new();
@@ -440,8 +439,10 @@ impl PackSweep {
             flush_dir(&dir)?;
         }
         drop(guard);
+        let held = locked_at.elapsed();
+        report.retire_hold_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
         #[cfg(test)]
-        SWEEP_HOLD.set(locked_at.elapsed());
+        SWEEP_HOLD.set(held);
         Ok(true)
     }
 }
