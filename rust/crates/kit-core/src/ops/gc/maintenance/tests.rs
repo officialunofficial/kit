@@ -725,6 +725,27 @@ fn a_budget_that_ends_with_nothing_wholly_dead_reports_over_budget_and_keeps_the
 }
 
 #[test]
+fn a_copy_that_runs_out_of_budget_with_nothing_wholly_dead_never_tries_the_locks() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Copy));
+    let repo = Repo::new();
+    repo.due_live();
+    let before = repo.pack_count();
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        panic!("nothing is left to retire, so no lock is tried");
+    });
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(repo.pack_count(), before);
+    assert_eq!(repo.staging(), 0);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(
+        Stamp::read(&mut file).unwrap().outcome,
+        Collection::Complete
+    );
+}
+
+#[test]
 fn a_stop_at_any_checkpoint_leaves_nothing_half_done() {
     use std::cell::Cell;
 

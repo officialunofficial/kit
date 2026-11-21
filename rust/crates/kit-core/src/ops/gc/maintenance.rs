@@ -35,7 +35,9 @@ pub enum Collection {
     RootsChanged,
     /// The mark, plan, verification or copy ran out of time before publish.
     OverBudget,
-    /// The attempt stopped on unreadable state, damage or interruption.
+    /// The attempt stopped on unreadable state, damage or interruption, or a
+    /// copy failed with an I/O error after the wholly dead retirement
+    /// finished.
     Failed,
 }
 
@@ -308,9 +310,10 @@ fn run(
 }
 
 /// What a collection reports and what the stamp records. They differ only
-/// when the budget cut the copy short but wholly dead retirement finished:
-/// the report says `over_budget`, and the stamp keeps the weekly interval of
-/// a finished collection, so the retirement main would do is not postponed.
+/// when the copy was cut short, by the budget or an I/O error, but wholly dead
+/// retirement finished: the report says `over_budget` or `failed`, and the
+/// stamp keeps the weekly interval of a finished collection, so the
+/// retirement main would do is not postponed.
 struct Outcome {
     reported: Collection,
     stamped: Collection,
@@ -452,6 +455,9 @@ fn collect(
         }
         if !gc.skipped_pack_errors.is_empty() {
             return Ok(Outcome::same(Collection::Failed));
+        }
+        if deferred.is_some() && retire.is_empty() {
+            return Ok(Outcome::finished(deferred));
         }
     }
 
