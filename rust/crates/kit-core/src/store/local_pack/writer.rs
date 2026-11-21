@@ -755,7 +755,14 @@ mod tests {
         assert!(matches!(writer.write(&b), Err(StoreError::ObjectTooLarge)));
 
         // One byte over the object limit, through the prehashed entry.
-        let mut writer = small_writer(&store, &guard, Limits { object: object - 1, ..limits });
+        let mut writer = small_writer(
+            &store,
+            &guard,
+            Limits {
+                object: object - 1,
+                ..limits
+            },
+        );
         let id = index::canonical_id(&a).unwrap();
         assert!(matches!(
             writer.write_hashed(id, &[&a]),
