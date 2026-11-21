@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
 use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
@@ -490,49 +490,203 @@ impl Staged {
     }
 }
 
+/// How many bytes of whole frames [`check_frames`] reads and digests at a
+/// time. It is the only buffer the check holds, and a frame above it is read
+/// in pieces of this size.
+const SEGMENT: usize = 8 << 20;
+
 /// Read the pack once, from its header to the end of its last frame, and
 /// check it against the rows the writer recorded: the magic, version and
 /// count, each frame's reserved byte, offset and length, that the frames end
 /// where the trailer will start, and that nothing follows. Returns the digest
 /// of those bytes. The ids come from the writer, so this is the one check of
 /// everything `scan` verifies except the id hash of each object.
+///
+/// The digest is BLAKE3 of the file's bytes up to `end`: a raw frame is its
+/// reserved byte 0, its little-endian length and its body. The check reads
+/// whole frames into one buffer, validates every header in that buffer, and
+/// digests the same buffer on several threads, so the bytes digested are the
+/// bytes checked and the file is read once.
 fn check_frames(
     file: &mut fs::File,
     rows: &[(Hash, Frame)],
     end: u64,
 ) -> StoreResult<blake3::Hasher> {
-    let mut reader = BufReader::with_capacity(256 << 10, file);
-    let header = index::read_version::<HEADER_LEN>(&mut reader, *MAGIC, "local pack")?;
+    check_frames_in(file, rows, end, SEGMENT)
+}
+
+fn check_frames_in(
+    file: &mut fs::File,
+    rows: &[(Hash, Frame)],
+    end: u64,
+    segment: usize,
+) -> StoreResult<blake3::Hasher> {
+    let header = index::read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     if index::le_u32(&header[8..12]) as usize != rows.len() {
         return Err(index::invalid("local pack frame count disagrees with rows"));
     }
     let mut digest = blake3::Hasher::new();
     digest.update(&header);
-    let mut next = HEADER_LEN as u64;
-    let mut bytes = Vec::new();
-    for (_, row) in rows {
-        let len = index::read_frame_header(&mut reader)?;
+    let mut checked = FrameChecker {
+        next: HEADER_LEN as u64,
+        end,
+    };
+    // One buffer for the whole check, never grown, and no larger than the
+    // frames: a small pack must not pay for a full segment.
+    let frames_total = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
+    let cap = segment.min(frames_total).max(ENTRY_FRAME_LEN);
+    let mut scratch = Scratch::take(&SPARE_BUFFER, cap);
+    let buf = &mut scratch.buf[..cap];
+    let mut rows = rows.iter().peekable();
+    while let Some((_, first)) = rows.peek() {
+        let first_len = ENTRY_FRAME_LEN + first.len as usize;
+        if first_len > cap {
+            // One frame larger than the buffer: check its header from the
+            // first piece, then digest the rest piece by piece.
+            let (_, row) = rows.next().expect("peeked");
+            file.read_exact(buf)?;
+            checked.frame(buf, row)?;
+            update(&mut digest, buf);
+            let mut left = first_len - cap;
+            while left > 0 {
+                let piece = left.min(cap);
+                file.read_exact(&mut buf[..piece])?;
+                update(&mut digest, &buf[..piece]);
+                left -= piece;
+            }
+            continue;
+        }
+        // The rows that fit the buffer whole: read them in one go.
+        let mut group = Vec::new();
+        let mut len = 0;
+        while let Some((_, row)) = rows.peek() {
+            let size = ENTRY_FRAME_LEN + row.len as usize;
+            if len + size > cap {
+                break;
+            }
+            len += size;
+            group.push(&rows.next().expect("peeked").1);
+        }
+        file.read_exact(&mut buf[..len])?;
+        let mut at = 0;
+        for row in group {
+            at += checked.frame(&buf[at..len], row)?;
+        }
+        update(&mut digest, &buf[..len]);
+    }
+    if checked.next != end || file.read(&mut [0])? != 0 {
+        return Err(index::invalid("local pack does not end at its last frame"));
+    }
+    Ok(digest)
+}
+
+/// The buffer a finished check leaves for the next one, so each check does
+/// not allocate its own segment. Seals run on many threads, and a buffer
+/// freed on a thread can stay resident in that thread's malloc arena, so one
+/// fresh buffer per seal added up to a segment of resident memory per seal.
+/// The buffer is taken for the length of a check and put back, so a process
+/// keeps one segment, plus one more for each check that runs at the same time.
+static SPARE_BUFFER: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// A check's buffer, returned to its spare slot when the check ends.
+struct Scratch<'a> {
+    buf: Vec<u8>,
+    spare: &'a std::sync::Mutex<Vec<u8>>,
+}
+
+impl<'a> Scratch<'a> {
+    /// A buffer of at least `len` bytes, the spare one if it is big enough.
+    fn take(spare: &'a std::sync::Mutex<Vec<u8>>, len: usize) -> Self {
+        let held = std::mem::take(
+            &mut *spare
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let buf = if held.len() >= len {
+            held
+        } else {
+            vec![0; len]
+        };
+        Self { buf, spare }
+    }
+}
+
+impl Drop for Scratch<'_> {
+    fn drop(&mut self) {
+        let mut spare = self
+            .spare
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.buf.len() > spare.len() {
+            *spare = std::mem::take(&mut self.buf);
+        }
+    }
+}
+
+/// Whether `len` bytes are worth a hand-off to the digest pool.
+#[cfg(not(target_arch = "wasm32"))]
+fn worth_the_pool(len: usize) -> bool {
+    len >= 128 << 10
+}
+
+/// Digest `bytes` on a few threads, as one hasher would serially.
+fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if worth_the_pool(bytes.len())
+        && let Some(pool) = digest_pool()
+    {
+        pool.install(|| digest.update_rayon(bytes));
+        return;
+    }
+    digest.update(bytes);
+}
+
+/// The threads that digest a pack, apart from the global rayon pool: BLAKE3's
+/// split into 4 KiB leaves wastes more CPU the more threads it spreads over,
+/// and the seal gains little past a handful. `None` when threads cannot start.
+#[cfg(not(target_arch = "wasm32"))]
+fn digest_pool() -> Option<&'static rayon::ThreadPool> {
+    const DIGEST_THREADS: usize = 8;
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        (threads > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads.min(DIGEST_THREADS))
+                    .thread_name(|n| format!("kit-digest-{n}"))
+                    .build()
+                    .ok()
+            })
+            .flatten()
+    })
+    .as_ref()
+}
+
+/// Where the next frame must start, and where the frames must end.
+struct FrameChecker {
+    next: u64,
+    end: u64,
+}
+
+impl FrameChecker {
+    /// Check the frame at the start of `bytes` against its row and step to
+    /// the next one. Returns the frame's length in bytes, header included.
+    fn frame(&mut self, bytes: &[u8], row: &Frame) -> StoreResult<usize> {
+        let len = index::parse_frame_header(&bytes[..ENTRY_FRAME_LEN])?;
         let frame = Frame {
-            offset: next + ENTRY_FRAME_LEN as u64,
+            offset: self.next + ENTRY_FRAME_LEN as u64,
             len,
         };
         let (_, frame_end) = frame
-            .extent(end)
+            .extent(self.end)
             .ok_or_else(|| index::invalid("invalid raw frame extent"))?;
         if frame != *row {
             return Err(index::invalid("local pack frame disagrees with its row"));
         }
-        bytes.resize(len as usize, 0);
-        reader.read_exact(&mut bytes)?;
-        digest.update(&[0]);
-        digest.update(&len.to_le_bytes());
-        digest.update(&bytes);
-        next = frame_end;
+        self.next = frame_end;
+        Ok(ENTRY_FRAME_LEN + len as usize)
     }
-    if next != end || reader.read(&mut [0])? != 0 {
-        return Err(index::invalid("local pack does not end at its last frame"));
-    }
-    Ok(digest)
 }
 
 // Return the staged copy on collision so the caller can compare it with the
@@ -926,6 +1080,161 @@ mod tests {
         // The recorded end beyond the last frame.
         file.rewind().unwrap();
         assert!(check_frames(&mut file, &rows, end + 1).is_err());
+    }
+
+    /// A finished pack file with one distinct blob per size, its count
+    /// written as the seal does, with the rows and end the writer recorded.
+    fn unsealed(
+        sizes: &[usize],
+    ) -> (
+        tempfile::TempDir,
+        fs::File,
+        Vec<(Hash, Frame)>,
+        u64,
+        Vec<u8>,
+    ) {
+        let (dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        for (n, size) in sizes.iter().enumerate() {
+            let data = (0..*size)
+                .map(|i| u8::try_from((i * 7 + n) % 251).unwrap())
+                .collect::<Vec<_>>();
+            writer
+                .write(&blob(&[&n.to_le_bytes()[..], &data].concat()))
+                .unwrap();
+        }
+        writer.pack.flush().unwrap();
+        let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
+        let path = writer.pack.get_ref().path().to_path_buf();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
+        file.write_all(&u32::try_from(rows.len()).unwrap().to_le_bytes())
+            .unwrap();
+        file.rewind().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        (dir, file, rows, end, bytes)
+    }
+
+    #[test]
+    fn the_digest_is_the_serial_digest_across_chunk_and_subtree_boundaries() {
+        // Frame sizes around BLAKE3's 1 KiB chunks and power-of-two subtrees,
+        // and a frame of several subtrees, with the default buffer and with
+        // buffers that cut groups and frames at every size.
+        let sizes = [
+            1, 1000, 1018, 1019, 1020, 2043, 2044, 4091, 8185, 65_530, 131_072, 300_000, 7,
+        ];
+        let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
+        let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+        for segment in [16, 17, 1024, 1029, 4096, 70_000, 131_072, 1 << 20, SEGMENT] {
+            file.rewind().unwrap();
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            assert_eq!(digest.finalize(), serial, "segment {segment}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn the_checked_digest_equals_the_serial_digest_for_any_sizes_and_buffer(
+            sizes in proptest::collection::vec(
+                prop_oneof![0_usize..3000, 1015..1030_usize, 2040..2055_usize, 0..200_000_usize],
+                0..20,
+            ),
+            segment in 16_usize..300_000,
+        ) {
+            let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
+            let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            prop_assert_eq!(digest.finalize(), serial);
+        }
+    }
+
+    #[test]
+    fn a_bad_frame_in_any_position_of_any_group_fails_the_check() {
+        let sizes = [500, 900, 1300, 100, 40_000, 700, 800];
+        let (_dir, file, rows, end, bytes) = unsealed(&sizes);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            for (n, (_, row)) in rows.iter().enumerate() {
+                let start = usize::try_from(row.offset).unwrap() - ENTRY_FRAME_LEN;
+                for (offset, value) in [(0, 1_u8), (1, bytes[start + 1] ^ 1), (4, 0x7f)] {
+                    let mut damaged = bytes.clone();
+                    damaged[start + offset] = value;
+                    path.as_file_mut().set_len(0).unwrap();
+                    path.rewind().unwrap();
+                    path.write_all(&damaged).unwrap();
+                    path.rewind().unwrap();
+                    assert!(
+                        check_frames_in(path.as_file_mut(), &rows, end, segment).is_err(),
+                        "segment {segment}, frame {n}, byte {offset}"
+                    );
+                }
+            }
+        }
+        // The undamaged file passes every buffer.
+        drop(file);
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            path.as_file_mut().set_len(0).unwrap();
+            path.rewind().unwrap();
+            path.write_all(&bytes).unwrap();
+            path.rewind().unwrap();
+            check_frames_in(path.as_file_mut(), &rows, end, segment).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_short_or_long_pack_fails_the_check_with_any_buffer() {
+        let (_dir, _file, rows, end, bytes) = unsealed(&[500, 900, 1300]);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        let len = usize::try_from(end).unwrap();
+        for segment in [16, 600, SEGMENT] {
+            for damaged in [&bytes[..len - 1], &[&bytes[..], b"x"].concat()[..]] {
+                path.as_file_mut().set_len(0).unwrap();
+                path.rewind().unwrap();
+                path.write_all(damaged).unwrap();
+                path.rewind().unwrap();
+                assert!(check_frames_in(path.as_file_mut(), &rows, end, segment).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn the_check_buffer_is_reused_and_only_ever_grows() {
+        let spare = std::sync::Mutex::new(Vec::new());
+        drop(Scratch::take(&spare, 100));
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A smaller request takes the spare buffer and gives it back whole.
+        let small = Scratch::take(&spare, 40);
+        assert_eq!(small.buf.len(), 100);
+        assert!(spare.lock().unwrap().is_empty());
+        drop(small);
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A larger one replaces it, and a concurrent smaller one does not.
+        let (big, other) = (Scratch::take(&spare, 300), Scratch::take(&spare, 200));
+        drop(big);
+        drop(other);
+        assert_eq!(spare.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn the_default_segment_holds_many_frames_and_the_pool_takes_only_big_inputs() {
+        const { assert!(SEGMENT >= 1 << 20) };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert!(!worth_the_pool((128 << 10) - 1));
+            assert!(worth_the_pool(128 << 10));
+            let threads = std::thread::available_parallelism().map_or(1, usize::from);
+            assert_eq!(digest_pool().is_some(), threads > 1);
+            if let Some(pool) = digest_pool() {
+                assert_eq!(pool.current_num_threads(), threads.min(8));
+            }
+        }
     }
 
     enum Corruption {
