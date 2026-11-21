@@ -245,7 +245,8 @@ its last remote-tracking ref write, and writes each of those refs under
 `worktree.lock`. A gc during the push therefore cannot prune the tip of a
 tracking ref the push writes, even when the local branch is deleted first.
 
-A local batch that writes the chunks of a large file (`kit add`,
+A local batch that writes the chunks of a large file, or small files past
+the first 64 of the batch (`kit add`,
 `kit stash`) publishes the packs it fills, at 64 MiB, at commit, and at a
 checkpoint that stages a manifest, tree or commit, before any ref or index
 names their objects. It holds `worktree.lock` from its

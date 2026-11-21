@@ -1456,7 +1456,8 @@ pub trait ObjectSink {
     /// Store the canonical blob at `origin`, with its prologue and payload
     /// in `parts`. This covers an inline file or a chunk of a file. A sink may
     /// keep the origin and read the payload back from the file. The default
-    /// stores the bytes.
+    /// stores the bytes. A batch that packs also sends the small files past
+    /// its first 64 to its open local pack.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
     }
@@ -1487,7 +1488,7 @@ pub trait ObjectSink {
     /// Make the loose objects stored so far durable and visible, so a writer
     /// of many objects keeps its staged set bounded. An object in an open
     /// local pack becomes visible when the pack seals or at commit, so a
-    /// caller must not read a chunk back before its commit. A checkpoint never
+    /// caller must not read a chunk or small file back before its commit. A checkpoint never
     /// makes an object visible before the objects it names. The default does
     /// nothing, for a sink that is durable or keeps no state per object.
     fn checkpoint(&self) -> StoreResult<()> {

@@ -66,7 +66,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
@@ -74,8 +74,8 @@ use tempfile::TempPath;
 
 use crate::hash::Hash;
 use crate::store::{
-    HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog,
-    PruneGuard, SealJob, StoreError, StoreResult,
+    ChunkOrigin, HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore,
+    PackCatalog, PruneGuard, SealJob, StoreError, StoreResult,
 };
 
 /// When object writes become durable.
@@ -320,6 +320,9 @@ pub struct WriteBatch<'s> {
     // can no longer promise that a hash it returned is durable. Every later
     // write, checkpoint and commit fails.
     failed: AtomicBool,
+    // How many small blobs the batch has been given as inline files. Past
+    // `SMALL_PACK_AFTER`, the next ones go to the local pack sink.
+    small_files: AtomicUsize,
     // Windows and chunk buffers that each large file of this batch reuses.
     chunk_buffers: crate::chunker::ChunkBuffers,
 }
@@ -336,6 +339,7 @@ impl<'s> WriteBatch<'s> {
             pack_catalog: OnceLock::new(),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
+            small_files: AtomicUsize::new(0),
             chunk_buffers: crate::chunker::ChunkBuffers::default(),
         }
     }
@@ -722,7 +726,8 @@ impl<'s> WriteBatch<'s> {
     /// then all renames, then deduplicated shard-directory flushes.
     ///
     /// After `commit()` returns `Ok`, every hash returned by
-    /// [`Self::write`], [`Self::write_parts`] and [`Self::put_hashed_chunk`] is
+    /// [`Self::write`], [`Self::write_parts`], [`Self::put_hashed_chunk`] and
+    /// `put_chunk_parts` is
     /// durable AND visible. It publishes the open local pack first.
     /// Callers MUST call this before reading any object written by this
     /// batch and before writing any ref/index that references one.
@@ -1256,6 +1261,31 @@ const MAX_SYNC_WORKERS: usize = 64;
 /// 64 KiB and 256 KiB were level, within 0.2%.
 const SMALL_OBJECT_BYTES: u64 = crate::chunker::MIN_SIZE as u64;
 
+/// How many small files a batch writes loose before it packs the rest.
+///
+/// A pack costs a fixed set of syncs and a read-back at seal, about 5 to 8 ms
+/// on Linux/ext4, which the syncs and files it saves repay from about 35
+/// files. Below this count a batch keeps the loose path and its cost is
+/// unchanged; the first file past it pays that fixed cost, so the worst case
+/// is a batch of one more file, which measured at most 8 ms over loose (adds
+/// of 1 to 10,000 files of 1 to 4 KiB, median of 7 runs, against all-loose).
+const SMALL_PACK_AFTER: usize = 64;
+
+/// The data of `parts` when they are one canonical blob of at most
+/// [`SMALL_OBJECT_BYTES`] serialized bytes: a prologue that names the data's
+/// length, then the data. Anything else is not packed by the small-file
+/// route.
+fn small_blob<'a>(parts: &[&'a [u8]]) -> Option<&'a [u8]> {
+    let [prologue, data] = parts else {
+        return None;
+    };
+    let total = prologue.len().checked_add(data.len())?;
+    if u64::try_from(total).ok()? > SMALL_OBJECT_BYTES {
+        return None;
+    }
+    (crate::serialize::blob_prologue(data.len()).ok()?.as_slice() == *prologue).then_some(*data)
+}
+
 /// Worker cap for the barriers of small objects on Linux, before the
 /// open-file limit (see [`small_object_sync_workers`]).
 ///
@@ -1365,6 +1395,16 @@ impl ObjectSink for WriteBatch<'_> {
     }
 
     fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        self.write_parts(parts)
+    }
+
+    fn put_chunk_parts(&self, parts: &[&[u8]], origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
+        if let Some(data) = small_blob(parts)
+            && self.small_files.fetch_add(1, Ordering::Relaxed) >= SMALL_PACK_AFTER
+            && let Ok(chunk) = HashedChunk::new(data)
+        {
+            return WriteBatch::put_hashed_chunk(self, &chunk.at(origin));
+        }
         self.write_parts(parts)
     }
 
@@ -2844,3 +2884,6 @@ mod tests {
 
 #[cfg(test)]
 mod pack_sink_tests;
+
+#[cfg(test)]
+mod small_pack_tests;
