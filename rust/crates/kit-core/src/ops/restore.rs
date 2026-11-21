@@ -4953,7 +4953,7 @@ mod tests {
             store,
             sorted(vec![
                 dir("build", vec![file("out.o")]),
-                dir("docs", vec![dir("deep", vec![file("y.md")]), file("x.md")]),
+                dir("guide", vec![dir("deep", vec![file("y.md")]), file("x.md")]),
                 file("Makefile"),
                 file("README.md"),
                 dir(
@@ -5002,7 +5002,7 @@ mod tests {
                 vec![
                     sparse("src", false, false),
                     sparse("src/lib", true, false),
-                    sparse("/docs", false, false),
+                    sparse("/guide", false, false),
                     sparse("Makefile", false, false),
                     sparse("build", false, true),
                 ],
@@ -5013,8 +5013,8 @@ mod tests {
                 [
                     "Makefile",
                     "build/out.o",
-                    "docs/deep/y.md",
-                    "docs/x.md",
+                    "guide/deep/y.md",
+                    "guide/x.md",
                     "src/Makefile",
                     "src/main.rs",
                 ],
@@ -5032,8 +5032,8 @@ mod tests {
         // `src/Makefile` and `sub/Makefile` as well; the selection keeps
         // doing that.
         let paths = [
-            "docs/deep/y.md",
-            "docs/x.md",
+            "guide/deep/y.md",
+            "guide/x.md",
             "src/lib/util.rs",
             "sub/other.txt",
             "Makefile",
@@ -5045,8 +5045,8 @@ mod tests {
                 got,
                 [
                     "Makefile",
-                    "docs/deep/y.md",
-                    "docs/x.md",
+                    "guide/deep/y.md",
+                    "guide/x.md",
                     "src/Makefile",
                     "src/lib/util.rs",
                     "sub/Makefile",
