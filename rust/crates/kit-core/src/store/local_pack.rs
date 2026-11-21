@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::hash::{Hash, to_hex};
@@ -23,7 +23,9 @@ mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
-use reader::{Handles, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix};
+use reader::{
+    Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,
+};
 pub use writer::LocalPackWriter;
 
 /// Payload bytes at which a local pack is sealed and a new one begins.
@@ -36,31 +38,32 @@ pub const PACK_SEAL_BYTES: usize = 64 << 20;
 /// normal window.
 pub const PACK_SEAL_ENTRIES: usize = 1 << 16;
 
+/// Lookups that probe a pair's index file one at a time are cheaper than
+/// loading every row, until about this many pair probes. Then the catalog
+/// loads its rows.
+const LAZY_PROBE_BUDGET: usize = 2048;
+
 #[derive(Debug, Default)]
 pub(crate) struct Catalog {
     error: Option<Arc<StoreError>>,
     packs: Vec<Arc<Locator>>,
     routes: Vec<Route>,
     on_disk: Vec<usize>,
+    /// No pair loaded its rows: every lookup probes the index files.
+    lazy: bool,
 }
 
 impl Catalog {
-    fn from_packs(packs: Vec<Arc<Locator>>, error: Option<StoreError>) -> Self {
-        let mut routes = Vec::with_capacity(packs.iter().map(|p| p.route_count()).sum());
-        let mut on_disk = Vec::new();
-        for (number, pack) in packs.iter().enumerate() {
-            if pack.route_count() == 0 {
-                on_disk.push(number);
-            } else {
-                routes.extend(pack.routes(number));
-            }
-        }
-        routes.sort_unstable_by_key(|route| (route.prefix, route.pack));
+    fn from_packs(packs: Vec<Arc<Locator>>, error: Option<StoreError>, lazy: bool) -> Self {
+        let on_disk = (0..packs.len())
+            .filter(|&number| packs[number].route_count() == 0)
+            .collect();
         Self {
             error: error.map(Arc::new),
+            routes: sorted_routes(&packs),
             packs,
-            routes,
             on_disk,
+            lazy,
         }
     }
 
@@ -79,12 +82,63 @@ impl Catalog {
     }
 }
 
+/// The routes of every pair, in (prefix, pair) order. Distribute them by the
+/// leading bits of the prefix straight from the rows, which needs no copy and
+/// no comparison sort of the whole list, then order each small bucket.
+fn sorted_routes(packs: &[Arc<Locator>]) -> Vec<Route> {
+    let total: usize = packs.iter().map(|pack| pack.route_count()).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let bits = total.bit_width().clamp(1, 16);
+    let bucket = |prefix: u32| (prefix >> (32 - bits)) as usize;
+    let mut ends = vec![0_usize; (1 << bits) + 1];
+    for pack in packs {
+        for prefix in pack.prefixes() {
+            ends[bucket(prefix) + 1] += 1;
+        }
+    }
+    for at in 1..ends.len() {
+        ends[at] += ends[at - 1];
+    }
+    // `ends[b]` starts as the first slot of bucket `b` and finishes as its end.
+    let mut routes = vec![
+        Route {
+            prefix: 0,
+            pack: 0,
+            row: 0,
+        };
+        total
+    ];
+    for (number, locator) in packs.iter().enumerate() {
+        let pack = u32::try_from(number).expect("bounded pack number");
+        for (row, prefix) in locator.prefixes().enumerate() {
+            let slot = &mut ends[bucket(prefix)];
+            routes[*slot] = Route {
+                prefix,
+                pack,
+                row: u32::try_from(row).expect("bounded index row"),
+            };
+            *slot += 1;
+        }
+    }
+    let mut start = 0;
+    // The last entry is the total, so its bucket is empty.
+    for &end in &ends {
+        routes[start..end].sort_unstable_by_key(|route| (route.prefix, route.pack));
+        start = end;
+    }
+    routes
+}
+
 #[derive(Debug, Default)]
 struct Discovery {
     catalog: Arc<Catalog>,
     latest: Option<Arc<Locator>>,
     dir: Option<index::Stamp>,
     scanned: bool,
+    /// Set once, for the rest of the process: every pair loads its rows.
+    full: bool,
     #[cfg(test)]
     budgets: Option<(usize, usize)>,
     #[cfg(test)]
@@ -96,6 +150,8 @@ pub(super) struct LocalPacks {
     enabled: AtomicBool,
     discovery: Mutex<Discovery>,
     handles: Handles,
+    /// Pair probes made against index files by a catalog with no rows.
+    lazy_probes: AtomicUsize,
     #[cfg(test)]
     index_loads: std::sync::atomic::AtomicUsize,
 }
@@ -106,6 +162,7 @@ impl LocalPacks {
             enabled: AtomicBool::new(enabled),
             discovery: Mutex::default(),
             handles: Handles::default(),
+            lazy_probes: AtomicUsize::new(0),
             #[cfg(test)]
             index_loads: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -169,18 +226,21 @@ impl LocalPacks {
         let settled = stamp.as_ref().is_none_or(index::Stamp::settled);
         #[cfg(test)]
         let retired = discovery.retire_after_listing.take();
+        let mut pairs = list_pairs(dir)?;
+        pairs.sort_unstable_by_key(|pair| pair.key);
+        let lazy = !discovery.full && pairs.len() <= LAZY_PAIR_LIMIT;
+        #[cfg(test)]
+        let lazy = lazy && discovery.budgets.is_none();
+        discovery.full |= !lazy;
+        // Locators that loaded no rows stay valid only in a lazy catalog.
+        let reuse = discovery.catalog.lazy == lazy;
         let old: BTreeMap<_, _> = discovery
             .catalog
             .packs
             .iter()
+            .filter(|_| reuse)
             .map(|p| (p.pair.key, p))
             .collect();
-        let mut pairs = Vec::new();
-        visit_pairs(dir, |pair| {
-            pairs.push(pair);
-            Ok(())
-        })?;
-        pairs.sort_unstable_by_key(|pair| pair.key);
         #[cfg(test)]
         if let Some(pack) = retired {
             fs::remove_file(pack)?;
@@ -192,6 +252,10 @@ impl LocalPacks {
         if let Some((rows, routes)) = discovery.budgets {
             row_budget = rows;
             route_budget = routes;
+        }
+        if lazy {
+            row_budget = 0;
+            route_budget = 0;
         }
         for locator in pairs.iter().filter_map(|pair| old.get(&pair.key)) {
             row_budget -= locator.row_charge();
@@ -244,14 +308,38 @@ impl LocalPacks {
                 .is_ok_and(|i| Arc::ptr_eq(&packs[i], locator))
         });
         discovery.latest = None;
-        discovery.catalog = Arc::new(Catalog::from_packs(packs, error));
+        discovery.catalog = Arc::new(Catalog::from_packs(packs, error, lazy));
         Ok(Arc::clone(&discovery.catalog))
     }
 
     // Freeze the set of candidates for one local write session. A later
     // reader can discover more packs without changing that session's view.
+    // A write session asks about every object it adds, so it needs the routes.
     pub(super) fn write_catalog(&self, store: &ObjectStore) -> StoreResult<Arc<Catalog>> {
+        self.promote();
         self.discover(&store.pack_dir(), false)
+    }
+
+    /// Load every pair's rows from the next discovery on.
+    fn promote(&self) {
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        if !discovery.full {
+            discovery.full = true;
+            discovery.scanned = false;
+        }
+    }
+
+    // Probing index files is cheaper than loading rows for a few lookups.
+    // Past the probe budget, loading the rows is cheaper.
+    fn promote_when_spent(&self, store: &ObjectStore) {
+        if self.lazy_probes.load(Ordering::Relaxed) >= LAZY_PROBE_BUDGET
+            && self.lazy_probes.swap(0, Ordering::Relaxed) >= LAZY_PROBE_BUDGET
+        {
+            self.promote();
+            // A failure here belongs to the refresh after a miss, which
+            // reports it in the usual order.
+            let _ = self.discover(&store.pack_dir(), false);
+        }
     }
 
     pub(super) fn has_packed_size(&self, catalog: &Catalog, id: &Hash, size: u64) -> bool {
@@ -271,18 +359,34 @@ impl LocalPacks {
         .is_ok_and(|hit| hit.is_some())
     }
 
-    pub(super) fn collect(
-        &self,
-        store: &ObjectStore,
-        shard: Option<u8>,
-        out: &mut Vec<Hash>,
-    ) -> StoreResult<()> {
+    pub(super) fn collect(&self, store: &ObjectStore, out: &mut Vec<Hash>) -> StoreResult<()> {
         if self.refresh_enabled(store)? {
             visit_pairs(&store.pack_dir(), |pair| {
                 let index = Index::open(&pair)?;
-                out.extend(index.ids(shard));
+                out.extend(index.ids());
                 Ok(())
             })?;
+        }
+        Ok(())
+    }
+
+    /// List the packed ids of one shard. A listing is not an integrity scan:
+    /// each index passes the checks of an ordinary lookup, not a checksum.
+    pub(super) fn list_shard(
+        &self,
+        store: &ObjectStore,
+        shard: u8,
+        out: &mut Vec<Hash>,
+    ) -> StoreResult<()> {
+        if !self.refresh_enabled(store)? {
+            return Ok(());
+        }
+        let catalog = self.discover(&store.pack_dir(), true)?;
+        if let Some(error) = catalog.error.as_deref() {
+            return Err(replay(error));
+        }
+        for locator in &catalog.packs {
+            locator.shard_ids(&self.handles, shard, out)?;
         }
         Ok(())
     }
@@ -296,6 +400,7 @@ impl LocalPacks {
         refresh: bool,
         mut use_location: impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
+        self.promote_when_spent(store);
         let (known, latest) = {
             let discovery = self.discovery.lock().expect("local pack catalog mutex");
             (Arc::clone(&discovery.catalog), discovery.latest.clone())
@@ -341,6 +446,9 @@ impl LocalPacks {
         for (locator, row) in catalog.candidates(id) {
             if checked.is_some_and(|old| old.candidates(id).any(|(p, _)| Arc::ptr_eq(p, locator))) {
                 continue;
+            }
+            if catalog.lazy {
+                self.lazy_probes.fetch_add(1, Ordering::Relaxed);
             }
             if let Some(value) = self.try_pack(locator, id, row, errors, use_location)? {
                 return Ok(Some(value));
@@ -535,6 +643,25 @@ fn regular(path: &Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Every pair named in the directory. A pair whose members are not both
+/// regular files fails to open as absent, which discovery skips.
+fn list_pairs(dir: &Path) -> StoreResult<Vec<Pair>> {
+    let Some(entries) = read_pack_dir(dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut pairs = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(pair) = name
+            .to_str()
+            .and_then(|name| Pair::from_pack_name(dir, name))
+        {
+            pairs.push(pair);
+        }
+    }
+    Ok(pairs)
 }
 
 fn pair_is_live(pair: &Pair) -> io::Result<bool> {

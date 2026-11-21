@@ -16,6 +16,10 @@ exclude_re = [
   'kit-keystore/src/software/atomic_write.rs:.*replace > with >= in create_synced_tmp_key_file',
   # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
   'kit-keystore/src/software/atomic_write.rs:.* in (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable)$',
+  # O_NOFOLLOW and O_NONBLOCK occupy disjoint bits, so OR and XOR are equivalent.
+  'kit-core/src/store/local_pack/reader.rs:[0-9]+:[0-9]+: replace \| with \^$',
+  # The link check in open_member is cfg(not(unix)); on Unix the open refuses a link.
+  'kit-core/src/store/local_pack/reader.rs:[0-9]+:[0-9]+: delete ! in open_member$',
   # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
   'kit-keystore/src/software/atomic_write.rs:.*replace (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable) ->',
   # Each native constructor has a cfg-gated definition that this host does not compile.
