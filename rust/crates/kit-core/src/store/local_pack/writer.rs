@@ -804,6 +804,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_layout_check_refuses_bytes_after_the_last_frame_and_missing_frames() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        writer.write(&blob(&[1; 500])).unwrap();
+        writer.write(&blob(&[2; 600])).unwrap();
+        writer.pack.flush().unwrap();
+        let count = u32::try_from(writer.frames.rows.len()).unwrap();
+        let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
+        let path = writer.pack.get_ref().path().to_path_buf();
+        // The count is written at seal time, before the check.
+        let mut file = fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
+        file.write_all(&count.to_le_bytes()).unwrap();
+
+        check_frames(&mut file, &rows, end).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"x").unwrap();
+        assert!(matches!(
+            check_frames(&mut file, &rows, end),
+            Err(StoreError::LocalPackDamaged { .. })
+        ));
+
+        // A row for a frame that is not in the file.
+        file.set_len(end).unwrap();
+        let mut missing = rows.clone();
+        missing.push((rows[0].0, rows[1].1));
+        assert!(check_frames(&mut file, &missing, end).is_err());
+        // The recorded end beyond the last frame.
+        assert!(check_frames(&mut file, &rows, end + 1).is_err());
+    }
+
     enum Corruption {
         FrameLength,
         Trailing,
