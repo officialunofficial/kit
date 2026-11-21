@@ -733,3 +733,112 @@ fn a_write_failure_during_the_copy_keeps_the_inputs_and_the_run_goes_on() {
     assert_eq!(report.packs_rewritten, 1);
     assert_eq!(store.read(&ids[0]).unwrap(), x);
 }
+
+fn dead_packs(store: &ObjectStore, n: usize) -> Vec<Pair> {
+    let mut pairs: Vec<Pair> = (0..n)
+        .map(|n| publish(store, &[&obj(&format!("dead {n}"), 500)], OLD).0)
+        .collect();
+    pairs.sort_by_key(|pair| pair.key);
+    pairs
+}
+
+#[test]
+fn retirement_takes_the_exclusive_lock_once_per_batch() {
+    let _batch = super::tests::set_retire_batch(2);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 5);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 5);
+    assert_eq!(report.retire_batches, 3, "2 + 2 + 1");
+    assert!(
+        pairs
+            .iter()
+            .all(|pair| !pair.pack.exists() && !pair.index.exists())
+    );
+    assert!(report.retire_hold_ms <= 1000 * 60);
+}
+
+#[test]
+fn a_pair_that_changes_between_batches_stays() {
+    let _batch = super::tests::set_retire_batch(2);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 5);
+    let touched = pairs[4].clone();
+    super::tests::set_after_retire_batch(move |done| {
+        if done == 1 {
+            set_pack_age(&touched.pack, OLD + 1);
+        }
+        Ok(())
+    });
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 4);
+    assert!(exists(&pairs[4]), "the refreshed pair stays");
+    assert!(pairs[..4].iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_crash_between_batches_leaves_only_pairs_and_inputs_the_next_run_retires() {
+    let _batch = super::tests::set_retire_batch(1);
+    let (_dir, layout, store) = fresh();
+    let dead = dead_packs(&store, 2);
+    let live = obj("live", 2000);
+    let more: Vec<_> = (0..9).map(|n| obj(&format!("more{n}"), 2000)).collect();
+    let mut all = vec![&live];
+    all.extend(more.iter());
+    let (mixed, ids) = publish(&store, &all, OLD);
+    keep(&layout, "live", &ids[0]);
+
+    // The two wholly dead pairs go in the first two batches. The crash comes
+    // before the copy input's batch.
+    super::tests::set_after_retire_batch(|done| {
+        if done == 2 {
+            return Err(std::io::Error::other("crash between batches").into());
+        }
+        Ok(())
+    });
+    assert!(run_gc(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
+    assert!(dead.iter().all(|pair| !exists(pair)));
+    assert!(exists(&mixed), "the input waits");
+    assert_eq!(packs(&store).len(), 2, "the input and its output");
+    assert_eq!(store.read(&ids[0]).unwrap(), live);
+
+    // The next run finds the input covered by the output and copies nothing.
+    super::tests::set_after_retire_batch(|_| Ok(()));
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired_covered, 1);
+    assert_eq!(report.survivor_bytes_copied, 0);
+    assert!(!exists(&mixed));
+    assert_eq!(packs(&store).len(), 1);
+    assert_eq!(store.read(&ids[0]).unwrap(), live);
+}
+
+#[test]
+fn a_busy_try_in_a_later_batch_ends_the_run_and_the_next_run_finishes() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let _batch = super::tests::set_retire_batch(1);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 3);
+    let publisher = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&publisher);
+    let holder = ObjectStore::open(&layout).unwrap();
+    super::tests::set_after_retire_batch(move |done| {
+        if done == 1 {
+            *slot.borrow_mut() = Some(holder.prune_guard().unwrap());
+        }
+        Ok(())
+    });
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 1, "the first batch only");
+    assert_eq!(pairs.iter().filter(|pair| exists(pair)).count(), 2);
+    drop(publisher.borrow_mut().take());
+
+    super::tests::set_after_retire_batch(|_| Ok(()));
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 2);
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}

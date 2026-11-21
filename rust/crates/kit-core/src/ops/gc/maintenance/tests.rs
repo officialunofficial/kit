@@ -34,6 +34,20 @@ impl Repo {
         maintain_packs(&self.layout, &self.store, &|| false)
     }
 
+    fn pack_count(&self) -> usize {
+        fs::read_dir(self.pack_dir())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "pack")
+            })
+            .count()
+    }
+
     fn pack_dir(&self) -> std::path::PathBuf {
         self.store.objects_root().join("pack")
     }
@@ -80,6 +94,41 @@ impl Repo {
         }
         .write(&mut file)
         .unwrap();
+    }
+
+    /// A due repository whose small packs each hold one live object.
+    fn due_live(&self) -> Vec<Hash> {
+        let ids: Vec<Hash> = (0..MIN_PAIRS)
+            .map(|n| {
+                let (_, ids) = self.pack(&[format!("live {n}").as_bytes()]);
+                self.pin(&format!("live{n}"), &ids[0]);
+                ids[0]
+            })
+            .collect();
+        let mut file = lock_stamp(self.layout.common_dir()).unwrap();
+        Stamp {
+            attempted: 1,
+            outcome: Collection::Complete,
+            complete_pairs: 10,
+        }
+        .write(&mut file)
+        .unwrap();
+        ids
+    }
+
+    /// Staging files in the pack directory: what an abandoned copy leaves.
+    fn staging(&self) -> usize {
+        fs::read_dir(self.pack_dir())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tmp")
+            })
+            .count()
     }
 
     fn leftover(&self, nonce: u8, age: u64) -> std::path::PathBuf {
@@ -139,7 +188,7 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
 }
 
 #[test]
-fn collection_retires_only_wholly_dead_packs_past_grace() {
+fn collection_retires_wholly_dead_packs_and_copies_the_rest_past_grace() {
     TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
@@ -155,15 +204,22 @@ fn collection_retires_only_wholly_dead_packs_past_grace() {
     assert_eq!(report.collection, Collection::Complete);
     assert_eq!(report.packs_retired, 1);
     assert!(!dead.exists() && !dead.with_extension("idx").exists());
-    for path in [live, mixed, young] {
-        assert!(path.is_file() && path.with_extension("idx").is_file());
+    // The mixed pack is rewritten without its dead entry; the live pack and
+    // every small young pack are merged. Nothing unreachable inside grace goes.
+    assert_eq!(report.packs_rewritten, 1);
+    assert_eq!(report.packs_merged, MIN_PAIRS + 2);
+    for path in [&live, &mixed, &young] {
+        assert!(!path.exists() && !path.with_extension("idx").exists());
     }
+    assert!(report.bytes_copied > 0);
     assert!(repo.store.read(&live_ids[0]).is_ok());
     assert!(repo.store.read(&mixed_ids[0]).is_ok());
+    assert!(repo.store.read(&mixed_ids[1]).is_err());
+    assert_eq!(repo.pack_count(), 1, "one output holds everything kept");
 
     let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
     let stamp = Stamp::read(&mut file).unwrap();
-    assert_eq!(stamp.complete_pairs, (MIN_PAIRS + 3) as u64);
+    assert_eq!(stamp.complete_pairs, 1);
 }
 
 #[test]
@@ -446,15 +502,20 @@ fn a_due_collection_backs_off_when_the_orphan_sweep_cannot_lock() {
 }
 
 #[test]
-fn an_empty_sweep_leaves_the_format_lock_to_the_publisher() {
+fn a_publisher_holding_the_format_lock_keeps_the_retirement_waiting() {
     let repo = Repo::new();
     repo.due();
     let _publisher = repo.store.prune_guard().unwrap();
 
+    // The small pairs are merged: the copy runs under the shared guard, the
+    // exclusive try then fails, and the inputs stay beside the output.
     let report = repo.run();
-    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.collection, Collection::Busy);
     assert_eq!(report.leftovers_removed, 0);
     assert_eq!(report.packs_retired, 0);
+    assert_eq!(report.packs_merged, 0);
+    assert!(report.bytes_copied > 0);
+    assert_eq!(repo.pack_count(), MIN_PAIRS + 1);
 }
 
 #[test]
@@ -562,4 +623,306 @@ fn stamp_intervals_and_report_names_match_the_collection_outcomes() {
         assert!(stamp.due(stamp.attempted - 1, MIN_PAIRS));
         assert_eq!(Stamp::decode(&stamp.encode()).unwrap().outcome, outcome);
     }
+}
+
+#[test]
+fn a_budget_that_ends_before_the_copy_publishes_nothing() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let before = repo.pack_count();
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, Duration::ZERO, || {
+        panic!("an expired step must not reach the locks");
+    });
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(report.bytes_copied, 0);
+    assert_eq!(repo.pack_count(), before);
+    assert_eq!(repo.staging(), 0);
+}
+
+/// A budget that ends in the copy part, or a copy that fails on a full disk,
+/// defers only that part: the wholly dead packs still retire, as before the
+/// copy existed. The report says `over_budget` or `failed`, and the stamp
+/// keeps the weekly interval of a finished run.
+fn a_copy_that_stops_still_retires_the_wholly_dead(phase: CopyPhase, expected: Collection) {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(phase));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let (dead_a, _) = repo.old_pack(&[b"dead a"]);
+    let (dead_b, _) = repo.old_pack(&[b"dead b"]);
+    let (mixed, mixed_ids) = repo.old_pack(&[b"kept", b"dead mixed"]);
+    repo.pin("mixed", &mixed_ids[0]);
+    let before = repo.pack_count();
+
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, expected);
+    assert_eq!(report.packs_retired, 2);
+    assert!(!dead_a.exists() && !dead_b.exists());
+    // Only the copy part waits: the mixed pack and the small packs stay.
+    assert_eq!(report.packs_rewritten + report.packs_merged, 0);
+    assert_eq!(report.bytes_copied, 0);
+    assert!(mixed.exists());
+    assert_eq!(repo.pack_count(), before - 2);
+    assert_eq!(repo.staging(), 0);
+    for id in ids.iter().chain(&mixed_ids[..1]) {
+        assert!(repo.store.read(id).is_ok());
+    }
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    let stamp = Stamp::read(&mut file).unwrap();
+    assert_eq!(stamp.outcome, Collection::Complete);
+    assert_eq!(stamp.complete_pairs, u64::try_from(before - 2).unwrap());
+
+    // The next due step, with the budget back, does the copy.
+    age_file(&mixed, DEFAULT_GRACE_SECS + 1);
+    drop(file);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    Stamp {
+        attempted: 1,
+        outcome: Collection::Complete,
+        complete_pairs: 10,
+    }
+    .write(&mut file)
+    .unwrap();
+    drop(file);
+    let next = repo.run();
+    assert_eq!(next.collection, Collection::Complete);
+    assert!(next.bytes_copied > 0);
+}
+
+#[test]
+fn a_copy_plan_that_runs_out_of_budget_still_retires_the_wholly_dead() {
+    a_copy_that_stops_still_retires_the_wholly_dead(CopyPhase::Plan, Collection::OverBudget);
+}
+
+#[test]
+fn a_copy_that_runs_out_of_budget_after_planning_still_retires_the_wholly_dead() {
+    a_copy_that_stops_still_retires_the_wholly_dead(CopyPhase::Copy, Collection::OverBudget);
+}
+
+#[test]
+fn a_copy_that_fails_on_a_full_disk_still_retires_the_wholly_dead() {
+    a_copy_that_stops_still_retires_the_wholly_dead(CopyPhase::DiskFull, Collection::Failed);
+}
+
+#[test]
+fn a_budget_that_ends_with_nothing_wholly_dead_reports_over_budget_and_keeps_the_weekly_interval() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Plan));
+    let repo = Repo::new();
+    repo.due_live();
+    let before = repo.pack_count();
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(repo.pack_count(), before);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(
+        Stamp::read(&mut file).unwrap().outcome,
+        Collection::Complete
+    );
+}
+
+#[test]
+fn a_copy_that_runs_out_of_budget_with_nothing_wholly_dead_never_tries_the_locks() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Copy));
+    let repo = Repo::new();
+    repo.due_live();
+    let before = repo.pack_count();
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        panic!("nothing is left to retire, so no lock is tried");
+    });
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(repo.pack_count(), before);
+    assert_eq!(repo.staging(), 0);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(
+        Stamp::read(&mut file).unwrap().outcome,
+        Collection::Complete
+    );
+}
+
+#[test]
+fn an_interruption_in_the_copy_stops_the_step_and_is_not_deferred() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Interrupt));
+    let repo = Repo::new();
+    repo.due_live();
+    let (dead, _) = repo.old_pack(&[b"dead"]);
+    let before = repo.pack_count();
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::Failed);
+    assert_eq!(report.packs_retired, 0);
+    assert!(dead.exists());
+    assert_eq!(repo.pack_count(), before);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(Stamp::read(&mut file).unwrap().outcome, Collection::Failed);
+}
+
+#[test]
+fn a_stop_at_any_checkpoint_leaves_nothing_half_done() {
+    use std::cell::Cell;
+
+    for stop_after in [
+        0,
+        1,
+        2,
+        5,
+        10,
+        20,
+        40,
+        80,
+        120,
+        160,
+        200,
+        260,
+        340,
+        460,
+        usize::MAX,
+    ] {
+        TEST_NOW.set(Some(now_secs()));
+        let repo = Repo::new();
+        let ids = repo.due_live();
+        let before = repo.pack_count();
+        let calls = Cell::new(0_usize);
+        let report = maintain_with(
+            &repo.layout,
+            &repo.store,
+            &|| {
+                calls.set(calls.get() + 1);
+                calls.get() > stop_after
+            },
+            BUDGET,
+            || {},
+        );
+        // Either nothing was published, or one output was and no input went.
+        let after = repo.pack_count();
+        match report.collection {
+            Collection::Complete => assert_eq!(after, 1, "stop_after {stop_after}"),
+            _ => assert!(
+                after == before || after == before + 1,
+                "stop_after {stop_after}: {before} -> {after}"
+            ),
+        }
+        assert_eq!(repo.staging(), 0, "stop_after {stop_after}");
+        for id in &ids {
+            assert!(repo.store.read(id).is_ok(), "stop_after {stop_after}");
+        }
+    }
+}
+
+#[test]
+fn a_busy_worktree_after_the_copy_leaves_duplicates_that_the_next_step_retires_as_covered() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let lock = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Busy);
+    assert_eq!(report.packs_merged, 0, "nothing retired under a busy lock");
+    assert!(report.bytes_copied > 0);
+    assert_eq!(
+        repo.pack_count(),
+        MIN_PAIRS + 1,
+        "the output stays beside its inputs"
+    );
+    drop(lock);
+
+    TEST_NOW.set(Some(now_secs() + HOUR + 1));
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.packs_retired_covered, MIN_PAIRS);
+    assert_eq!(
+        report.bytes_copied, 0,
+        "the output already holds every entry"
+    );
+    assert_eq!(repo.pack_count(), 1);
+    for id in &ids {
+        assert!(repo.store.read(id).is_ok());
+    }
+}
+
+#[test]
+fn a_commit_in_flight_makes_the_step_miss_and_retire_nothing() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    let _commit = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Busy);
+    assert_eq!(
+        report.packs_retired + report.packs_merged + report.packs_retired_covered,
+        0
+    );
+}
+
+#[test]
+fn a_damaged_input_frame_stops_collection_and_retires_nothing() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let (dead, _) = repo.old_pack(&[b"dead"]);
+    let (mixed, ids) = repo.old_pack(&[b"kept", b"dead mixed"]);
+    repo.pin("mixed", &ids[0]);
+    // Flip a payload byte of the first frame, the live one, keeping the age.
+    let mut file = fs::OpenOptions::new().write(true).open(&mixed).unwrap();
+    file.seek(SeekFrom::Start(
+        (crate::pack::HEADER_LEN + crate::pack::ENTRY_FRAME_LEN + 7) as u64,
+    ))
+    .unwrap();
+    file.write_all(&[0xff]).unwrap();
+    drop(file);
+    age_file(&mixed, DEFAULT_GRACE_SECS + 86_400);
+    let before = repo.pack_count();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Failed);
+    assert_eq!(
+        report.packs_retired + report.packs_rewritten + report.packs_merged,
+        0
+    );
+    assert_eq!(report.bytes_copied, 0);
+    assert!(dead.exists() && mixed.exists());
+    assert_eq!(repo.pack_count(), before, "nothing was published");
+    assert_eq!(repo.staging(), 0);
+}
+
+#[test]
+fn roots_that_change_after_the_copy_retire_nothing() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    let (_, ids) = repo.old_pack(&[b"becomes live"]);
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        let _lock = acquire(
+            repo.layout.worktree_state_dir(),
+            WORKTREE_LOCK,
+            Duration::ZERO,
+        )
+        .unwrap();
+        repo.pin("root", &ids[0]);
+    });
+    assert_eq!(report.collection, Collection::RootsChanged);
+    assert_eq!(
+        report.packs_retired + report.packs_merged + report.packs_retired_covered,
+        0
+    );
+    assert!(report.bytes_copied > 0);
+    assert!(repo.store.read(&ids[0]).is_ok());
 }

@@ -33,9 +33,11 @@ pub enum Collection {
     Busy,
     /// Retention roots changed during the unlocked mark.
     RootsChanged,
-    /// The mark and plan ran out of time.
+    /// The mark, plan, verification or copy ran out of time before publish.
     OverBudget,
-    /// The attempt stopped on unreadable state, damage or interruption.
+    /// The attempt stopped on unreadable state, damage or interruption, or a
+    /// copy failed with an I/O error after the wholly dead retirement
+    /// finished.
     Failed,
 }
 
@@ -70,6 +72,15 @@ pub struct MaintenanceReport {
     pub leftovers_removed: usize,
     /// Wholly dead pack pairs retired.
     pub packs_retired: usize,
+    /// Pairs rewritten, their survivors copied into a new pack.
+    pub packs_rewritten: usize,
+    /// Small pairs merged into a new pack.
+    pub packs_merged: usize,
+    /// Pairs retired with no copy, because pairs that stay hold every live
+    /// entry.
+    pub packs_retired_covered: usize,
+    /// Payload bytes copied into the new pack.
+    pub bytes_copied: u64,
     /// Bytes of removed pack and index files, including leftovers.
     pub bytes_reclaimed: u64,
     /// Result of the collection decision.
@@ -176,7 +187,8 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Sweep old pack leftovers and, when due, retire wholly dead local packs.
+/// Sweep old pack leftovers and, when due, retire wholly dead local packs
+/// and copy-then-retire the rest, at most one output pack per step.
 ///
 /// Call after the last ref publish has released its worktree lock and prune
 /// guard. The step only tries locks and honors cancellation before removing
@@ -211,6 +223,10 @@ fn maintain_with(
     MaintenanceReport {
         leftovers_removed: gc_report.pack_leftovers_pruned,
         packs_retired: gc_report.packs_retired,
+        packs_rewritten: gc_report.packs_rewritten,
+        packs_merged: gc_report.packs_merged,
+        packs_retired_covered: gc_report.packs_retired_covered,
+        bytes_copied: gc_report.survivor_bytes_copied,
         bytes_reclaimed: gc_report.bytes_reclaimed,
         collection,
         elapsed: start.elapsed(),
@@ -263,31 +279,80 @@ fn run(
                 cancelled,
             };
             collect(layout, store, &clock, before_collection_locks, gc).unwrap_or_else(|error| {
-                match error {
+                let outcome = match error {
                     GcRootsError::Io(error) | GcRootsError::Store(StoreError::Io(error))
                         if error.kind() == io::ErrorKind::TimedOut =>
                     {
                         Collection::OverBudget
                     }
                     _ => Collection::Failed,
-                }
+                };
+                Outcome::same(outcome)
             })
         }
-        Ok(false) if due => Collection::Busy,
-        Err(_) if due => Collection::Failed,
+        Ok(false) if due => Outcome::same(Collection::Busy),
+        Err(_) if due => Outcome::same(Collection::Failed),
         _ => return Collection::NotDue,
     };
     let _ = Stamp {
         attempted: now,
-        outcome: collection,
-        complete_pairs: if collection == Collection::Complete {
-            pairs.saturating_sub(gc.packs_retired) as u64
+        outcome: collection.stamped,
+        complete_pairs: if collection.stamped == Collection::Complete {
+            (pairs + gc.packs_written).saturating_sub(
+                gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
+            ) as u64
         } else {
             stamp.complete_pairs
         },
     }
     .write(&mut file);
-    collection
+    collection.reported
+}
+
+/// What a collection reports and what the stamp records. They differ only
+/// when the copy was cut short, by the budget or an I/O error, but wholly dead
+/// retirement finished: the report says `over_budget` or `failed`, and the
+/// stamp keeps the weekly interval of a finished collection, so the
+/// retirement main would do is not postponed.
+struct Outcome {
+    reported: Collection,
+    stamped: Collection,
+}
+
+impl Outcome {
+    const fn same(collection: Collection) -> Self {
+        Self {
+            reported: collection,
+            stamped: collection,
+        }
+    }
+
+    /// The retirement of the wholly dead packs finished, with the copy done
+    /// or deferred. A deferral is reported as it happened; the stamp keeps
+    /// the weekly interval of a finished collection either way, because a
+    /// step that does less than the one before the copy existed would be a
+    /// regression.
+    const fn finished(deferred: Option<Collection>) -> Self {
+        Self {
+            reported: match deferred {
+                Some(reason) => reason,
+                None => Collection::Complete,
+            },
+            stamped: Collection::Complete,
+        }
+    }
+}
+
+/// How a deferred copy is reported: a timeout is the budget, any other I/O
+/// error, such as a full disk, a failure.
+fn deferral(kind: Option<io::ErrorKind>) -> Option<Collection> {
+    kind.map(|kind| {
+        if kind == io::ErrorKind::TimedOut {
+            Collection::OverBudget
+        } else {
+            Collection::Failed
+        }
+    })
 }
 
 struct Budget<'a> {
@@ -323,7 +388,7 @@ fn collect(
     budget: &Budget<'_>,
     before_locks: impl FnOnce(),
     gc: &mut GcReport,
-) -> Result<Collection, GcRootsError> {
+) -> Result<Outcome, GcRootsError> {
     let now = now_secs();
     budget.check()?;
     let (hard, mut soft) = collect_root_sets(layout, &mut |_| {})?;
@@ -341,14 +406,62 @@ fn collect(
         &|| Ok(budget.check()?),
         &|| Ok(check_deadline(start, limit)?),
     )?;
-    let retire =
+    let mut retire =
         store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, gc, &|| Ok(budget.check()?))?;
     budget.check()?;
     if !gc.skipped_pack_errors.is_empty() {
-        return Ok(Collection::Failed);
+        return Ok(Outcome::same(Collection::Failed));
     }
+    // Copy-then-retire is the added part of the step. A budget that runs out
+    // in its planning, verification or copy defers only that part: the
+    // wholly dead retirement planned above still runs, as it does today.
+    // Cancellation and every other error still stop the step.
+    let planned = retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
+        #[cfg(test)]
+        if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Plan) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+        }
+        Ok(budget.check()?)
+    });
+    let mut deferred = deferral(retire.defer_copy_on_io_error(planned)?);
     if retire.is_empty() {
-        return Ok(Collection::Complete);
+        return Ok(Outcome::finished(deferred));
+    }
+
+    // Copying reads pack bodies, so it runs before any worktree lock: the
+    // step holds only the shared guard, and only inside the copy. Damage or
+    // a failed coverage check stops the step with nothing published. The
+    // budget ends the copy before it publishes; once published, the outputs
+    // are harmless duplicates that the next step retires as covered, so the
+    // retirement below is not on the clock.
+    let mut copied = None;
+    if deferred.is_none() {
+        let checkpoint = || {
+            #[cfg(test)]
+            match TEST_COPY_EXPIRES.get() {
+                Some(CopyPhase::Copy) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+                }
+                Some(CopyPhase::DiskFull) => {
+                    return Err(io::Error::from(io::ErrorKind::StorageFull).into());
+                }
+                Some(CopyPhase::Interrupt) => {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, INTERRUPTED).into());
+                }
+                _ => {}
+            }
+            Ok(budget.check()?)
+        };
+        match retire.copy_survivors(store, gc, &checkpoint, true) {
+            Ok(done) => copied = done,
+            Err(error) => deferred = deferral(retire.defer_copy_on_io_error(Err(error))?),
+        }
+        if !gc.skipped_pack_errors.is_empty() {
+            return Ok(Outcome::same(Collection::Failed));
+        }
+        if deferred.is_some() && retire.is_empty() {
+            return Ok(Outcome::finished(deferred));
+        }
     }
 
     before_locks();
@@ -359,26 +472,26 @@ fn collect(
         Err(error) => Err(io::Error::other(error)),
     };
     let Some(_registry) = acquire_lock(layout.common_dir(), WORKTREES_REGISTRY_LOCK)? else {
-        return Ok(Collection::Busy);
+        return Ok(Outcome::same(Collection::Busy));
     };
     let trees = all_state_layouts(layout)?;
     let mut locks = Vec::with_capacity(trees.len());
     for tree in &trees {
         let Some(lock) = acquire_lock(tree.worktree_state_dir(), WORKTREE_LOCK)? else {
-            return Ok(Collection::Busy);
+            return Ok(Outcome::same(Collection::Busy));
         };
         locks.push(lock);
     }
     let (locked_hard, mut locked_soft) = collect_root_sets(layout, &mut |_| {})?;
     locked_soft.sort_unstable();
     if (hard, soft) != (locked_hard, locked_soft) {
-        return Ok(Collection::RootsChanged);
+        return Ok(Outcome::same(Collection::RootsChanged));
     }
     budget.check_cancellation()?;
-    Ok(if retire.run_with(store, gc, || Ok(()))? {
-        Collection::Complete
+    Ok(if retire.retire(store, gc, copied.as_ref(), || Ok(()))? {
+        Outcome::finished(deferred)
     } else {
-        Collection::Busy
+        Outcome::same(Collection::Busy)
     })
 }
 
@@ -392,9 +505,22 @@ pub fn fuzz_maintenance_stamp(bytes: &[u8]) {
     }
 }
 
+/// Where a test makes the copy part run out of budget or fail, after the
+/// wholly dead plan.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyPhase {
+    Plan,
+    Copy,
+    DiskFull,
+    Interrupt,
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static TEST_COPY_EXPIRES: std::cell::Cell<Option<CopyPhase>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

@@ -413,6 +413,17 @@ select, stay in place. If a candidate's body
 fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
+Retirement takes the exclusive `format` try-lock once per batch of at most
+32 items: pack pairs, copy inputs and leftovers together. Each batch is a
+complete retirement as described here: it rechecks its own items, makes what
+they rely on durable, unlinks the pack names, flushes, unlinks the indexes
+and flushes, then releases the lock, so a writer that waits for the lock waits
+for one batch. The size is policy. A failed try in any batch ends the run
+with the earlier batches done. A crash between batches leaves only pairs and
+inputs that the next run reconsiders; an input whose survivors have an output
+is then covered by it and retires without a copy. No input relies on a pair
+that the same run retires, whichever batch takes it.
+
 Retirement after a copy takes the same try-lock and rechecks input
 identity and the file stamps of every output and covering pair it relies
 on, and durable coverage by the verified replacement packs.
@@ -479,23 +490,50 @@ collection that follows stops without retiring any pack.
 **Collection.** The listing must show at least 32 published pairs.
 The stamp allows a new collection 7 days after a complete collection
 or an error, 1 hour after a lock miss or changed roots, or 30 days
-after an attempt that ran out of budget. These intervals are policy.
+after an attempt that ran out of budget before retirement. These
+intervals are policy.
 
 1. Read `now` and collect retention roots without the worktree locks.
 2. Mark the roots under a wall-clock budget of 5 seconds that also covers
-   retirement planning. A missing object or skipped soft root stops
-   collection.
+   retirement planning, coverage verification and the copy. A missing
+   object or skipped soft root stops collection.
 3. Plan retirement at the default grace. Validate the indexes, account
    for each entry against the mark, verify the body of each wholly dead
    pair past grace, and record each candidate's file stamps. A damaged
-   pair or expired budget ends collection before retirement. With no
-   candidate, record a complete collection and stop.
-4. Try `worktrees.lock`, then every registered tree's `worktree.lock`
+   pair or expired budget ends collection before retirement. Then plan
+   copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
+   keep only the inputs whose survivors fit in one output pack: at most
+   64 MiB of payload and 65,536 entries, inputs that copy nothing first,
+   then the smallest. With no candidate and no input, record a complete
+   collection and stop. A budget that expires in this copy planning, in the
+   verification or in the copy, or an I/O error such as a full disk there,
+   defers only the copy: the wholly dead pairs planned above still retire
+   (steps 5 to 7), as they do without a copy. The collection reports
+   `over_budget` or `failed`, and the stamp keeps the interval of a complete
+   collection. If no pair is left to retire after a budget deferral, the
+   interval is the same. Interruption and damage still stop the step.
+4. Copy. Verify each covering copy that an input relies on, copy the
+   survivors into one output pack and publish it durably under the shared
+   `format` guard, which the step takes after planning and releases before
+   the next step. The copy reads pack bodies, so it runs before any
+   worktree lock. The budget can stop it before the publication, which then
+   publishes nothing and leaves no staging file. An unreadable input
+   frame, a frame that is not the object its index row names, or a covering
+   copy that fails verification stops collection with nothing published and
+   no pair retired: the automatic step never repairs or works around
+   damage, and it does not keep a damaged input and go on as `kit gc`
+   does. Once the output is published the budget no longer applies.
+5. Try `worktrees.lock`, then every registered tree's `worktree.lock`
    in the order of SPEC-CONCURRENCY §4.
-5. Read the roots again. If the hard set or the soft list differs, stop.
+6. Read the roots again. If the hard set or the soft list differs, stop.
    An unreadable root also stops collection before retirement.
-6. Retire the planned pairs under the exclusive `format` try-lock.
-   Apply the stamp recheck and removal order above. Release the locks.
+7. Retire the planned pairs and the copy inputs under the exclusive
+   `format` try-lock, in batches (see "Local pack maintenance"). Apply the
+   stamp recheck and removal order above. Release the locks.
+
+A lock miss or changed roots after the output was published leaves it beside
+its inputs. Those inputs are then covered by the output, and the next step
+retires them without copying.
 
 The mark depends on immutable objects and the retention roots. The
 second root read holds every lock that manual gc takes, so a locked
@@ -508,7 +546,7 @@ or pack body while holding them.
 
 Automatic maintenance never expires the recovery log, prunes loose
 objects or their temporary files, sweeps the spool, rebuilds an index,
-merges packs, or invalidates fetch records. Collection stops on an
+or invalidates fetch records. Collection stops on an
 integrity error without retiring a pair or repairing anything. A
 completed orphan sweep stands. An interruption during retirement can
 leave a lone index. The orphan rule removes it on a later sweep. A
@@ -544,7 +582,7 @@ remains an error.
 | Invariant | Enforced by |
 |---|---|
 | No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and copy-then-retire require verified, durable coverage by a copy that is not retired in the same run. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
-| Automatic collection retires only wholly dead packs past the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
+| Automatic collection retires only what `kit gc` would retire at the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

@@ -805,6 +805,8 @@ pub struct GcReport {
     pub packs_rewritten: usize,
     /// Small packs merged into larger ones by copy-then-retire.
     pub packs_merged: usize,
+    /// New packs that copy-then-retire published.
+    pub packs_written: usize,
     /// Packs retired with no copy, because a pair that stays holds a verified
     /// copy of every entry the pack must keep.
     pub packs_retired_covered: usize,
@@ -822,9 +824,12 @@ pub struct GcReport {
     /// meant to copy and went on with the rest of the run.
     pub pack_copy_error: Option<String>,
     /// Milliseconds that pack retirement held the exclusive `format` lock,
-    /// from the successful try to the release; the longest hold if the run
-    /// took it more than once. A writer that starts then waits that long.
+    /// from the successful try to the release; the longest of the holds. A
+    /// writer that starts then waits that long.
     pub retire_hold_ms: u64,
+    /// How many exclusive holds retirement took: one per batch of at most 32
+    /// items (SPEC-GC).
+    pub retire_batches: usize,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,
 }

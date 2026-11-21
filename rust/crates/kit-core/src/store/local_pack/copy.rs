@@ -37,6 +37,47 @@ const RECLAIM_FRACTION: u64 = 4;
 pub(super) const OUTPUT_PAYLOAD: u64 = 64 << 20;
 pub(super) const OUTPUT_ENTRIES: usize = 65_536;
 
+/// The most one run copies.
+#[derive(Clone, Copy)]
+pub(super) struct Limit {
+    pub(super) payload: u64,
+    pub(super) entries: usize,
+}
+
+impl Limit {
+    pub(super) const NONE: Self = Self {
+        payload: u64::MAX,
+        entries: usize::MAX,
+    };
+    /// One output pack, the automatic step's bound.
+    pub(super) const ONE_OUTPUT: Self = Self {
+        payload: OUTPUT_PAYLOAD,
+        entries: OUTPUT_ENTRIES,
+    };
+
+    /// Keep the inputs that fit, those that copy nothing first, then the
+    /// smallest. A dropped input stays as it is and counts as a pair that
+    /// stays for none of the others.
+    fn apply(self, inputs: &mut Vec<Input>) {
+        if self.payload == u64::MAX && self.entries == usize::MAX {
+            return;
+        }
+        inputs.sort_by_key(|input| (input.survivor_bytes(), input.survivors.len(), input.member));
+        let (mut payload, mut entries) = (0_u64, 0_usize);
+        inputs.retain(|input| {
+            let (bytes, count) = (input.survivor_bytes(), input.survivors.len());
+            if payload.saturating_add(bytes) > self.payload
+                || entries.saturating_add(count) > self.entries
+            {
+                return false;
+            }
+            payload += bytes;
+            entries += count;
+            true
+        });
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
     Covered,
@@ -98,6 +139,13 @@ struct Input {
 }
 
 impl Input {
+    fn survivor_bytes(&self) -> u64 {
+        self.survivors
+            .iter()
+            .map(|entry| u64::from(entry.frame.len))
+            .sum()
+    }
+
     fn dropped_bytes(&self) -> u64 {
         self.dropped
             .iter()
@@ -159,7 +207,7 @@ struct Relied {
 }
 
 /// What a run copied, and what each input that it did not keep relies on.
-pub(super) struct Copied {
+pub(crate) struct Copied {
     outputs: Vec<Dep>,
     inputs: Vec<Relied>,
 }
@@ -181,15 +229,22 @@ struct Work {
 impl CopyPlan {
     /// Plan the run. `retiring` names the pairs that the wholly dead
     /// retirement takes: they never count as staying, and they are not inputs.
+    ///
+    /// `limit` bounds the work: the inputs together copy at most
+    /// `limit.payload` bytes in at most `limit.entries` entries. The automatic
+    /// step passes one output pack's worth.
     pub(super) fn plan(
         store: &ObjectStore,
         live: &LiveSet,
         now: u64,
         grace: u64,
+        limit: Limit,
         retiring: impl Fn(&Hash) -> bool,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
     ) -> StoreResult<Option<Self>> {
         let mut members = Vec::new();
         visit_pairs(&store.pack_dir(), |pair| {
+            checkpoint()?;
             if retiring(&pair.key) {
                 return Ok(());
             }
@@ -200,6 +255,7 @@ impl CopyPlan {
             let index = Index::open(&pair)?;
             let (mut live_bytes, mut dead_bytes, mut entries) = (0, 0, 0);
             for (id, frame) in index.entries() {
+                checkpoint()?;
                 entries += 1;
                 if live.contains(&id) {
                     live_bytes += u64::from(frame.len);
@@ -226,17 +282,19 @@ impl CopyPlan {
             Ok(())
         })?;
 
-        let (holders, covered) = find_holders(&members, live);
+        let (holders, covered) = find_holders(&members, live, checkpoint)?;
         let classes = classify(&members, &covered);
         let staying: Vec<bool> = classes.iter().map(Option::is_none).collect();
         let mut inputs = Vec::new();
         for (at, class) in classes.iter().enumerate() {
+            checkpoint()?;
             if let Some(class) = *class
                 && let Some(input) = plan_input(&members, at, class, live, &holders, &staying)
             {
                 inputs.push(input);
             }
         }
+        limit.apply(&mut inputs);
         if inputs.is_empty() {
             return Ok(None);
         }
@@ -268,10 +326,17 @@ impl CopyPlan {
 
     /// Verify coverage, copy the survivors and publish them. The shared
     /// `format` guard lives only inside this call.
+    ///
+    /// `checkpoint` runs between entries and before the publication, so an
+    /// error from it publishes nothing. A `strict` run stops at the first
+    /// damaged input or failed coverage check, publishes nothing and leaves
+    /// the error in `report.skipped_pack_errors`.
     pub(super) fn execute(
         &self,
         store: &ObjectStore,
         report: &mut GcReport,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+        strict: bool,
     ) -> StoreResult<Copied> {
         let mut work: Vec<Work> = self
             .inputs
@@ -283,9 +348,16 @@ impl CopyPlan {
                 relies: BTreeSet::new(),
             })
             .collect();
-        self.verify_coverage(&mut work, report);
-        let (outputs, copied) = self.copy(store, &mut work, report)?;
+        self.verify_coverage(&mut work, report, checkpoint)?;
+        if strict && !report.skipped_pack_errors.is_empty() {
+            return Ok(Copied::none());
+        }
+        let Some((outputs, copied)) = self.copy(store, &mut work, report, checkpoint, strict)?
+        else {
+            return Ok(Copied::none());
+        };
         report.survivor_bytes_copied += copied;
+        report.packs_written += outputs.iter().flatten().count();
 
         let mut inputs = Vec::new();
         for (input, work) in self.inputs.iter().zip(&work) {
@@ -324,10 +396,16 @@ impl CopyPlan {
 
     /// Read and hash the covering copy of every live entry that the run
     /// drops. A copy that fails verification counts as no copy.
-    fn verify_coverage(&self, work: &mut [Work], report: &mut GcReport) {
+    fn verify_coverage(
+        &self,
+        work: &mut [Work],
+        report: &mut GcReport,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+    ) -> StoreResult<()> {
         let mut verdicts: HashMap<Hash, bool> = HashMap::new();
         for (input, work) in self.inputs.iter().zip(work) {
             for dropped in &input.dropped {
+                checkpoint()?;
                 let id = dropped.entry.id;
                 let ok = if let Some(ok) = verdicts.get(&id) {
                     *ok
@@ -363,19 +441,23 @@ impl CopyPlan {
             work.survivors
                 .sort_unstable_by_key(|entry| entry.frame.offset);
         }
+        Ok(())
     }
 
     /// Write every survivor into rolling output packs, oldest input first.
     /// Returns the published outputs by writer number, and the payload bytes
-    /// copied.
+    /// copied. A strict run that meets damage returns `None` with nothing
+    /// published.
     fn copy(
         &self,
         store: &ObjectStore,
         work: &mut [Work],
         report: &mut GcReport,
-    ) -> StoreResult<(Vec<Option<Dep>>, u64)> {
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+        strict: bool,
+    ) -> StoreResult<Option<(Vec<Option<Dep>>, u64)>> {
         if work.iter().all(|work| work.survivors.is_empty()) {
-            return Ok((Vec::new(), 0));
+            return Ok(Some((Vec::new(), 0)));
         }
         let guard = store.prune_guard()?;
         let mut rolling = Rolling::new(store, &guard);
@@ -387,6 +469,7 @@ impl CopyPlan {
         for at in order {
             let member = &self.members[self.inputs[at].member];
             for entry in &work[at].survivors {
+                checkpoint()?;
                 if let Some(output) = rolling.home(&entry.id) {
                     work[at].relies.insert(output);
                     continue;
@@ -398,6 +481,9 @@ impl CopyPlan {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         report.skipped_pack_errors.push(error.to_string());
+                        if strict {
+                            return Ok(None);
+                        }
                         work[at].kept = true;
                         break;
                     }
@@ -405,6 +491,9 @@ impl CopyPlan {
                 if !matches!(super::index::canonical_id(&bytes), Ok(id) if id == entry.id) {
                     let error = member.pair.error("frame does not match its index id");
                     report.skipped_pack_errors.push(error.to_string());
+                    if strict {
+                        return Ok(None);
+                    }
                     work[at].kept = true;
                     break;
                 }
@@ -412,6 +501,7 @@ impl CopyPlan {
                 work[at].relies.insert(output);
             }
         }
+        checkpoint()?;
         let (pairs, ids, copied) = rolling.finish()?;
         let mut outputs = Vec::new();
         for (pair, ids) in pairs.into_iter().zip(ids) {
@@ -428,27 +518,47 @@ impl CopyPlan {
             outputs.push(Some(Dep::of(&pair)?));
         }
         drop(guard);
-        Ok((outputs, copied))
+        Ok(Some((outputs, copied)))
     }
 }
 
 impl Copied {
-    /// The inputs that are still safe to retire. Call under the exclusive
-    /// lock, with `retiring` naming the pairs the wholly dead retirement takes.
-    pub(super) fn select(&self, dir: &Path, retiring: &dyn Fn(&Hash) -> bool) -> Vec<Selected> {
-        // An output with the key of an input is that input: it stays.
+    /// A run that copied nothing and relies on nothing.
+    pub(super) fn none() -> Self {
+        Self {
+            outputs: Vec::new(),
+            inputs: Vec::new(),
+        }
+    }
+
+    /// The inputs a retirement may take, in the order it takes them. An
+    /// output with the key of an input is that input: it stays.
+    pub(super) fn candidates(&self) -> Vec<usize> {
         let outputs: BTreeSet<Hash> = self.outputs.iter().map(|dep| dep.pair.key).collect();
+        (0..self.inputs.len())
+            .filter(|&at| !outputs.contains(&self.inputs[at].key))
+            .collect()
+    }
+
+    /// Of the candidates `among`, the inputs that are still safe to retire.
+    /// Call under the exclusive lock, with `retiring` naming the pairs the
+    /// wholly dead retirement takes. Whether an input is safe never depends
+    /// on which batch it is in: no input relies on a pair this run retires,
+    /// whichever batch takes that pair.
+    pub(super) fn select(
+        &self,
+        dir: &Path,
+        retiring: &dyn Fn(&Hash) -> bool,
+        among: &[usize],
+    ) -> Vec<Selected> {
         let candidates: BTreeSet<Hash> = self
-            .inputs
-            .iter()
-            .map(|input| input.key)
-            .filter(|key| !outputs.contains(key))
+            .candidates()
+            .into_iter()
+            .map(|at| self.inputs[at].key)
             .collect();
         let mut selected = Vec::new();
-        for (at, input) in self.inputs.iter().enumerate() {
-            if !candidates.contains(&input.key) {
-                continue;
-            }
+        for &at in among {
+            let input = &self.inputs[at];
             let pair = Pair::new(dir, input.key);
             if !input.pack.unchanged(&pair.pack) || !input.locator.unchanged(&pair.index) {
                 continue;
@@ -479,7 +589,9 @@ impl Copied {
             .collect()
     }
 
-    pub(super) fn report(&self, selected: &[Selected], report: &mut GcReport) {
+    /// Count the retired inputs. Returns the bytes their files held; the
+    /// caller subtracts [`Self::written`] once for the whole run.
+    pub(super) fn report(&self, selected: &[Selected], report: &mut GcReport) -> u64 {
         let mut freed = 0;
         for selected in selected {
             let input = &self.inputs[selected.at];
@@ -487,24 +599,34 @@ impl Copied {
             count(report, input.class);
             report.duplicate_bytes_reclaimed += input.duplicate_bytes;
         }
-        let written: u64 = self
-            .outputs
+        freed
+    }
+
+    /// File bytes of the outputs.
+    pub(super) fn written(&self) -> u64 {
+        self.outputs
             .iter()
             .map(|dep| dep.pack.len + dep.locator.len)
-            .sum();
-        report.bytes_reclaimed += freed.saturating_sub(written);
+            .sum()
     }
 }
+
+type Holders = (HashMap<Hash, Vec<usize>>, Vec<u64>);
 
 /// The ids of live entries that two or more pairs hold, with those pairs, and
 /// for each pair the live bytes whose home is another pair. The home of an id
 /// is its holder with the youngest pack, then the lowest key. Streams one
 /// first-byte bucket at a time.
-fn find_holders(members: &[Member], live: &LiveSet) -> (HashMap<Hash, Vec<usize>>, Vec<u64>) {
+fn find_holders(
+    members: &[Member],
+    live: &LiveSet,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<Holders> {
     let mut holders = HashMap::new();
     let mut covered = vec![0_u64; members.len()];
     let mut rows: Vec<(Hash, usize, u32)> = Vec::new();
     for shard in 0..=u8::MAX {
+        checkpoint()?;
         rows.clear();
         for (at, member) in members.iter().enumerate() {
             if member.live_bytes != 0 {
@@ -534,7 +656,7 @@ fn find_holders(members: &[Member], live: &LiveSet) -> (HashMap<Hash, Vec<usize>
             holders.insert(first.0, run.iter().map(|row| row.1).collect());
         }
     }
-    (holders, covered)
+    Ok((holders, covered))
 }
 
 /// `Greater` for the pair that is the better home: younger, then lower key.
@@ -761,11 +883,18 @@ mod select_tests {
             outputs: output_dep(),
             inputs: vec![relied(&input, &[&covering], &[&output])],
         };
-        assert_eq!(copied.select(&dir, &|_| false).len(), 1);
+        assert_eq!(
+            copied.select(&dir, &|_| false, &copied.candidates()).len(),
+            1
+        );
 
         // The covering pair is a wholly dead retirement of this run.
         let retiring = covering.key;
-        assert!(copied.select(&dir, &|key| *key == retiring).is_empty());
+        assert!(
+            copied
+                .select(&dir, &|key| *key == retiring, &copied.candidates())
+                .is_empty()
+        );
 
         // The covering pair is itself an input of this run. Only that input,
         // which relies on a pair that stays, may go.
@@ -776,7 +905,7 @@ mod select_tests {
                 relied(&covering, &[&other], &[&output]),
             ],
         };
-        let selected = copied.select(&dir, &|_| false);
+        let selected = copied.select(&dir, &|_| false, &copied.candidates());
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pair.key, covering.key);
 
@@ -785,7 +914,96 @@ mod select_tests {
             outputs: vec![Dep::of(&spare).unwrap()],
             inputs: vec![relied(&spare, &[&covering], &[&spare])],
         };
-        assert!(copied.select(&dir, &|_| false).is_empty());
+        assert!(
+            copied
+                .select(&dir, &|_| false, &copied.candidates())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_input_is_blocked_by_a_candidate_whichever_batch_takes_it() {
+        let (_dir, _layout, store) = fresh();
+        let (input, covering, other, output) = (
+            pair(&store, "input"),
+            pair(&store, "covering"),
+            pair(&store, "other"),
+            pair(&store, "output"),
+        );
+        let dir = store.pack_dir();
+        let copied = Copied {
+            outputs: vec![Dep::of(&output).unwrap()],
+            inputs: vec![
+                relied(&input, &[&covering], &[&output]),
+                relied(&covering, &[&other], &[&output]),
+            ],
+        };
+        assert!(copied.select(&dir, &|_| false, &[0]).is_empty());
+        let selected = copied.select(&dir, &|_| false, &[1]);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].pair.key, covering.key);
+    }
+
+    fn input_of(member: usize, sizes: &[u32]) -> Input {
+        Input {
+            member,
+            class: Class::Mixed,
+            survivors: sizes
+                .iter()
+                .map(|&len| Entry {
+                    id: [u8::try_from(member).unwrap(); 32],
+                    frame: Frame { offset: 0, len },
+                })
+                .collect(),
+            dropped: Vec::new(),
+            dead_dropped: 0,
+        }
+    }
+
+    #[test]
+    fn the_limit_keeps_the_inputs_that_copy_least_and_that_fit() {
+        let mut inputs = vec![
+            input_of(0, &[30]),
+            input_of(1, &[10]),
+            input_of(2, &[]),
+            input_of(3, &[20]),
+        ];
+        Limit {
+            payload: 35,
+            entries: usize::MAX,
+        }
+        .apply(&mut inputs);
+        assert_eq!(
+            inputs.iter().map(|i| i.member).collect::<Vec<_>>(),
+            [2, 1, 3]
+        );
+
+        // The payload limit is inclusive.
+        let mut inputs = vec![input_of(0, &[20]), input_of(1, &[15])];
+        Limit {
+            payload: 35,
+            entries: usize::MAX,
+        }
+        .apply(&mut inputs);
+        assert_eq!(inputs.len(), 2);
+
+        // The entry limit counts entries, and is inclusive too.
+        let mut inputs = vec![
+            input_of(0, &[1, 1]),
+            input_of(1, &[1, 1]),
+            input_of(2, &[1]),
+        ];
+        Limit {
+            payload: u64::MAX,
+            entries: 3,
+        }
+        .apply(&mut inputs);
+        assert_eq!(inputs.iter().map(|i| i.member).collect::<Vec<_>>(), [2, 0]);
+
+        // No limit keeps every input in order.
+        let mut inputs = vec![input_of(5, &[9]), input_of(4, &[1])];
+        Limit::NONE.apply(&mut inputs);
+        assert_eq!(inputs.iter().map(|i| i.member).collect::<Vec<_>>(), [5, 4]);
     }
 
     #[test]

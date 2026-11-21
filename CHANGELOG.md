@@ -13,6 +13,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
 - Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first.
+- The maintenance step after fetch and pull also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
+- Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
 - Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs.

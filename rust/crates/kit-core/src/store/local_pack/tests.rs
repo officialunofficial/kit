@@ -1574,8 +1574,12 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
 }
 
 type AfterCopy = Box<dyn FnOnce() -> crate::store::StoreResult<()>>;
+type AfterBatch = Box<dyn FnMut(usize) -> crate::store::StoreResult<()>>;
 
 thread_local! {
+    static RETIRE_BATCH: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static AFTER_RETIRE_BATCH: std::cell::RefCell<Option<AfterBatch>> =
+        const { std::cell::RefCell::new(None) };
     static AFTER_COPY_PUBLISH: std::cell::Cell<Option<AfterCopy>> =
         const { std::cell::Cell::new(None) };
     static IO_LOG: std::cell::RefCell<Option<Vec<(&'static str, std::path::PathBuf)>>> =
@@ -1584,6 +1588,40 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static PACK_SCAN_ERROR: std::cell::Cell<Option<(Hash, std::io::ErrorKind)>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Test override of the batch size; reset when the guard drops.
+pub(super) struct RetireBatch;
+
+pub(super) fn set_retire_batch(size: usize) -> RetireBatch {
+    RETIRE_BATCH.set(Some(size));
+    RetireBatch
+}
+
+impl Drop for RetireBatch {
+    fn drop(&mut self) {
+        RETIRE_BATCH.set(None);
+        AFTER_RETIRE_BATCH.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+pub(super) fn retire_batch() -> Option<usize> {
+    RETIRE_BATCH.get()
+}
+
+/// Runs after each batch released the exclusive lock, with the number of
+/// batches done so far. An error stands for a crash.
+pub(super) fn after_retire_batch(done: usize) -> crate::store::StoreResult<()> {
+    AFTER_RETIRE_BATCH.with(|hook| match hook.borrow_mut().as_mut() {
+        Some(hook) => hook(done),
+        None => Ok(()),
+    })
+}
+
+pub(super) fn set_after_retire_batch(
+    hook: impl FnMut(usize) -> crate::store::StoreResult<()> + 'static,
+) {
+    AFTER_RETIRE_BATCH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// Runs after copy-then-retire published its outputs and dropped the shared

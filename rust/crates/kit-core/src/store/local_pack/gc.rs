@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use super::copy::{Copied, CopyPlan};
-use super::{Index, Location, read_pack_dir, scan_pair_checked, visit_pairs};
+use super::copy::{Copied, CopyPlan, Limit};
+use super::{Index, Location, Pair, read_pack_dir, scan_pair_checked, visit_pairs};
 use crate::atomic::sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet};
@@ -18,6 +18,12 @@ pub(crate) struct PackSweep {
     leftovers: BTreeMap<PathBuf, Stamp>,
     copy: Option<CopyPlan>,
 }
+
+/// The most items one exclusive `format` hold retires: pack pairs, copy
+/// inputs and leftovers together. A run takes the lock again for the next
+/// batch, rechecking every stamp, so one hold stays short however many pairs
+/// retire. Policy, not format.
+pub(crate) const RETIRE_BATCH: usize = 32;
 
 struct Retirement {
     pack: Stamp,
@@ -90,7 +96,7 @@ impl ObjectStore {
             }
         }
         if self.local_packs_enabled()? {
-            plan.copy = CopyPlan::plan(self, live, now, grace, |key| plan.pairs.contains_key(key))?;
+            plan.plan_copy(self, live, now, grace, Limit::NONE, &|| Ok(()))?;
         }
         Ok(plan)
     }
@@ -308,6 +314,25 @@ impl PackSweep {
         }
     }
 
+    /// For a copy step that returned `result`: when it failed with an I/O
+    /// error, such as a full disk or an expired budget, drop the planned copy
+    /// so that only wholly dead pairs and leftovers retire, as they do
+    /// without a copy, and return the error kind. Interruption, damage and
+    /// every other error pass on.
+    pub(crate) fn defer_copy_on_io_error(
+        &mut self,
+        result: StoreResult<()>,
+    ) -> StoreResult<Option<std::io::ErrorKind>> {
+        match result {
+            Ok(()) => Ok(None),
+            Err(StoreError::Io(error)) if error.kind() != std::io::ErrorKind::Interrupted => {
+                self.copy = None;
+                Ok(Some(error.kind()))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.pairs.is_empty() && self.leftovers.is_empty() && self.copy.is_none()
     }
@@ -316,21 +341,59 @@ impl PackSweep {
         self.run_with(store, report, || Ok(())).map(|_| ())
     }
 
-    /// Copy under the shared guard, which the copy releases before the
-    /// exclusive try that follows: the process would otherwise fail its own
-    /// try. A failed copy, such as a full disk, keeps every copy input and
-    /// still lets the wholly dead retirement free space.
-    fn copy_survivors(&self, store: &ObjectStore, report: &mut GcReport) -> Option<Copied> {
-        match &self.copy {
-            Some(copy) => match copy.execute(store, report) {
-                Ok(copied) => Some(copied),
-                Err(error) => {
-                    report.pack_copy_error = Some(error.to_string());
-                    None
-                }
-            },
-            None => None,
-        }
+    /// Plan copy-then-retire for the pairs that the wholly dead retirement
+    /// leaves alone.
+    fn plan_copy(
+        &mut self,
+        store: &ObjectStore,
+        live: &LiveSet,
+        now: u64,
+        grace: u64,
+        limit: Limit,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+    ) -> StoreResult<()> {
+        self.copy = CopyPlan::plan(
+            store,
+            live,
+            now,
+            grace,
+            limit,
+            |key| self.pairs.contains_key(key),
+            checkpoint,
+        )?;
+        Ok(())
+    }
+
+    /// The automatic step's plan: at most one output pack of survivors.
+    pub(crate) fn plan_automatic_copy(
+        &mut self,
+        store: &ObjectStore,
+        live: &LiveSet,
+        now: u64,
+        grace: u64,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+    ) -> StoreResult<()> {
+        self.plan_copy(store, live, now, grace, Limit::ONE_OUTPUT, checkpoint)
+    }
+
+    /// Verify coverage, copy and publish, under the shared `format` guard
+    /// that the copy releases before the exclusive try of [`Self::retire`]:
+    /// the process would otherwise fail its own try. It reads pack bodies, so
+    /// the automatic step calls it before it tries any worktree lock.
+    ///
+    /// A `strict` run stops at damage and publishes nothing; see
+    /// `CopyPlan::execute`.
+    pub(crate) fn copy_survivors(
+        &self,
+        store: &ObjectStore,
+        report: &mut GcReport,
+        checkpoint: &dyn Fn() -> StoreResult<()>,
+        strict: bool,
+    ) -> StoreResult<Option<Copied>> {
+        self.copy
+            .as_ref()
+            .map(|copy| copy.execute(store, report, checkpoint, strict))
+            .transpose()
     }
 
     pub(crate) fn run_with(
@@ -356,47 +419,143 @@ impl PackSweep {
         if self.is_empty() {
             return Ok(true);
         }
-        let copied = self.copy_survivors(store, report);
+        // A failed copy, such as a full disk, keeps every copy input and
+        // still lets the wholly dead retirement free space.
+        let copied = match self.copy_survivors(store, report, &|| Ok(()), false) {
+            Ok(copied) => copied,
+            Err(error) => {
+                report.pack_copy_error = Some(error.to_string());
+                None
+            }
+        };
         #[cfg(test)]
         super::tests::after_copy_publish()?;
+        self.retire(store, report, copied.as_ref(), after_pack_sync)
+    }
+
+    fn batch() -> usize {
+        #[cfg(test)]
+        if let Some(size) = super::tests::retire_batch() {
+            return size;
+        }
+        RETIRE_BATCH
+    }
+
+    /// Retire the planned pairs, the copy inputs that `copied` covers and the
+    /// leftovers, [`RETIRE_BATCH`] at a time. Each batch is its own exclusive
+    /// `format` try-lock: it rechecks every stamp, flushes what its inputs
+    /// rely on, unlinks the pack names, syncs, unlinks the indexes and syncs.
+    /// A crash between batches leaves only pairs that the next run
+    /// reconsiders, and inputs whose survivors already have copies.
+    ///
+    /// Returns false when an exclusive try fails. Earlier batches stay done.
+    pub(crate) fn retire(
+        &self,
+        store: &ObjectStore,
+        report: &mut GcReport,
+        copied: Option<&Copied>,
+        after_pack_sync: impl FnOnce() -> StoreResult<()>,
+    ) -> StoreResult<bool> {
+        let whole: Vec<&Hash> = self.pairs.keys().collect();
+        let inputs = copied.map(Copied::candidates).unwrap_or_default();
+        let leftovers: Vec<(&PathBuf, &Stamp)> = self.leftovers.iter().collect();
+        let size = Self::batch();
+        let mut run = Run {
+            hook: Some(after_pack_sync),
+            flushed: BTreeSet::new(),
+            copy_freed: 0,
+        };
+        let (mut at_whole, mut at_input, mut at_leftover) = (0, 0, 0);
+        while at_whole < whole.len() || at_input < inputs.len() || at_leftover < leftovers.len() {
+            let take = |from: &mut usize, len: usize, room: &mut usize| {
+                let end = (*from + *room).min(len);
+                let range = *from..end;
+                *room -= end - *from;
+                *from = end;
+                range
+            };
+            let mut room = size;
+            let whole_batch = take(&mut at_whole, whole.len(), &mut room);
+            let input_batch = take(&mut at_input, inputs.len(), &mut room);
+            let leftover_batch = take(&mut at_leftover, leftovers.len(), &mut room);
+            let batch = Batch {
+                whole: &whole[whole_batch],
+                inputs: &inputs[input_batch],
+                leftovers: &leftovers[leftover_batch],
+            };
+            if !self.retire_batch(store, report, copied, &batch, &mut run)? {
+                Self::count_copy_freed(report, copied, &run);
+                return Ok(false);
+            }
+            #[cfg(test)]
+            super::tests::after_retire_batch(report.retire_batches)?;
+        }
+        Self::count_copy_freed(report, copied, &run);
+        Ok(true)
+    }
+
+    /// Adds what retired copy inputs freed, net of the outputs, for the
+    /// batches that ran, including a run that a later batch ended early.
+    fn count_copy_freed<F: FnOnce() -> StoreResult<()>>(
+        report: &mut GcReport,
+        copied: Option<&Copied>,
+        run: &Run<F>,
+    ) {
+        if let Some(copied) = copied {
+            report.bytes_reclaimed += run.copy_freed.saturating_sub(copied.written());
+        }
+    }
+
+    fn retire_batch<F: FnOnce() -> StoreResult<()>>(
+        &self,
+        store: &ObjectStore,
+        report: &mut GcReport,
+        copied: Option<&Copied>,
+        batch: &Batch<'_>,
+        run: &mut Run<F>,
+    ) -> StoreResult<bool> {
         let guard = fs::File::open(store.format_path())?;
         if guard.try_lock().is_err() {
             return Ok(false);
         }
         let locked_at = std::time::Instant::now();
         let dir = store.pack_dir();
+        // Writers may have published or refreshed a pair since the mark.
+        // Retire only the same pair with unchanged stamps.
         let mut retire = Vec::new();
-        // Writers may have published or refreshed a pair since the mark. Scan
-        // under the guard and retire only the same pair with unchanged mtimes.
-        visit_pairs(&dir, |pair| {
-            if let Some(r) = self.pairs.get(&pair.key)
-                && r.pack.unchanged(&pair.pack)
-                && r.index.unchanged(&pair.index)
-            {
+        for key in batch.whole {
+            let r = &self.pairs[*key];
+            let pair = Pair::new(&dir, **key);
+            if r.pack.unchanged(&pair.pack) && r.index.unchanged(&pair.index) {
                 retire.push((pair, r));
             }
-            Ok(())
-        })?;
-        let leftovers: Vec<_> = self
+        }
+        let leftovers: Vec<_> = batch
             .leftovers
             .iter()
             .filter(|(path, stamp)| is_leftover(path) && stamp.unchanged(path))
             .collect();
         let copy_retire = copied
-            .as_ref()
-            .map(|copied| copied.select(&dir, &|key| self.pairs.contains_key(key)))
+            .map(|copied| copied.select(&dir, &|key| self.pairs.contains_key(key), batch.inputs))
             .unwrap_or_default();
 
         // Make every pair that a retired input relies on durable before the
         // first unlink: a publisher may have died before its last directory
-        // flush, and so may an earlier run.
-        if !copy_retire.is_empty() {
-            for pair in copied.iter().flat_map(|copied| copied.deps(&copy_retire)) {
-                flush_file(&pair.pack)?;
-                flush_file(&pair.index)?;
+        // flush, and so may an earlier run. A pair that an earlier batch
+        // flushed has unchanged stamps, so it is still durable.
+        if let Some(copied) = copied {
+            let mut fresh = false;
+            for pair in copied.deps(&copy_retire) {
+                if run.flushed.insert(pair.key) {
+                    flush_file(&pair.pack)?;
+                    flush_file(&pair.index)?;
+                    fresh = true;
+                }
             }
-            flush_dir(store.objects_root())?;
-            flush_dir(&dir)?;
+            if fresh {
+                flush_dir(store.objects_root())?;
+                flush_dir(&dir)?;
+            }
         }
 
         let any = !retire.is_empty() || !copy_retire.is_empty();
@@ -412,8 +571,8 @@ impl PackSweep {
         if any || !leftovers.is_empty() {
             flush_dir(&dir)?;
         }
-        if any {
-            after_pack_sync()?;
+        if any && let Some(hook) = run.hook.take() {
+            hook()?;
         }
         for (pair, r) in &retire {
             unlink(&pair.index)?;
@@ -425,8 +584,8 @@ impl PackSweep {
             unlink(&input.pair.index)?;
             store.packs.forget(&input.pair.key);
         }
-        if let Some(copied) = &copied {
-            copied.report(&copy_retire, report);
+        if let Some(copied) = copied {
+            run.copy_freed += copied.report(&copy_retire, report);
         }
         for (path, stamp) in &leftovers {
             unlink(path)?;
@@ -438,6 +597,7 @@ impl PackSweep {
         }
         drop(guard);
         let held = locked_at.elapsed();
+        report.retire_batches += 1;
         report.retire_hold_ms = report
             .retire_hold_ms
             .max(u64::try_from(held.as_millis()).unwrap_or(u64::MAX));
@@ -445,6 +605,24 @@ impl PackSweep {
         SWEEP_HOLD.set(held);
         Ok(true)
     }
+}
+
+/// What a retirement carries from one batch to the next.
+struct Run<F> {
+    /// Runs once, after the first batch that unlinks a pack name.
+    hook: Option<F>,
+    /// Pairs already flushed: their stamps are checked again, so they stay
+    /// durable.
+    flushed: BTreeSet<Hash>,
+    /// File bytes of the retired copy inputs.
+    copy_freed: u64,
+}
+
+/// One exclusive hold's share of a retirement.
+struct Batch<'a> {
+    whole: &'a [&'a Hash],
+    inputs: &'a [usize],
+    leftovers: &'a [(&'a PathBuf, &'a Stamp)],
 }
 
 pub(super) fn flush_file(path: &Path) -> StoreResult<()> {
