@@ -672,7 +672,7 @@ fn a_copy_that_stops_still_retires_the_wholly_dead(phase: CopyPhase, expected: C
     let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
     let stamp = Stamp::read(&mut file).unwrap();
     assert_eq!(stamp.outcome, Collection::Complete);
-    assert_eq!(stamp.complete_pairs as usize, before - 2);
+    assert_eq!(stamp.complete_pairs, u64::try_from(before - 2).unwrap());
 
     // The next due step, with the budget back, does the copy.
     age_file(&mixed, DEFAULT_GRACE_SECS + 1);
