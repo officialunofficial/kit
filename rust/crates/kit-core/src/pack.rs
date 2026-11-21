@@ -82,7 +82,7 @@ pub use file_read::{
     STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
 };
 #[doc(hidden)]
-pub use object_spool::ObjectSpool;
+pub use object_spool::{LooseStaging, ObjectSpool};
 pub use retained::RetainedPacks;
 pub use rewrite::{Rewritten, rewrite_excluding};
 pub use spool::{

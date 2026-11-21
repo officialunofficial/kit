@@ -346,7 +346,7 @@ fn apply_chain(
         });
         let held = unsettled.last().expect("pushed a pack");
         let pack = held.pack.as_ref().expect("the newest pack is open");
-        let decoded = decode_pack(store, pack, publication.pending(), require_signed);
+        let decoded = decode_pack(store, pack, &publication, require_signed);
         let (spool, unpacked) = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
@@ -378,12 +378,14 @@ fn apply_chain(
 fn decode_pack(
     store: &ObjectStore,
     pack: &VerifiedPack,
-    pending: Option<&ObjectSpool>,
+    publication: &Publication<'_>,
     require_signed: bool,
 ) -> Result<(ObjectSpool, usize), SyncError> {
-    let dir = store.spool_dir();
-    let spool = ObjectSpool::new(&dir).map_err(|e| spool_error(&dir, e.kind(), &e.to_string()))?;
-    let report = PackReader::stage_verified(pack, store, pending, &spool)?;
+    let spool = publication.decode_spool().map_err(|e| {
+        let dir = store.spool_dir();
+        spool_error(&dir, e.kind(), &e.to_string())
+    })?;
+    let report = PackReader::stage_verified(pack, store, publication.pending(), &spool)?;
     verify_new_object_signatures(
         &PendingView::new(store, Some(&spool)),
         &report.signed,
@@ -404,7 +406,7 @@ fn apply_pack(
 ) -> Result<usize, SyncError> {
     let guard = store.prune_guard()?;
     let mut publication = Publication::new(store, &guard)?;
-    let (spool, unpacked) = decode_pack(store, pack, None, require_signed)?;
+    let (spool, unpacked) = decode_pack(store, pack, &publication, require_signed)?;
     publication.accept(&spool, *key, observer, remote, applied)?;
     publication.seal(observer, remote, applied)?;
     if unpacked > 0 {
