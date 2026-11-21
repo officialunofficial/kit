@@ -18,10 +18,60 @@ const HANDLE_LIMIT: usize = 96;
 pub(super) const ROW_CACHE_BYTES: usize = 64 << 20;
 pub(super) const ROUTE_CACHE_BYTES: usize = 288 << 20;
 
+/// A small LRU of open pack and index files.
+///
+/// The lock covers only the list. A miss opens and checks the file with the
+/// lock released, so one slow `open` never holds up probes of cached packs.
 #[derive(Debug, Default)]
-pub(super) struct Handles(MutexHandles);
+pub(super) struct Handles {
+    cache: std::sync::Mutex<Cache>,
+    #[cfg(test)]
+    opens: std::sync::atomic::AtomicUsize,
+    /// Runs once between a miss's open and its insert, with no lock held.
+    #[cfg(test)]
+    after_open: std::sync::Mutex<AfterOpen>,
+}
 
-type MutexHandles = std::sync::Mutex<VecDeque<(Arc<Locator>, Member, Arc<File>)>>;
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct AfterOpen(Option<Hook>);
+
+#[cfg(test)]
+type Hook = Box<dyn FnOnce(&Handles) + Send>;
+
+#[cfg(test)]
+impl std::fmt::Debug for AfterOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AfterOpen")
+    }
+}
+
+#[derive(Debug, Default)]
+struct Cache {
+    entries: VecDeque<(Arc<Locator>, Member, Arc<File>)>,
+    /// Bumped by `retain`, so a file opened before a retire is not cached after it.
+    retains: u64,
+}
+
+impl Cache {
+    fn position(&self, locator: &Arc<Locator>, member: Member) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|(old, kind, _)| Arc::ptr_eq(old, locator) && *kind == member)
+    }
+
+    /// Moves a cached entry to the front and returns its handle.
+    fn promote(&mut self, locator: &Arc<Locator>, member: Member) -> Option<Arc<File>> {
+        let position = self.position(locator, member)?;
+        let entry = self
+            .entries
+            .remove(position)
+            .expect("position in handle cache");
+        let handle = Arc::clone(&entry.2);
+        self.entries.push_front(entry);
+        Some(handle)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Member {
@@ -32,48 +82,81 @@ pub(super) enum Member {
 impl Handles {
     #[cfg(test)]
     pub(super) fn cached(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.lock().entries.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn opens(&self) -> usize {
+        self.opens.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn once_after_open(&self, hook: impl FnOnce(&Handles) + Send + 'static) {
+        self.after_open.lock().unwrap().0 = Some(Box::new(hook));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.cache.lock().expect("local pack handles mutex")
     }
 
     pub(super) fn get(&self, locator: &Arc<Locator>, member: Member) -> StoreResult<Arc<File>> {
-        let mut handles = self.0.lock().expect("local pack handles mutex");
-        let handle = if let Some(position) = handles
-            .iter()
-            .position(|(old, kind, _)| Arc::ptr_eq(old, locator) && *kind == member)
-        {
-            handles
-                .remove(position)
-                .expect("position in handle cache")
-                .2
-        } else {
-            let (path, stamp) = match member {
-                Member::Index => (&locator.pair.index, &locator.index_stamp),
-                Member::Pack => (&locator.pair.pack, &locator.pack_stamp),
-            };
-            let file = open_regular(path)?;
-            let opened = Stamp::get(&file.metadata()?)?;
-            let current = match member {
-                Member::Index => opened == *stamp,
-                Member::Pack => opened.same_file(stamp),
-            };
-            if !current {
-                return locator.changed();
+        let retains = {
+            let mut cache = self.lock();
+            if let Some(handle) = cache.promote(locator, member) {
+                return Ok(handle);
             }
-            Arc::new(file)
+            cache.retains
         };
-        if handles.len() == HANDLE_LIMIT {
-            handles.pop_back();
+        #[cfg(test)]
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handle = Arc::new(open_current(locator, member)?);
+        #[cfg(test)]
+        {
+            let hook = self.after_open.lock().unwrap().0.take();
+            if let Some(hook) = hook {
+                hook(self);
+            }
         }
-        handles.push_front((Arc::clone(locator), member, Arc::clone(&handle)));
+        let mut cache = self.lock();
+        if let Some(cached) = cache.promote(locator, member) {
+            // Another thread cached this file while this one opened it: keep one.
+            return Ok(cached);
+        }
+        if cache.retains != retains {
+            // Some pack was retired during the open. This file may be a retired
+            // pack's, and caching it would hold a deleted file open.
+            return Ok(handle);
+        }
+        if cache.entries.len() == HANDLE_LIMIT {
+            cache.entries.pop_back();
+        }
+        cache
+            .entries
+            .push_front((Arc::clone(locator), member, Arc::clone(&handle)));
         Ok(handle)
     }
 
     pub(super) fn retain(&self, mut live: impl FnMut(&Arc<Locator>) -> bool) {
-        self.0
-            .lock()
-            .expect("local pack handles mutex")
-            .retain(|(locator, _, _)| live(locator));
+        let mut cache = self.lock();
+        cache.retains += 1;
+        cache.entries.retain(|(locator, _, _)| live(locator));
     }
+}
+
+/// Opens a locator's pack or index file and checks it is still the one indexed.
+fn open_current(locator: &Arc<Locator>, member: Member) -> StoreResult<File> {
+    let (path, stamp) = match member {
+        Member::Index => (&locator.pair.index, &locator.index_stamp),
+        Member::Pack => (&locator.pair.pack, &locator.pack_stamp),
+    };
+    let file = open_regular(path)?;
+    let opened = Stamp::get(&file.metadata()?)?;
+    let current = match member {
+        Member::Index => opened == *stamp,
+        Member::Pack => opened.same_file(stamp),
+    };
+    if current { Ok(file) } else { locator.changed() }
 }
 
 #[derive(Debug)]
