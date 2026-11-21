@@ -1028,15 +1028,15 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
     let busy = store.prune_guard().unwrap();
     store.try_activate_local_packs().unwrap();
     assert!(!store.local_packs_active(&busy).unwrap());
-    assert!(LocalPackPackFixture::new(&store, &busy).is_err());
+    assert!(LocalPackWriter::new(&store, &busy).is_err());
     drop(busy);
 
     store.try_activate_local_packs().unwrap();
     let guard = store.prune_guard().unwrap();
     assert!(store.local_packs_active(&guard).unwrap());
     assert!(store.local_packs_enabled().unwrap());
-    assert!(LocalPackPackFixture::new(&other, &guard).is_err());
-    LocalPackPackFixture::new(&store, &guard)
+    assert!(LocalPackWriter::new(&other, &guard).is_err());
+    LocalPackWriter::new(&store, &guard)
         .unwrap()
         .publish()
         .unwrap();
@@ -1044,7 +1044,7 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
 
     let bytes = blob(b"overlap");
     let id = store.write(&bytes).unwrap();
-    let mut writer = LocalPackPackFixture::new(&store, &guard).unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
     assert_eq!(writer.write(&bytes).unwrap(), id);
     assert_eq!(writer.write(&bytes).unwrap(), id);
     writer.publish().unwrap();
@@ -1063,7 +1063,7 @@ fn the_fetch_writer_publishes_many_small_objects_in_one_pack() {
     let (_dir, _layout, store) = fresh();
     store.try_activate_local_packs().unwrap();
     let guard = store.prune_guard().unwrap();
-    let mut writer = LocalPackPackFixture::new(&store, &guard).unwrap();
+    let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
     let objects = (0..20).map(|n| blob(&[n; 16_000])).collect::<Vec<_>>();
     let ids: Vec<_> = objects
         .iter()
