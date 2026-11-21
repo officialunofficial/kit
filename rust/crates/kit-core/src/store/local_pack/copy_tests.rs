@@ -282,6 +282,43 @@ fn small_packs_merge_only_from_eight_and_a_large_pack_is_never_an_input() {
 }
 
 #[test]
+fn a_pack_counts_as_small_below_sixteen_mib_and_below_sixteen_thousand_entries() {
+    const SMALL_PAYLOAD: usize = 16 << 20;
+    const SMALL_ENTRIES: usize = 16_384;
+
+    let edge_bytes = |payload: usize| {
+        let extra = obj("edge", 100).len() - 100;
+        let bytes = obj("edge", payload - extra);
+        assert_eq!(bytes.len(), payload);
+        vec![bytes]
+    };
+    let edge_entries = |entries: usize| -> Vec<Vec<u8>> {
+        (0..entries).map(|n| obj(&format!("e{n}"), 20)).collect()
+    };
+    // The edge pack is small one byte or one entry below the limit and is
+    // not small at the limit. Seven small packs beside it make eight only
+    // when it counts.
+    let cases: [(&str, Vec<Vec<u8>>, bool); 4] = [
+        ("payload - 1", edge_bytes(SMALL_PAYLOAD - 1), true),
+        ("payload", edge_bytes(SMALL_PAYLOAD), false),
+        ("entries - 1", edge_entries(SMALL_ENTRIES - 1), true),
+        ("entries", edge_entries(SMALL_ENTRIES), false),
+    ];
+    for (label, edge, merges) in cases {
+        let (_dir, layout, store) = fresh();
+        let tiny: Vec<_> = (0..7).map(|n| obj(&format!("tiny{n}"), 500)).collect();
+        for bytes in &tiny {
+            publish(&store, &[bytes], YOUNG);
+        }
+        let refs: Vec<&Vec<u8>> = edge.iter().collect();
+        publish(&store, &refs, YOUNG);
+
+        let report = run(&store, &layout, false);
+        assert_eq!(report.packs_merged, if merges { 8 } else { 0 }, "{label}");
+    }
+}
+
+#[test]
 fn a_damaged_input_frame_keeps_that_input_and_the_others_proceed() {
     // The mark refuses a damaged live blob, so the damage sits in an
     // unreachable entry that survives inside grace.

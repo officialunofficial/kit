@@ -324,14 +324,14 @@ impl PackSweep {
     /// still lets the wholly dead retirement free space.
     fn copy_survivors(&self, store: &ObjectStore, report: &mut GcReport) -> Option<Copied> {
         match &self.copy {
-            Some(copy) if !copy.is_empty() => match copy.execute(store, report) {
+            Some(copy) => match copy.execute(store, report) {
                 Ok(copied) => Some(copied),
                 Err(error) => {
                     report.pack_copy_error = Some(error.to_string());
                     None
                 }
             },
-            _ => None,
+            None => None,
         }
     }
 
