@@ -59,7 +59,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
 - A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
 - A push to a file, ssh or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. Packs below 8 MiB and pushes to a remote that issues upload tickets are unchanged, and a failed existence check uploads the pack.
-- A push records the packs it sent without first flushing the object directories, so a one-commit push makes 12 flush calls where it made 18.
 
 ### Removed
 
@@ -72,8 +71,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.
 - A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
-- Push records its verified data packs locally so the next fetch can skip them.
-- Push flushes only the object directories of the packs it records, not all 256.
+- Push records its verified data packs locally so the next fetch can skip them. Writing the record adds two flush calls to a push.
 - Fetch and clone write an object larger than 262,154 bytes loose from the decoder's spool, without copying it to a second spool and back.
 
 - Continue SSH transfers in a fresh session after 10,000 requests.

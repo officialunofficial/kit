@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::cell::Cell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -246,17 +247,15 @@ fn a_push_flushes_no_object_directory() {
     );
 }
 
-/// A push records its packs once it has published, not when it uploads them.
+/// A push killed after it published and wrote its tracking ref, before it
+/// records its packs, leaves the next fetch to apply every one of them.
 #[test]
-fn a_push_records_its_packs_after_it_publishes() {
-    struct Watch {
-        record: PathBuf,
-        recorded_at_upload: AtomicBool,
-    }
-    impl Observer<SyncEvent> for Watch {
+fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
+    struct KillAfterPublish;
+    impl Observer<SyncEvent> for KillAfterPublish {
         fn event(&self, event: &SyncEvent) {
-            if matches!(event, SyncEvent::PackUploaded { .. }) && self.record.exists() {
-                self.recorded_at_upload.store(true, Ordering::SeqCst);
+            if matches!(event, SyncEvent::PushStepCommitted { .. }) {
+                panic!("the push is killed before it records its packs");
             }
         }
     }
@@ -265,21 +264,40 @@ fn a_push_records_its_packs_after_it_publishes() {
     let work = Work::new();
     let tip = work.commit(None);
     work.branch("main", tip);
-    let watch = Watch {
-        record: work.layout.applied_packs_dir().join(REMOTE),
-        recorded_at_upload: AtomicBool::new(false),
-    };
-    work.push(
+    let killed = catch_unwind(AssertUnwindSafe(|| {
+        work.push(
+            &TransportSource::new(&tx),
+            "main",
+            PushLease::FastForward,
+            Some(&KillAfterPublish),
+        )
+    }));
+
+    assert!(killed.is_err());
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    assert_eq!(work.tracking("main"), Some(tip));
+    assert!(!work.layout.applied_packs_dir().join(REMOTE).exists());
+    let map = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
+    let bytes = tx
+        .download_blob(&PackKey::from_hash(map), None, u64::MAX)
+        .unwrap();
+    let packs = kit_core::transfer::decode_packlist(&bytes).unwrap().packs;
+    assert!(!packs.is_empty());
+    let applied = kit_sync::AppliedPacks::load(&work.layout, REMOTE).unwrap();
+    assert!(
+        packs
+            .iter()
+            .all(|pack| !applied.contains(&PackKey::from_hash(*pack)))
+    );
+    let report = kit_sync::fetch(
+        &work.path,
         &TransportSource::new(&tx),
-        "main",
-        PushLease::FastForward,
-        Some(&watch),
+        REMOTE,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
     )
     .unwrap();
-
-    assert!(!watch.recorded_at_upload.load(Ordering::SeqCst));
-    assert!(watch.record.exists());
-    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    assert_eq!(report.packs_already_applied, 0);
 }
 
 /// A plain push of a tip that does not descend from the tracking ref is
