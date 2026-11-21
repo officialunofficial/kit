@@ -235,9 +235,12 @@ const MAX_TREE_DEPTH: usize = 64;
 /// Where the same path is a plain [`crate::object::Blob`] on both sides
 /// (a changed small file, under `CHUNK_THRESHOLD`), the old blob is paired
 /// as the new blob's delta base directly — no similarity search, just
-/// "same path, old version". A path whose kind changed between the
-/// two blob/chunked-blob variants, or that has no old-side counterpart at
-/// all (added path, or a rename), is left unpaired.
+/// "same path, old version". Where a path was a plain blob and is now a
+/// [`crate::object::ChunkedBlob`] (a file that grew past `CHUNK_THRESHOLD`),
+/// the old blob is the base of every new chunk that shares content with it
+/// (`pair_blob_to_chunks`), within a per-file budget. A path that shrank from
+/// a chunked blob to a plain one, or that has no old-side counterpart at all
+/// (added path, or a rename), is left unpaired.
 ///
 /// The returned map is `new_hash -> base_hash`. Every base is reachable
 /// from `old_tip`, so a remote that already holds `old_tip` holds the
@@ -317,9 +320,10 @@ fn pair_trees(
 
 /// Dispatch a changed same-named entry: recurse into subtrees, pair
 /// chunked blobs, pair small blobs against their same-path prior version
-/// (#646a), ignore everything else (in particular, a `Blob<->ChunkedBlob`
-/// kind mismatch — a file crossing `CHUNK_THRESHOLD` between the two
-/// commits — is deliberately left unpaired here).
+/// (#646a), pair the chunks of a file that grew past `CHUNK_THRESHOLD`
+/// against its old inline blob, ignore everything else (a file that shrank
+/// below the threshold keeps no base: one old chunk is at most a quarter of a
+/// 1 MiB blob, so the saving does not repay reading the old chunks).
 fn pair_entry(
     store: &ObjectStore,
     new_hash: Hash,
@@ -346,8 +350,13 @@ fn pair_entry(
             out.entry(new_hash).or_insert(old_hash);
             Ok(())
         }
-        // A missing object or a kind mismatch (file became a chunked blob,
-        // etc.) just yields no pairing for this entry.
+        // A file that grew past `CHUNK_THRESHOLD`: its old inline blob is the
+        // base of the new chunks that share content with it.
+        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::Blob(old_blob))) => {
+            pair_blob_to_chunks(store, new_cb.chunks(), old_hash, &old_blob.data, out)
+        }
+        // A missing object or the other kind mismatch (a chunked file that
+        // shrank to a blob) just yields no pairing for this entry.
         (Err(StoreError::ObjectNotFound(_)), _) | (_, Err(StoreError::ObjectNotFound(_))) => Ok(()),
         (Err(e), _) | (_, Err(e)) => Err(e),
         _ => Ok(()),
@@ -370,6 +379,64 @@ const MAX_SKETCHED_CHUNKS: usize = 131_072;
 /// Old chunks on each side of an unmatched run that may also serve as a base,
 /// so a new chunk can still pair with a neighbour of the run it replaces.
 const ANCHOR_MARGIN: usize = 2;
+
+/// Bytes of the old inline blob sketched together: a chunk's features are
+/// its smallest window hashes, so the blob is cut into slices small enough
+/// that a window that is among a chunk's smallest is also among its slice's.
+const BLOB_FEATURE_SLICE: usize = 4096;
+/// Most new chunks that one file crossing `CHUNK_THRESHOLD` reads to look for
+/// a share of its old blob: 4,096 chunks are about 256 MiB of content.
+const MAX_BLOB_SKETCH_READS: usize = 4_096;
+/// Most new chunks paired with the one old blob. Each pair costs the encoder
+/// an index of the whole blob, and a blob under `CHUNK_THRESHOLD` cannot
+/// cover more than a few dozen chunks of the new file.
+const MAX_BLOB_PAIRS: usize = 256;
+
+/// Pair the new chunks of a file that grew past `CHUNK_THRESHOLD` with the
+/// inline blob it was at the old tip. A new chunk shares content with the
+/// blob when one of its min-hash features is one of the blob's, sampled per
+/// [`BLOB_FEATURE_SLICE`]; it then takes the blob as its base and the packed
+/// cost gate decides whether the delta is sent. A chunk is read once, at most
+/// [`MAX_BLOB_SKETCH_READS`] chunks per file, and at most [`MAX_BLOB_PAIRS`]
+/// are paired: what is left is sent raw. A pairing already made for a chunk
+/// stands.
+fn pair_blob_to_chunks(
+    store: &ObjectStore,
+    new_chunks: &[Hash],
+    old_blob: Hash,
+    old_data: &[u8],
+    out: &mut HashMap<Hash, Hash>,
+) -> Result<(), StoreError> {
+    let features: HashSet<u64> = old_data
+        .chunks(BLOB_FEATURE_SLICE)
+        .flat_map(chunk_features)
+        .collect();
+    if features.is_empty() {
+        return Ok(());
+    }
+    let mut seen: HashSet<&Hash> = HashSet::new();
+    let (mut reads, mut pairs) = (0usize, 0usize);
+    for nj in new_chunks {
+        if reads == MAX_BLOB_SKETCH_READS || pairs == MAX_BLOB_PAIRS {
+            break;
+        }
+        if *nj == old_blob || out.contains_key(nj) || !seen.insert(nj) {
+            continue;
+        }
+        reads += 1;
+        let Some(content) = chunk_bytes(store, nj)? else {
+            continue;
+        };
+        if chunk_features(&content)
+            .iter()
+            .any(|f| features.contains(f))
+        {
+            out.insert(*nj, old_blob);
+            pairs += 1;
+        }
+    }
+    Ok(())
+}
 
 /// Pair each changed new chunk against a base chunk in the old manifest.
 /// Skips chunks already present byte-identically in the old manifest (those
@@ -2253,6 +2320,170 @@ mod tests {
         );
 
         assert_pack_reconstructs(&s, &plan, c1, c2);
+    }
+
+    // =================================================================
+    // A path that was an inline blob and is now a chunked file (it grew
+    // past CHUNK_THRESHOLD): the old blob is the base of the new chunks
+    // that share content with it.
+    // =================================================================
+
+    /// An old inline blob of `len` bytes and the commit that holds it.
+    fn inline_old_tip(s: &ObjectStore, seed: u8, len: usize) -> (Vec<u8>, Hash, Hash) {
+        let content = chunk_content(seed, len);
+        let blob = put_blob(s, content.clone());
+        let tip = commit_with_named_file(s, b"doc.bin", blob, vec![], "old");
+        (content, blob, tip)
+    }
+
+    /// A commit that holds `chunks` as the chunked file at the old tip's path.
+    fn chunked_new_tip(s: &ObjectStore, chunks: &[Vec<u8>], old_tip: Hash) -> Hash {
+        let file = put_chunked_from(s, chunks);
+        commit_with_named_file(s, b"doc.bin", file, vec![old_tip], "new")
+    }
+
+    #[test]
+    fn inline_blob_that_became_chunked_is_the_base_of_its_shared_chunks() {
+        let (_d, s) = store();
+        let (old, old_blob, c_old) = inline_old_tip(&s, 1, 600_000);
+        // The file grew: its first 200 kB and the rest survive, an unrelated
+        // block sits between them and a tail was appended.
+        let kept_head = old[..200_000].to_vec();
+        let unrelated = chunk_content(2, 100_000);
+        let mut kept_tail = old[200_000..].to_vec();
+        kept_tail.extend_from_slice(&chunk_content(3, 50_000));
+        let c_new = chunked_new_tip(
+            &s,
+            &[kept_head.clone(), unrelated.clone(), kept_tail.clone()],
+            c_old,
+        );
+
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        assert_eq!(bases.get(&put_blob(&s, kept_head.clone())), Some(&old_blob));
+        assert_eq!(bases.get(&put_blob(&s, kept_tail.clone())), Some(&old_blob));
+        assert!(
+            !bases.contains_key(&put_blob(&s, unrelated.clone())),
+            "a chunk with nothing in common with the blob has no base"
+        );
+        // The remote holds every base: each is an object of the old tip.
+        let held = crate::ops::reachable_objects(&s, &c_old).unwrap();
+        assert!(bases.values().all(|base| held.contains(base)));
+
+        // The plan sends the shared chunks as deltas, far under their raw
+        // size, and the pack rebuilds every object under its id.
+        let plan = plan_pack(&s, c_new, Some(c_old)).unwrap();
+        for chunk in [&kept_head, &kept_tail] {
+            let id = put_blob(&s, chunk.clone());
+            let delta = plan.deltas.iter().find(|d| d.target == id).unwrap();
+            assert_eq!(delta.base, old_blob);
+            assert!(hash::HASH_LEN + delta.stream.len() < chunk.len() / 100);
+            assert!(!plan.raw.contains(&id));
+        }
+        assert!(plan.raw.contains(&put_blob(&s, unrelated)));
+        assert_pack_reconstructs(&s, &plan, c_old, c_new);
+    }
+
+    #[test]
+    fn a_chunked_file_that_shrank_to_an_inline_blob_keeps_no_base() {
+        let (_d, s) = store();
+        let old = chunk_content(1, 400_000);
+        let old_file = put_chunked_from(&s, &[old[..200_000].to_vec(), old[200_000..].to_vec()]);
+        let c_old = commit_with_named_file(&s, b"doc.bin", old_file, vec![], "old");
+        let new_blob = put_blob(&s, old[..300_000].to_vec());
+        let c_new = commit_with_named_file(&s, b"doc.bin", new_blob, vec![c_old], "new");
+
+        assert!(
+            select_chunk_delta_bases(&s, c_new, c_old)
+                .unwrap()
+                .is_empty()
+        );
+        let plan = plan_pack(&s, c_new, Some(c_old)).unwrap();
+        assert!(plan.deltas.is_empty());
+        assert_pack_reconstructs(&s, &plan, c_old, c_new);
+    }
+
+    #[test]
+    fn a_missing_inline_base_leaves_the_chunks_raw() {
+        let (_d, s) = store();
+        let old = chunk_content(1, 300_000);
+        // The old tip names a blob this store does not hold: nothing to read,
+        // so no pairing, and the push plans every chunk raw rather than fail.
+        let absent = Object::Blob(Blob { data: old.clone() }).id().unwrap();
+        let c_old = commit_with_named_file(&s, b"doc.bin", absent, vec![], "old");
+        let c_new = chunked_new_tip(
+            &s,
+            &[old[..150_000].to_vec(), old[150_000..].to_vec()],
+            c_old,
+        );
+        assert!(
+            select_chunk_delta_bases(&s, c_new, c_old)
+                .unwrap()
+                .is_empty()
+        );
+        let plan = plan_pack(&s, c_new, Some(c_old)).unwrap();
+        assert!(plan.deltas.is_empty());
+    }
+
+    #[test]
+    fn a_declined_inline_base_delta_sends_the_chunk_raw() {
+        let (_d, s) = store();
+        let (old, _, c_old) = inline_old_tip(&s, 1, 300_000);
+        let head = old[..150_000].to_vec();
+        let c_new = chunked_new_tip(&s, &[head.clone(), old[150_000..].to_vec()], c_old);
+        // An encoder that finds no delta worth sending (the packed-cost
+        // gate's answer for a chunk whose delta loses) leaves it raw.
+        let plan = plan_pack_with(&s, c_new, Some(c_old), |_, candidates| {
+            assert!(!candidates.is_empty());
+            Ok(vec![None; candidates.len()])
+        })
+        .unwrap();
+        assert!(plan.deltas.is_empty());
+        assert!(plan.raw.contains(&put_blob(&s, head)));
+        assert_pack_reconstructs(&s, &plan, c_old, c_new);
+    }
+
+    #[test]
+    fn inline_base_pairing_stops_at_its_pair_cap() {
+        let (_d, s) = store();
+        let (old, old_blob, c_old) = inline_old_tip(&s, 1, 100_000);
+        // More distinct chunks than the cap, each a slice of the blob with a
+        // byte changed, so every one shares features with it.
+        let chunks: Vec<Vec<u8>> = (0..MAX_BLOB_PAIRS + 20)
+            .map(|i| {
+                let mut chunk = old[20_000..60_000].to_vec();
+                chunk[i] ^= 0xFF;
+                chunk
+            })
+            .collect();
+        let c_new = chunked_new_tip(&s, &chunks, c_old);
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        assert_eq!(bases.len(), MAX_BLOB_PAIRS);
+        assert!(bases.values().all(|base| *base == old_blob));
+        // The first chunks in file order are the ones paired.
+        for chunk in &chunks[..MAX_BLOB_PAIRS] {
+            assert!(bases.contains_key(&put_blob(&s, chunk.clone())));
+        }
+    }
+
+    #[test]
+    fn inline_base_sketching_stops_at_its_read_budget() {
+        let (_d, s) = store();
+        let (old, old_blob, c_old) = inline_old_tip(&s, 1, 100_000);
+        // The budget goes on chunks with nothing in common with the blob; a
+        // chunk past it is not read, even though it shares content.
+        let mut chunks: Vec<Vec<u8>> = (0..MAX_BLOB_SKETCH_READS)
+            .map(|i| {
+                let mut chunk = chunk_content(9, 64);
+                chunk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                chunk
+            })
+            .collect();
+        let late = old[..40_000].to_vec();
+        chunks.push(late.clone());
+        let c_new = chunked_new_tip(&s, &chunks, c_old);
+        let bases = select_chunk_delta_bases(&s, c_new, c_old).unwrap();
+        assert!(!bases.contains_key(&put_blob(&s, late)));
+        assert!(bases.values().all(|base| *base != old_blob));
     }
 
     /// Split probing plans several ranges of one chain. Through one delta
