@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::layout::RepoLayout;
-use crate::store::ChunkOrigin;
+use crate::store::{ChunkOrigin, PACK_SEAL_ENTRIES};
 
 fn fresh_store() -> (TempDir, RepoLayout, ObjectStore) {
     let dir = TempDir::new().expect("tempdir");
@@ -167,9 +167,10 @@ fn parts_that_are_not_a_canonical_blob_stay_loose() {
     // One part, a prologue that names another length, and a tree.
     let one = blob_bytes(b"one part");
     let prologue = crate::serialize::blob_prologue(3).unwrap();
-    let tree =
-        crate::serialize::serialize(&crate::object::Object::Tree(crate::object::Tree::default()))
-            .unwrap();
+    let tree = crate::serialize::serialize(&crate::object::Object::Tree(crate::object::Tree {
+        entries: Vec::new(),
+    }))
+    .unwrap();
     let a = batch.put_chunk_parts(&[&one], origin).unwrap();
     let b = batch
         .put_chunk_parts(&[&prologue, b"not three bytes"], origin)
@@ -284,9 +285,10 @@ fn a_checkpoint_that_shows_a_tree_seals_the_small_files_first() {
     for d in &data {
         put_file(&batch, d);
     }
-    let tree =
-        crate::serialize::serialize(&crate::object::Object::Tree(crate::object::Tree::default()))
-            .unwrap();
+    let tree = crate::serialize::serialize(&crate::object::Object::Tree(crate::object::Tree {
+        entries: Vec::new(),
+    }))
+    .unwrap();
     batch.write(&tree).unwrap();
     batch.checkpoint().unwrap();
     // The pack is durable and visible before the tree can be.
