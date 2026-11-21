@@ -626,7 +626,8 @@ impl S3Transport {
 /// take the range or its condition, as opposed to a refusal of the request
 /// itself (401, 403, 404) or a transient answer (408, 429, 5xx but 501).
 fn refuses_range(status: u16) -> bool {
-    status == 501 || ((400..500).contains(&status) && !matches!(status, 401 | 403 | 404 | 408 | 429))
+    status == 501
+        || ((400..500).contains(&status) && !matches!(status, 401 | 403 | 404 | 408 | 429))
 }
 
 /// The value of response header `name`, when it is text.
