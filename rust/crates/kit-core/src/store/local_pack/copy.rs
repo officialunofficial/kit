@@ -903,7 +903,7 @@ mod select_tests {
             ],
         };
         let selected = copied.select(&dir, &|_| false, &copied.candidates());
-        assert_eq!(selected.len(, &copied.candidates()), 1);
+        assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pair.key, covering.key);
 
         // An output that carries an input's key leaves that input in place.
