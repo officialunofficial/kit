@@ -880,7 +880,9 @@ impl<'s> WriteBatch<'s> {
 }
 
 /// The seal of one full local pack, run on a worker thread. At most one runs
-/// at a time, so a batch holds at most two packs and two open files.
+/// at a time: a writer that fills another pack waits for it, and each such
+/// writer holds one full pack meanwhile, so the packs a batch holds are
+/// bounded by its writer threads.
 #[derive(Debug, Default)]
 struct Sealing {
     worker: Mutex<Option<JoinHandle<StoreResult<()>>>>,

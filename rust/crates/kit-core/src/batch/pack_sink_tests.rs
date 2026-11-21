@@ -588,6 +588,28 @@ fn a_panic_in_the_seal_worker_is_surfaced_not_swallowed() {
 }
 
 #[test]
+fn a_panic_of_the_seal_in_flight_reaches_the_next_full_pack_and_fails_the_batch() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    batch
+        .put_hashed_chunk(&HashedChunk::new(b"first pack").unwrap())
+        .unwrap();
+    let job = batch.pack.lock().unwrap().take().unwrap().detach();
+    batch
+        .sealing
+        .start_with(job, |_| panic!("a seal panicked"))
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fill_entries(&batch, 5_000_000);
+        // The pack above is the batch's second. Its rollover starts a third.
+        batch.put_hashed_chunk(&HashedChunk::new(b"rollover").unwrap())
+    }));
+    assert!(result.is_err());
+    assert!(batch.check_not_failed().is_err());
+    assert!(batch.write(&blob_bytes(b"later")).is_err());
+}
+
+#[test]
 fn a_seal_runs_on_this_thread_when_no_worker_can_start() {
     let sealing = Sealing::default();
     let ran = Arc::new(AtomicBool::new(false));
