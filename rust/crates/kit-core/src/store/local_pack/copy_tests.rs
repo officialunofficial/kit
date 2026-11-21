@@ -14,7 +14,7 @@ use super::tests::{
 use super::{Index, Pair};
 use crate::hash::Hash;
 use crate::layout::RepoLayout;
-use crate::ops::gc::{GcReport, run_gc_observed};
+use crate::ops::gc::{GcReport, run_gc};
 use crate::store::ObjectStore;
 
 const NOW: u64 = 100;
@@ -29,7 +29,7 @@ fn obj(label: &str, len: usize) -> Vec<u8> {
 }
 
 fn run(store: &ObjectStore, layout: &RepoLayout, dry_run: bool) -> GcReport {
-    run_gc_observed(store, layout, NOW, GRACE, dry_run, &mut |_, _, _| {}).unwrap()
+    run_gc(store, layout, NOW, GRACE, dry_run, &mut |_, _, _| {}).unwrap()
 }
 
 fn publish(store: &ObjectStore, objects: &[&Vec<u8>], age: u64) -> (Pair, Vec<Hash>) {
@@ -179,6 +179,25 @@ fn two_packs_with_the_same_ids_retire_one_as_covered_and_the_same_one_every_time
     assert!(!gone.pack.exists() && !gone.index.exists());
     assert_eq!(store.read(&ids[0]).unwrap(), a);
     assert_eq!(store.read(&ids[1]).unwrap(), b);
+}
+
+#[test]
+fn the_report_names_how_long_retirement_held_the_exclusive_lock() {
+    let (_dir, layout, store) = fresh();
+    let x = obj("x", 2000);
+    let dead: Vec<_> = (0..4).map(|n| obj(&format!("dead{n}"), 2000)).collect();
+    let mut all = vec![&x];
+    all.extend(dead.iter());
+    let (_, ids) = publish(&store, &all, OLD);
+    keep(&layout, "x", &ids[0]);
+
+    // A dry run and a run with nothing to retire never take the lock.
+    assert_eq!(run(&store, &layout, true).retire_hold_ms, 0);
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_rewritten, 1);
+    let held = ObjectStore::last_sweep_hold().as_millis();
+    assert_eq!(u128::from(report.retire_hold_ms), held);
+    assert_eq!(run(&store, &layout, false).retire_hold_ms, 0);
 }
 
 #[test]
@@ -354,7 +373,7 @@ fn a_crash_after_the_outputs_publish_loses_nothing_and_the_next_run_copies_nothi
     keep(&layout, "x", &ids[0]);
 
     set_after_copy_publish(|| Err(std::io::Error::other("crash after publish").into()));
-    assert!(run_gc_observed(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
+    assert!(run_gc(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
     assert!(exists(&pair));
     assert_eq!(packs(&store).len(), 2);
     let reopened = ObjectStore::open(&layout).unwrap();
