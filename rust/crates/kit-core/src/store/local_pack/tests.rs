@@ -1839,6 +1839,7 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
     }
     assert_eq!(loads(), objects.len());
     let handles = &reader.packs.handles;
+    assert!(handles.limit() >= super::reader::HANDLE_FLOOR);
     assert_eq!(handles.cached(), objects.len().min(handles.limit()));
 }
 
