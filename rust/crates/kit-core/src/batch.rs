@@ -610,13 +610,18 @@ impl<'s> WriteBatch<'s> {
     /// it to the open local pack unless a copy exists; any other batch stages
     /// it as a loose object.
     ///
+    /// A full pack seals on a worker thread, one at a time, while writes go
+    /// on into the next pack.
+    ///
     /// # Errors
-    /// An error of the write or of sealing a full pack. A pack error fails the
-    /// whole batch.
+    /// An error of the write, or of the seal of the previous full pack, which
+    /// a later call, checkpoint or commit returns, not the call that filled
+    /// the pack. A pack error fails the whole batch.
     ///
     /// # Panics
     ///
-    /// Panics only if a previous write panicked while holding a batch lock.
+    /// Panics only if a previous write panicked while holding a batch lock,
+    /// or if the seal worker panicked.
     pub fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
         let id = chunk.id();
         let parts = chunk.parts();
@@ -738,8 +743,9 @@ impl<'s> WriteBatch<'s> {
     ///
     /// A checkpoint leaves the open local pack open, so the chunks in it stay
     /// invisible until the pack seals or the batch commits. It seals the pack
-    /// first when a staged loose object is not a plain blob, so a manifest, tree
-    /// or commit is never visible before the chunks it names.
+    /// first when a staged loose object is not a plain blob, after the seal of
+    /// an earlier full pack finishes, so a manifest, tree or commit is never
+    /// visible before the chunks it names.
     ///
     /// The objects a checkpoint makes visible are not yet named by any ref or
     /// index. A crash leaves them unreferenced, which gc collects. The caller

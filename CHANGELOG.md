@@ -18,6 +18,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs.
 
 - `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the chunks of a large file into local packs in a repository that declares capability `P`, so adding a large file no longer leaves one loose file per chunk.
+- `kit add` seals a full local pack on a background thread while it hashes and writes the next one, so adding many large files is faster.
 
 - Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
 - Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days.
