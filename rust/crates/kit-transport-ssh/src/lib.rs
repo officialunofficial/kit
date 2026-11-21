@@ -323,6 +323,11 @@ impl Drop for SshTransport {
 }
 
 impl Transport for SshTransport {
+    /// A `kit serve` remote ingests and serves packs with this crate's pack reader, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }

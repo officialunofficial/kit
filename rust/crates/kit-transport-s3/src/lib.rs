@@ -1190,6 +1190,11 @@ fn quoted_md5(wire: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 impl Transport for S3Transport {
+    /// A direct `kit+s3` remote stores the pack bytes kit uploads and its clients read them, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }

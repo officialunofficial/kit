@@ -91,7 +91,16 @@ impl<'a> PushContext<'a> {
         Self {
             source,
             observer,
-            deltas: DeltaEncoder::new(spool_dir.clone()),
+            // A replacement manifest goes as a delta only to a remote that
+            // says it takes one; every other source, a hosted one included,
+            // is sent full manifests.
+            deltas: DeltaEncoder::new(spool_dir.clone()).with_manifests(
+                if source.accepts_manifest_deltas() {
+                    transfer::ManifestDeltas::Held
+                } else {
+                    transfer::ManifestDeltas::Full
+                },
+            ),
             spool_dir,
             record: None,
         }
@@ -1362,7 +1371,8 @@ fn build_packs<W: std::io::Write>(
 
     // Delta entries: sizes are known from the plan with no I/O, so batch
     // lengths are computed directly off them. The planner only chooses
-    // blob delta targets, so none of these entries needs a signature check.
+    // blob and manifest delta targets, so none of these entries needs a
+    // signature check.
     // `drain` then moves each
     // batch's `PlannedDelta`s out of `deltas`, and each batch reads its
     // streams back from the push's delta spool.

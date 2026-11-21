@@ -38,7 +38,7 @@ use crate::delta;
 use crate::hash::{self, Hash};
 use crate::list_decode::read_list;
 use crate::object::{Object, ObjectType};
-use crate::pack::delta_fits_reader;
+use crate::pack::{self, delta_fits_reader};
 use crate::store::{ObjectStore, StoreError};
 
 use self::walk::{ChunkMemory, HeldCommits, MAX_CHUNK_MEMORY, MAX_HELD_SCAN, PushWalk};
@@ -257,7 +257,33 @@ pub fn select_chunk_delta_bases(
     new_tip: Hash,
     old_tip: Hash,
 ) -> Result<HashMap<Hash, Hash>, StoreError> {
-    let mut out = HashMap::new();
+    Ok(select_delta_bases(store, new_tip, old_tip)?.chunks)
+}
+
+/// The delta bases [`select_delta_bases`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeltaBases {
+    /// `new_hash -> base_hash` for the blobs: changed chunks and small files,
+    /// as [`select_chunk_delta_bases`] returns them.
+    pub chunks: HashMap<Hash, Hash>,
+    /// `new_manifest -> old_manifest` for each path that is a
+    /// [`crate::object::ChunkedBlob`] at both tips with a different manifest.
+    pub manifests: HashMap<Hash, Hash>,
+}
+
+/// [`select_chunk_delta_bases`] together with the manifest of each changed
+/// chunked file paired with the manifest it replaces. Every base, of either
+/// kind, is an object of `old_tip`'s tree.
+///
+/// # Errors
+///
+/// As [`select_chunk_delta_bases`].
+pub fn select_delta_bases(
+    store: &ObjectStore,
+    new_tip: Hash,
+    old_tip: Hash,
+) -> Result<DeltaBases, StoreError> {
+    let mut out = DeltaBases::default();
     let (Some(new_tree), Some(old_tree)) = (tip_tree(store, new_tip)?, tip_tree(store, old_tip)?)
     else {
         return Ok(out);
@@ -285,7 +311,7 @@ fn pair_trees(
     new_tree: Hash,
     old_tree: Hash,
     depth: usize,
-    out: &mut HashMap<Hash, Hash>,
+    out: &mut DeltaBases,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH || new_tree == old_tree {
         return Ok(());
@@ -329,25 +355,31 @@ fn pair_entry(
     new_hash: Hash,
     old_hash: Hash,
     depth: usize,
-    out: &mut HashMap<Hash, Hash>,
+    out: &mut DeltaBases,
 ) -> Result<(), StoreError> {
     match (store.read_object(&new_hash), store.read_object(&old_hash)) {
         (Ok(Object::Tree(_)), Ok(Object::Tree(_))) => {
             pair_trees(store, new_hash, old_hash, depth + 1, out)
         }
-        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => pair_chunks(
-            store,
-            new_cb.chunks(),
-            old_cb.chunks(),
-            MAX_SKETCHED_CHUNKS,
-            out,
-        ),
+        (Ok(Object::ChunkedBlob(new_cb)), Ok(Object::ChunkedBlob(old_cb))) => {
+            // The manifest the remote holds for this path is the base of the
+            // one that replaces it; whether it is sent as a delta is the
+            // planner's call.
+            out.manifests.entry(new_hash).or_insert(old_hash);
+            pair_chunks(
+                store,
+                new_cb.chunks(),
+                old_cb.chunks(),
+                MAX_SKETCHED_CHUNKS,
+                &mut out.chunks,
+            )
+        }
         // A changed same-path small blob: the old blob at this path is a
         // natural delta base for the new one. Never overwrite an
         // existing pairing for `new_hash`, mirroring `pair_chunks`'
         // determinism guarantee.
         (Ok(Object::Blob(_)), Ok(Object::Blob(_))) => {
-            out.entry(new_hash).or_insert(old_hash);
+            out.chunks.entry(new_hash).or_insert(old_hash);
             Ok(())
         }
         // A file that grew past `CHUNK_THRESHOLD`: its old inline blob is the
@@ -358,7 +390,7 @@ fn pair_entry(
             old_hash,
             &old_blob.data,
             BlobBudget::default(),
-            out,
+            &mut out.chunks,
         ),
         // A missing object or the other kind mismatch (a chunked file that
         // shrank to a blob) just yields no pairing for this entry.
@@ -747,6 +779,46 @@ fn read_optional(store: &ObjectStore, h: Hash) -> Result<Option<Object>, StoreEr
 // Pack planning
 // ---------------------------------------------------------------------------
 
+/// Whether a plan may send a replacement chunk manifest as a delta.
+///
+/// The manifest of a large file lists every chunk, so a rewrite that changes
+/// one chunk still sends a manifest of the file's full length, at about 0.5 MB
+/// per GiB of file. A delta against the manifest the remote holds for the path
+/// is far smaller, and SPEC-PACKFILE §3.2 already allows it: a delta
+/// reconstructs a full object whatever its type. A remote that admits only
+/// full manifests must not be sent one, so the caller opts in per remote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ManifestDeltas {
+    /// Every manifest goes in full.
+    #[default]
+    Full,
+    /// A replacement manifest goes as a delta against the manifest at the
+    /// same path in the remote head when that is smaller as a framed entry,
+    /// and in full otherwise.
+    Held,
+}
+
+/// What one plan spends encoding manifests as deltas.
+#[derive(Debug, Clone, Copy)]
+struct ManifestBudget {
+    /// Largest manifest, base or replacement, a plan encodes as a delta: each
+    /// delta reads and indexes both. A manifest of 16 MiB lists about 32 GiB
+    /// of file.
+    each: u64,
+    /// Most manifest bytes, bases and replacements together, one plan encodes
+    /// as deltas; manifests past it go in full.
+    plan: u64,
+}
+
+impl Default for ManifestBudget {
+    fn default() -> Self {
+        Self {
+            each: 16 << 20,
+            plan: 256 << 20,
+        }
+    }
+}
+
 /// One delta entry in a [`PackPlan`]: a target object encoded against a
 /// base the remote already holds.
 #[derive(Debug, Clone)]
@@ -1042,6 +1114,37 @@ pub fn plan_pack_tips(
     )
 }
 
+/// [`plan_pack_tips`] that may also send replacement manifests as deltas, as
+/// `manifests` allows. `encode_deltas` is handed the manifest candidates after
+/// the blob ones, in the same batch; a manifest delta it returns is kept only
+/// when its framed entry is smaller than the manifest's own.
+///
+/// # Errors
+///
+/// As [`plan_pack_tips`].
+pub fn plan_pack_tips_with_manifests(
+    store: &ObjectStore,
+    new_tips: &[Hash],
+    old_tip: Option<Hash>,
+    manifests: ManifestDeltas,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+) -> Result<PackPlan, StoreError> {
+    let limits = WalkLimits::default();
+    let held = HeldCommits::for_tips(store, new_tips, old_tip, limits.objects)?;
+    plan_with_held_manifests(
+        store,
+        new_tips,
+        &held,
+        manifests,
+        ManifestBudget::default(),
+        encode_deltas,
+        limits,
+    )
+}
+
 /// [`plan_pack_with`] with caller-supplied bounds, so a test can cut the walk.
 #[cfg(test)]
 fn plan_pack_capped(
@@ -1108,8 +1211,32 @@ fn plan_with_held(
     ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
     limits: WalkLimits,
 ) -> Result<PackPlan, StoreError> {
+    plan_with_held_manifests(
+        store,
+        new_tips,
+        held,
+        ManifestDeltas::Full,
+        ManifestBudget::default(),
+        encode_deltas,
+        limits,
+    )
+}
+
+fn plan_with_held_manifests(
+    store: &ObjectStore,
+    new_tips: &[Hash],
+    held: &HeldCommits,
+    manifests: ManifestDeltas,
+    manifest_budget: ManifestBudget,
+    encode_deltas: impl FnOnce(
+        &ObjectStore,
+        &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError>,
+    limits: WalkLimits,
+) -> Result<PackPlan, StoreError> {
     let walk = PushWalk::run_tips(store, new_tips, held, limits, None)?;
     let mut base_map = HashMap::new();
+    let mut manifest_bases = HashMap::new();
     if let Some(old) = held.tip() {
         for &tip in new_tips {
             // A tip the head holds sends no blob, so it needs no delta base.
@@ -1117,8 +1244,14 @@ fn plan_with_held(
             if held.contains(&peeled) {
                 continue;
             }
-            for (target, base) in select_chunk_delta_bases(store, peeled, old)? {
+            let bases = select_delta_bases(store, peeled, old)?;
+            for (target, base) in bases.chunks {
                 base_map.entry(target).or_insert(base);
+            }
+            if manifests == ManifestDeltas::Held {
+                for (target, base) in bases.manifests {
+                    manifest_bases.entry(target).or_insert(base);
+                }
             }
         }
     }
@@ -1163,6 +1296,30 @@ fn plan_with_held(
         }
     }
 
+    // A replacement manifest is a candidate too, after the blobs, when the
+    // caller allows it: against the manifest at its path in the remote head,
+    // which this store must hold, and only while the work stays within the
+    // per-manifest and per-plan bounds.
+    let mut manifest_left = manifest_budget.plan;
+    for h in &non_blob_raw {
+        let Some(&base) = manifest_bases.get(h) else {
+            continue;
+        };
+        if !store.contains(&base) {
+            continue;
+        }
+        let (target_len, base_len) = (store.object_size(h)?, store.object_size(&base)?);
+        let work = target_len.saturating_add(base_len);
+        if target_len > manifest_budget.each
+            || base_len > manifest_budget.each
+            || work > manifest_left
+        {
+            continue;
+        }
+        manifest_left -= work;
+        candidates.push(DeltaCandidate { target: *h, base });
+    }
+
     let delta_results = encode_deltas(store, &candidates)?;
     if delta_results.len() != candidates.len() {
         return Err(StoreError::DeltaBatchLengthMismatch {
@@ -1179,8 +1336,18 @@ fn plan_with_held(
     // A blob goes out as its delta if one was encoded, else raw. A candidate
     // whose encode returned nothing is never dropped. A blob listed twice
     // (a repeat past the chunk memory) goes out as its delta once.
-    let mut raw = non_blob_raw;
+    let mut raw = Vec::with_capacity(non_blob_raw.len());
     let mut deltas = Vec::with_capacity(encoded.len());
+    for h in non_blob_raw {
+        // A manifest goes as its delta only when that is smaller on the wire
+        // as the entry a pack writer frames, which compresses a manifest and
+        // a delta stream alike: a stream shorter than the manifest can still
+        // lose to the manifest's own compressed entry.
+        match encoded.remove(&h) {
+            Some(planned) if manifest_delta_wins(store, &planned)? => deltas.push(planned),
+            _ => raw.push(h),
+        }
+    }
     let mut sent_as_delta: HashSet<Hash> = HashSet::new();
     for h in blobs {
         if let Some(planned) = encoded.remove(&h) {
@@ -1202,6 +1369,14 @@ fn plan_with_held(
         deltas,
         self_contained: held.tip().is_none(),
     })
+}
+
+/// Whether `planned`, a delta of a manifest, takes fewer bytes in a pack than
+/// the manifest in full, each as the framed entry a pack writer emits.
+fn manifest_delta_wins(store: &ObjectStore, planned: &PlannedDelta) -> Result<bool, StoreError> {
+    let stream = planned.stream.bytes().map_err(StoreError::Io)?;
+    let full = store.read(&planned.target)?;
+    Ok(pack::delta_entry_len(&stream) < pack::raw_entry_len(&full))
 }
 
 /// Encode `target` against `base` and return the delta only if it is
@@ -2578,6 +2753,446 @@ mod tests {
         };
         let (old_blob, out) = pair_blob_within(&s, &old, &chunks, budget);
         assert_eq!(out.get(&put_blob(&s, chunks[3].clone())), Some(&old_blob));
+    }
+
+    // =================================================================
+    // A replacement chunk manifest goes as a delta against the manifest the
+    // remote holds at the same path, when the caller allows it and the
+    // framed delta entry is smaller than the manifest's own.
+    // =================================================================
+
+    fn encode_sequentially(
+        s: &ObjectStore,
+        candidates: &[DeltaCandidate],
+    ) -> Result<Vec<Option<PlannedDelta>>, StoreError> {
+        candidates
+            .iter()
+            .map(|&c| encode_delta_candidate(s, c))
+            .collect()
+    }
+
+    /// `n` distinct 64-byte chunks.
+    fn many_chunks(n: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|i| {
+                let mut chunk = chunk_content(3, 64);
+                chunk[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                chunk
+            })
+            .collect()
+    }
+
+    /// An old file of `many_chunks(n)`, and the new one with chunk `at`
+    /// replaced; each at a commit, with their manifests.
+    struct ManifestPair {
+        old_tip: Hash,
+        new_tip: Hash,
+        old_manifest: Hash,
+        new_manifest: Hash,
+    }
+
+    fn manifest_pair(s: &ObjectStore, n: usize, at: usize) -> ManifestPair {
+        let old_chunks = many_chunks(n);
+        let mut new_chunks = old_chunks.clone();
+        new_chunks[at] = chunk_content(9, 64);
+        let old_manifest = put_chunked_from(s, &old_chunks);
+        let new_manifest = put_chunked_from(s, &new_chunks);
+        let old_tip = commit_with_file(s, old_manifest, vec![], "old");
+        let new_tip = commit_with_file(s, new_manifest, vec![old_tip], "new");
+        ManifestPair {
+            old_tip,
+            new_tip,
+            old_manifest,
+            new_manifest,
+        }
+    }
+
+    fn plan_manifests(
+        s: &ObjectStore,
+        pair: &ManifestPair,
+        manifests: ManifestDeltas,
+        budget: ManifestBudget,
+    ) -> PackPlan {
+        let limits = WalkLimits::default();
+        let held =
+            HeldCommits::for_tips(s, &[pair.new_tip], Some(pair.old_tip), limits.objects).unwrap();
+        plan_with_held_manifests(
+            s,
+            &[pair.new_tip],
+            &held,
+            manifests,
+            budget,
+            encode_sequentially,
+            limits,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_replacement_manifest_goes_as_a_delta_against_the_held_one() {
+        let (_d, s) = store();
+        let pair = manifest_pair(&s, 300, 150);
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, ManifestBudget::default());
+
+        let delta = plan
+            .deltas
+            .iter()
+            .find(|d| d.target == pair.new_manifest)
+            .expect("the manifest is sent as a delta");
+        assert_eq!(delta.base, pair.old_manifest);
+        assert!(!plan.raw.contains(&pair.new_manifest));
+        // The framed delta entry is a small fraction of the manifest's.
+        let full = s.read(&pair.new_manifest).unwrap();
+        let stream = delta.stream.bytes().unwrap();
+        assert!(pack::delta_entry_len(&stream) * 10 < pack::raw_entry_len(&full));
+        // Every object of the new tip reconstructs under its id, the manifest
+        // from the one the remote held.
+        assert_pack_reconstructs(&s, &plan, pair.old_tip, pair.new_tip);
+    }
+
+    #[test]
+    fn full_manifests_are_the_default() {
+        let (_d, s) = store();
+        let pair = manifest_pair(&s, 300, 150);
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Full, ManifestBudget::default());
+        assert!(plan.raw.contains(&pair.new_manifest));
+        assert!(plan.deltas.iter().all(|d| d.target != pair.new_manifest));
+        let plan =
+            plan_pack_with(&s, pair.new_tip, Some(pair.old_tip), encode_sequentially).unwrap();
+        assert!(plan.raw.contains(&pair.new_manifest));
+        assert_pack_reconstructs(&s, &plan, pair.old_tip, pair.new_tip);
+        // The opt-in entry point sends one delta where the default sends none.
+        let plan = plan_pack_tips_with_manifests(
+            &s,
+            &[pair.new_tip],
+            Some(pair.old_tip),
+            ManifestDeltas::Held,
+            encode_sequentially,
+        )
+        .unwrap();
+        assert!(plan.deltas.iter().any(|d| d.target == pair.new_manifest));
+    }
+
+    #[test]
+    fn a_manifest_with_no_held_base_goes_in_full() {
+        let (_d, s) = store();
+        // The old tip names a manifest this store does not hold.
+        let elsewhere = store();
+        let absent = put_chunked_from(&elsewhere.1, &many_chunks(300));
+        let c_old = commit_with_file(&s, absent, vec![], "old");
+        let new_manifest = put_chunked_from(&s, &many_chunks(301));
+        let c_new = commit_with_file(&s, new_manifest, vec![c_old], "new");
+        let pair = ManifestPair {
+            old_tip: c_old,
+            new_tip: c_new,
+            old_manifest: absent,
+            new_manifest,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, ManifestBudget::default());
+        assert!(plan.raw.contains(&new_manifest));
+        assert!(plan.deltas.iter().all(|d| d.target != new_manifest));
+    }
+
+    #[test]
+    fn a_manifest_that_shares_nothing_goes_in_full() {
+        let (_d, s) = store();
+        let old: Vec<Vec<u8>> = (0..300)
+            .map(|i| {
+                chunk_content(1, 64 + i % 7)
+                    .into_iter()
+                    .chain([u8::try_from(i % 256).unwrap()])
+                    .collect()
+            })
+            .collect();
+        let new: Vec<Vec<u8>> = (0..300)
+            .map(|i| {
+                chunk_content(2, 70 + i % 5)
+                    .into_iter()
+                    .chain([u8::try_from(i % 256).unwrap()])
+                    .collect()
+            })
+            .collect();
+        let old_manifest = put_chunked_from(&s, &old);
+        let new_manifest = put_chunked_from(&s, &new);
+        let old_tip = commit_with_file(&s, old_manifest, vec![], "old");
+        let new_tip = commit_with_file(&s, new_manifest, vec![old_tip], "new");
+        let pair = ManifestPair {
+            old_tip,
+            new_tip,
+            old_manifest,
+            new_manifest,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, ManifestBudget::default());
+        assert!(plan.raw.contains(&new_manifest));
+        assert!(plan.deltas.iter().all(|d| d.target != new_manifest));
+    }
+
+    #[test]
+    fn a_delta_manifest_must_beat_the_framed_full_entry() {
+        let (_d, s) = store();
+        // A manifest of one chunk repeated compresses to a few hundred bytes,
+        // so a stream far shorter than its canonical length still loses.
+        let chunk = chunk_content(4, 64);
+        let manifest = put_chunked_from(&s, &vec![chunk; 2_000]);
+        let canonical = s.read(&manifest).unwrap();
+        assert!(canonical.len() > 50_000);
+        let planned = |stream: Vec<u8>| PlannedDelta {
+            target: manifest,
+            base: [7; 32],
+            stream: DeltaBytes::Inline(stream),
+        };
+        let long = planned(chunk_content(5, 10_000));
+        assert!(hash::HASH_LEN + long.stream.len() < canonical.len());
+        assert!(!manifest_delta_wins(&s, &long).unwrap());
+        let short = planned(chunk_content(5, 100));
+        assert!(manifest_delta_wins(&s, &short).unwrap());
+    }
+
+    #[test]
+    fn a_delta_manifest_that_only_ties_the_framed_full_entry_goes_in_full() {
+        let (_d, s) = store();
+        let manifest = put_chunked_from(&s, &many_chunks(300));
+        let framed = pack::raw_entry_len(&s.read(&manifest).unwrap());
+        // An incompressible stream's entry is the frame, the base id and the
+        // stream itself.
+        let entry = |stream_len: u64| {
+            let stream = chunk_content(5, usize::try_from(stream_len).unwrap());
+            let entry = pack::delta_entry_len(&stream);
+            (
+                PlannedDelta {
+                    target: manifest,
+                    base: [7; 32],
+                    stream: DeltaBytes::Inline(stream),
+                },
+                entry,
+            )
+        };
+        let overhead = 5 + hash::HASH_LEN as u64;
+        let (tie, tie_len) = entry(framed - overhead);
+        assert_eq!(tie_len, framed);
+        assert!(!manifest_delta_wins(&s, &tie).unwrap());
+        let (under, under_len) = entry(framed - overhead - 1);
+        assert_eq!(under_len, framed - 1);
+        assert!(manifest_delta_wins(&s, &under).unwrap());
+    }
+
+    #[test]
+    fn a_cap_under_either_manifest_leaves_it_in_full() {
+        let (_d, s) = store();
+        // Two files of different lengths, so one manifest is longer.
+        let longer = |n: usize| {
+            let mut chunks = many_chunks(n);
+            chunks.push(chunk_content(9, 64));
+            chunks
+        };
+        for (old_chunks, new_chunks) in [
+            (many_chunks(300), longer(300)),
+            (longer(300), many_chunks(300)),
+        ] {
+            let old_manifest = put_chunked_from(&s, &old_chunks);
+            let new_manifest = put_chunked_from(&s, &new_chunks);
+            let old_tip = commit_with_file(&s, old_manifest, vec![], "old");
+            let new_tip = commit_with_file(&s, new_manifest, vec![old_tip], "new");
+            let pair = ManifestPair {
+                old_tip,
+                new_tip,
+                old_manifest,
+                new_manifest,
+            };
+            let (old_len, new_len) = (
+                s.object_size(&old_manifest).unwrap(),
+                s.object_size(&new_manifest).unwrap(),
+            );
+            assert_ne!(old_len, new_len);
+            // A cap that only the shorter one fits: the longer is in the way.
+            let under = ManifestBudget {
+                each: old_len.min(new_len),
+                plan: u64::MAX,
+            };
+            let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, under);
+            assert!(plan.raw.contains(&new_manifest));
+            let fits = ManifestBudget {
+                each: old_len.max(new_len),
+                plan: u64::MAX,
+            };
+            let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, fits);
+            assert!(plan.deltas.iter().any(|d| d.target == new_manifest));
+        }
+    }
+
+    #[test]
+    fn a_manifest_whose_delta_loses_the_framed_comparison_goes_in_full() {
+        let (_d, s) = store();
+        // The new file is one chunk repeated, a manifest that compresses to
+        // a few hundred bytes. The old one shares only its first twenty
+        // entries, so the delta is nearly all literal: shorter than the
+        // canonical manifest, but longer than its compressed entry.
+        let repeated = chunk_content(4, 64);
+        let mut old_chunks = vec![repeated.clone(); 20];
+        old_chunks.extend(many_chunks(380));
+        let new_chunks = vec![repeated; 400];
+        let old_manifest = put_chunked_from(&s, &old_chunks);
+        let new_manifest = put_chunked_from(&s, &new_chunks);
+        let old_tip = commit_with_file(&s, old_manifest, vec![], "old");
+        let new_tip = commit_with_file(&s, new_manifest, vec![old_tip], "new");
+        let pair = ManifestPair {
+            old_tip,
+            new_tip,
+            old_manifest,
+            new_manifest,
+        };
+        let old_bytes = s.read(&old_manifest).unwrap();
+        let new_bytes = s.read(&new_manifest).unwrap();
+        let stream = delta::encode(&old_bytes, &new_bytes).unwrap();
+        assert!(hash::HASH_LEN + stream.len() < new_bytes.len());
+        assert!(pack::delta_entry_len(&stream) >= pack::raw_entry_len(&new_bytes));
+
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, ManifestBudget::default());
+        assert!(plan.raw.contains(&new_manifest));
+        assert!(plan.deltas.iter().all(|d| d.target != new_manifest));
+    }
+
+    #[test]
+    fn a_manifest_over_the_per_manifest_cap_goes_in_full() {
+        let (_d, s) = store();
+        let pair = manifest_pair(&s, 300, 150);
+        let size = s.object_size(&pair.new_manifest).unwrap();
+        let over = ManifestBudget {
+            each: size - 1,
+            plan: u64::MAX,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, over);
+        assert!(plan.raw.contains(&pair.new_manifest));
+        // The base counts too: a cap under its length leaves it in full.
+        let base_size = s.object_size(&pair.old_manifest).unwrap();
+        let small_base = ManifestBudget {
+            each: base_size - 1,
+            plan: u64::MAX,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, small_base);
+        assert!(plan.raw.contains(&pair.new_manifest));
+        // At the cap it is a delta.
+        let at = ManifestBudget {
+            each: size.max(base_size),
+            plan: u64::MAX,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, at);
+        assert!(plan.deltas.iter().any(|d| d.target == pair.new_manifest));
+    }
+
+    /// A commit holding each `(name, object)`, names in tree order.
+    fn commit_with_files(
+        s: &ObjectStore,
+        files: &[(&[u8], Hash)],
+        parents: Vec<Hash>,
+        msg: &str,
+    ) -> Hash {
+        let tree = put(
+            s,
+            &Object::Tree(Tree {
+                entries: files
+                    .iter()
+                    .map(|(name, object_hash)| TreeEntry {
+                        name: name.to_vec(),
+                        mode: EntryMode::Blob,
+                        object_hash: *object_hash,
+                    })
+                    .collect(),
+            }),
+        );
+        put(
+            s,
+            &Object::Commit(Commit::new_unannotated(
+                tree,
+                parents,
+                Identity::ed25519([7; 32]),
+                [0; 32],
+                msg.as_bytes().to_vec(),
+                msg.len() as u64,
+                [0; 64],
+            )),
+        )
+    }
+
+    #[test]
+    fn manifest_deltas_stop_at_the_per_plan_cap() {
+        let (_d, s) = store();
+        let chunks = many_chunks(300);
+        let (mut a_new, mut b_new) = (chunks.clone(), many_chunks(310));
+        a_new[10] = chunk_content(9, 64);
+        b_new[20] = chunk_content(8, 64);
+        let (a_old, b_old) = (
+            put_chunked_from(&s, &chunks),
+            put_chunked_from(&s, &many_chunks(310)),
+        );
+        let (a_new, b_new) = (put_chunked_from(&s, &a_new), put_chunked_from(&s, &b_new));
+        let old_tip = commit_with_files(&s, &[(b"a.bin", a_old), (b"b.bin", b_old)], vec![], "old");
+        let new_tip = commit_with_files(
+            &s,
+            &[(b"a.bin", a_new), (b"b.bin", b_new)],
+            vec![old_tip],
+            "new",
+        );
+        let pair = ManifestPair {
+            old_tip,
+            new_tip,
+            old_manifest: a_old,
+            new_manifest: a_new,
+        };
+        let work =
+            |old: Hash, new: Hash| s.object_size(&old).unwrap() + s.object_size(&new).unwrap();
+        let (a_work, b_work) = (work(a_old, a_new), work(b_old, b_new));
+        let sent = |plan: &PackPlan| {
+            [a_new, b_new]
+                .iter()
+                .filter(|m| plan.deltas.iter().any(|d| d.target == **m))
+                .count()
+        };
+        let both = ManifestBudget {
+            each: u64::MAX,
+            plan: a_work + b_work,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, both);
+        assert_eq!(sent(&plan), 2);
+        let one_short = ManifestBudget {
+            each: u64::MAX,
+            plan: a_work + b_work - 1,
+        };
+        let plan = plan_manifests(&s, &pair, ManifestDeltas::Held, one_short);
+        assert_eq!(sent(&plan), 1, "the rest goes in full");
+        assert_pack_reconstructs(&s, &plan, old_tip, new_tip);
+        let none = ManifestBudget {
+            each: u64::MAX,
+            plan: a_work.min(b_work) - 1,
+        };
+        assert_eq!(
+            sent(&plan_manifests(&s, &pair, ManifestDeltas::Held, none)),
+            0
+        );
+    }
+
+    #[test]
+    fn select_delta_bases_pairs_the_manifest_of_a_changed_chunked_path() {
+        let (_d, s) = store();
+        let pair = manifest_pair(&s, 30, 5);
+        let bases = select_delta_bases(&s, pair.new_tip, pair.old_tip).unwrap();
+        assert_eq!(
+            bases.manifests,
+            HashMap::from([(pair.new_manifest, pair.old_manifest)])
+        );
+        assert_eq!(
+            bases.chunks,
+            select_chunk_delta_bases(&s, pair.new_tip, pair.old_tip).unwrap()
+        );
+        // A path that was an inline blob has no manifest to pair.
+        let (_old, _blob, c_old) = inline_old_tip(&s, 1, 300_000);
+        let c_new = chunked_new_tip(&s, &many_chunks(10), c_old);
+        assert!(
+            select_delta_bases(&s, c_new, c_old)
+                .unwrap()
+                .manifests
+                .is_empty()
+        );
     }
 
     /// Split probing plans several ranges of one chain. Through one delta

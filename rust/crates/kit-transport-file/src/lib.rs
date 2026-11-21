@@ -1716,6 +1716,11 @@ fn remove_durably(path: &Path) -> io::Result<bool> {
 }
 
 impl Transport for FileTransport {
+    /// A `kit+file` remote is a directory kit writes and reads itself, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }
@@ -2029,6 +2034,13 @@ mod tests {
     // ------------------------------------------------------------------
     // Pack verb tests (6 tests)
     // ------------------------------------------------------------------
+
+    /// A `kit+file` remote takes a manifest delta.
+    #[test]
+    fn a_file_remote_accepts_manifest_deltas() {
+        let dir = tmp();
+        assert!(FileTransport::new(dir.path()).accepts_manifest_deltas());
+    }
 
     #[test]
     fn upload_and_download_pack() {

@@ -959,6 +959,16 @@ pub trait Transport: Send + Sync {
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
 
+    /// Whether a push may send a replacement chunk manifest as a delta against
+    /// the manifest the remote holds (SPEC-PACKFILE §3.2). `false`, the
+    /// default, sends every manifest in full. Only a transport whose remote
+    /// kit controls and reads with this crate's pack reader says `true`: a
+    /// managed or hosted remote may admit only full manifests and refuse a
+    /// delta one, so it must never be asked for one.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
+    }
+
     /// How [`Self::list_refs`] answers: an ordered read that pages, by
     /// default. A transport whose listing comes in one bounded frame, or
     /// whose listing may lag a write, says so.
@@ -1325,6 +1335,11 @@ mod tests {
         ));
         assert!(transport.uploaded.lock().unwrap().is_none());
         assert!(transport.stored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_transport_sends_full_manifests_unless_it_opts_in() {
+        assert!(!RecordingTransport::default().accepts_manifest_deltas());
     }
 
     impl Transport for RecordingTransport {

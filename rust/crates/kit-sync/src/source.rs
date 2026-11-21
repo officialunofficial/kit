@@ -148,6 +148,12 @@ pub trait RemoteSource {
     fn ref_listing(&self) -> kit_core::protocol::RefListing {
         kit_core::protocol::RefListing::Ordered
     }
+    /// Whether a push may send a replacement chunk manifest as a delta, as
+    /// [`Transport::accepts_manifest_deltas`]. A source says `false` unless it
+    /// reaches a remote kit controls; a hosted source keeps full manifests.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
+    }
     /// Both conditioned refs can advance atomically.
     fn supports_atomic_advance(&self) -> bool {
         false
@@ -322,6 +328,9 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn ref_listing(&self) -> kit_core::protocol::RefListing {
         self.transport.ref_listing()
+    }
+    fn accepts_manifest_deltas(&self) -> bool {
+        self.transport.accepts_manifest_deltas()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
