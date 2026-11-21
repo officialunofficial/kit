@@ -1476,6 +1476,13 @@ pub trait ObjectSink {
     fn orders_chunks(&self) -> bool {
         false
     }
+    /// Buffers that live as long as this sink, for the pipeline that cuts and
+    /// hashes the chunks of each large file it takes, so that a sequence of
+    /// files reuses one set. The default is none: each file allocates its own.
+    #[doc(hidden)]
+    fn chunk_buffers(&self) -> Option<&crate::chunker::ChunkBuffers> {
+        None
+    }
     /// Make the loose objects stored so far durable and visible, so a writer
     /// of many objects keeps its staged set bounded. An object in an open
     /// local pack becomes visible when the pack seals or at commit, so a

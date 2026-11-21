@@ -1737,18 +1737,36 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
+    // A sink that lends buffers gets the windows and chunks of a file back for
+    // the next one, so a sequence of large files holds one set. The reader is
+    // built here, not on the cutter's thread, so the windows are not allocated
+    // from the arena of a thread that ends with the file.
+    let buffers = sink.chunk_buffers();
+    let chunker = match buffers {
+        Some(buffers) => ChunkReader::with_buffers(FastCdc::v1(), reader, buffers),
+        None => ChunkReader::new(FastCdc::v1(), reader),
+    };
 
     let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(ChunkList, u64)> {
         scope.spawn(move || {
-            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut chunker = chunker;
             let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
             let mut running_total: u64 = 0;
             loop {
-                let chunk = match chunker.next_chunk() {
-                    Ok(Some(chunk)) => chunk,
+                let chunk = match chunker.next_chunk_ref() {
+                    Ok(Some(chunk)) => {
+                        let mut owned = buffers
+                            .map(crate::chunker::ChunkBuffers::chunk)
+                            .unwrap_or_default();
+                        owned.extend_from_slice(chunk);
+                        owned
+                    }
                     Ok(None) => {
                         if !batch.is_empty() {
                             let _ = tx.send(Ok(batch));
+                        }
+                        if let Some(buffers) = buffers {
+                            chunker.recycle(buffers);
                         }
                         return;
                     }
@@ -1800,6 +1818,9 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 Ok((hashes, batch)) => {
                     let before = chunks.len();
                     chunks.extend(hashes, &batch);
+                    if let Some(buffers) = buffers {
+                        buffers.give_chunks(batch);
+                    }
                     if checkpoint_due(before, chunks.len(), window)
                         && let Err(e) = sink.checkpoint()
                     {
@@ -2656,6 +2677,43 @@ mod tests {
         batch.commit().unwrap();
         assert!(store.contains(&expected.chunks()[0]));
         assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_batch_lends_its_buffers_to_each_large_file_and_the_ids_do_not_change() {
+        // The second file is shorter, so it starts in windows and chunk
+        // buffers that still hold the first file's bytes.
+        let first = pseudo_random(5 * 1024 * 1024, 0xB0F1);
+        let second = pseudo_random(3 * 1024 * 1024 + 17, 0xB0F2);
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        assert!(batch.chunk_buffers().is_some());
+        let ids: Vec<Hash> = [&first, &second, &first]
+            .into_iter()
+            .map(|data| {
+                store_large_file_streaming_with(
+                    &batch,
+                    io::Cursor::new(data.clone()),
+                    Path::new("lent.bin"),
+                    |sink, chunks| {
+                        chunks
+                            .iter()
+                            .map(|chunk| store_chunk_blob(sink, chunk))
+                            .collect()
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        batch.commit().unwrap();
+
+        let (_plain_dir, plain) = fresh_store();
+        assert!(plain.chunk_buffers().is_none());
+        assert_eq!(ids[0], store_file_object(&plain, &first).unwrap());
+        assert_eq!(ids[1], store_file_object(&plain, &second).unwrap());
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(read_blob(&store, &ids[0]).unwrap(), first);
+        assert_eq!(read_blob(&store, &ids[1]).unwrap(), second);
     }
 
     #[test]

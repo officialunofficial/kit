@@ -802,6 +802,9 @@ impl ObjectSink for HashProgressSink<'_> {
     fn orders_chunks(&self) -> bool {
         self.inner.orders_chunks()
     }
+    fn chunk_buffers(&self) -> Option<&kit_core::chunker::ChunkBuffers> {
+        self.inner.chunk_buffers()
+    }
     fn has(&self, hash: &Hash) -> bool {
         self.inner.has(hash)
     }

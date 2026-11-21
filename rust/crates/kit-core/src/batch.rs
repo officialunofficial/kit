@@ -316,6 +316,8 @@ pub struct WriteBatch<'s> {
     // can no longer promise that a hash it returned is durable. Every later
     // write, checkpoint and commit fails.
     failed: AtomicBool,
+    // Windows and chunk buffers that each large file of this batch reuses.
+    chunk_buffers: crate::chunker::ChunkBuffers,
 }
 
 impl<'s> WriteBatch<'s> {
@@ -329,6 +331,7 @@ impl<'s> WriteBatch<'s> {
             pack_catalog: OnceLock::new(),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
+            chunk_buffers: crate::chunker::ChunkBuffers::default(),
         }
     }
 
@@ -1260,6 +1263,10 @@ impl ObjectSink for WriteBatch<'_> {
 
     fn orders_chunks(&self) -> bool {
         self.pack_guard().is_some()
+    }
+
+    fn chunk_buffers(&self) -> Option<&crate::chunker::ChunkBuffers> {
+        Some(&self.chunk_buffers)
     }
 
     fn has(&self, h: &Hash) -> bool {
