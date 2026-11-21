@@ -2,7 +2,8 @@
 //! order, everything else stays loose.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use tempfile::TempDir;
 
@@ -411,4 +412,126 @@ fn threads_share_one_pack_and_every_chunk_lands() {
         let id = HashedChunk::new(chunk).unwrap().id();
         assert_eq!(store.read(&id).unwrap(), blob_bytes(chunk));
     }
+}
+
+/// A file of `len` deterministic bytes that cuts into many chunks.
+fn big_file(dir: &Path, name: &str, len: usize) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, bytes(77, len)).unwrap();
+    path
+}
+
+fn only_pack_name(store: &ObjectStore) -> String {
+    let packs = files_in_pack_dir(store, ".pack");
+    assert_eq!(packs.len(), 1);
+    packs[0].file_name().unwrap().to_string_lossy().into_owned()
+}
+
+#[test]
+fn a_file_packs_the_same_through_the_sequential_and_the_fan_out_path() {
+    let work = TempDir::new().unwrap();
+    let file = big_file(work.path(), "big.bin", 6 << 20);
+
+    let (_a, _la, sequential) = fresh_store();
+    let batch = sequential.batch();
+    let (manifest_a, _) = crate::worktree::hash_file_with_metadata(&batch, &file).unwrap();
+    batch.commit().unwrap();
+
+    let (_b, _lb, fanned) = fresh_store();
+    let batch = fanned.batch();
+    let (manifest_b, _) = crate::worktree::hash_file_with_metadata_with(&batch, &file, |sink, chunks| {
+        assert!(sink.orders_chunks());
+        let hashed = chunks
+            .iter()
+            .map(|chunk| crate::worktree::hash_chunk(chunk))
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::worktree::put_hashed_chunks(sink, &hashed)
+    })
+    .unwrap();
+    batch.commit().unwrap();
+
+    assert_eq!(manifest_a, manifest_b);
+    // The pack name is the digest of its bytes.
+    assert_eq!(only_pack_name(&sequential), only_pack_name(&fanned));
+    assert_eq!(loose(&sequential), 1, "one loose manifest");
+    assert_eq!(loose(&fanned), 1);
+}
+
+#[test]
+fn a_file_through_a_per_object_batch_stays_loose() {
+    let work = TempDir::new().unwrap();
+    let file = big_file(work.path(), "big.bin", 3 << 20);
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch_with_policy(SyncPolicy::PerObject);
+    crate::worktree::hash_file_with_metadata(&batch, &file).unwrap();
+    batch.commit().unwrap();
+    assert_eq!(pairs(&store), 0);
+    assert!(loose(&store) > 10);
+}
+
+/// A sink that says which method took each chunk.
+#[derive(Default)]
+struct Routing {
+    order: bool,
+    with_origin: Mutex<usize>,
+    without_origin: Mutex<usize>,
+}
+
+impl ObjectSink for Routing {
+    fn put(&self, bytes: &[u8]) -> StoreResult<Hash> {
+        Ok(crate::object::object_id_from_bytes(bytes))
+    }
+    fn put_parts(&self, parts: &[&[u8]]) -> StoreResult<Hash> {
+        *self.without_origin.lock().unwrap() += 1;
+        Ok(crate::object::object_id_from_parts(parts))
+    }
+    fn put_chunk_parts(
+        &self,
+        parts: &[&[u8]],
+        _origin: crate::store::ChunkOrigin<'_>,
+    ) -> StoreResult<Hash> {
+        *self.with_origin.lock().unwrap() += 1;
+        Ok(crate::object::object_id_from_parts(parts))
+    }
+    fn has(&self, _h: &Hash) -> bool {
+        false
+    }
+    fn orders_chunks(&self) -> bool {
+        self.order
+    }
+}
+
+#[test]
+fn the_default_chunk_route_keeps_the_origin_a_source_sink_reads() {
+    let work = TempDir::new().unwrap();
+    let file = big_file(work.path(), "big.bin", 3 << 20);
+
+    // A sink that does not ask for ordered chunks sees none of the token.
+    let plain = Routing::default();
+    crate::worktree::hash_file_with_metadata(&plain, &file).unwrap();
+    assert!(*plain.with_origin.lock().unwrap() > 10);
+
+    // One that asks gets the same routing from the default, with the origin.
+    let ordered = Routing {
+        order: true,
+        ..Routing::default()
+    };
+    crate::worktree::hash_file_with_metadata(&ordered, &file).unwrap();
+    assert_eq!(
+        *ordered.with_origin.lock().unwrap(),
+        *plain.with_origin.lock().unwrap()
+    );
+    assert_eq!(*ordered.without_origin.lock().unwrap(), 1, "the manifest");
+
+    // A token with no origin falls back to `put_parts`.
+    let chunk = HashedChunk::new(b"no origin").unwrap();
+    plain.put_hashed_chunk(&chunk).unwrap();
+    assert_eq!(*plain.without_origin.lock().unwrap(), 2);
+}
+
+#[test]
+fn the_sinks_that_keep_no_bytes_do_not_ask_for_ordered_chunks() {
+    let (_dir, _layout, store) = fresh_store();
+    assert!(!store.orders_chunks());
+    assert!(!crate::store::HashOnlySink::default().orders_chunks());
 }

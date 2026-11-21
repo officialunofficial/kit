@@ -634,3 +634,56 @@ fn a_dry_run_of_a_file_of_many_chunks_stores_nothing_and_reports_what_add_stages
     assert_eq!(idx.entries[0].path, "big.bin");
     assert!(object_files(&f) > before);
 }
+
+/// The loose object files and the local packs of a repository.
+fn loose_and_packs(f: &Fixture) -> (usize, usize) {
+    let objects = f.root.join(".kit/objects");
+    let mut loose = 0;
+    for shard in fs::read_dir(&objects).unwrap() {
+        let shard = shard.unwrap().path();
+        let name = shard.file_name().unwrap().to_string_lossy().into_owned();
+        if shard.is_dir() && name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+            loose += fs::read_dir(&shard)
+                .unwrap()
+                .filter(|e| !e.as_ref().unwrap().file_name().to_string_lossy().starts_with('.'))
+                .count();
+        }
+    }
+    let packs = fs::read_dir(objects.join("pack"))
+        .map(|dir| {
+            dir.filter(|e| {
+                let name = e.as_ref().unwrap().file_name().to_string_lossy().into_owned();
+                !name.starts_with('.') && name.ends_with(".pack")
+            })
+            .count()
+        })
+        .unwrap_or(0);
+    (loose, packs)
+}
+
+#[test]
+fn a_large_file_is_added_as_one_pack_and_one_loose_manifest() {
+    let f = Fixture::new(&[], &[]);
+    let data = pseudo_random(24 * 1024 * 1024);
+    fs::write(f.root.join("big.bin"), &data).unwrap();
+    f.paths(&["big.bin"]).unwrap();
+
+    assert_eq!(loose_and_packs(&f), (1, 1));
+    let idx = index::read_index(&f.layout).unwrap();
+    let Object::ChunkedBlob(manifest) = f.store.read_object(&idx.entries[0].object_hash).unwrap()
+    else {
+        panic!("a file of many chunks is a manifest");
+    };
+    assert!(manifest.chunks().len() > 100);
+    for id in manifest.chunks() {
+        f.store.read(id).unwrap();
+    }
+    // An edit rewrites only the changed chunks, into a small pack.
+    let mut edited = data;
+    edited[12 << 20] ^= 0xFF;
+    fs::write(f.root.join("big.bin"), &edited).unwrap();
+    f.paths(&["big.bin"]).unwrap();
+    let (loose, packs) = loose_and_packs(&f);
+    assert_eq!(packs, 2);
+    assert_eq!(loose, 2, "the old and the new manifest");
+}
