@@ -610,6 +610,11 @@ impl<'s> WriteBatch<'s> {
     pub fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
         let id = chunk.id();
         let parts = chunk.parts();
+        // A chunk of the chunker's size or less fits any pack. A larger one
+        // is not a chunk of a cut file, so it takes the checked loose path.
+        if chunk.len() > crate::chunker::MAX_SIZE + crate::serialize::BLOB_PROLOGUE_LEN {
+            return self.write_parts(&parts);
+        }
         let Some(guard) = self.pack_guard() else {
             return self.write_prehashed(id, &parts);
         };
@@ -623,7 +628,7 @@ impl<'s> WriteBatch<'s> {
         let (full, result) = {
             let mut open = self.pack.lock().expect("batch pack mutex poisoned");
             let full = match open.as_ref() {
-                Some(writer) if writer.has_room(chunk.len()) => None,
+                Some(writer) if writer.holds(&id) || writer.has_room(chunk.len()) => None,
                 Some(_) => open.replace(LocalPackWriter::for_batch(self.store, guard)?),
                 None => {
                     *open = Some(LocalPackWriter::for_batch(self.store, guard)?);
@@ -686,7 +691,7 @@ impl<'s> WriteBatch<'s> {
     /// mutex.
     #[must_use]
     pub fn contains(&self, h: &Hash) -> bool {
-        self.is_staged(h) || self.store.contains(h)
+        self.is_staged(h) || self.pack_holds(h) || self.store.contains(h)
     }
 
     fn is_staged(&self, h: &Hash) -> bool {
@@ -701,7 +706,8 @@ impl<'s> WriteBatch<'s> {
     /// then all renames, then deduplicated shard-directory flushes.
     ///
     /// After `commit()` returns `Ok`, every hash returned by
-    /// [`Self::write`]/[`Self::write_parts`] is durable AND visible.
+    /// [`Self::write`], [`Self::write_parts`] and [`Self::put_hashed_chunk`] is
+    /// durable AND visible. It publishes the open local pack first.
     /// Callers MUST call this before reading any object written by this
     /// batch and before writing any ref/index that references one.
     ///
@@ -718,6 +724,11 @@ impl<'s> WriteBatch<'s> {
     /// [`Self::commit`] for the objects staged so far, keeping the batch
     /// open. The batch then stages new objects from empty, so a caller that
     /// writes many objects bounds the batch by checkpointing in windows.
+    ///
+    /// A checkpoint leaves the open local pack open, so the chunks in it stay
+    /// invisible until the pack seals or the batch commits. It seals the pack
+    /// first when a staged loose object is not a plain blob, so a manifest, tree
+    /// or commit is never visible before the chunks it names.
     ///
     /// The objects a checkpoint makes visible are not yet named by any ref or
     /// index. A crash leaves them unreferenced, which gc collects. The caller

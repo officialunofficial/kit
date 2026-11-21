@@ -547,3 +547,85 @@ fn the_sinks_that_keep_no_bytes_do_not_ask_for_ordered_chunks() {
     assert!(!store.orders_chunks());
     assert!(!crate::store::HashOnlySink::default().orders_chunks());
 }
+
+#[test]
+fn a_pack_holds_exactly_its_byte_limit() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    // 256 blobs of exactly 256 KiB with their prologues are 64 MiB.
+    let data = (256 << 10) - crate::serialize::BLOB_PROLOGUE_LEN;
+    for n in 0..256u64 {
+        batch
+            .put_hashed_chunk(&HashedChunk::new(&bytes(n, data)).unwrap())
+            .unwrap();
+    }
+    assert_eq!(pairs(&store), 0, "64 MiB fits");
+    batch
+        .put_hashed_chunk(&HashedChunk::new(&bytes(256, data)).unwrap())
+        .unwrap();
+    assert_eq!(pairs(&store), 1, "one byte more does not");
+}
+
+#[test]
+fn a_chunk_above_the_chunker_size_is_stored_loose() {
+    let (_dir, _layout, store) = fresh_store();
+    let data = bytes(12, crate::chunker::MAX_SIZE + 1);
+    let batch = store.batch();
+    let id = batch
+        .put_hashed_chunk(&HashedChunk::new(&data).unwrap())
+        .unwrap();
+    batch.commit().unwrap();
+    assert_eq!(pairs(&store), 0);
+    assert!(store.path_for(&id).exists());
+}
+
+#[test]
+fn a_staged_tree_makes_a_checkpoint_seal_the_pack() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    batch
+        .put_hashed_chunk(&HashedChunk::new(&bytes(13, 20_000)).unwrap())
+        .unwrap();
+    let tree = crate::serialize::serialize(&crate::object::Object::Tree(crate::object::Tree {
+        entries: Vec::new(),
+    }))
+    .unwrap();
+    batch.write(&tree).unwrap();
+    batch.checkpoint().unwrap();
+    assert_eq!(pairs(&store), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_checkpoint_publishes_the_pack_before_it_renames_a_manifest() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    let data = bytes(14, 20_000);
+    let id = batch
+        .put_hashed_chunk(&HashedChunk::new(&data).unwrap())
+        .unwrap();
+    let manifest = crate::serialize::serialize(&crate::object::Object::ChunkedBlob(
+        crate::object::ChunkedBlob::from_parts(
+            data.len() as u64,
+            0,
+            vec![id],
+            vec![data.len() as u64],
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    let manifest_id = batch.write(&manifest).unwrap();
+    // The pack cannot be published, so the manifest must not become visible.
+    for path in fs::read_dir(store.pack_dir()).unwrap() {
+        fs::remove_file(path.unwrap().path()).unwrap();
+    }
+    assert!(batch.checkpoint().is_err());
+    assert!(!store.path_for(&manifest_id).exists());
+    assert!(batch.commit().is_err());
+}
+
+#[test]
+fn the_source_sink_does_not_ask_for_ordered_chunks() {
+    let (_dir, _layout, store) = fresh_store();
+    assert!(!crate::store::EphemeralSink::new(&store).orders_chunks());
+}
