@@ -196,6 +196,32 @@ impl ObjectSpool {
         self.read_before(id, usize::MAX, |_| Ok(()))
     }
 
+    /// The type and, for a blob, the payload length of a staged object, read
+    /// from its ten-byte head alone, as [`crate::store::ObjectStore::object_head`]
+    /// reads a stored one. The rest of the object is neither read nor hashed.
+    ///
+    /// # Errors
+    /// A local read error, or a head that is not an object's.
+    ///
+    /// # Panics
+    /// If a previous spool operation panicked while holding its lock.
+    pub fn head(&self, id: &Hash) -> StoreResult<Option<(ObjectType, Option<u64>)>> {
+        let mut spool = self.inner.lock().expect("object spool mutex");
+        let Some(frame) = spool.by_id.get(id).copied() else {
+            return Ok(None);
+        };
+        let mut head = [0; 10];
+        let len = head.len().min(frame.len as usize);
+        spool.writer.flush()?;
+        let file = match frame.segment {
+            0 => spool.writer.get_ref(),
+            segment => &spool.adopted[segment as usize - 1],
+        };
+        read_spooled(file, frame.offset, &mut head[..len])?;
+        drop(spool);
+        Ok(Some(crate::store::head_at(&mut &head[..len])?))
+    }
+
     pub(super) fn read_before<E: From<StoreError>>(
         &self,
         id: &Hash,
@@ -398,5 +424,44 @@ mod tests {
             Err(StoreError::ObjectNotFound(_))
         ));
         assert!(!window.contains(&id));
+    }
+
+    #[test]
+    fn the_head_of_a_staged_object_comes_from_its_first_ten_bytes() {
+        use crate::object::Tree;
+        let dir = tempfile::tempdir().unwrap();
+        let window = ObjectSpool::new(dir.path()).unwrap();
+        let (blob_id, blob_bytes) = blob(&vec![3; 70_000]);
+        let tree = Object::Tree(Tree {
+            entries: Vec::new(),
+        });
+        let (tree_id, tree_bytes) = (tree.id().unwrap(), serialize(&tree).unwrap());
+
+        let donor = ObjectSpool::new(dir.path()).unwrap();
+        donor
+            .append(0, blob_id, ObjectType::Blob, &blob_bytes)
+            .unwrap();
+        window
+            .append(1, tree_id, ObjectType::Tree, &tree_bytes)
+            .unwrap();
+        window.adopt(&donor, &donor.take_order()).unwrap();
+        drop(donor);
+
+        assert_eq!(
+            window.head(&blob_id).unwrap(),
+            Some((ObjectType::Blob, Some(70_000)))
+        );
+        assert_eq!(
+            window.head(&tree_id).unwrap(),
+            Some((ObjectType::Tree, None))
+        );
+        assert_eq!(window.head(&[0; 32]).unwrap(), None);
+
+        // A frame too short for a head is refused, not read past.
+        let (short, _) = blob(b"short");
+        window
+            .append(2, short, ObjectType::Blob, &[1, 2, 3])
+            .unwrap();
+        assert!(window.head(&short).is_err());
     }
 }

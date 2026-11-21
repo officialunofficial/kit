@@ -174,6 +174,7 @@ impl<'a> Publication<'a> {
         };
         let loose = self.store.batch();
         let mut loose_ids = Vec::new();
+        let mut seen = HashSet::new();
         let mut pack = None;
         for (_, id, len, _) in window.spool.take_order() {
             if self.packs(len as usize) {
@@ -182,7 +183,7 @@ impl<'a> Publication<'a> {
                 }
                 let bytes = staged(&window.spool, &id)?;
                 pack.as_mut().expect("created local pack").write(&bytes)?;
-            } else {
+            } else if seen.insert(id) {
                 loose_ids.push(id);
             }
         }
@@ -236,6 +237,12 @@ impl<'a> PendingView<'a> {
         self.spool.map_or(Ok(None), |spool| spool.read(id))
     }
 
+    /// The head of a staged object. A staged object's bytes are checked when
+    /// they are written out, so a head read does not read the rest.
+    fn pending_head(&self, id: &Hash) -> StoreResult<Option<(ObjectType, Option<u64>)>> {
+        self.spool.map_or(Ok(None), |spool| spool.head(id))
+    }
+
     pub(crate) fn contains(&self, id: &Hash) -> bool {
         self.spool.is_some_and(|spool| spool.contains(id)) || self.store.contains(id)
     }
@@ -256,21 +263,16 @@ impl ObjectSource for PendingView<'_> {
 }
 impl ClosureSource for PendingView<'_> {
     fn object_type(&self, id: &Hash) -> StoreResult<ObjectType> {
-        if let Some(bytes) = self.pending(id)? {
-            Ok(serialize::deserialize_owned(bytes)?.object_type())
+        if let Some((ty, _)) = self.pending_head(id)? {
+            Ok(ty)
         } else {
             self.store.object_type(id)
         }
     }
 
     fn object_head(&self, id: &Hash) -> StoreResult<(ObjectType, Option<u64>)> {
-        if let Some(bytes) = self.pending(id)? {
-            let object = serialize::deserialize_owned(bytes)?;
-            let len = match &object {
-                Object::Blob(blob) => Some(blob.data.len() as u64),
-                _ => None,
-            };
-            Ok((object.object_type(), len))
+        if let Some(head) = self.pending_head(id)? {
+            Ok(head)
         } else {
             self.store.object_head(id)
         }
@@ -379,6 +381,12 @@ mod tests {
         assert!(view.contains(&mid_id) && view.contains(&large_id));
         assert_eq!(view.read(&mid_id).unwrap(), mid);
         assert_eq!(view.read(&large_id).unwrap(), large);
+        // The closure check asks for a head, which reads ten bytes.
+        assert_eq!(
+            view.object_head(&mid_id).unwrap(),
+            (ObjectType::Blob, Some(300 << 10))
+        );
+        assert_eq!(view.object_type(&large_id).unwrap(), ObjectType::Blob);
 
         publication
             .seal(&NoopObserver, "origin", &mut applied)

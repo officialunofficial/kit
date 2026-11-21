@@ -1291,7 +1291,9 @@ fn parse_type(prologue: &[u8]) -> StoreResult<crate::object::ObjectType> {
     Ok(object_type)
 }
 
-fn head_at(reader: &mut impl Read) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+pub(crate) fn head_at(
+    reader: &mut impl Read,
+) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
     let mut head = [0; 10];
     let len = read_header_prefix(reader, &mut head)?;
     let object_type = parse_type(&head[..len])?;
