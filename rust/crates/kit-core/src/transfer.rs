@@ -2463,7 +2463,7 @@ mod tests {
 
     /// `pair_blob_to_chunks` on the `chunks` of a file whose old tip held
     /// `old` as one blob, within `budget`.
-    fn pair_with_budget(
+    fn pair_blob_within(
         s: &ObjectStore,
         old: &[u8],
         chunks: &[Vec<u8>],
@@ -2497,7 +2497,7 @@ mod tests {
             reads: 100,
             pairs: 4,
         };
-        let (old_blob, out) = pair_with_budget(&s, &old, &chunks, budget);
+        let (old_blob, out) = pair_blob_within(&s, &old, &chunks, budget);
         assert_eq!(out.len(), 4);
         assert!(out.values().all(|base| *base == old_blob));
         // The first chunks in file order are the ones paired.
@@ -2520,14 +2520,14 @@ mod tests {
             reads: 3,
             pairs: 100,
         };
-        let (_, out) = pair_with_budget(&s, &old, &chunks, budget);
+        let (_, out) = pair_blob_within(&s, &old, &chunks, budget);
         assert!(out.is_empty());
         // One more read and the same chunk pairs.
         let budget = BlobBudget {
             reads: 4,
             pairs: 100,
         };
-        let (old_blob, out) = pair_with_budget(&s, &old, &chunks, budget);
+        let (old_blob, out) = pair_blob_within(&s, &old, &chunks, budget);
         assert_eq!(out.get(&put_blob(&s, chunks[3].clone())), Some(&old_blob));
         assert_eq!(BlobBudget::default().reads, 4_096);
     }
