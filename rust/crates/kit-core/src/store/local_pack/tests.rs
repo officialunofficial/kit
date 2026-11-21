@@ -1919,12 +1919,17 @@ fn an_index_outside_the_row_budget_routes_without_reopening_on_misses() {
     assert_ne!(prefix(&absent), prefix(&id));
     assert!(catalog.candidates(&absent).next().is_none());
     let handles = Handles::default();
-    assert!(locator.find(&handles, &id, routes[0].1).unwrap().is_some());
+    assert!(
+        locator
+            .find(&handles, &id, routes[0].1, None)
+            .unwrap()
+            .is_some()
+    );
     let mut different = id;
     different[31] ^= 1;
     assert!(
         locator
-            .find(&handles, &different, routes[0].1)
+            .find(&handles, &different, routes[0].1, None)
             .unwrap()
             .is_none()
     );
@@ -1991,7 +1996,7 @@ fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
         for id in &ids {
             let frames: Vec<_> = catalog
                 .candidates(id)
-                .filter_map(|(pack, row)| pack.find(&handles, id, row).unwrap())
+                .filter_map(|(pack, row)| pack.find(&handles, id, row, None).unwrap())
                 .collect();
             assert_eq!(frames, [strict.find(id).unwrap()]);
         }
@@ -2000,9 +2005,10 @@ fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
                 let mut absent = [trailing; 32];
                 absent[0] = first;
                 assert!(
-                    catalog
-                        .candidates(&absent)
-                        .all(|(pack, row)| pack.find(&handles, &absent, row).unwrap().is_none())
+                    catalog.candidates(&absent).all(|(pack, row)| pack
+                        .find(&handles, &absent, row, None)
+                        .unwrap()
+                        .is_none())
                 );
             }
         }
@@ -2368,6 +2374,14 @@ pub(super) fn damage_frame(pair: &Pair, id: &Hash, at: usize, change: impl FnOnc
     fs::write(&pair.pack, bytes).unwrap();
 }
 
+/// Change one byte of an object's five-byte frame header.
+pub(super) fn damage_header(pair: &Pair, id: &Hash, at: usize, change: impl FnOnce(&mut u8)) {
+    let frame = super::Index::open(pair).unwrap().find(id).unwrap();
+    let mut bytes = fs::read(&pair.pack).unwrap();
+    change(&mut bytes[usize::try_from(frame.offset).unwrap() - 5 + at]);
+    fs::write(&pair.pack, bytes).unwrap();
+}
+
 #[test]
 fn the_mark_checks_a_packed_chunk_by_its_head_and_hashes_none_of_it() {
     let (_dir, layout, store) = fresh();
@@ -2489,7 +2503,7 @@ fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
     }
 }
 
-fn cut_pack_short(pair: &Pair) {
+pub(super) fn cut_pack_short(pair: &Pair) {
     let cut = fs::metadata(&pair.pack).unwrap().len() - 100;
     fs::OpenOptions::new()
         .write(true)

@@ -45,6 +45,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
 - Commands that read a few objects, such as `cat-file`, `log -n 1` and a no-op `fetch`, find local packs with far less CPU: a store of up to 40 packs probes its index files instead of loading every row, and a larger one builds its object routes in near-linear time and with fewer system calls per pack. Resolving a short hash no longer checksums every index.
+- Fetch checks that each local pack is still current once, not at every read, while it checks that the fetched history is complete and while it verifies the signatures of that history, and it reads the type of an object and its payload head in one read. The full completeness check that an unsigned fetch makes on a large clone takes about half the CPU.
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 - **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
