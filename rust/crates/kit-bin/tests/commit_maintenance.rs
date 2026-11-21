@@ -50,14 +50,15 @@ fn add_large(repo: &Path, n: u64) {
 }
 
 fn pairs(repo: &Path) -> usize {
-    fs::read_dir(repo.join(".kit/objects/pack"))
-        .unwrap()
-        .filter(|entry| {
-            let name = entry.as_ref().unwrap().file_name();
-            let name = name.to_string_lossy();
-            !name.starts_with('.') && name.ends_with(".pack")
-        })
-        .count()
+    fs::read_dir(repo.join(".kit/objects/pack")).map_or(0, |entries| {
+        entries
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && name.ends_with(".pack")
+            })
+            .count()
+    })
 }
 
 fn stamp(repo: &Path) -> Option<Vec<u8>> {
