@@ -17,8 +17,10 @@ use crate::hash::Hash;
 use crate::object::{Object, object_id_from_parts};
 use crate::serialize;
 
+use super::local_pack::Currency;
 use super::{
-    ChunkOrigin, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, check_hash,
+    ChunkOrigin, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PruneGuard, StoreError, StoreResult,
+    check_hash,
 };
 
 /// Read source shared by [`ObjectStore`] and snapshot overlays, so
@@ -120,6 +122,61 @@ impl ClosureSource for ObjectStore {
 
     fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
         ObjectStore::object_head(self, h)
+    }
+}
+
+/// The durable store, read by a walk that holds a [`PruneGuard`].
+///
+/// The guard keeps gc, index repair and every other unlink of a pack, an
+/// index or a loose object from running, so a pair that a read found current
+/// stays so for the rest of the walk. The view checks each pair once and not
+/// at every read. A pair that fails a read is checked again at its next one,
+/// and a catalog refreshed in the middle of the walk gives new pairs, which
+/// are checked on their own first read.
+///
+/// Build the view before the walk's first read and keep the guard until the
+/// walk ends.
+#[derive(Debug)]
+pub struct GuardedStore<'a> {
+    store: &'a ObjectStore,
+    currency: Currency,
+}
+
+impl ObjectStore {
+    /// A view of this store for a walk that holds `guard`.
+    ///
+    /// # Errors
+    /// The guard belongs to a different store.
+    pub fn guarded<'a>(&'a self, guard: &'a PruneGuard) -> StoreResult<GuardedStore<'a>> {
+        self.check_prune_guard(guard)?;
+        Ok(GuardedStore {
+            store: self,
+            currency: Currency::default(),
+        })
+    }
+}
+
+impl ObjectSource for GuardedStore<'_> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.store.read_in(h, Some(&self.currency))
+    }
+
+    fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.store.read_unverified_in(h, Some(&self.currency))
+    }
+
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        self.store.read_object_in(h, Some(&self.currency))
+    }
+}
+
+impl ClosureSource for GuardedStore<'_> {
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.store.object_type_in(h, Some(&self.currency))
+    }
+
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        self.store.object_head_in(h, Some(&self.currency))
     }
 }
 

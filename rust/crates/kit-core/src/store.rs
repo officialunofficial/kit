@@ -62,7 +62,9 @@ pub(crate) use local_pack::SealJob;
 pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
-pub use source::{ClosureSource, DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
+pub use source::{
+    ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
+};
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.
@@ -768,9 +770,18 @@ impl ObjectStore {
         h: &Hash,
         use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
+        self.read_with_in(h, None, use_location)
+    }
+
+    fn read_with_in<T>(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+        use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        self.packs.lookup(self, h, true, use_location)
+        self.packs.lookup_in(self, h, true, currency, use_location)
     }
 
     fn verify_at(location: &local_pack::Location, h: &Hash, bytes: &[u8]) -> StoreResult<()> {
@@ -790,7 +801,11 @@ impl ObjectStore {
 
     /// Read and verify the contents of the requested object.
     pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_in(h, None)
+    }
+
+    fn read_in(&self, h: &Hash, currency: Option<&local_pack::Currency>) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             Self::verify_at(&location, h, &bytes)?;
             Ok(bytes)
@@ -858,7 +873,15 @@ impl ObjectStore {
     /// no-verify choice at the boundary instead of threading a flag
     /// through render code.
     pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_unverified_in(h, None)
+    }
+
+    fn read_unverified_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             if location.is_packed() {
                 Self::verify_at(&location, h, &bytes)?;
@@ -877,13 +900,20 @@ impl ObjectStore {
     /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
     /// for a short file, bad magic/version, or unknown tag.
     pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        self.packs.lookup(self, h, true, |location| {
+        self.object_type_in(h, None)
+    }
+
+    fn object_type_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<crate::object::ObjectType> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
             let mut prologue = [0; 6];
-            location
-                .open()?
-                .read_exact(&mut prologue)
-                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
-            parse_type(&prologue)
+            match location.read_head(&mut prologue)? {
+                Ok(6) => parse_type(&prologue),
+                _ => Err(StoreError::Decode(KitError::EmptyData)),
+            }
         })
     }
 
@@ -961,9 +991,18 @@ impl ObjectStore {
     /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        self.packs.lookup(self, h, true, |location| {
-            let mut contents = location.open()?;
-            head_at(&mut contents)
+        self.object_head_in(h, None)
+    }
+
+    fn object_head_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
+            let mut head = [0; 10];
+            let len = location.read_head(&mut head)??;
+            head_of(&head[..len])
         })
     }
 
@@ -984,7 +1023,15 @@ impl ObjectStore {
     /// payload's length goes to [`serialize::deserialize`], so every
     /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        self.read_with(h, |location| {
+        self.read_object_in(h, None)
+    }
+
+    fn read_object_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Object> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             let (actual, decoded) = verified_id_and_object(&bytes);
             check_hash(h, &actual)?;
@@ -1371,11 +1418,16 @@ pub(crate) fn head_at(
 ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
     let mut head = [0; 10];
     let len = read_header_prefix(reader, &mut head)?;
-    let object_type = parse_type(&head[..len])?;
+    head_of(&head[..len])
+}
+
+/// The type and blob length that the first bytes of an object name.
+fn head_of(head: &[u8]) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+    let object_type = parse_type(head)?;
     if object_type != crate::object::ObjectType::Blob {
         return Ok((object_type, None));
     }
-    let size: [u8; 4] = head[..len]
+    let size: [u8; 4] = head
         .get(6..10)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(StoreError::Decode(KitError::EmptyData))?;

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::hash::Hash;
-use crate::pack::{HEADER_LEN, MAGIC, read_spooled};
+use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, MAGIC, read_spooled};
 
 use super::index::{
     FANOUT_END, Frame, INDEX_BASE_LEN, INDEX_ROW_LEN, MAGIC_INDEX, Pair, Stamp, invalid, le_u32,
@@ -173,6 +173,9 @@ pub(in crate::store) struct Locator {
     fanout: Box<[u8; FANOUT_END]>,
     rows: Box<[u8]>,
     prefixes: Box<[u32]>,
+    /// How many times this locator checked that its pair is current.
+    #[cfg(test)]
+    pub(super) checks: std::sync::atomic::AtomicUsize,
 }
 
 impl Locator {
@@ -259,6 +262,8 @@ impl Locator {
             fanout,
             rows: rows.into_boxed_slice(),
             prefixes: prefixes.into_boxed_slice(),
+            #[cfg(test)]
+            checks: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -287,6 +292,9 @@ impl Locator {
     }
 
     pub(super) fn check_current(&self) -> StoreResult<bool> {
+        #[cfg(test)]
+        self.checks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Retirement unlinks the pack first. Check its name last so a
         // live index alone cannot authorize a read through a cached handle.
         if Self::named_stamp(&self.pair.index)?.as_ref() != Some(&self.index_stamp) {
@@ -299,6 +307,18 @@ impl Locator {
             return self.changed();
         }
         Ok(pack == self.pack_stamp)
+    }
+
+    /// [`Self::check_current`], skipped when `currency` already found this
+    /// locator exact.
+    pub(super) fn check_current_once(
+        self: &Arc<Self>,
+        currency: Option<&Currency>,
+    ) -> StoreResult<bool> {
+        match currency {
+            Some(currency) => currency.check(self),
+            None => self.check_current(),
+        }
     }
 
     fn changed<T>(&self) -> StoreResult<T> {
@@ -347,12 +367,13 @@ impl Locator {
         handles: &Handles,
         id: &Hash,
         row: Option<usize>,
+        currency: Option<&Currency>,
     ) -> StoreResult<Option<Frame>> {
         let file = if self.rows.is_empty() {
             if row.is_none() && self.bucket(id[0]).is_empty() {
                 return Ok(None);
             }
-            self.check_current()?;
+            self.check_current_once(currency)?;
             Some(handles.get(self, Member::Index)?)
         } else {
             None
@@ -426,8 +447,10 @@ impl Locator {
         Ok(())
     }
 
-    pub(super) fn open_frame(&self, file: &File, frame: Frame) -> StoreResult<()> {
-        if !self.check_current()? {
+    /// Check that the pair is still the one this locator read. `checked` says
+    /// a guarded walk found it exact already.
+    fn confirm_pack(&self, file: &File, checked: bool) -> StoreResult<()> {
+        if !checked && !self.check_current()? {
             // Reuse can touch a pack's timestamps without replacing it.
             let mut header = [0; HEADER_LEN];
             read_spooled(file, 0, &mut header).map_err(|e| self.pair.context(e))?;
@@ -437,16 +460,106 @@ impl Locator {
                 return Err(self.pair.error("pack size or count changed"));
             }
         }
+        Ok(())
+    }
+
+    fn frame_start(&self, frame: Frame) -> StoreResult<u64> {
         let (start, _) = frame
             .extent(self.trailer)
             .ok_or_else(|| self.pair.error("invalid frame extent"))?;
-        let mut header = [0; crate::pack::ENTRY_FRAME_LEN];
-        read_spooled(file, start, &mut header).map_err(|e| self.pair.context(e))?;
-        let len = read_frame_header(&mut header.as_slice()).map_err(|e| self.pair.context(e))?;
+        Ok(start)
+    }
+
+    fn check_frame_len(&self, header: &[u8], frame: Frame) -> StoreResult<()> {
+        let len = read_frame_header(&mut &*header).map_err(|e| self.pair.context(e))?;
         if len != frame.len {
             return Err(self.pair.error("index and pack disagree on frame length"));
         }
         Ok(())
+    }
+
+    pub(super) fn open_frame(&self, file: &File, frame: Frame, checked: bool) -> StoreResult<()> {
+        self.confirm_pack(file, checked)?;
+        let start = self.frame_start(frame)?;
+        let mut header = [0; ENTRY_FRAME_LEN];
+        read_spooled(file, start, &mut header).map_err(|e| self.pair.context(e))?;
+        self.check_frame_len(&header, frame)
+    }
+
+    /// [`Self::open_frame`], then the first bytes of the payload up to
+    /// `head.len()`, fewer when the frame is shorter: how many came. The frame
+    /// header and those bytes come in one read. `None` when that read fails, so
+    /// the caller reads the frame as it does without this path and a damaged
+    /// pack gives the same error.
+    pub(super) fn read_head(
+        &self,
+        file: &File,
+        frame: Frame,
+        checked: bool,
+        head: &mut [u8],
+    ) -> StoreResult<Option<usize>> {
+        const HEAD_LIMIT: usize = 16;
+        self.confirm_pack(file, checked)?;
+        let start = self.frame_start(frame)?;
+        let len = head.len().min(frame.len as usize);
+        assert!(len <= HEAD_LIMIT, "bounded frame head");
+        // Room for the frame header and `HEAD_LIMIT` bytes.
+        let mut bytes = [0; 32];
+        let bytes = &mut bytes[..ENTRY_FRAME_LEN + len];
+        if read_spooled(file, start, bytes).is_err() {
+            return Ok(None);
+        }
+        self.check_frame_len(&bytes[..ENTRY_FRAME_LEN], frame)?;
+        head[..len].copy_from_slice(&bytes[ENTRY_FRAME_LEN..]);
+        Ok(Some(len))
+    }
+}
+
+/// The locators a guarded walk found current. A guard keeps a pair from being
+/// retired while the walk runs, so one check per locator stands for every
+/// read through it. The set holds each `Arc` it names, so an address is never
+/// reused by another locator.
+#[derive(Debug, Default)]
+pub(crate) struct Currency {
+    current: std::sync::RwLock<std::collections::HashMap<usize, Arc<Locator>>>,
+}
+
+impl Currency {
+    fn key(locator: &Arc<Locator>) -> usize {
+        Arc::as_ptr(locator) as usize
+    }
+
+    /// Whether the locator is current: from the set when it was found exact,
+    /// otherwise by checking it. Only an exact match is remembered, so a pair
+    /// whose timestamps moved is checked at every read. Threads that meet a
+    /// locator for the first time wait for one check.
+    fn check(&self, locator: &Arc<Locator>) -> StoreResult<bool> {
+        let key = Self::key(locator);
+        if self
+            .current
+            .read()
+            .expect("currency set")
+            .contains_key(&key)
+        {
+            return Ok(true);
+        }
+        let mut current = self.current.write().expect("currency set");
+        if current.contains_key(&key) {
+            return Ok(true);
+        }
+        let exact = locator.check_current()?;
+        if exact {
+            current.insert(key, Arc::clone(locator));
+        }
+        Ok(exact)
+    }
+
+    /// Check this locator again at its next read.
+    pub(super) fn forget(&self, locator: &Arc<Locator>) {
+        self.current
+            .write()
+            .expect("currency set")
+            .remove(&Self::key(locator));
     }
 }
 

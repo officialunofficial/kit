@@ -19,10 +19,13 @@ pub(super) use index::{canonical_id, invalid_at, named};
 
 #[cfg(test)]
 mod copy_tests;
+#[cfg(test)]
+mod guarded_tests;
 mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
+pub(crate) use reader::Currency;
 use reader::{
     Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,
 };
@@ -348,6 +351,7 @@ impl LocalPacks {
             catalog,
             id,
             None,
+            None,
             &mut LookupErrors::default(),
             &mut |location| {
                 if location.size()? == size {
@@ -399,6 +403,19 @@ impl LocalPacks {
         store: &ObjectStore,
         id: &Hash,
         refresh: bool,
+        use_location: impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        self.lookup_in(store, id, refresh, None, use_location)
+    }
+
+    /// [`Self::lookup`] with `currency`, when a guarded walk keeps one: a
+    /// locator it found current is not checked again.
+    pub(super) fn lookup_in<T>(
+        &self,
+        store: &ObjectStore,
+        id: &Hash,
+        refresh: bool,
+        currency: Option<&Currency>,
         mut use_location: impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
         self.promote_when_spent(store);
@@ -408,11 +425,14 @@ impl LocalPacks {
         };
         let mut errors = LookupErrors::default();
         if let Some(pack) = latest
-            && let Some(value) = self.try_pack(&pack, id, None, &mut errors, &mut use_location)?
+            && let Some(value) =
+                self.try_pack(&pack, id, None, currency, &mut errors, &mut use_location)?
         {
             return Ok(value);
         }
-        if let Some(value) = self.try_catalog(&known, id, None, &mut errors, &mut use_location)? {
+        if let Some(value) =
+            self.try_catalog(&known, id, None, currency, &mut errors, &mut use_location)?
+        {
             return Ok(value);
         }
         if let Some(value) = errors.attempt(use_location(Location::Loose(store.path_for(id))))? {
@@ -423,8 +443,14 @@ impl LocalPacks {
             let fresh = self.discover(&store.pack_dir(), errors.stale)?;
             pair_error = fresh.error.as_deref().map(replay);
             if !Arc::ptr_eq(&known, &fresh)
-                && let Some(value) =
-                    self.try_catalog(&fresh, id, Some(&known), &mut errors, &mut use_location)?
+                && let Some(value) = self.try_catalog(
+                    &fresh,
+                    id,
+                    Some(&known),
+                    currency,
+                    &mut errors,
+                    &mut use_location,
+                )?
             {
                 return Ok(value);
             }
@@ -441,6 +467,7 @@ impl LocalPacks {
         catalog: &Catalog,
         id: &Hash,
         checked: Option<&Catalog>,
+        currency: Option<&Currency>,
         errors: &mut LookupErrors,
         use_location: &mut impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<Option<T>> {
@@ -451,7 +478,7 @@ impl LocalPacks {
             if catalog.lazy {
                 self.lazy_probes.fetch_add(1, Ordering::Relaxed);
             }
-            if let Some(value) = self.try_pack(locator, id, row, errors, use_location)? {
+            if let Some(value) = self.try_pack(locator, id, row, currency, errors, use_location)? {
                 return Ok(Some(value));
             }
         }
@@ -463,19 +490,41 @@ impl LocalPacks {
         locator: &Arc<Locator>,
         id: &Hash,
         row: Option<usize>,
+        currency: Option<&Currency>,
         errors: &mut LookupErrors,
         use_location: &mut impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<Option<T>> {
         let value = (|| {
-            let Some(frame) = locator.find(&self.handles, id, row)? else {
+            let Some(frame) = locator.find(&self.handles, id, row, currency)? else {
                 return Ok(None);
             };
             let file = self.handles.get(locator, Member::Pack)?;
+            // The locator is checked here, once, so that the location can say
+            // so. A failed check is a failed read of this pair.
+            let checked = match currency {
+                Some(_) => locator
+                    .check_current_once(currency)
+                    .map_err(|e| named(&locator.pair.pack, e))?,
+                None => false,
+            };
             // A pack cut short after its handle was cached ends a read early.
-            use_location(Location::Cached(Arc::clone(locator), frame, file))
+            use_location(Location::Cached(Arc::clone(locator), frame, file, checked))
                 .map(Some)
                 .map_err(|e| named(&locator.pair.pack, e))
         })();
+        let value = match (value, currency) {
+            (Err(error), Some(currency)) => {
+                // A damaged copy may have been replaced by a verified one under
+                // the same key. The pair is checked again, as every read of it
+                // would have done, and a change takes the refresh path.
+                currency.forget(locator);
+                match locator.check_current() {
+                    Err(changed) => Err(named(&locator.pair.pack, changed)),
+                    Ok(_) => Err(error),
+                }
+            }
+            (value, _) => value,
+        };
         if value.as_ref().is_err_and(is_disappeared) {
             errors.stale = true;
         }
@@ -528,7 +577,8 @@ fn is_disappeared(err: &StoreError) -> bool {
 pub(super) enum Location {
     Loose(PathBuf),
     Packed(Arc<Index>, Frame),
-    Cached(Arc<Locator>, Frame, Arc<File>),
+    /// A pair's frame. The flag says a guarded walk found the pair current.
+    Cached(Arc<Locator>, Frame, Arc<File>, bool),
 }
 
 impl Location {
@@ -559,11 +609,24 @@ impl Location {
                 let file = Arc::new(index.open_frame(*frame)?);
                 Ok(Contents::packed(file, *frame))
             }
-            Self::Cached(index, frame, file) => {
-                index.open_frame(file, *frame)?;
+            Self::Cached(index, frame, file, checked) => {
+                index.open_frame(file, *frame, *checked)?;
                 Ok(Contents::packed(Arc::clone(file), *frame))
             }
         }
+    }
+
+    /// The first bytes of the object, up to `head.len()`: how many came, or the
+    /// error of the payload read. A packed copy gives its frame header and
+    /// these bytes in one read when it can.
+    pub(super) fn read_head(&self, head: &mut [u8]) -> StoreResult<io::Result<usize>> {
+        if let Self::Cached(index, frame, file, checked) = self
+            && let Some(len) = index.read_head(file, *frame, *checked, head)?
+        {
+            return Ok(Ok(len));
+        }
+        let mut contents = self.open()?;
+        Ok(crate::store::read_header_prefix(&mut contents, head))
     }
 
     pub(super) fn size(&self) -> StoreResult<u64> {
@@ -848,7 +911,7 @@ impl ObjectStore {
         format::packed_under_guard(guard)
     }
 
-    fn check_prune_guard(&self, guard: &super::PruneGuard) -> StoreResult<()> {
+    pub(super) fn check_prune_guard(&self, guard: &super::PruneGuard) -> StoreResult<()> {
         if guard.objects_root != self.objects_root {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

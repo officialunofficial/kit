@@ -369,8 +369,10 @@ fn apply_chain(
         publication.seal(observer, remote, applied)?;
         return Err(error);
     }
-    let view = publication.view();
-    let checked = validate(&view);
+    let checked = publication
+        .view()
+        .map_err(SyncError::from)
+        .and_then(|view| validate(&view));
     publication.seal(observer, remote, applied)?;
     checked
 }

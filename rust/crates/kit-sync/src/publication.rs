@@ -9,8 +9,8 @@ use kit_core::pack::{LooseStaging, ObjectSpool, PackError};
 use kit_core::protocol::PackKey;
 use kit_core::serialize;
 use kit_core::store::{
-    ClosureSource, LocalPackWriter, ObjectSource, ObjectStore, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES,
-    PruneGuard, StoreError, StoreResult,
+    ClosureSource, GuardedStore, LocalPackWriter, ObjectSource, ObjectStore, PACK_SEAL_BYTES,
+    PACK_SEAL_ENTRIES, PruneGuard, StoreError, StoreResult,
 };
 
 use crate::applied_packs::AppliedPacks;
@@ -72,8 +72,10 @@ impl<'a> Publication<'a> {
         self.window.as_ref().map(|window| &window.spool)
     }
 
-    pub(crate) fn view(&self) -> PendingView<'_> {
-        PendingView::new(self.store, self.pending())
+    /// The pending objects over the store, for a walk that runs under this
+    /// publication's guard.
+    pub(crate) fn view(&self) -> StoreResult<PendingView<'_>> {
+        PendingView::guarded(self.store, self.pending(), self.guard)
     }
 
     pub(crate) fn completed(&self, key: &PackKey) -> bool {
@@ -259,11 +261,39 @@ fn record(
 pub(crate) struct PendingView<'a> {
     store: &'a ObjectStore,
     spool: Option<&'a ObjectSpool>,
+    /// The durable reads of a walk that holds the guard.
+    guarded: Option<GuardedStore<'a>>,
 }
 
 impl<'a> PendingView<'a> {
     pub(crate) fn new(store: &'a ObjectStore, spool: Option<&'a ObjectSpool>) -> Self {
-        Self { store, spool }
+        Self {
+            store,
+            spool,
+            guarded: None,
+        }
+    }
+
+    /// A view whose durable reads check each local pack once. `guard` must
+    /// outlive the view, and the view must be built before its first read.
+    pub(crate) fn guarded(
+        store: &'a ObjectStore,
+        spool: Option<&'a ObjectSpool>,
+        guard: &'a PruneGuard,
+    ) -> StoreResult<Self> {
+        Ok(Self {
+            store,
+            spool,
+            guarded: Some(store.guarded(guard)?),
+        })
+    }
+
+    /// The durable store the view falls through to.
+    fn durable(&self) -> &dyn ClosureSource {
+        match &self.guarded {
+            Some(guarded) => guarded,
+            None => self.store,
+        }
     }
 
     fn pending(&self, id: &Hash) -> StoreResult<Option<Vec<u8>>> {
@@ -283,14 +313,15 @@ impl<'a> PendingView<'a> {
 
 impl ObjectSource for PendingView<'_> {
     fn read(&self, id: &Hash) -> StoreResult<Vec<u8>> {
-        self.pending(id)?.map_or_else(|| self.store.read(id), Ok)
+        self.pending(id)?
+            .map_or_else(|| self.durable().read(id), Ok)
     }
 
     fn read_object(&self, id: &Hash) -> StoreResult<Object> {
         if let Some(bytes) = self.pending(id)? {
             Ok(serialize::deserialize_owned(bytes)?)
         } else {
-            self.store.read_object(id)
+            self.durable().read_object(id)
         }
     }
 }
@@ -299,7 +330,7 @@ impl ClosureSource for PendingView<'_> {
         if let Some((ty, _)) = self.pending_head(id)? {
             Ok(ty)
         } else {
-            self.store.object_type(id)
+            self.durable().object_type(id)
         }
     }
 
@@ -307,7 +338,7 @@ impl ClosureSource for PendingView<'_> {
         if let Some(head) = self.pending_head(id)? {
             Ok(head)
         } else {
-            self.store.object_head(id)
+            self.durable().object_head(id)
         }
     }
 }
@@ -476,7 +507,7 @@ mod tests {
         assert_eq!(pending.written_bytes(), small.1.len() as u64);
         assert_eq!(pending.donor_files(), 0);
         assert_eq!(staged_files(&layout), staged);
-        let view = publication.view();
+        let view = publication.view().unwrap();
         assert!(view.contains(&mid.0) && view.contains(&large.0));
         assert_eq!(view.read(&small.0).unwrap(), small.1);
         assert_eq!(view.read(&mid.0).unwrap(), mid.1);
@@ -703,7 +734,7 @@ mod tests {
         assert_eq!(pending.donor_files(), 1);
         assert_eq!(pending.written_bytes(), 0);
         assert_eq!(
-            publication.view().read(&objects[9].0).unwrap(),
+            publication.view().unwrap().read(&objects[9].0).unwrap(),
             objects[9].1
         );
         publication
@@ -818,7 +849,7 @@ mod tests {
         assert_eq!(pending.donor_files(), 0);
         assert!(pending.written_bytes() > 0);
         assert_eq!(
-            publication.view().read(&objects[359].0).unwrap(),
+            publication.view().unwrap().read(&objects[359].0).unwrap(),
             objects[359].1
         );
         publication
@@ -866,6 +897,51 @@ mod tests {
             view.read(&durable_id),
             Err(StoreError::HashMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn a_guarded_view_reads_the_spool_before_the_store_and_refuses_a_foreign_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        std::fs::create_dir_all(store.spool_dir()).unwrap();
+        let spool = ObjectSpool::new(&store.spool_dir()).unwrap();
+        let blob = |data: &[u8]| {
+            serialize::serialize(&Object::Blob(kit_core::object::Blob {
+                data: data.to_vec(),
+            }))
+            .unwrap()
+        };
+        let (durable, pending) = (blob(b"durable"), blob(b"pending"));
+        let durable_id = store.write(&durable).unwrap();
+        let pending_id = kit_core::hash::hash(&pending);
+        spool
+            .append(0, pending_id, ObjectType::Blob, &pending)
+            .unwrap();
+        let guard = store.prune_guard().unwrap();
+        let view = PendingView::guarded(&store, Some(&spool), &guard).unwrap();
+
+        assert_eq!(view.read(&durable_id).unwrap(), durable);
+        assert_eq!(view.read(&pending_id).unwrap(), pending);
+        assert_eq!(
+            view.object_head(&pending_id).unwrap(),
+            (ObjectType::Blob, Some(7))
+        );
+        assert_eq!(view.object_type(&durable_id).unwrap(), ObjectType::Blob);
+        // A staged copy comes first, so a corrupt one is not hidden by a
+        // good copy in the store.
+        spool
+            .append(1, durable_id, ObjectType::Blob, &pending)
+            .unwrap();
+        assert!(matches!(
+            view.read(&durable_id),
+            Err(StoreError::HashMismatch { .. })
+        ));
+
+        let other = tempfile::tempdir().unwrap();
+        let other_store = ObjectStore::init(&RepoLayout::single(other.path())).unwrap();
+        assert!(PendingView::guarded(&other_store, None, &guard).is_err());
     }
 
     #[test]
