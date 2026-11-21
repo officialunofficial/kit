@@ -207,7 +207,7 @@ struct Relied {
 }
 
 /// What a run copied, and what each input that it did not keep relies on.
-pub(super) struct Copied {
+pub(crate) struct Copied {
     outputs: Vec<Dep>,
     inputs: Vec<Relied>,
 }
@@ -880,11 +880,18 @@ mod select_tests {
             outputs: output_dep(),
             inputs: vec![relied(&input, &[&covering], &[&output])],
         };
-        assert_eq!(copied.select(&dir, &|_| false).len(), 1);
+        assert_eq!(
+            copied.select(&dir, &|_| false, &copied.candidates()).len(),
+            1
+        );
 
         // The covering pair is a wholly dead retirement of this run.
         let retiring = covering.key;
-        assert!(copied.select(&dir, &|key| *key == retiring).is_empty());
+        assert!(
+            copied
+                .select(&dir, &|key| *key == retiring, &copied.candidates())
+                .is_empty()
+        );
 
         // The covering pair is itself an input of this run. Only that input,
         // which relies on a pair that stays, may go.
@@ -895,8 +902,8 @@ mod select_tests {
                 relied(&covering, &[&other], &[&output]),
             ],
         };
-        let selected = copied.select(&dir, &|_| false);
-        assert_eq!(selected.len(), 1);
+        let selected = copied.select(&dir, &|_| false, &copied.candidates());
+        assert_eq!(selected.len(, &copied.candidates()), 1);
         assert_eq!(selected[0].pair.key, covering.key);
 
         // An output that carries an input's key leaves that input in place.
@@ -904,7 +911,11 @@ mod select_tests {
             outputs: vec![Dep::of(&spare).unwrap()],
             inputs: vec![relied(&spare, &[&covering], &[&spare])],
         };
-        assert!(copied.select(&dir, &|_| false).is_empty());
+        assert!(
+            copied
+                .select(&dir, &|_| false, &copied.candidates())
+                .is_empty()
+        );
     }
 
     #[test]
