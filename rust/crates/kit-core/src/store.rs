@@ -1047,7 +1047,7 @@ impl ObjectStore {
             }
             read_shard_dir(&shard.path(), dir, &mut out)?;
         }
-        self.packs.collect(self, None, &mut out)?;
+        self.packs.collect(self, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -1063,7 +1063,7 @@ impl ObjectStore {
     /// [`StoreError::Io`] if the directory cannot be read.
     pub fn list_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
         let mut out = self.list_loose_shard(shard)?;
-        self.packs.collect(self, Some(shard), &mut out)?;
+        self.packs.list_shard(self, shard, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)

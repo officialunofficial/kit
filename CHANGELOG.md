@@ -39,6 +39,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
+- Commands that read a few objects, such as `cat-file`, `log -n 1` and a no-op `fetch`, find local packs with far less CPU: a store of up to 40 packs probes its index files instead of loading every row, and a larger one builds its object routes in near-linear time and with fewer system calls per pack. Resolving a short hash no longer checksums every index.
 
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 - **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.

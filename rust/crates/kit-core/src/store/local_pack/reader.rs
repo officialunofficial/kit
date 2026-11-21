@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, IoSliceMut, Read};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,12 +9,16 @@ use crate::pack::{HEADER_LEN, MAGIC, read_spooled};
 
 use super::index::{
     FANOUT_END, Frame, INDEX_BASE_LEN, INDEX_ROW_LEN, MAGIC_INDEX, Pair, Stamp, invalid, le_u32,
-    open_regular, read_frame_header, read_header, read_version,
+    open_regular, read_frame_header, read_header_sized, read_version,
 };
 use super::{StoreError, StoreResult, is_disappeared};
 
 // Keep room for loose objects, transports and other repository files.
 const HANDLE_LIMIT: usize = 96;
+/// Most pairs a catalog keeps without rows or routes. Each pair may hold an
+/// index handle and a pack handle in the cache, and these must both fit.
+pub(super) const LAZY_PAIR_LIMIT: usize = 40;
+const _: () = assert!(2 * LAZY_PAIR_LIMIT <= HANDLE_LIMIT);
 pub(super) const ROW_CACHE_BYTES: usize = 64 << 20;
 pub(super) const ROUTE_CACHE_BYTES: usize = 288 << 20;
 
@@ -187,49 +191,63 @@ impl Locator {
     }
 
     fn load(pair: &Pair, row_budget: usize, route_budget: usize) -> StoreResult<Self> {
-        let mut pack = open_regular(&pair.pack)?;
-        let pack_stamp = Stamp::get(&pack.metadata()?)?;
-        let (count, trailer, _) = read_header(&mut pack)?;
-        let mut index = open_regular(&pair.index)?;
-        let metadata = index.metadata()?;
+        let (mut pack, pack_metadata) = open_member(&pair.pack)?;
+        let (mut index, metadata) = open_member(&pair.index)?;
+        let pack_stamp = Stamp::get(&pack_metadata)?;
+        let (count, trailer, _) = read_header_sized(&mut pack, pack_metadata.len())?;
         let index_stamp = Stamp::get(&metadata)?;
         let row_bytes = INDEX_ROW_LEN * count;
         let size = INDEX_BASE_LEN + row_bytes;
         if metadata.len() != size as u64 {
             return Err(invalid("index length does not match frame count"));
         }
-        let fanout = Box::new(read_version::<FANOUT_END>(
-            &mut index,
-            *MAGIC_INDEX,
-            "local index",
-        )?);
+        let route_bytes = count * (size_of::<Route>() + size_of::<u32>());
+        // Rows that fit are read with the header, the fanout and the key in
+        // one call. Otherwise read the header and the fanout, then the key.
+        let rows_fit = route_bytes <= route_budget && row_bytes <= row_budget;
+        let mut rows = Vec::new();
+        let mut tail = [0; 64];
+        let fanout = if rows_fit {
+            let mut head = [0; FANOUT_END];
+            // The row budget and the file length checked above bound this.
+            rows.resize(row_bytes, 0);
+            read_exact_vectored(
+                &mut index,
+                &mut [
+                    IoSliceMut::new(&mut head),
+                    IoSliceMut::new(&mut rows),
+                    IoSliceMut::new(&mut tail),
+                ],
+            )?;
+            read_version::<FANOUT_END>(&mut head.as_slice(), *MAGIC_INDEX, "local index")?
+        } else {
+            read_version::<FANOUT_END>(&mut index, *MAGIC_INDEX, "local index")?
+        };
+        let fanout = Box::new(fanout);
         if le_u32(&fanout[8..12]) as usize != count {
             return Err(invalid("index count differs from pack count"));
         }
         super::index::validate_fanout_bounds(&fanout[12..], count)?;
         let mut key = [0; 32];
-        read_spooled(&index, (size - 64) as u64, &mut key)?;
+        if rows_fit {
+            key.copy_from_slice(&tail[..32]);
+        } else {
+            read_spooled(&index, (size - 64) as u64, &mut key)?;
+        }
         if key != pair.key {
             return Err(invalid("index key differs from filename"));
         }
-        let mut rows = Vec::new();
         let mut prefixes = Vec::new();
-        let route_bytes = count * (size_of::<Route>() + size_of::<u32>());
-        if route_bytes <= route_budget {
-            if row_bytes <= row_budget {
-                rows.resize(row_bytes, 0);
-                index.read_exact(&mut rows)?;
-            } else {
-                prefixes.reserve_exact(count);
-                let mut buffer = [0; 32 * 256];
-                let mut remaining = count;
-                while remaining != 0 {
-                    let entries = remaining.min(256);
-                    let bytes = &mut buffer[..entries * 32];
-                    index.read_exact(bytes)?;
-                    prefixes.extend(bytes.chunks_exact(32).map(prefix));
-                    remaining -= entries;
-                }
+        if !rows_fit && route_bytes <= route_budget {
+            prefixes.reserve_exact(count);
+            let mut buffer = [0; 32 * 256];
+            let mut remaining = count;
+            while remaining != 0 {
+                let entries = remaining.min(256);
+                let bytes = &mut buffer[..entries * 32];
+                index.read_exact(bytes)?;
+                prefixes.extend(bytes.chunks_exact(32).map(prefix));
+                remaining -= entries;
             }
         }
         Ok(Self {
@@ -371,18 +389,41 @@ impl Locator {
         })
     }
 
-    pub(super) fn routes(&self, pack: usize) -> impl Iterator<Item = Route> + '_ {
+    /// The routing prefix of each row, in row order.
+    pub(super) fn prefixes(&self) -> impl Iterator<Item = u32> + '_ {
         self.rows
             .chunks_exact(32)
             .take(self.count)
             .map(prefix)
             .chain(self.prefixes.iter().copied())
-            .enumerate()
-            .map(move |(row, prefix)| Route {
-                prefix,
-                pack: u32::try_from(pack).expect("bounded pack number"),
-                row: u32::try_from(row).expect("bounded index row"),
-            })
+    }
+
+    /// Add the ids of one shard to `out`. A pair with no rows in memory reads
+    /// that shard's ids from its index.
+    pub(super) fn shard_ids(
+        self: &Arc<Self>,
+        handles: &Handles,
+        shard: u8,
+        out: &mut Vec<Hash>,
+    ) -> StoreResult<()> {
+        let range = self.bucket(shard);
+        if range.is_empty() {
+            return Ok(());
+        }
+        let mut ids = vec![0; range.len() * 32];
+        if self.rows.is_empty() {
+            self.check_current()?;
+            let file = handles.get(self, Member::Index)?;
+            read_spooled(&file, (FANOUT_END + range.start * 32) as u64, &mut ids)
+                .map_err(|e| self.pair.context(e))?;
+        } else {
+            ids.copy_from_slice(&self.rows[range.start * 32..range.end * 32]);
+        }
+        out.extend(
+            ids.chunks_exact(32)
+                .map(|id| Hash::try_from(id).expect("id width")),
+        );
+        Ok(())
     }
 
     pub(super) fn open_frame(&self, file: &File, frame: Frame) -> StoreResult<()> {
@@ -409,7 +450,7 @@ impl Locator {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Route {
     pub(super) prefix: u32,
     pub(super) pack: u32,
@@ -418,4 +459,55 @@ pub(super) struct Route {
 
 pub(super) fn prefix(id: &[u8]) -> u32 {
     u32::from_le_bytes(id[..4].try_into().expect("id prefix"))
+}
+
+/// Fill every buffer from the reader with as few calls as it takes.
+pub(super) fn read_exact_vectored(
+    file: &mut impl Read,
+    mut buffers: &mut [IoSliceMut<'_>],
+) -> io::Result<()> {
+    IoSliceMut::advance_slices(&mut buffers, 0);
+    while !buffers.is_empty() {
+        match file.read_vectored(buffers) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => IoSliceMut::advance_slices(&mut buffers, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Never follow a link, and never wait on a pipe.
+#[cfg(unix)]
+const OPEN_FLAGS: i32 = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
+/// Open a pack or index file. A symlink or any other kind of file is not a
+/// member: report it as absent, without waiting on a pipe. Linux and macOS
+/// report a refused symlink as `ELOOP`.
+fn open_member(path: &Path) -> io::Result<(File, fs::Metadata)> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(OPEN_FLAGS);
+    }
+    #[cfg(not(unix))]
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::from(io::ErrorKind::NotFound));
+    }
+    let file = match options.open(path) {
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        result => result?,
+    };
+    let metadata = file.metadata()?;
+    if metadata.is_file() {
+        Ok((file, metadata))
+    } else {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
 }
