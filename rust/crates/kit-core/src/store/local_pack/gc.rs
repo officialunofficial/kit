@@ -23,7 +23,7 @@ pub(crate) struct PackSweep {
 /// inputs and leftovers together. A run takes the lock again for the next
 /// batch, rechecking every stamp, so one hold stays short however many pairs
 /// retire. Policy, not format.
-pub(crate) const RETIRE_BATCH: usize = 64;
+pub(crate) const RETIRE_BATCH: usize = 32;
 
 struct Retirement {
     pack: Stamp,

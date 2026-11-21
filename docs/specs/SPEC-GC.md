@@ -414,7 +414,7 @@ fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
 Retirement takes the exclusive `format` try-lock once per batch of at most
-64 items: pack pairs, copy inputs and leftovers together. Each batch is a
+32 items: pack pairs, copy inputs and leftovers together. Each batch is a
 complete retirement as described here: it rechecks its own items, makes what
 they rely on durable, unlinks the pack names, flushes, unlinks the indexes
 and flushes, then releases the lock, so a writer that waits for the lock waits

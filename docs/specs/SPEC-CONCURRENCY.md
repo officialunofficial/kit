@@ -233,7 +233,7 @@ verified pair or copy input to retire, automatic maintenance first copies
 under the shared `format` guard with no worktree lock, then tries the registry
 and worktree locks in gc's order. It holds them for the second root read
 and the retirement of the verified names, whose exclusive `format` holds
-are one per batch of at most 64 items. See SPEC-GC, "Automatic
+are one per batch of at most 32 items. See SPEC-GC, "Automatic
 maintenance".
 
 ## 4. Global lock order and per-command lock sets
@@ -301,7 +301,7 @@ the history lock):
 | `worktree add` | `worktrees.lock` (guard re-verified after acquiring), then the new tree's `worktree.lock` |
 | `worktree remove` | `worktrees.lock`, then the condemned tree's `worktree.lock` |
 | `gc` | `worktrees.lock` first (freezes the worktree set), then every registered tree's `worktree.lock`, deterministic order (main tree first, then registry ids ascending). Pack copying takes the shared `format` guard after the worktree locks and releases it before the exclusive `format` try-lock. |
-| automatic maintenance after `fetch` or `pull` | After release of the command's prune guard and worktree locks, try `gc-auto`. The sweep adds only the exclusive `format` try-lock. A collection that copies takes the shared `format` guard after planning and releases it before any worktree try: it holds no worktree lock while it reads a pack body. Collection with a verified retirement candidate or a copy input then tries `worktrees.lock`, each `worktree.lock` in gc's order, then the exclusive `format` lock, once per batch of at most 64 items. A miss ends the step. |
+| automatic maintenance after `fetch` or `pull` | After release of the command's prune guard and worktree locks, try `gc-auto`. The sweep adds only the exclusive `format` try-lock. A collection that copies takes the shared `format` guard after planning and releases it before any worktree try: it holds no worktree lock while it reads a pack body. Collection with a verified retirement candidate or a copy input then tries `worktrees.lock`, each `worktree.lock` in gc's order, then the exclusive `format` lock, once per batch of at most 32 items. A miss ends the step. |
 | `clean` | this tree's `worktree.lock` |
 | `status` (opportunistic index refresh) | this tree's `worktree.lock`, tried with a 10 ms timeout; on contention the refresh is skipped |
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
