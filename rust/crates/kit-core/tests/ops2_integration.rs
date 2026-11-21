@@ -343,7 +343,10 @@ fn stash_of_a_large_file_packs_its_chunks_and_pops_the_same_bytes() {
                 && !path.file_name().unwrap().to_string_lossy().starts_with('.')
         })
         .count();
-    assert!(packs >= 1, "the stash packs the chunks of the modified file");
+    assert!(
+        packs >= 1,
+        "the stash packs the chunks of the modified file"
+    );
 
     stash::pop(&store, &layout, 0).unwrap();
     assert_eq!(fs::read(repo.join("big.bin")).unwrap(), edited);
