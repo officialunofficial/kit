@@ -540,6 +540,24 @@ mod tests {
     }
 
     #[test]
+    fn the_spool_sweep_clears_stale_spools_and_trims_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RetainedPacks::new(dir.path());
+        ensure_dir(&cache.dir).unwrap();
+        std::fs::write(dir.path().join(".tmpspool"), b"x").unwrap();
+        std::fs::write(dir.path().join("other"), b"x").unwrap();
+        for (name, days) in [("stale", 8), ("recent", 1)] {
+            let path = cache.dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            set_age(&path, Duration::from_hours(days * 24));
+        }
+        crate::pack::sweep_spool_dir(dir.path());
+        assert!(!dir.path().join(".tmpspool").exists());
+        assert!(dir.path().join("other").exists());
+        assert_eq!(files(&cache), ["recent"]);
+    }
+
+    #[test]
     fn trim_without_a_cache_does_nothing() {
         let dir = tempfile::tempdir().unwrap();
         RetainedPacks::new(dir.path()).trim();
