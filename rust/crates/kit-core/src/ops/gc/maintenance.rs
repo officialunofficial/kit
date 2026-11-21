@@ -277,24 +277,25 @@ fn run(
                 cancelled,
             };
             collect(layout, store, &clock, before_collection_locks, gc).unwrap_or_else(|error| {
-                match error {
+                let outcome = match error {
                     GcRootsError::Io(error) | GcRootsError::Store(StoreError::Io(error))
                         if error.kind() == io::ErrorKind::TimedOut =>
                     {
                         Collection::OverBudget
                     }
                     _ => Collection::Failed,
-                }
+                };
+                Outcome::same(outcome)
             })
         }
-        Ok(false) if due => Collection::Busy,
-        Err(_) if due => Collection::Failed,
+        Ok(false) if due => Outcome::same(Collection::Busy),
+        Err(_) if due => Outcome::same(Collection::Failed),
         _ => return Collection::NotDue,
     };
     let _ = Stamp {
         attempted: now,
-        outcome: collection,
-        complete_pairs: if collection == Collection::Complete {
+        outcome: collection.stamped,
+        complete_pairs: if collection.stamped == Collection::Complete {
             (pairs + gc.packs_written).saturating_sub(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
@@ -303,7 +304,25 @@ fn run(
         },
     }
     .write(&mut file);
-    collection
+    collection.reported
+}
+
+/// What a collection reports and what the stamp records. They differ only
+/// when the budget cut the copy short but wholly dead retirement finished:
+/// the report says `over_budget`, and the stamp keeps the weekly interval of
+/// a finished collection, so the retirement main would do is not postponed.
+struct Outcome {
+    reported: Collection,
+    stamped: Collection,
+}
+
+impl Outcome {
+    const fn same(collection: Collection) -> Self {
+        Self {
+            reported: collection,
+            stamped: collection,
+        }
+    }
 }
 
 struct Budget<'a> {
@@ -339,7 +358,7 @@ fn collect(
     budget: &Budget<'_>,
     before_locks: impl FnOnce(),
     gc: &mut GcReport,
-) -> Result<Collection, GcRootsError> {
+) -> Result<Outcome, GcRootsError> {
     let now = now_secs();
     budget.check()?;
     let (hard, mut soft) = collect_root_sets(layout, &mut |_| {})?;
@@ -361,14 +380,26 @@ fn collect(
         store.plan_pack_retirement(&live, now, DEFAULT_GRACE_SECS, gc, &|| Ok(budget.check()?))?;
     budget.check()?;
     if !gc.skipped_pack_errors.is_empty() {
-        return Ok(Collection::Failed);
+        return Ok(Outcome::same(Collection::Failed));
     }
-    retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
+    // Copy-then-retire is the added part of the step. A budget that runs out
+    // in its planning, verification or copy defers only that part: the
+    // wholly dead retirement planned above still runs, as it does today.
+    // Cancellation and every other error still stop the step.
+    let planned = retire.plan_automatic_copy(store, &live, now, DEFAULT_GRACE_SECS, &|| {
+        #[cfg(test)]
+        if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Plan) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+        }
         Ok(budget.check()?)
-    })?;
-    budget.check()?;
+    });
+    let mut deferred = retire.defer_copy_on_timeout(planned)?;
     if retire.is_empty() {
-        return Ok(Collection::Complete);
+        return Ok(Outcome::same(if deferred {
+            Collection::OverBudget
+        } else {
+            Collection::Complete
+        }));
     }
 
     // Copying reads pack bodies, so it runs before any worktree lock: the
@@ -377,9 +408,22 @@ fn collect(
     // budget ends the copy before it publishes; once published, the outputs
     // are harmless duplicates that the next step retires as covered, so the
     // retirement below is not on the clock.
-    let copied = retire.copy_survivors(store, gc, &|| Ok(budget.check()?), true)?;
-    if !gc.skipped_pack_errors.is_empty() {
-        return Ok(Collection::Failed);
+    let mut copied = None;
+    if !deferred {
+        let checkpoint = || {
+            #[cfg(test)]
+            if TEST_COPY_EXPIRES.get() == Some(CopyPhase::Copy) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE).into());
+            }
+            Ok(budget.check()?)
+        };
+        match retire.copy_survivors(store, gc, &checkpoint, true) {
+            Ok(done) => copied = done,
+            Err(error) => deferred = retire.defer_copy_on_timeout(Err(error))?,
+        }
+        if !gc.skipped_pack_errors.is_empty() {
+            return Ok(Outcome::same(Collection::Failed));
+        }
     }
 
     before_locks();
@@ -390,26 +434,33 @@ fn collect(
         Err(error) => Err(io::Error::other(error)),
     };
     let Some(_registry) = acquire_lock(layout.common_dir(), WORKTREES_REGISTRY_LOCK)? else {
-        return Ok(Collection::Busy);
+        return Ok(Outcome::same(Collection::Busy));
     };
     let trees = all_state_layouts(layout)?;
     let mut locks = Vec::with_capacity(trees.len());
     for tree in &trees {
         let Some(lock) = acquire_lock(tree.worktree_state_dir(), WORKTREE_LOCK)? else {
-            return Ok(Collection::Busy);
+            return Ok(Outcome::same(Collection::Busy));
         };
         locks.push(lock);
     }
     let (locked_hard, mut locked_soft) = collect_root_sets(layout, &mut |_| {})?;
     locked_soft.sort_unstable();
     if (hard, soft) != (locked_hard, locked_soft) {
-        return Ok(Collection::RootsChanged);
+        return Ok(Outcome::same(Collection::RootsChanged));
     }
     budget.check_cancellation()?;
     Ok(if retire.retire(store, gc, copied.as_ref(), || Ok(()))? {
-        Collection::Complete
+        Outcome {
+            reported: if deferred {
+                Collection::OverBudget
+            } else {
+                Collection::Complete
+            },
+            stamped: Collection::Complete,
+        }
     } else {
-        Collection::Busy
+        Outcome::same(Collection::Busy)
     })
 }
 
@@ -423,9 +474,19 @@ pub fn fuzz_maintenance_stamp(bytes: &[u8]) {
     }
 }
 
+/// Where a test makes the budget run out, after the wholly dead plan.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyPhase {
+    Plan,
+    Copy,
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static TEST_COPY_EXPIRES: std::cell::Cell<Option<CopyPhase>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]

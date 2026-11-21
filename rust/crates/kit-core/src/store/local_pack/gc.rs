@@ -314,6 +314,20 @@ impl PackSweep {
         }
     }
 
+    /// For a copy step that returned `result`: true after dropping the
+    /// planned copy when the budget ran out of time, so that only wholly dead
+    /// pairs and leftovers retire. Any other error passes on.
+    pub(crate) fn defer_copy_on_timeout(&mut self, result: StoreResult<()>) -> StoreResult<bool> {
+        match result {
+            Ok(()) => Ok(false),
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                self.copy = None;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.pairs.is_empty() && self.leftovers.is_empty() && self.copy.is_none()
     }

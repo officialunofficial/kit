@@ -640,6 +640,80 @@ fn a_budget_that_ends_before_the_copy_publishes_nothing() {
     assert_eq!(repo.staging(), 0);
 }
 
+/// A budget that ends in the copy part defers only that part: the wholly
+/// dead packs still retire, as before the copy existed, and the report says
+/// `over_budget` while the stamp keeps the weekly interval of a finished run.
+fn a_copy_that_runs_out_of_budget_still_retires_the_wholly_dead(phase: CopyPhase) {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(phase));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let (dead_a, _) = repo.old_pack(&[b"dead a"]);
+    let (dead_b, _) = repo.old_pack(&[b"dead b"]);
+    let (mixed, mixed_ids) = repo.old_pack(&[b"kept", b"dead mixed"]);
+    repo.pin("mixed", &mixed_ids[0]);
+    let before = repo.pack_count();
+
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(report.packs_retired, 2);
+    assert!(!dead_a.exists() && !dead_b.exists());
+    // Only the copy part waits: the mixed pack and the small packs stay.
+    assert_eq!(report.packs_rewritten + report.packs_merged, 0);
+    assert_eq!(report.bytes_copied, 0);
+    assert!(mixed.exists());
+    assert_eq!(repo.pack_count(), before - 2);
+    assert_eq!(repo.staging(), 0);
+    for id in ids.iter().chain(&mixed_ids[..1]) {
+        assert!(repo.store.read(id).is_ok());
+    }
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    let stamp = Stamp::read(&mut file).unwrap();
+    assert_eq!(stamp.outcome, Collection::Complete);
+
+    // The next due step, with the budget back, does the copy.
+    age_file(&mixed, DEFAULT_GRACE_SECS + 1);
+    Stamp {
+        attempted: 1,
+        outcome: Collection::Complete,
+        complete_pairs: 10,
+    }
+    .write(&mut file)
+    .unwrap();
+    let next = repo.run();
+    assert_eq!(next.collection, Collection::Complete);
+    assert!(next.bytes_copied > 0);
+}
+
+#[test]
+fn a_copy_plan_that_runs_out_of_budget_still_retires_the_wholly_dead() {
+    a_copy_that_runs_out_of_budget_still_retires_the_wholly_dead(CopyPhase::Plan);
+}
+
+#[test]
+fn a_copy_that_runs_out_of_budget_after_planning_still_retires_the_wholly_dead() {
+    a_copy_that_runs_out_of_budget_still_retires_the_wholly_dead(CopyPhase::Copy);
+}
+
+#[test]
+fn a_budget_that_ends_with_nothing_wholly_dead_reports_over_budget_for_30_days() {
+    TEST_NOW.set(Some(now_secs()));
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Plan));
+    let repo = Repo::new();
+    repo.due_live();
+    let before = repo.pack_count();
+    let report = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(report.collection, Collection::OverBudget);
+    assert_eq!(repo.pack_count(), before);
+    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+    assert_eq!(
+        Stamp::read(&mut file).unwrap().outcome,
+        Collection::OverBudget
+    );
+}
+
 #[test]
 fn a_stop_at_any_checkpoint_leaves_nothing_half_done() {
     use std::cell::Cell;

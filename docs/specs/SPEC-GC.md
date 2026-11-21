@@ -504,7 +504,12 @@ after an attempt that ran out of budget. These intervals are policy.
    keep only the inputs whose survivors fit in one output pack: at most
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
    then the smallest. With no candidate and no input, record a complete
-   collection and stop.
+   collection and stop. A budget that expires in this copy planning, in the
+   verification or in the copy defers only the copy: the wholly dead pairs
+   planned above still retire (steps 5 to 7), and the collection reports
+   `over_budget`. If no pair is left to retire, the stamp keeps the
+   `over_budget` interval; if the retirement finished, it keeps the interval
+   of a complete collection.
 4. Copy. Verify each covering copy that an input relies on, copy the
    survivors into one output pack and publish it durably under the shared
    `format` guard, which the step takes after planning and releases before
