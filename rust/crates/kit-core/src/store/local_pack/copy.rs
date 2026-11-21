@@ -342,11 +342,12 @@ impl CopyPlan {
                                 .and_then(|bytes| ObjectStore::verify_at(&location, &id, &bytes))
                             {
                                 Ok(()) => true,
-                                Err(error) if is_damage(&error) => {
+                                // Whatever the reason, the entry has no
+                                // covering copy and its input copies it.
+                                Err(error) => {
                                     report.skipped_pack_errors.push(error.to_string());
                                     false
                                 }
-                                Err(error) => return Err(error),
                             }
                         }
                     };
