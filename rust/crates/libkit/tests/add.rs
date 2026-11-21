@@ -645,19 +645,24 @@ fn loose_and_packs(f: &Fixture) -> (usize, usize) {
         if shard.is_dir() && name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
             loose += fs::read_dir(&shard)
                 .unwrap()
-                .filter(|e| !e.as_ref().unwrap().file_name().to_string_lossy().starts_with('.'))
+                .filter(|e| {
+                    !e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with('.')
+                })
                 .count();
         }
     }
-    let packs = fs::read_dir(objects.join("pack"))
-        .map(|dir| {
-            dir.filter(|e| {
-                let name = e.as_ref().unwrap().file_name().to_string_lossy().into_owned();
-                !name.starts_with('.') && name.ends_with(".pack")
-            })
-            .count()
+    let packs = fs::read_dir(objects.join("pack")).map_or(0, |dir| {
+        dir.filter(|e| {
+            let path = e.as_ref().unwrap().path();
+            !path.file_name().unwrap().to_string_lossy().starts_with('.')
+                && path.extension().is_some_and(|ext| ext == "pack")
         })
-        .unwrap_or(0);
+        .count()
+    });
     (loose, packs)
 }
 

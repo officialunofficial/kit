@@ -71,7 +71,14 @@ fn loose(store: &ObjectStore) -> usize {
         if two_hex && shard.is_dir() {
             count += fs::read_dir(&shard)
                 .unwrap()
-                .filter(|entry| !entry.as_ref().unwrap().file_name().to_string_lossy().starts_with('.'))
+                .filter(|entry| {
+                    !entry
+                        .as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with('.')
+                })
                 .count();
         }
     }
@@ -80,14 +87,12 @@ fn loose(store: &ObjectStore) -> usize {
 
 /// Staging files left in the pack directory.
 fn staging(store: &ObjectStore) -> usize {
-    fs::read_dir(store.pack_dir())
-        .map(|entries| {
-            entries
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with('.'))
-                .count()
-        })
-        .unwrap_or(0)
+    fs::read_dir(store.pack_dir()).map_or(0, |entries| {
+        entries
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with('.'))
+            .count()
+    })
 }
 
 #[test]
@@ -106,7 +111,9 @@ fn a_hashed_chunk_has_the_id_of_the_blob_it_describes() {
 #[test]
 fn chunks_of_a_batch_go_to_one_pack_in_order() {
     let (_dir, _layout, store) = fresh_store();
-    let data: Vec<Vec<u8>> = (0..20).map(|n| bytes(n, 30_000 + n as usize)).collect();
+    let data: Vec<Vec<u8>> = (0..20u64)
+        .map(|n| bytes(n, 30_000 + usize::try_from(n).unwrap()))
+        .collect();
     let batch = store.batch();
     assert!(batch.orders_chunks());
     let ids: Vec<Hash> = data
@@ -290,7 +297,11 @@ fn a_repeated_chunk_is_written_once() {
         assert!(batch.has(&chunk.id()));
         batch.commit().unwrap();
     }
-    let size = |store: &ObjectStore| fs::metadata(&files_in_pack_dir(store, ".pack")[0]).unwrap().len();
+    let size = |store: &ObjectStore| {
+        fs::metadata(&files_in_pack_dir(store, ".pack")[0])
+            .unwrap()
+            .len()
+    };
     assert_eq!(size(&once), size(&repeated));
 }
 
@@ -439,15 +450,16 @@ fn a_file_packs_the_same_through_the_sequential_and_the_fan_out_path() {
 
     let (_b, _lb, fanned) = fresh_store();
     let batch = fanned.batch();
-    let (manifest_b, _) = crate::worktree::hash_file_with_metadata_with(&batch, &file, |sink, chunks| {
-        assert!(sink.orders_chunks());
-        let hashed = chunks
-            .iter()
-            .map(|chunk| crate::worktree::hash_chunk(chunk))
-            .collect::<Result<Vec<_>, _>>()?;
-        crate::worktree::put_hashed_chunks(sink, &hashed)
-    })
-    .unwrap();
+    let (manifest_b, _) =
+        crate::worktree::hash_file_with_metadata_with(&batch, &file, |sink, chunks| {
+            assert!(sink.orders_chunks());
+            let hashed = chunks
+                .iter()
+                .map(|chunk| crate::worktree::hash_chunk(chunk))
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::worktree::put_hashed_chunks(sink, &hashed)
+        })
+        .unwrap();
     batch.commit().unwrap();
 
     assert_eq!(manifest_a, manifest_b);
@@ -521,12 +533,12 @@ fn the_default_chunk_route_keeps_the_origin_a_source_sink_reads() {
         *ordered.with_origin.lock().unwrap(),
         *plain.with_origin.lock().unwrap()
     );
-    assert_eq!(*ordered.without_origin.lock().unwrap(), 1, "the manifest");
+    assert_eq!(*ordered.without_origin.lock().unwrap(), 0);
 
     // A token with no origin falls back to `put_parts`.
     let chunk = HashedChunk::new(b"no origin").unwrap();
     plain.put_hashed_chunk(&chunk).unwrap();
-    assert_eq!(*plain.without_origin.lock().unwrap(), 2);
+    assert_eq!(*plain.without_origin.lock().unwrap(), 1);
 }
 
 #[test]

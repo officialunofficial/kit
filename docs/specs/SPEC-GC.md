@@ -245,6 +245,15 @@ its last remote-tracking ref write, and writes each of those refs under
 `worktree.lock`. A gc during the push therefore cannot prune the tip of a
 tracking ref the push writes, even when the local branch is deleted first.
 
+A local batch that writes the chunks of a large file (`kit add`,
+`kit stash`) publishes the packs it fills, at 64 MiB and at commit, before
+any ref or index names their objects. It holds `worktree.lock` from its
+first write to its index or ref write, so gc's mark either sees the
+result or sweeps before the first write, as for loose objects. The batch
+holds a prune guard while it publishes packs. A pack that no index
+names, left by a crash or an aborted add, is a wholly dead pack, and
+the sweep retires it after grace.
+
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the

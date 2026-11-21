@@ -2605,11 +2605,19 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpointed_chunk_is_visible_before_the_commit() {
+    fn a_checkpointed_chunk_is_visible_before_the_commit_in_a_loose_store() {
         let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
         let expected = chunked_blob_from_bytes(&data).unwrap();
         assert!(expected.chunks().len() > 8, "the file has several windows");
-        let (_dir, store) = fresh_store();
+        // A shared guard held elsewhere makes the one try at the packed marker
+        // miss, so this batch stays loose.
+        let (dir, _init) = fresh_store();
+        let layout = crate::layout::RepoLayout::single(dir.path());
+        fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+        let holder = ObjectStore::open(&layout).unwrap();
+        let _guard = holder.prune_guard().unwrap();
+        let store = ObjectStore::open(&layout).unwrap();
+        drop(holder);
         let batch = store.batch();
         let h = store_large_file_streaming_windowed(
             &batch,
@@ -2624,6 +2632,28 @@ mod tests {
         assert!(store.contains(&expected.chunks()[3]));
         assert!(!store.contains(&h));
         batch.commit().unwrap();
+        assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_checkpoint_keeps_the_chunks_of_an_open_pack_invisible_until_the_commit() {
+        let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
+        let expected = chunked_blob_from_bytes(&data).unwrap();
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let h = store_large_file_streaming_windowed(
+            &batch,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            4,
+        )
+        .unwrap();
+        // The chunks are in the open pack and the manifest is staged, so none
+        // is visible, and the manifest cannot be visible before its chunks.
+        assert!(!store.contains(&expected.chunks()[0]));
+        assert!(!store.contains(&h));
+        batch.commit().unwrap();
+        assert!(store.contains(&expected.chunks()[0]));
         assert_eq!(read_blob(&store, &h).unwrap(), data);
     }
 

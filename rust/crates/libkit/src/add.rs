@@ -953,11 +953,10 @@ fn hash_pending(
             if sink.orders_chunks() {
                 // Hash the batch in parallel, then hand it over in file order
                 // on this thread, so a packing sink writes the file in order.
-                let hashed = fanout::try_map_seq_or_par(
-                    batch,
-                    chunk_fanout_threshold(),
-                    |chunk| worktree::hash_chunk(chunk),
-                )?;
+                let hashed =
+                    fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                        worktree::hash_chunk(chunk)
+                    })?;
                 worktree::put_hashed_chunks(sink, &hashed)
             } else {
                 fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {

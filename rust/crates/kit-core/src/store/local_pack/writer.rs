@@ -80,9 +80,10 @@ impl<'a> LocalPackWriter<'a> {
     /// # Errors
     /// The packed marker could not be validated or synced, or staging failed.
     pub fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> StoreResult<Self> {
-        let mut writer = Self::for_batch(store, guard)?;
-        writer._guard = Some(guard);
-        Ok(writer)
+        Ok(Self {
+            _guard: Some(guard),
+            ..Self::for_batch(store, guard)?
+        })
     }
 
     /// [`Self::new`] for a writer that lives beside its guard in one struct.
