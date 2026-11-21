@@ -1841,7 +1841,9 @@ mod tests {
         let mut data = Vec::with_capacity(len);
         let mut state: u64 = 0x5EED_0001;
         while data.len() < len {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             data.extend_from_slice(&state.to_le_bytes());
         }
         data.truncate(len);
