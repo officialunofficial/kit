@@ -50,6 +50,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.
 - A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
 - Push records its verified data packs locally so the next fetch can skip them.
