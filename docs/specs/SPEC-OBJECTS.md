@@ -662,8 +662,8 @@ stores everything else loose. The batch seals its open pack at 64 MiB of
 payload or 65,536 entries, and when it commits. Before it renames a loose
 manifest, tree or commit, it publishes the pack, so no such object is
 visible before the packed chunks it names. A pack's layout is checked
-against the writer's records when it is published, and an index entry or ref is written only after
-the batch's last pack is published. Per-object writes, loose stores, and a
+against the writer's records when it is published, and an index entry or
+ref is written only after the batch's last pack is published. Per-object writes, loose stores, and a
 writer that cannot activate the marker keep every chunk loose.
 
 Before pack publication, a crash can leave staged files. Between

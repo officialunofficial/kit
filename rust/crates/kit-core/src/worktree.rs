@@ -1411,7 +1411,8 @@ const STREAM_HASH_BATCH: usize = 64;
 /// Number of chunks a large file stages before its sink makes them durable
 /// and visible with [`ObjectSink::checkpoint`]. A sink that stages a file per
 /// object then holds at most this many staged chunks of one file, whatever the
-/// file's size. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
+/// file's size. A chunk in an open local pack stays invisible until the pack
+/// seals or the batch commits. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
 const CHECKPOINT_CHUNKS: usize = 4096;
 
 /// Whether a file's chunk count passed a checkpoint boundary when it grew from

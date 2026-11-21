@@ -1476,12 +1476,12 @@ pub trait ObjectSink {
     fn orders_chunks(&self) -> bool {
         false
     }
-    /// Make the objects stored so far durable, so a writer of many objects
-    /// keeps its staged set bounded. A loose object becomes visible. An object
-    /// in an open local pack becomes visible when the pack seals or at commit,
-    /// so a caller must not read a chunk back before its commit. A checkpoint
-    /// never makes an object visible before the objects it names. The default
-    /// does nothing, for a sink that is durable or keeps no state per object.
+    /// Make the loose objects stored so far durable and visible, so a writer
+    /// of many objects keeps its staged set bounded. An object in an open
+    /// local pack becomes visible when the pack seals or at commit, so a
+    /// caller must not read a chunk back before its commit. A checkpoint never
+    /// makes an object visible before the objects it names. The default does
+    /// nothing, for a sink that is durable or keeps no state per object.
     fn checkpoint(&self) -> StoreResult<()> {
         Ok(())
     }

@@ -306,6 +306,50 @@ fn stash_save_pop_roundtrip_restores_dirty_changes() {
 }
 
 #[test]
+fn stash_of_a_large_file_packs_its_chunks_and_pops_the_same_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let layout = RepoLayout::single(repo);
+    fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+    refs::init(&layout).unwrap();
+    let store_dir = TempDir::new().unwrap();
+    let store = fresh_store_in(store_dir.path());
+
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let original: Vec<u8> = (0..6 << 20)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[3]
+        })
+        .collect();
+    fs::write(repo.join("big.bin"), &original).unwrap();
+    let initial_tree = kit_core::worktree::build_tree(&store, repo).unwrap();
+    let initial_commit = put_commit(&store, initial_tree, vec![], 1000);
+    refs::update_head(&layout, &initial_commit).unwrap();
+
+    let mut edited = original.clone();
+    edited[3 << 20] ^= 0xFF;
+    fs::write(repo.join("big.bin"), &edited).unwrap();
+    stash::save(&store, &layout, "WIP").unwrap();
+    assert_eq!(fs::read(repo.join("big.bin")).unwrap(), original);
+    // The changed chunks went into a local pack of the store.
+    let packs = fs::read_dir(store_dir.path().join(".kit/objects/pack"))
+        .unwrap()
+        .filter(|entry| {
+            let path = entry.as_ref().unwrap().path();
+            path.extension().is_some_and(|ext| ext == "pack")
+                && !path.file_name().unwrap().to_string_lossy().starts_with('.')
+        })
+        .count();
+    assert!(packs >= 1, "the stash packs the chunks of the modified file");
+
+    stash::pop(&store, &layout, 0).unwrap();
+    assert_eq!(fs::read(repo.join("big.bin")).unwrap(), edited);
+}
+
+#[test]
 fn stash_drop_removes_without_applying() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
