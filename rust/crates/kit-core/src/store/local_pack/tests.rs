@@ -2428,6 +2428,8 @@ fn the_soft_classification_hashes_an_id_it_reached_as_a_chunk_and_as_a_node() {
             "{manifest_name}/{blob_name}: {result:?}"
         );
     }
+}
+
 #[test]
 fn the_seal_limits_are_the_fetch_window_and_fit_the_pack_format() {
     assert_eq!(super::PACK_SEAL_BYTES, 64 * 1024 * 1024);
