@@ -2611,6 +2611,7 @@ dependencies = [
  "kit-transport-s3",
  "kit-transport-ssh",
  "libc",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
