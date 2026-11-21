@@ -581,10 +581,7 @@ impl PackSweep {
             let mut bytes = byte_cap;
             let mut take = |from: &mut usize, sizes: &[u64]| {
                 let start = *from;
-                while *from < sizes.len()
-                    && room > 0
-                    && (room == size || sizes[*from] <= bytes)
-                {
+                while *from < sizes.len() && room > 0 && (room == size || sizes[*from] <= bytes) {
                     room -= 1;
                     bytes = bytes.saturating_sub(sizes[*from]);
                     *from += 1;

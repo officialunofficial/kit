@@ -849,7 +849,8 @@ fn a_busy_try_in_a_later_batch_ends_the_run_and_the_next_run_finishes() {
 fn a_hold_is_bounded_by_bytes_as_well_as_by_items() {
     let (_dir, layout, store) = fresh();
     let pairs = dead_packs(&store, 6);
-    let one = fs::metadata(&pairs[0].pack).unwrap().len() + fs::metadata(&pairs[0].index).unwrap().len();
+    let one =
+        fs::metadata(&pairs[0].pack).unwrap().len() + fs::metadata(&pairs[0].index).unwrap().len();
     // Room for two packs by bytes, though the item count would allow 32.
     let _batch = super::tests::set_retire_batch_limits(32, 2 * one + one / 2);
 

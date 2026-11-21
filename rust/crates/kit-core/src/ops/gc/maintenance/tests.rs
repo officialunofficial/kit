@@ -961,21 +961,33 @@ fn a_step_that_runs_out_of_time_retires_what_it_verified_oldest_first() {
     TEST_VERIFY_ROOM.set(None);
     assert_eq!(first.collection, Collection::Progress);
     assert_eq!(first.packs_retired, 2);
-    assert!(!dead[4].exists() && !dead[3].exists(), "the oldest go first");
+    assert!(
+        !dead[4].exists() && !dead[3].exists(),
+        "the oldest go first"
+    );
     assert!(dead[..3].iter().all(|path| path.exists()));
     assert_eq!(repo.pack_count(), before - 2);
     let stamp = stamp_of(&repo);
     assert_eq!(stamp.outcome, Collection::Progress);
     assert!(!stamp.due(stamp.attempted + HOUR - 1, 3));
-    assert!(stamp.due(stamp.attempted + HOUR, 3), "the pair floor does not apply");
+    assert!(
+        stamp.due(stamp.attempted + HOUR, 3),
+        "the pair floor does not apply"
+    );
     assert_eq!(repo.run().collection, Collection::NotDue, "not due yet");
 
     TEST_VERIFY_ROOM.set(Some(2));
     let second = step_later(&repo);
     TEST_VERIFY_ROOM.set(None);
-    assert_eq!((second.collection, second.packs_retired), (Collection::Progress, 2));
+    assert_eq!(
+        (second.collection, second.packs_retired),
+        (Collection::Progress, 2)
+    );
     let third = step_later(&repo);
-    assert_eq!((third.collection, third.packs_retired), (Collection::Complete, 1));
+    assert_eq!(
+        (third.collection, third.packs_retired),
+        (Collection::Complete, 1)
+    );
     assert!(dead.iter().all(|path| !path.exists()));
     assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
     for id in &ids {
@@ -1020,7 +1032,11 @@ fn a_large_dead_set_empties_in_a_bounded_number_of_steps() {
     let mut steps = 0;
     loop {
         TEST_VERIFY_ROOM.set(Some(7));
-        let report = if steps == 0 { repo.run() } else { step_later(&repo) };
+        let report = if steps == 0 {
+            repo.run()
+        } else {
+            step_later(&repo)
+        };
         TEST_VERIFY_ROOM.set(None);
         steps += 1;
         assert!(steps <= 6, "40 packs at 7 a step take 6 steps");
@@ -1046,7 +1062,11 @@ fn a_copy_capped_to_one_output_leaves_work_and_runs_again_under_the_floor() {
     let first = repo.run();
     assert_eq!(first.collection, Collection::Progress);
     assert_eq!(first.packs_merged, 8);
-    assert!(repo.pack_count() < MIN_PAIRS, "{before} -> {}", repo.pack_count());
+    assert!(
+        repo.pack_count() < MIN_PAIRS,
+        "{before} -> {}",
+        repo.pack_count()
+    );
     assert_eq!(stamp_of(&repo).outcome, Collection::Progress);
 
     let mut steps = 1;
@@ -1080,7 +1100,10 @@ fn a_step_that_retires_nothing_is_never_stamped_progress() {
         for entry in fs::read_dir(repo.pack_dir()).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "pack") {
-                File::open(&path).unwrap().set_modified(SystemTime::now()).unwrap();
+                File::open(&path)
+                    .unwrap()
+                    .set_modified(SystemTime::now())
+                    .unwrap();
             }
         }
     });
@@ -1096,7 +1119,10 @@ fn the_progress_stamp_round_trips_and_an_unknown_one_is_unreadable() {
         outcome: Collection::Progress,
         complete_pairs: 3,
     };
-    assert_eq!(Stamp::decode(&stamp.encode()).unwrap().outcome, Collection::Progress);
+    assert_eq!(
+        Stamp::decode(&stamp.encode()).unwrap().outcome,
+        Collection::Progress
+    );
     let mut bytes = stamp.encode();
     bytes[8] = 8;
     assert!(Stamp::decode(&bytes).is_none());

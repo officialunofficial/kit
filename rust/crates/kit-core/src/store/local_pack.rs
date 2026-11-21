@@ -25,14 +25,14 @@ mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
+#[cfg(test)]
+pub(crate) use copy::set_test_output_entries;
+pub(crate) use gc::Verify;
 pub(crate) use reader::Currency;
 use reader::{
     Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,
 };
 pub use writer::LocalPackWriter;
-pub(crate) use gc::Verify;
-#[cfg(test)]
-pub(crate) use copy::set_test_output_entries;
 pub(crate) use writer::SealJob;
 
 /// Payload bytes at which a local pack is sealed and a new one begins.

@@ -307,11 +307,8 @@ fn run(
     // A step that left planned work, and retired or rewrote something, is
     // due again in an hour whatever the pair count. A step that did nothing
     // keeps its own interval, so the work cannot loop.
-    let progressed = gc.packs_retired
-        + gc.packs_rewritten
-        + gc.packs_merged
-        + gc.packs_retired_covered
-        > 0;
+    let progressed =
+        gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered > 0;
     if collection.left
         && progressed
         && collection.stamped == Collection::Complete
