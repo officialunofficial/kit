@@ -16,6 +16,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
 - Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs.
 
+- Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
+- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days.
+- `FetchReport::savings` and the `DownloadResumed`, `DownloadRestarted` and `PackReused` events report the bytes a fetch did not download again.
+
 - Read and verify raw local object packs in repositories that declare capability `P`.
 - Run `kit closure repair-indexes` to rebuild damaged local pack indexes from verified packs.
 

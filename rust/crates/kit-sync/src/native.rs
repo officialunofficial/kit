@@ -17,7 +17,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, USER_AGENT};
+use http::header::{
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_MATCH, RANGE,
+    USER_AGENT,
+};
 use http::{HeaderMap, HeaderValue, Request, Response, Uri};
 use http_body_util::{BodyExt as _, Full};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -29,7 +32,7 @@ use kit_client::{
     FailureObserver, HttpTransport, RequestStream, RequestTimeout, ResponseStream,
 };
 use kit_core::hash::Hash;
-use kit_core::protocol::PackSink;
+use kit_core::protocol::{PackSink, RestartReason, ResumeOutcome, Validator};
 use rustls::{ClientConfig, RootCertStore};
 
 use crate::client_source::Executor;
@@ -1334,6 +1337,225 @@ fn location_client(
         .build(connector)
 }
 
+/// Resumes of one pack-location fetch after an interrupted body. Past this
+/// the fetch fails and the pack comes from the server.
+const LOCATION_RESUMES: usize = 3;
+
+/// How one request of a pack-location fetch ended.
+enum LocationAttempt {
+    /// The whole body is in the sink.
+    Done,
+    /// The server could not continue the body: ask again from the start.
+    Restart,
+    Failed {
+        cause: String,
+        /// The body began and then stopped, so a continuation may follow.
+        interrupted: bool,
+    },
+}
+
+impl LocationAttempt {
+    fn refused(cause: impl Into<String>) -> Self {
+        Self::Failed {
+            cause: cause.into(),
+            interrupted: false,
+        }
+    }
+
+    fn interrupted(cause: impl Into<String>) -> Self {
+        Self::Failed {
+            cause: cause.into(),
+            interrupted: true,
+        }
+    }
+}
+
+fn header_text(headers: &HeaderMap, name: http::header::HeaderName) -> Option<&str> {
+    headers.get(name)?.to_str().ok()
+}
+
+impl NativeHttp {
+    /// One request of a pack-location fetch. With a `validator` and a prefix
+    /// in the sink it asks for the rest of the body, and takes it only when
+    /// the answer is exactly that ([`Validator::accepts`]). A full answer
+    /// sets `validator` from its entity tag and length.
+    async fn location_attempt(
+        &self,
+        uri: Uri,
+        response_limit: u64,
+        sink: &mut dyn PackSink,
+        validator: &mut Option<Validator>,
+        progress: &Progress,
+    ) -> LocationAttempt {
+        let resume = validator
+            .clone()
+            .zip(Some(sink.retained()).filter(|&held| held > 0));
+        // This is deliberately independent of the RPC request path: neither
+        // default headers nor signed request headers reach the location host.
+        // Hyper does not follow redirects or retain cookies.
+        let mut request = Request::get(uri).header(ACCEPT_ENCODING, "identity");
+        if let Some((held, offset)) = &resume {
+            request = request
+                .header(RANGE, Validator::range(*offset))
+                .header(IF_MATCH, held.etag());
+        }
+        let Ok(request) = request.body(NativeBody::Full(Full::new(Bytes::new()))) else {
+            return LocationAttempt::refused("invalid pack location request");
+        };
+        let response = match self.location_client.request(request).await {
+            Ok(response) => response,
+            Err(_) if resume.is_some() => {
+                return LocationAttempt::interrupted("pack location request failed");
+            }
+            Err(_) => return LocationAttempt::refused("pack location request failed"),
+        };
+        progress.mark();
+        let status = response.status().as_u16();
+        let headers = response.headers();
+        let mut from = None;
+        if let Some((held, offset)) = &resume {
+            match resumed_answer(held, *offset, status, headers) {
+                Answer::Rest => from = Some((held.total(), *offset)),
+                Answer::Restart(reason) => {
+                    sink.note_resume(ResumeOutcome::Restarted { reason });
+                    *validator = None;
+                    return LocationAttempt::Restart;
+                }
+                Answer::Full => sink.note_resume(ResumeOutcome::Restarted {
+                    reason: RestartReason::Status,
+                }),
+                Answer::Other => {}
+            }
+        }
+        if from.is_none() && status != 200 {
+            return LocationAttempt::refused("pack location response was not OK");
+        }
+        if !identity_coded(headers) {
+            return LocationAttempt::refused("encoded pack location body refused");
+        }
+        let received = if let Some((total, offset)) = from {
+            if let Err(error) = sink.resume(total, offset) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
+            }
+            sink.note_resume(ResumeOutcome::Resumed { bytes: offset });
+            offset
+        } else {
+            let declared = match declared_length(headers) {
+                Ok(declared) => declared,
+                Err(cause) => return LocationAttempt::refused(cause),
+            };
+            if declared.is_some_and(|declared| declared > response_limit) {
+                return LocationAttempt::refused("pack location body exceeded the size limit");
+            }
+            *validator = Validator::new(header_text(headers, ETAG), declared);
+            if let Err(error) = sink.begin(declared) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
+            }
+            0
+        };
+        stream_location_body(
+            response.into_body(),
+            sink,
+            received,
+            response_limit,
+            progress,
+        )
+        .await
+    }
+}
+
+/// How a response to a ranged request relates to the prefix held.
+enum Answer {
+    /// Exactly the rest of the body.
+    Rest,
+    /// A reply that cannot be used; read the location again from the start.
+    Restart(RestartReason),
+    /// The whole body, as if no range was asked.
+    Full,
+    /// Anything else; the caller decides.
+    Other,
+}
+
+fn resumed_answer(held: &Validator, offset: u64, status: u16, headers: &HeaderMap) -> Answer {
+    match status {
+        206 if !identity_coded(headers) => Answer::Restart(RestartReason::Range),
+        206 => {
+            let accepted = declared_length(headers)
+                .map_err(|_| RestartReason::Range)
+                .and_then(|length| {
+                    held.accepts(
+                        offset,
+                        status,
+                        header_text(headers, ETAG),
+                        header_text(headers, CONTENT_RANGE),
+                        length,
+                    )
+                });
+            match accepted {
+                Ok(()) => Answer::Rest,
+                Err(reason) => Answer::Restart(reason),
+            }
+        }
+        412 => Answer::Restart(RestartReason::Validator),
+        416 => Answer::Restart(RestartReason::Range),
+        200 => Answer::Full,
+        _ => Answer::Other,
+    }
+}
+
+/// Whether a body is sent as it is: no `Content-Encoding`, or only `identity`.
+fn identity_coded(headers: &HeaderMap) -> bool {
+    let mut codings = headers.get_all(CONTENT_ENCODING).iter();
+    match (codings.next(), codings.next()) {
+        (None, _) => true,
+        (Some(coding), None) => coding
+            .to_str()
+            .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")),
+        _ => false,
+    }
+}
+
+/// The `Content-Length` of a response, if it has one.
+fn declared_length(headers: &HeaderMap) -> Result<Option<u64>, &'static str> {
+    match headers.get(CONTENT_LENGTH) {
+        None => Ok(None),
+        Some(value) => value
+            .to_str()
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Some)
+            .ok_or("pack location length is invalid"),
+    }
+}
+
+/// Write the frames of a location body into the sink. `received` counts the
+/// bytes already in it.
+async fn stream_location_body(
+    mut body: hyper::body::Incoming,
+    sink: &mut dyn PackSink,
+    mut received: u64,
+    response_limit: u64,
+    progress: &Progress,
+) -> LocationAttempt {
+    while let Some(frame) = body.frame().await {
+        progress.mark();
+        let Ok(frame) = frame else {
+            return LocationAttempt::interrupted("pack location body failed");
+        };
+        if let Some(data) = frame.data_ref() {
+            received = received.saturating_add(data.len() as u64);
+            if received > response_limit {
+                return LocationAttempt::refused("pack location body exceeded the size limit");
+            }
+            if let Err(error) = sink.write(data) {
+                return LocationAttempt::refused(format!("pack location body refused: {error}"));
+            }
+            progress.mark();
+        }
+    }
+    LocationAttempt::Done
+}
+
 impl HttpTransport for NativeHttp {
     fn supports_pack_locations(&self) -> bool {
         true
@@ -1374,76 +1596,47 @@ impl HttpTransport for NativeHttp {
                 return Err("pack location destination refused".to_owned());
             }
         }
-        if timeout.is_some_and(|timeout| timeout.is_zero()) {
-            return Err("pack location deadline exceeded".to_owned());
-        }
-        let budget = Budget {
-            total: timeout,
-            stall: Some(self.transfer_timeout),
-        };
-        let progress = Progress::new();
-        // This is deliberately independent of the RPC request path: neither
-        // default headers nor signed request headers reach the location host.
-        // Hyper does not follow redirects or retain cookies.
-        let request = Request::get(uri)
-            .header(ACCEPT_ENCODING, "identity")
-            .body(NativeBody::Full(Full::new(Bytes::new())))
-            .map_err(|_| "invalid pack location request")?;
-        let fetch = async {
-            let response = self
-                .location_client
-                .request(request)
-                .await
-                .map_err(|_| "pack location request failed".to_owned())?;
-            progress.mark();
-            if response.status() != http::StatusCode::OK {
-                return Err("pack location response was not OK".to_owned());
-            }
-            let mut codings = response.headers().get_all(CONTENT_ENCODING).iter();
-            match (codings.next(), codings.next()) {
-                (None, _) => {}
-                (Some(coding), None)
-                    if coding
-                        .to_str()
-                        .is_ok_and(|coding| coding.trim().eq_ignore_ascii_case("identity")) => {}
-                _ => return Err("encoded pack location body refused".to_owned()),
-            }
-            let declared = match response.headers().get(CONTENT_LENGTH) {
+        let started = tokio::time::Instant::now();
+        let mut validator: Option<Validator> = None;
+        let mut resumes = 0;
+        loop {
+            let total = match timeout {
+                Some(timeout) => match timeout.checked_sub(started.elapsed()) {
+                    Some(left) if !left.is_zero() => Some(left),
+                    _ => return Err("pack location deadline exceeded".to_owned()),
+                },
                 None => None,
-                Some(value) => Some(
-                    value
-                        .to_str()
-                        .ok()
-                        .and_then(|value| value.trim().parse::<u64>().ok())
-                        .ok_or("pack location length is invalid")?,
-                ),
             };
-            if declared.is_some_and(|declared| declared > response_limit) {
-                return Err("pack location body exceeded the size limit".to_owned());
-            }
-            sink.begin(declared)
-                .map_err(|error| format!("pack location body refused: {error}"))?;
-            let mut body = response.into_body();
-            let mut received = 0_u64;
-            while let Some(frame) = body.frame().await {
-                progress.mark();
-                let frame = frame.map_err(|_| "pack location body failed".to_owned())?;
-                if let Some(data) = frame.data_ref() {
-                    received = received.saturating_add(data.len() as u64);
-                    if received > response_limit {
-                        return Err("pack location body exceeded the size limit".to_owned());
-                    }
-                    sink.write(data)
-                        .map_err(|error| format!("pack location body refused: {error}"))?;
-                    progress.mark();
+            let budget = Budget {
+                total,
+                stall: Some(self.transfer_timeout),
+            };
+            let progress = Progress::new();
+            let attempt = self.location_attempt(
+                uri.clone(),
+                response_limit,
+                &mut *sink,
+                &mut validator,
+                &progress,
+            );
+            let failed = match within(attempt, budget, &progress).await {
+                Ok(LocationAttempt::Done) => return Ok(()),
+                Ok(LocationAttempt::Restart) => continue,
+                Ok(LocationAttempt::Failed { cause, interrupted }) => (cause, interrupted),
+                Err(Expired::Deadline) => {
+                    return Err("pack location deadline exceeded".to_owned());
                 }
+                Err(Expired::Stalled(stall)) => (format!("pack location {}", stalled(stall)), true),
+            };
+            // Only an interrupted body can continue. A refusal, or a failure
+            // before the body began, ends the fetch: the caller reads the
+            // pack from the server instead.
+            if failed.1 && resumes < LOCATION_RESUMES && validator.is_some() && sink.retained() > 0
+            {
+                resumes += 1;
+                continue;
             }
-            Ok(())
-        };
-        match within(fetch, budget, &progress).await {
-            Ok(result) => result,
-            Err(Expired::Deadline) => Err("pack location deadline exceeded".to_owned()),
-            Err(Expired::Stalled(stall)) => Err(format!("pack location {}", stalled(stall))),
+            return Err(failed.0);
         }
     }
 

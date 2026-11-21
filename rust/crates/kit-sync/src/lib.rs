@@ -72,7 +72,7 @@ pub use clone::{
     clone, init_clone_dir,
 };
 pub use error::SyncError;
-pub use fetch::FetchReport;
+pub use fetch::{DownloadSavings, FetchReport};
 pub use kit_core::ops::gc::{Collection, MaintenanceReport};
 #[cfg(feature = "connect-native")]
 pub use native::{

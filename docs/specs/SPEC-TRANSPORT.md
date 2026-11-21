@@ -106,6 +106,15 @@ gc remove every spool file (named `.tmp` and a random suffix) in `.kit/tmp/`
 when they start, which clears what a power loss leaves on Windows. A spool that
 another process holds open is left alone.
 
+A fetch keeps a verified pack whose apply failed, in `.kit/tmp/retained/`
+as `<key>.pack`, so a retry reads it from disk instead of downloading it. The
+file is a disposable cache and is never trusted: a retry reads it again through
+a spool, which checks its length, its trailer and its key, and a file that fails
+is deleted. The cache holds at most four packs and none older than seven days,
+and the sweep that fetch, push and gc run when they start enforces both. A pack
+leaves the cache when a retry records it as applied. A directory or file in the
+cache that is a symlink is never followed.
+
 `update_ref`'s condition is one of:
 
 - `Any` &mdash; clobber the ref unconditionally.
@@ -1032,8 +1041,24 @@ reaches the sink: its `Content-Length`, when present, goes to `begin`
 before any byte is read, so a pack over `PACK_BODY_LIMIT` or the sink's
 limit is refused unread, and each piece of the body is written to the sink
 as it arrives. Any other answer's body is never read (§6.4). A retried
-attempt begins the sink again. `download_blob` is the same `GET` into a
-sink limited to the caller's bound.
+attempt begins the sink again, unless it continues the body.
+`download_blob` is the same `GET` into a sink limited to the caller's bound.
+
+**Continuing a download.** When an attempt fails after some bytes and the
+sink still holds them (`PackSink::retained`), a client MAY ask for the rest
+instead of reading the pack again from its start, if the `200` answer had a
+strong `ETag` (not starting `W/`) and a `Content-Length`. The retry is a
+`GET` with `Range: bytes=<n>-` for the `n` bytes held and `If-Match` with that
+`ETag`. The client MUST take the body only from a `206` whose `ETag` is the
+first answer's, whose `Content-Range` is `bytes <n>-<total-1>/<total>` for the
+first answer's length, whose `Content-Length` is `total - n`, and that has no
+content coding. A `200`, a `412`, a `416` or a `206` that fails a check reads the
+pack again from its start: a `200` is taken whole and begins the sink again, and
+the others are followed at once by a `GET` with neither header. Any other status
+is handled as for a first request, and a retry may continue again. The sink keeps the prefix and its hash, and
+the caller still checks the whole pack against its key, so a prefix that was not
+the pack's own fails there. A transport reports a continuation, and why it read
+again from the start, to the sink (`PackSink::note_resume`).
 
 ### 6.8 Repository cursor
 

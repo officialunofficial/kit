@@ -899,6 +899,7 @@ impl TagPhase<'_> {
             },
         );
         self.report.packs_downloaded += done.packs;
+        self.report.savings.add(&done.savings);
         self.report.packs_already_applied += done.skipped;
         self.report.objects_unpacked += done.objects;
         let skipped = stopped || done.skipped > 0;
