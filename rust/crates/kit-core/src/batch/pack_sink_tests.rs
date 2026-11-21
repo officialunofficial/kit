@@ -441,9 +441,12 @@ fn block_the_seal(batch: &WriteBatch<'_>) -> std::sync::mpsc::Sender<()> {
 
 fn manifest_of(data: &[u8], id: Hash) -> Vec<u8> {
     crate::serialize::serialize(&crate::object::Object::ChunkedBlob(
-        crate::object::ChunkedBlob::from_parts(data.len() as u64, 0, vec![id], vec![
+        crate::object::ChunkedBlob::from_parts(
             data.len() as u64,
-        ])
+            0,
+            vec![id],
+            vec![data.len() as u64],
+        )
         .unwrap(),
     ))
     .unwrap()
@@ -813,6 +816,7 @@ fn a_pack_holds_exactly_its_byte_limit() {
     batch
         .put_hashed_chunk(&HashedChunk::new(&bytes(256, data)).unwrap())
         .unwrap();
+    batch.sealing.wait().unwrap();
     assert_eq!(pairs(&store), 1, "one byte more does not");
 }
 

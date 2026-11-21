@@ -74,8 +74,8 @@ use tempfile::TempPath;
 
 use crate::hash::Hash;
 use crate::store::{
-    HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, SealJob, ObjectSink, ObjectStore, PackCatalog,
-    PruneGuard, StoreError, StoreResult,
+    HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog,
+    PruneGuard, SealJob, StoreError, StoreResult,
 };
 
 /// When object writes become durable.
@@ -962,7 +962,10 @@ impl Drop for Sealing {
     fn drop(&mut self) {
         // An aborted batch: the pack being sealed must not outlive the guard
         // that keeps its directory in place.
-        let worker = self.worker.get_mut().unwrap_or_else(PoisonError::into_inner);
+        let worker = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(handle) = worker.take() {
             let _ = handle.join();
         }
