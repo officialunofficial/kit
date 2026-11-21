@@ -1980,6 +1980,112 @@ fn handles_reuse_only_the_requested_member_and_close_removed_entries() {
 }
 
 #[test]
+fn concurrent_probes_of_one_uncached_pack_end_with_one_cached_handle() {
+    use std::sync::{Arc, Barrier};
+
+    use super::reader::{Handles, Locator, Member};
+
+    const THREADS: usize = 16;
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"racing probes")]);
+    let locator = Arc::new(Locator::open(&pair, 0, 0).unwrap());
+    for _ in 0..20 {
+        let handles = Handles::default();
+        let barrier = Barrier::new(THREADS);
+        let got: Vec<_> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        handles.get(&locator, Member::Pack).unwrap()
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+        assert_eq!(handles.cached(), 1);
+        assert!((1..=THREADS).contains(&handles.opens()));
+        let cached = handles.get(&locator, Member::Pack).unwrap();
+        assert!(got.iter().all(|h| Arc::ptr_eq(h, &cached)));
+    }
+}
+
+#[test]
+fn a_probe_that_loses_the_open_race_keeps_the_cached_handle() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"lost open race")]);
+    let locator = Arc::new(Locator::open(&pair, 0, 0).unwrap());
+    let handles = Handles::default();
+    let winner = Arc::new(std::sync::Mutex::new(None));
+    let slot = Arc::clone(&winner);
+    let rival = Arc::clone(&locator);
+    handles.once_after_open(move |handles| {
+        *slot.lock().unwrap() = Some(handles.get(&rival, Member::Pack).unwrap());
+    });
+    let loser = handles.get(&locator, Member::Pack).unwrap();
+    let winner = winner.lock().unwrap().take().unwrap();
+    assert!(Arc::ptr_eq(&loser, &winner));
+    assert_eq!(handles.cached(), 1);
+    assert_eq!(handles.opens(), 2);
+}
+
+#[test]
+fn a_pack_retired_during_an_open_is_not_cached() {
+    use std::io::Read;
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"retired during open")]);
+    let locator = Arc::new(Locator::open(&pair, 0, 0).unwrap());
+    let handles = Handles::default();
+    let retired = Arc::clone(&locator);
+    handles.once_after_open(move |handles| {
+        handles.retain(|candidate| !Arc::ptr_eq(candidate, &retired));
+        fs::remove_file(&retired.pair.pack).unwrap();
+    });
+    // The caller still gets a handle to the file it opened and checked.
+    let handle = handles.get(&locator, Member::Pack).unwrap();
+    let mut magic = [0; 4];
+    let mut file = &*handle;
+    file.read_exact(&mut magic).unwrap();
+    assert_eq!(&magic, crate::pack::MAGIC);
+    // Nothing keeps the deleted file open, and a later probe sees it gone.
+    assert_eq!(handles.cached(), 0);
+    assert!(matches!(
+        handles.get(&locator, Member::Pack),
+        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pack_replaced_before_its_open_is_damage_or_absence_and_is_not_cached() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let (pair, _) = publish_objects(&store, &[&blob(b"replaced before open")]);
+    let locator = Arc::new(Locator::open(&pair, 0, 0).unwrap());
+    let handles = Handles::default();
+    let bytes = fs::read(&pair.pack).unwrap();
+    let replacement = tempfile::NamedTempFile::new_in(store.pack_dir()).unwrap();
+    fs::write(replacement.path(), bytes).unwrap();
+    replacement.persist(&pair.pack).unwrap();
+    assert!(matches!(
+        handles.get(&locator, Member::Pack),
+        Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert_eq!(handles.cached(), 0);
+}
+
+#[test]
 fn a_verified_collection_location_rechecks_the_index_version() {
     use std::sync::Arc;
 

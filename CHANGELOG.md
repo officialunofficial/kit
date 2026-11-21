@@ -29,6 +29,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size.
 - Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
 - Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
+- Opening a local pack no longer holds the shared handle-cache lock, so concurrent reads and the garbage collection mark no longer queue behind one slow open.
 - **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
