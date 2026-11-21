@@ -620,11 +620,8 @@ impl From<SyncError> for ChainFailure {
 impl TagPhase<'_> {
     /// List the remote's tags and publish each one that proves, refusing the
     /// rest one by one.
-    pub(crate) fn run(
-        mut self,
-        listed: Option<Result<Vec<refs::Ref>, crate::SourceError>>,
-    ) -> Result<(), SyncError> {
-        let listed = match listed.unwrap_or_else(|| self.source.list_refs(TAG_REF_PREFIX)) {
+    pub(crate) fn run(mut self) -> Result<(), SyncError> {
+        let listed = match self.source.list_refs(TAG_REF_PREFIX) {
             Ok(listed) => listed,
             // A listing cut short by an interrupt is the interrupt.
             Err(_) if self.observer.cancelled() => return Err(SyncError::Interrupted),

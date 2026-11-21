@@ -500,23 +500,9 @@ pub(crate) fn fetch_objects(
             None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
         }
     }
-    let tag_listing = if store.local_packs_enabled()? {
-        None
-    } else if has_new_branch_tip(layout, remote, &remote_refs)? {
-        store.try_activate_local_packs()?;
-        None
-    } else if options.tags {
-        let tags = source.list_refs(refs::TAG_REF_PREFIX);
-        if let Ok(tags) = &tags
-            && !tags.is_empty()
-            && has_new_tag(layout, tags)?
-        {
-            store.try_activate_local_packs()?;
-        }
-        Some(tags)
-    } else {
-        None
-    };
+    // The activation try comes before this process takes its own shared guard,
+    // which would make it miss.
+    store.ensure_packed_once()?;
     let guard = store.prune_guard()?;
     kit_core::pack::sweep_spool_dir(&store.spool_dir());
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
@@ -534,34 +520,10 @@ pub(crate) fn fetch_objects(
         cursor,
         &cursor_path,
         remote_refs,
-        tag_listing,
         snapshot,
     );
     persist_record(&mut applied, observer, remote);
     result.map(|()| report)
-}
-
-fn has_new_branch_tip(
-    layout: &RepoLayout,
-    remote: &str,
-    refs: &[refs::Ref],
-) -> Result<bool, SyncError> {
-    for r in refs {
-        if r.hash.is_some() && r.hash != refs::read_remote_ref(layout, remote, &r.name)? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn has_new_tag(layout: &RepoLayout, tags: &[refs::Ref]) -> Result<bool, SyncError> {
-    let local: std::collections::HashSet<_> = refs::list_tags(layout)?
-        .into_iter()
-        .map(|tag| tag.name)
-        .collect();
-    Ok(tags
-        .iter()
-        .any(|tag| tag.hash.is_some() && !local.contains(&tag.name)))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -579,7 +541,6 @@ fn fetch_objects_inner(
     cursor: Option<kit_core::protocol::RepoCursor>,
     cursor_path: &std::path::Path,
     remote_refs: Vec<refs::Ref>,
-    tag_listing: Option<Result<Vec<refs::Ref>, crate::SourceError>>,
     snapshot: crate::fetch_attestations::Snapshot,
 ) -> Result<(), SyncError> {
     let require_signed = options.verify_signatures;
@@ -769,7 +730,7 @@ fn fetch_objects_inner(
             report: &mut *report,
             published: &mut matched_tags,
         }
-        .run(tag_listing)?;
+        .run()?;
     }
     let attestation_complete = crate::fetch_attestations::run(
         store, layout, source, observer, remote, options, lock_wait, snapshot, report,

@@ -398,6 +398,9 @@ impl<'s> WriteBatch<'s> {
     fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_existing: bool) -> StoreResult<Hash> {
         let _gate = self.gate.read().expect("batch gate poisoned");
         self.check_not_failed()?;
+        // The first staged write activates the store, always before the pack
+        // catalog below, which is fixed for the life of the batch.
+        self.store.ensure_packed_once()?;
         let final_path = self.store.path_for(&h);
         let shard_dir = final_path
             .parent()
@@ -2147,7 +2150,11 @@ mod tests {
 
     #[test]
     fn sync_shards_barriers_each_shard_once_then_flushes_the_device() {
-        let (_dir, store, rec) = recording_store();
+        let dir = TempDir::new().unwrap();
+        let mut store =
+            ObjectStore::init_loose(&crate::layout::RepoLayout::single(dir.path())).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
         let root = store.objects_root().to_path_buf();
 
         store.sync_shards([0xab, 0x01, 0xab]).unwrap();

@@ -100,15 +100,24 @@ pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
 static LOOSE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Keep the store of `layout` loose: the one-way local-pack activation that a
-/// fetch or clone attempts leaves its format marker as it is. For tests that
+/// write or fetch attempts leaves its format marker as it is. For tests that
 /// unlink or inspect individual objects, which a pack does not hold as files.
-/// Applies to this repository only, for the rest of the process, so tests run
-/// in parallel are not affected. Call it before the first fetch or clone.
+/// Applies to this repository only, for the rest of
+/// the process, so tests run in parallel are not affected. Call it before the
+/// first write or fetch; a store that exists already is made loose at once.
+///
+/// # Panics
+/// If the loose marker cannot be written.
 pub fn keep_loose(layout: &crate::layout::RepoLayout) {
+    let marker = layout.format_file();
     LOOSE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(layout.format_file());
+        .push(marker.clone());
+    // A store that `init` already made starts packed: make it loose.
+    if marker.exists() {
+        std::fs::write(&marker, b"bmt-v2\n").expect("write the loose marker");
+    }
 }
 
 /// Whether [`keep_loose`] named the format marker at `path`.
@@ -131,7 +140,7 @@ mod tests {
     #[test]
     fn the_hook_sees_each_dirent_flush_until_its_guard_drops() {
         let dir = tempfile::tempdir().unwrap();
-        let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
+        let store = ObjectStore::init_loose(&RepoLayout::single(dir.path())).unwrap();
         let root = store.objects_root().to_path_buf();
         let seen: Arc<Mutex<Vec<SyncStep>>> = Arc::default();
         {
@@ -160,15 +169,16 @@ mod tests {
     }
 
     #[test]
-    fn keep_loose_stops_activation_of_that_store_only() {
+    fn keep_loose_keeps_that_store_loose_only() {
         let dir = tempfile::tempdir().unwrap();
         let kept = RepoLayout::single(dir.path().join("kept"));
         let other = RepoLayout::single(dir.path().join("other"));
+        super::keep_loose(&kept);
         let kept_store = ObjectStore::init(&kept).unwrap();
         let other_store = ObjectStore::init(&other).unwrap();
-        super::keep_loose(&kept);
 
         kept_store.try_activate_local_packs().unwrap();
+        kept_store.write(b"kept").unwrap();
         other_store.try_activate_local_packs().unwrap();
         assert!(!kept_store.local_packs_enabled().unwrap());
         assert!(other_store.local_packs_enabled().unwrap());

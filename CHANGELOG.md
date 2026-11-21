@@ -20,6 +20,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
 - Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.

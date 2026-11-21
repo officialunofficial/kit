@@ -526,7 +526,7 @@ fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
 fn a_loose_only_repository_keeps_files_named_like_pack_leftovers() {
     let dir = tempfile::tempdir().unwrap();
     let layout = RepoLayout::single(dir.path());
-    let store = ObjectStore::init(&layout).unwrap();
+    let store = ObjectStore::init_loose(&layout).unwrap();
     let repo = Repo {
         _dir: dir,
         layout,

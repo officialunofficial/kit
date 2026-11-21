@@ -451,6 +451,22 @@ fn a_store_without_local_packs_writes_every_object_loose() {
 }
 
 #[test]
+fn an_up_to_date_fetch_activates_a_loose_store() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    // A store an earlier kit made: loose, and with nothing new to fetch.
+    std::fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+
+    signed_fetch(&target, &remote).unwrap();
+
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+}
+
+#[test]
 fn fetch_packs_every_blob_of_a_large_tree_even_when_blobs_precede_the_tree() {
     let remote = Remote::new();
     let entries: Vec<_> = (0u32..2_000)

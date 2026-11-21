@@ -189,6 +189,8 @@ impl BulkWriter<'_> {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
+        // Before this writer's own shared guard, which would make the try miss.
+        self.store.ensure_packed_once()?;
         let _guard = self.store.lock_writer()?;
         let h = object_id_from_bytes(bytes);
         let final_path = self.store.path_for(&h);
@@ -313,6 +315,12 @@ struct PackWrites {
     direct_catalog: OnceLock<Option<Arc<PackCatalog>>>,
     direct_synced: Mutex<bool>,
     root_synced: std::sync::atomic::AtomicBool,
+    /// Set once this handle's one try at the activation has missed. A try that
+    /// activates the store is recorded as enabled, and a failed try is not
+    /// recorded, so it is returned again. Other
+    /// threads wait on the lock, so none takes a shared guard that would make
+    /// the first try miss.
+    activation: Mutex<bool>,
 }
 
 /// Local content-addressed object store backed by the filesystem.
@@ -372,18 +380,29 @@ impl ObjectStore {
         }
         let objects_root = layout.objects_dir();
         fs::create_dir_all(&objects_root)?;
-        // Declare the object-addressing format so a future open by an
-        // different kit fails loudly (SPEC-MERKLE-OBJECTS §7).
-        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
+        // Declare the object-addressing format, with the packed capability,
+        // so a different kit fails loudly (SPEC-OBJECTS §7). The marker is
+        // synced before `init` returns, so a crash leaves no marker or the
+        // whole one.
+        let marker = format::init_marker(&layout.format_file());
+        crate::atomic::write_atomic(&layout.format_file(), marker, false)?;
         Ok(Self {
             objects_root,
-            packs: Arc::new(local_pack::LocalPacks::new(false)),
+            packs: Arc::new(local_pack::LocalPacks::new(marker == format::PACKED)),
             pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// Test-only: a new store with the legacy marker, as an earlier kit made it.
+    #[cfg(test)]
+    pub(crate) fn init_loose(layout: &RepoLayout) -> StoreResult<Self> {
+        Self::init(layout)?;
+        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
+        Self::open(layout)
     }
 
     /// Select the [`SyncPolicy`] that [`Self::batch`] hands out. The
@@ -499,6 +518,7 @@ impl ObjectStore {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
+        self.ensure_packed_once()?;
         let h = object_id_from_bytes(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
@@ -1485,7 +1505,7 @@ mod tests {
         let layout = RepoLayout::single(dir.path());
         ObjectStore::init(&layout).unwrap();
         let marker = fs::read_to_string(dir.path().join(KIT_DIR).join(FORMAT_FILE)).unwrap();
-        assert_eq!(marker.trim(), FORMAT_VALUE);
+        assert_eq!(marker, format!("{FORMAT_VALUE}\nP"));
         // A freshly-init'd repo opens cleanly.
         ObjectStore::open(&layout).unwrap();
     }

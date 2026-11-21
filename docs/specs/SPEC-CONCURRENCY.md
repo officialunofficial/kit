@@ -176,10 +176,12 @@ the repository is in use. Independently opened handles take shared locks
 for bulk writes, cached reuse, and format validation. The only marker
 update writes the capability byte as described in SPEC-OBJECTS §10.
 Readers treat an exact zero tail as loose storage under the shared lock.
-A publisher tries
-the exclusive lock for activation before taking a shared prune guard.
-After activation it releases the exclusive lock, takes the shared guard,
-and validates the marker again before publishing.
+Any writer of
+objects tries the exclusive lock for activation, once per store handle,
+before its first write and before taking a shared prune guard. A busy
+try leaves that handle's writes loose. After activation it releases the
+exclusive lock, takes the shared guard, and validates the marker again
+before publishing a pack.
 
 Every exclusive acquisition is nonblocking. Gc keeps a candidate when
 the try fails. A writer that reuses a packed object resolves its current
@@ -302,7 +304,7 @@ the history lock):
 | `status` (opportunistic index refresh) | this tree's `worktree.lock`, tried with a 10 ms timeout; on contention the refresh is skipped |
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
 | `attest` | this tree's `worktree.lock`, held across the subject re-check and the attestation write, after signing (`attest.rs`); no ref lock |
-| `clone`, `fetch`, and the fetch phase of `pull` | optional exclusive `format` try-lock for marker activation (§3.4), released before taking the shared `format` prune guard. Hold the guard from before reading applied packs until the last ref publish. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
+| `clone`, `fetch`, and the fetch phase of `pull` | exclusive `format` try-lock for marker activation (§3.4), released before taking the shared `format` prune guard. Hold the guard from before reading applied packs until the last ref publish. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
 | Fetched attestations | after download and pack validation, this tree's `worktree.lock`, then the common directory's `attest-fetch.lock` across storage accounting and envelope publication |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`kit_sync::pull`) |
 | `push` | the shared `format` prune guard (§3.4) from before it plans the first branch until after its last remote-tracking ref write. Per remote-tracking ref write: this tree's `worktree.lock`, with no limit on the wait (the wait reports once and ends on an interrupt), then that ref's `refs-<ref>.lock`, both released before the next upload (`kit_sync::push`) |
