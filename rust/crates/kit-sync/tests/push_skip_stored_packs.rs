@@ -10,8 +10,8 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use kit_core::protocol::{
-    AdvanceOutcome, PackBody, PackKey, PackSink, RefListing, RepoCursor, Transport,
-    TransportError, TransportResult,
+    AdvanceOutcome, PackBody, PackKey, PackSink, RefListing, RepoCursor, Transport, TransportError,
+    TransportResult,
 };
 use kit_core::refs::{self, Ref, RefWriteCondition};
 use kit_core::sign::{self, KeyPair};
@@ -170,16 +170,11 @@ impl Transport for Recording<'_> {
             return Err(TransportError::AccessDenied);
         }
         self.inner.upload_pack(pack, key, head)?;
-        calls.uploads.push(key.clone());
+        calls.uploads.push(*key);
         Ok(())
     }
     // Packmap nodes are not data packs: pass them through uncounted.
-    fn upload_blob(
-        &self,
-        bytes: &[u8],
-        key: &PackKey,
-        head: Option<&str>,
-    ) -> TransportResult<()> {
+    fn upload_blob(&self, bytes: &[u8], key: &PackKey, head: Option<&str>) -> TransportResult<()> {
         self.inner.upload_blob(bytes, key, head)
     }
     fn download_pack(
