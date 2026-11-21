@@ -67,7 +67,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
 use tempfile::TempPath;
@@ -75,7 +75,7 @@ use tempfile::TempPath;
 use crate::hash::Hash;
 use crate::store::{
     HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog,
-    PruneGuard, StoreError, StoreResult,
+    PruneGuard, SealJob, StoreError, StoreResult,
 };
 
 /// When object writes become durable.
@@ -305,6 +305,10 @@ pub struct WriteBatch<'s> {
     // The open local pack. Declared before `pack_catalog`, which holds the
     // prune guard its writer was checked against, so the writer drops first.
     pack: Mutex<Option<LocalPackWriter<'s>>>,
+    // The seal of the last full pack, running off the writing threads. Also
+    // declared before `pack_catalog`: a dropped batch joins it while the
+    // guard its pack was checked against is still held.
+    sealing: Sealing,
     // The shared guard keeps the discovered pairs in place until their
     // directory has been flushed. Callers hold the worktree lock through
     // publication, as with loose reuse.
@@ -328,6 +332,7 @@ impl<'s> WriteBatch<'s> {
             early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
             pack: Mutex::new(None),
+            sealing: Sealing::default(),
             pack_catalog: OnceLock::new(),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
@@ -605,13 +610,18 @@ impl<'s> WriteBatch<'s> {
     /// it to the open local pack unless a copy exists; any other batch stages
     /// it as a loose object.
     ///
+    /// A full pack seals on a worker thread, one at a time, while writes go
+    /// on into the next pack.
+    ///
     /// # Errors
-    /// An error of the write or of sealing a full pack. A pack error fails the
-    /// whole batch.
+    /// An error of the write, or of the seal of the previous full pack, which
+    /// a later call, checkpoint or commit returns, not the call that filled
+    /// the pack. A pack error fails the whole batch.
     ///
     /// # Panics
     ///
-    /// Panics only if a previous write panicked while holding a batch lock.
+    /// Panics only if a previous write panicked while holding a batch lock,
+    /// or if the seal worker panicked.
     pub fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
         let id = chunk.id();
         let parts = chunk.parts();
@@ -644,11 +654,12 @@ impl<'s> WriteBatch<'s> {
             (full, writer.write_hashed(id, &parts))
         };
         result?;
-        // The full pack seals here, with the gate's read side held, so a
-        // checkpoint or commit waits for it. Other threads append to the new
-        // pack meanwhile.
+        // The full pack seals on a worker while the gate's read side is held
+        // only to start it, so writers go on into the new pack. At most one
+        // seal runs: a second full pack waits for the first, and a
+        // checkpoint that shows a non-blob and the commit wait for it.
         if let Some(full) = full {
-            full.publish()?;
+            self.sealing.start(full.detach())?;
         }
         fail.disarm();
         Ok(id)
@@ -732,8 +743,9 @@ impl<'s> WriteBatch<'s> {
     ///
     /// A checkpoint leaves the open local pack open, so the chunks in it stay
     /// invisible until the pack seals or the batch commits. It seals the pack
-    /// first when a staged loose object is not a plain blob, so a manifest, tree
-    /// or commit is never visible before the chunks it names.
+    /// first when a staged loose object is not a plain blob, after the seal of
+    /// an earlier full pack finishes, so a manifest, tree or commit is never
+    /// visible before the chunks it names.
     ///
     /// The objects a checkpoint makes visible are not yet named by any ref or
     /// index. A crash leaves them unreferenced, which gc collects. The caller
@@ -785,6 +797,7 @@ impl<'s> WriteBatch<'s> {
             .expect("batch state mutex poisoned")
             .names_objects;
         if seal_pack || names_objects {
+            self.sealing.wait()?;
             let open = self.pack.lock().expect("batch pack mutex poisoned").take();
             if let Some(writer) = open {
                 writer.publish()?;
@@ -863,6 +876,104 @@ impl<'s> WriteBatch<'s> {
             store.mark_pack_parent_synced();
         }
         Ok(())
+    }
+}
+
+/// The seal of one full local pack, run on a worker thread. At most one runs
+/// at a time: a writer that fills another pack waits for it, and each such
+/// writer holds one full pack meanwhile, so the packs a batch holds are
+/// bounded by its writer threads.
+#[derive(Debug, Default)]
+struct Sealing {
+    worker: Mutex<Option<JoinHandle<StoreResult<()>>>>,
+}
+
+impl Sealing {
+    /// Seal `job` on a worker, after the seal in flight finishes. A thread
+    /// that cannot be spawned (wasm, resource limits) seals on this one.
+    ///
+    /// # Errors
+    /// The seal in flight failed, or, without a worker, this one did.
+    fn start(&self, job: SealJob) -> StoreResult<()> {
+        self.start_with(job, SealJob::publish)
+    }
+
+    fn start_with<J: Send + 'static>(
+        &self,
+        job: J,
+        run: impl FnOnce(J) -> StoreResult<()> + Send + 'static,
+    ) -> StoreResult<()> {
+        self.start_via(job, run, |work| {
+            std::thread::Builder::new()
+                .name("kit-seal".into())
+                .spawn(work)
+        })
+    }
+
+    fn start_via<J: Send + 'static, F: FnOnce(J) -> StoreResult<()> + Send + 'static>(
+        &self,
+        job: J,
+        run: F,
+        spawn: impl FnOnce(
+            Box<dyn FnOnce() -> StoreResult<()> + Send>,
+        ) -> io::Result<JoinHandle<StoreResult<()>>>,
+    ) -> StoreResult<()> {
+        let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::reap(&mut worker)?;
+        // The job stays reachable if the thread never starts.
+        let work = Arc::new(Mutex::new(Some((job, run))));
+        let handed = Arc::clone(&work);
+        let take = move || {
+            handed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("a seal job runs once")
+        };
+        let again = take.clone();
+        let started = spawn(Box::new(move || {
+            let (job, run) = take();
+            run(job)
+        }));
+        if let Ok(handle) = started {
+            *worker = Some(handle);
+            Ok(())
+        } else {
+            let (job, run) = again();
+            run(job)
+        }
+    }
+
+    /// Wait for the seal in flight and return its error. A panic of the worker
+    /// resumes here.
+    ///
+    /// # Errors
+    /// The seal failed.
+    fn wait(&self) -> StoreResult<()> {
+        let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::reap(&mut worker)
+    }
+
+    fn reap(worker: &mut Option<JoinHandle<StoreResult<()>>>) -> StoreResult<()> {
+        match worker.take().map(JoinHandle::join) {
+            None | Some(Ok(Ok(()))) => Ok(()),
+            Some(Ok(Err(error))) => Err(error),
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+        }
+    }
+}
+
+impl Drop for Sealing {
+    fn drop(&mut self) {
+        // An aborted batch: the pack being sealed must not outlive the guard
+        // that keeps its directory in place.
+        let worker = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(handle) = worker.take() {
+            let _ = handle.join();
+        }
     }
 }
 

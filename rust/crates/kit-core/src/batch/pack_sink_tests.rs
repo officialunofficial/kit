@@ -210,6 +210,7 @@ fn a_full_pack_seals_before_the_batch_ends() {
     batch
         .put_hashed_chunk(&HashedChunk::new(&bytes(255, size)).unwrap())
         .unwrap();
+    batch.sealing.wait().unwrap();
     assert_eq!(pairs(&store), 1, "the full pack is sealed");
     batch.commit().unwrap();
     assert_eq!(pairs(&store), 2);
@@ -229,6 +230,7 @@ fn a_pack_seals_at_its_entry_limit() {
     batch
         .put_hashed_chunk(&HashedChunk::new(b"one more").unwrap())
         .unwrap();
+    batch.sealing.wait().unwrap();
     assert_eq!(pairs(&store), 1);
     batch.commit().unwrap();
     assert_eq!(pairs(&store), 2);
@@ -355,23 +357,40 @@ fn an_aborted_batch_leaves_no_pack_and_no_staging_file() {
     assert_eq!((pairs(&store), staging(&store)), (0, 0));
 }
 
-#[cfg(unix)]
-#[test]
-fn a_failed_seal_fails_the_batch_and_publishes_nothing_more() {
-    let (_dir, _layout, store) = fresh_store();
-    let batch = store.batch();
-    let size = 256 << 10;
-    for n in 0..255u64 {
+/// Fill a pack to its entry limit with distinct tiny chunks.
+fn fill_entries(batch: &WriteBatch<'_>, seed: u64) {
+    for n in 0..PACK_SEAL_ENTRIES as u64 {
         batch
-            .put_hashed_chunk(&HashedChunk::new(&bytes(n, size)).unwrap())
+            .put_hashed_chunk(&HashedChunk::new(&(seed + n).to_le_bytes()).unwrap())
             .unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_seal_error_on_the_worker_fails_the_batch_and_leaves_no_index_entry() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    fill_entries(&batch, 0);
     // Unlink the open pack's staging file, so its publication cannot find it.
     for path in fs::read_dir(store.pack_dir()).unwrap() {
         fs::remove_file(path.unwrap().path()).unwrap();
     }
-    let rollover = batch.put_hashed_chunk(&HashedChunk::new(&bytes(900, size)).unwrap());
-    assert!(rollover.is_err());
+    // The rollover only starts the seal, which fails on the worker.
+    batch
+        .put_hashed_chunk(&HashedChunk::new(b"first of the second pack").unwrap())
+        .unwrap();
+    // The second pack fills while the error waits, and its rollover returns it.
+    let mut n = 1_000_000;
+    let failed = loop {
+        n += 1;
+        let result = batch.put_hashed_chunk(&HashedChunk::new(&u64::to_le_bytes(n)).unwrap());
+        if result.is_err() {
+            break result;
+        }
+        assert!(n < 1_000_000 + PACK_SEAL_ENTRIES as u64 + 2, "no rollover");
+    };
+    assert!(failed.is_err());
     assert!(
         batch
             .put_hashed_chunk(&HashedChunk::new(&bytes(901, 100)).unwrap())
@@ -381,6 +400,261 @@ fn a_failed_seal_fails_the_batch_and_publishes_nothing_more() {
     assert!(batch.checkpoint().is_err());
     assert!(batch.commit().is_err());
     assert_eq!(pairs(&store), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_seal_error_on_the_worker_reaches_the_commit() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    fill_entries(&batch, 0);
+    for path in fs::read_dir(store.pack_dir()).unwrap() {
+        fs::remove_file(path.unwrap().path()).unwrap();
+    }
+    batch
+        .put_hashed_chunk(&HashedChunk::new(b"first of the second pack").unwrap())
+        .unwrap();
+    assert!(batch.commit().is_err());
+    assert_eq!(pairs(&store), 0);
+}
+
+/// Hand the open pack of `batch` to its sealing slot behind a gate: the seal
+/// starts when the returned sender is used, and finishes after it.
+fn block_the_seal(batch: &WriteBatch<'_>) -> std::sync::mpsc::Sender<()> {
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let job = batch
+        .pack
+        .lock()
+        .unwrap()
+        .take()
+        .expect("an open pack")
+        .detach();
+    batch
+        .sealing
+        .start_with(job, move |job| {
+            let _ = wait.recv();
+            job.publish()
+        })
+        .unwrap();
+    release
+}
+
+fn manifest_of(data: &[u8], id: Hash) -> Vec<u8> {
+    crate::serialize::serialize(&crate::object::Object::ChunkedBlob(
+        crate::object::ChunkedBlob::from_parts(
+            data.len() as u64,
+            0,
+            vec![id],
+            vec![data.len() as u64],
+        )
+        .unwrap(),
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_checkpoint_that_shows_a_manifest_waits_for_the_seal_in_flight() {
+    let (_dir, layout, store) = fresh_store();
+    let batch = store.batch();
+    let data = bytes(20, 20_000);
+    let id = batch
+        .put_hashed_chunk(&HashedChunk::new(&data).unwrap())
+        .unwrap();
+    let release = block_the_seal(&batch);
+    let manifest_id = batch.write(&manifest_of(&data, id)).unwrap();
+    std::thread::scope(|scope| {
+        let checkpoint = scope.spawn(|| batch.checkpoint());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // The crash picture while the seal runs: no pair, no chunk, and no
+        // manifest, so nothing names a chunk that is not durable.
+        assert!(!checkpoint.is_finished());
+        let other = ObjectStore::open(&layout).unwrap();
+        assert_eq!(pairs(&other), 0);
+        assert!(!other.contains(&id));
+        assert!(!other.path_for(&manifest_id).exists());
+        release.send(()).unwrap();
+        checkpoint.join().unwrap().unwrap();
+    });
+    assert_eq!(pairs(&store), 1);
+    assert!(store.contains(&id));
+    assert!(store.path_for(&manifest_id).exists());
+}
+
+#[test]
+fn the_commit_waits_for_the_seal_in_flight() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    let id = batch
+        .put_hashed_chunk(&HashedChunk::new(&bytes(21, 20_000)).unwrap())
+        .unwrap();
+    let release = block_the_seal(&batch);
+    std::thread::scope(|scope| {
+        let commit = scope.spawn(|| batch.flush(true));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!commit.is_finished());
+        assert_eq!(pairs(&store), 0);
+        release.send(()).unwrap();
+        commit.join().unwrap().unwrap();
+    });
+    assert_eq!(pairs(&store), 1);
+    assert!(store.contains(&id));
+}
+
+#[test]
+fn a_checkpoint_of_plain_blobs_does_not_wait_for_the_seal() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    batch
+        .put_hashed_chunk(&HashedChunk::new(&bytes(22, 20_000)).unwrap())
+        .unwrap();
+    let release = block_the_seal(&batch);
+    batch.write(&blob_bytes(b"loose blob")).unwrap();
+    batch.checkpoint().unwrap();
+    assert_eq!(pairs(&store), 0, "the seal is still running");
+    release.send(()).unwrap();
+    batch.commit().unwrap();
+    assert_eq!(pairs(&store), 1);
+}
+
+#[test]
+fn a_second_full_pack_waits_for_the_first_seal() {
+    let sealing = Sealing::default();
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let started = Arc::new(AtomicBool::new(false));
+    sealing
+        .start_with((), move |()| {
+            let _ = wait.recv();
+            Ok(())
+        })
+        .unwrap();
+    std::thread::scope(|scope| {
+        let flag = Arc::clone(&started);
+        let second = scope.spawn(|| {
+            let result = sealing.start_with((), move |()| {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            });
+            result.and_then(|()| sealing.wait())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!second.is_finished());
+        assert!(!started.load(Ordering::SeqCst), "one seal at a time");
+        release.send(()).unwrap();
+        second.join().unwrap().unwrap();
+    });
+    assert!(started.load(Ordering::SeqCst));
+}
+
+#[test]
+fn an_error_of_the_first_seal_is_returned_when_the_second_starts() {
+    let sealing = Sealing::default();
+    sealing
+        .start_with((), |()| Err(io::Error::other("first seal").into()))
+        .unwrap();
+    let second_ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&second_ran);
+    let result = sealing.start_with((), move |()| {
+        flag.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+    assert!(result.unwrap_err().to_string().contains("first seal"));
+    assert!(!second_ran.load(Ordering::SeqCst));
+    sealing.wait().unwrap();
+}
+
+#[test]
+fn a_panic_in_the_seal_worker_is_surfaced_not_swallowed() {
+    let sealing = Sealing::default();
+    sealing
+        .start_with((), |()| panic!("a seal panicked"))
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sealing.wait()));
+    assert!(result.is_err());
+    // The slot is empty and usable afterwards.
+    sealing.wait().unwrap();
+
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    batch
+        .put_hashed_chunk(&HashedChunk::new(&bytes(23, 20_000)).unwrap())
+        .unwrap();
+    batch
+        .sealing
+        .start_with((), |()| panic!("a seal panicked"))
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| batch.commit()));
+    assert!(result.is_err());
+    assert_eq!(pairs(&store), 0);
+}
+
+#[test]
+fn a_panic_of_the_seal_in_flight_reaches_the_next_full_pack_and_fails_the_batch() {
+    let (_dir, _layout, store) = fresh_store();
+    let batch = store.batch();
+    batch
+        .put_hashed_chunk(&HashedChunk::new(b"first pack").unwrap())
+        .unwrap();
+    let job = batch.pack.lock().unwrap().take().unwrap().detach();
+    batch
+        .sealing
+        .start_with(job, |_| panic!("a seal panicked"))
+        .unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        fill_entries(&batch, 5_000_000);
+        // The pack above is the batch's second. Its rollover starts a third.
+        batch.put_hashed_chunk(&HashedChunk::new(b"rollover").unwrap())
+    }));
+    assert!(result.is_err());
+    assert!(batch.check_not_failed().is_err());
+    assert!(batch.write(&blob_bytes(b"later")).is_err());
+}
+
+#[test]
+fn a_seal_runs_on_this_thread_when_no_worker_can_start() {
+    let sealing = Sealing::default();
+    let ran = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ran);
+    sealing
+        .start_via(
+            (),
+            move |()| {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| Err(io::Error::other("no threads")),
+        )
+        .unwrap();
+    assert!(ran.load(Ordering::SeqCst));
+    let failed = sealing.start_via(
+        (),
+        |()| Err(io::Error::other("inline seal").into()),
+        |_| Err(io::Error::other("no threads")),
+    );
+    assert!(failed.unwrap_err().to_string().contains("inline seal"));
+}
+
+#[test]
+fn a_dropped_batch_waits_for_the_seal_in_flight() {
+    let (_dir, _layout, store) = fresh_store();
+    let done = Arc::new(AtomicBool::new(false));
+    {
+        let batch = store.batch();
+        batch
+            .put_hashed_chunk(&HashedChunk::new(&bytes(24, 20_000)).unwrap())
+            .unwrap();
+        let flag = Arc::clone(&done);
+        let job = batch.pack.lock().unwrap().take().unwrap().detach();
+        batch
+            .sealing
+            .start_with(job, move |job| {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                flag.store(true, Ordering::SeqCst);
+                job.publish()
+            })
+            .unwrap();
+    }
+    assert!(done.load(Ordering::SeqCst), "the drop joined the worker");
+    assert_eq!(staging(&store), 0);
 }
 
 #[test]
@@ -564,6 +838,7 @@ fn a_pack_holds_exactly_its_byte_limit() {
     batch
         .put_hashed_chunk(&HashedChunk::new(&bytes(256, data)).unwrap())
         .unwrap();
+    batch.sealing.wait().unwrap();
     assert_eq!(pairs(&store), 1, "one byte more does not");
 }
 
