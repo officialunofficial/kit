@@ -2533,6 +2533,7 @@ enum Damage {
     None,
     Payload,
     Prologue,
+    TypeTag,
     FrameHeader,
 }
 
@@ -2558,6 +2559,7 @@ fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
                 Damage::None,
                 Damage::Payload,
                 Damage::Prologue,
+                Damage::TypeTag,
                 Damage::FrameHeader,
             ] {
                 if payload == 0 && matches!(damage, Damage::Payload) {
@@ -2575,6 +2577,7 @@ fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
                     Damage::None => {}
                     Damage::Payload => damage_frame(&pair, &ids[0], 10 + payload / 2, |b| *b ^= 1),
                     Damage::Prologue => damage_frame(&pair, &ids[0], 6, |b| *b ^= 1),
+                    Damage::TypeTag => damage_frame(&pair, &ids[0], 0, |b| *b = 0xee),
                     Damage::FrameHeader => damage_header(&pair, &ids[0], 1, |b| *b ^= 1),
                 }
 

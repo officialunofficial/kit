@@ -1027,10 +1027,10 @@ impl ObjectStore {
         if self.gc_stream_only.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let Some(frame_len) = location.frame_len() else {
+        let Some(raw_len) = location.frame_len() else {
             return Ok(None);
         };
-        let frame_len = frame_len as usize;
+        let frame_len = raw_len as usize;
         let whole = verify && frame_len <= GC_SMALL_FRAME;
         if frame_len < serialize::BLOB_PROLOGUE_LEN || (verify && !whole) {
             return Ok(None);
@@ -1047,7 +1047,7 @@ impl ObjectStore {
         let ty = parse_type(&bytes[..6])?;
         match ty {
             ObjectType::Blob => {
-                let payload_len = frame_len - serialize::BLOB_PROLOGUE_LEN;
+                let payload_len = raw_capacity(u64::from(raw_len))? - serialize::BLOB_PROLOGUE_LEN;
                 if bytes[..serialize::BLOB_PROLOGUE_LEN] != serialize::blob_prologue(payload_len)? {
                     return Err(local_pack::invalid_at(
                         location.path(),

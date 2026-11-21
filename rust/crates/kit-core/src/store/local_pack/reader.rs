@@ -60,7 +60,11 @@ pub(super) const ROUTE_CACHE_BYTES: usize = 288 << 20;
 /// lock released, so one slow `open` never holds up probes of cached packs,
 /// and the file an insert evicts closes after the lock is released. A hit
 /// looks the file up in a hash table and stamps it, so the lock is held for
-/// a few instructions however many files are cached.
+/// a few instructions however many files are cached. A miss that fills the
+/// cache scans it once for the oldest entry.
+///
+/// Each store has its own cache, so a process that opens several stores holds
+/// up to the limit for each.
 #[derive(Debug)]
 pub(super) struct Handles {
     cache: std::sync::Mutex<Cache>,
