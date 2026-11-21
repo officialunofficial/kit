@@ -2482,6 +2482,35 @@ mod tests {
         assert_eq!(out.get(&put_blob(&s, chunks[0].clone())), Some(&old_blob));
     }
 
+    #[test]
+    fn an_inline_blob_is_never_its_own_chunk_base() {
+        let (_d, s) = store();
+        let old = chunk_content(1, 40_000);
+        // A new chunk that is byte-identical to the old blob has its id.
+        let (_, out) = pair_blob_within(&s, &old, &[old.clone()], BlobBudget::default());
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn an_earlier_pairing_for_a_chunk_stands() {
+        let (_d, s) = store();
+        let old = chunk_content(1, 100_000);
+        let old_blob = put_blob(&s, old.clone());
+        let chunk = put_blob(&s, old[..40_000].to_vec());
+        let other = [9u8; 32];
+        let mut out = HashMap::from([(chunk, other)]);
+        pair_blob_to_chunks(
+            &s,
+            &[chunk],
+            old_blob,
+            &old,
+            BlobBudget::default(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.get(&chunk), Some(&other));
+    }
+
     /// `pair_blob_to_chunks` on the `chunks` of a file whose old tip held
     /// `old` as one blob, within `budget`.
     fn pair_blob_within(
