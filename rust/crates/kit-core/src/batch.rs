@@ -437,7 +437,9 @@ impl<'s> WriteBatch<'s> {
                 st.created_shards.insert(shard_dir);
             }
             // The type of a spooled object is not known here, so it may name others.
-            SyncPolicy::Batch => self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES, true),
+            SyncPolicy::Batch => {
+                self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES, true)
+            }
         }
         Ok(())
     }
