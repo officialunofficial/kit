@@ -534,20 +534,22 @@ fn check_frames_in(
     // One buffer for the whole check, never grown, and no larger than the
     // frames: a small pack must not pay for a full segment.
     let frames_len = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
-    let mut buf = vec![0; segment.min(frames_len).max(ENTRY_FRAME_LEN)];
+    let cap = segment.min(frames_len).max(ENTRY_FRAME_LEN);
+    let mut scratch = Scratch::take(cap);
+    let buf = &mut scratch.0[..cap];
     let mut rows = rows.iter().peekable();
     while let Some((_, first)) = rows.peek() {
         let first_len = ENTRY_FRAME_LEN + first.len as usize;
-        if first_len > buf.len() {
+        if first_len > cap {
             // One frame larger than the buffer: check its header from the
             // first piece, then digest the rest piece by piece.
             let (_, row) = rows.next().expect("peeked");
-            file.read_exact(&mut buf)?;
-            checked.frame(&buf, row)?;
-            update(&mut digest, &buf);
-            let mut left = first_len - buf.len();
+            file.read_exact(buf)?;
+            checked.frame(buf, row)?;
+            update(&mut digest, buf);
+            let mut left = first_len - cap;
             while left > 0 {
-                let piece = left.min(buf.len());
+                let piece = left.min(cap);
                 file.read_exact(&mut buf[..piece])?;
                 update(&mut digest, &buf[..piece]);
                 left -= piece;
@@ -559,7 +561,7 @@ fn check_frames_in(
         let mut len = 0;
         while let Some((_, row)) = rows.peek() {
             let frame_len = ENTRY_FRAME_LEN + row.len as usize;
-            if len + frame_len > buf.len() {
+            if len + frame_len > cap {
                 break;
             }
             len += frame_len;
@@ -576,6 +578,43 @@ fn check_frames_in(
         return Err(index::invalid("local pack does not end at its last frame"));
     }
     Ok(digest)
+}
+
+/// The buffer a finished check leaves for the next one. Each seal runs on its
+/// own thread, and a buffer allocated and freed there stays in that thread's
+/// malloc arena, so one fresh buffer per seal would add up to a segment of
+/// resident memory per seal. The buffer is taken for the length of a check
+/// and put back, so a process keeps at most one segment, plus one more for
+/// each check that runs at the same time.
+static SPARE_BUFFER: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+struct Scratch(Vec<u8>);
+
+impl Scratch {
+    /// A buffer of at least `len` bytes.
+    fn take(len: usize) -> Self {
+        let spare = std::mem::take(
+            &mut *SPARE_BUFFER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Self(if spare.len() >= len {
+            spare
+        } else {
+            vec![0; len]
+        })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let mut spare = SPARE_BUFFER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.0.len() > spare.len() {
+            *spare = std::mem::take(&mut self.0);
+        }
+    }
 }
 
 /// Digest `bytes` on a few threads, as one hasher would serially.
