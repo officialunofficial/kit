@@ -106,7 +106,9 @@ it. So a wrong locator or a damaged payload for a chunk passes the mark. It
 can also stop the mark with `ChunkNotBlob` when the locator names another
 kind of object, even though a good loose copy exists. Every step of gc that
 deletes or replaces a copy in reliance on a packed copy verifies that copy:
-loose-duplicate removal and the body check before retirement. The local
+loose-duplicate removal, the body check before retirement, and copy-then-retire,
+which hashes each covering copy and re-derives the id of each survivor it
+copies. The local
 writer's reuse of a packed copy by id and length does not, as before. An
 integrity scan reports a bad packed copy. An id that the walk also reaches as
 a file, and an id that the soft-root classification reaches as a node, stays

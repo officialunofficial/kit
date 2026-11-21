@@ -9,7 +9,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use super::tests::{
-    blob, fresh, publish_objects, record_io, set_after_copy_publish, set_pack_age, take_io,
+    blob, damage_frame, fresh, manifest_root, publish_objects, record_io, set_after_copy_publish,
+    set_pack_age, take_io,
 };
 use super::{Index, Pair};
 use crate::hash::Hash;
@@ -201,6 +202,37 @@ fn the_report_names_how_long_retirement_held_the_exclusive_lock() {
 }
 
 #[test]
+fn a_live_chunk_with_a_damaged_payload_is_never_dropped_for_a_copy_and_never_copied() {
+    // The mark checks a packed chunk by its head only, so a bad payload
+    // passes it and reaches copy-then-retire.
+    for covered in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let chunk = obj("chunk", 4096);
+        let dead: Vec<_> = (0..4).map(|n| obj(&format!("dead{n}"), 4096)).collect();
+        let mut all = vec![&chunk];
+        all.extend(dead.iter());
+        let (input, ids) = publish(&store, &all, OLD);
+        manifest_root(&store, &layout, "live", &ids[..1]);
+        damage_frame(&input, &ids[0], 10, |byte| *byte ^= 1);
+        let healthy = covered.then(|| publish(&store, &[&chunk], YOUNG).0);
+
+        let report = run(&store, &layout, false);
+        assert_eq!(report.pack_copy_error, None, "{covered}");
+        if let Some(healthy) = healthy {
+            // A verified healthy copy stays; the damaged pack may go.
+            assert!(exists(&healthy));
+            assert_eq!(store.read(&ids[0]).unwrap(), chunk);
+        } else {
+            // No other copy: the damaged input stays and is reported.
+            assert!(exists(&input));
+            assert_eq!(report.packs_rewritten, 0);
+            assert_eq!(report.skipped_pack_errors.len(), 1);
+            assert!(store.read(&ids[0]).is_err());
+        }
+    }
+}
+
+#[test]
 fn a_young_pack_with_no_dead_entry_that_another_pack_covers_is_retired_as_covered() {
     let (_dir, layout, store) = fresh();
     let a = obj("a", 500);
@@ -320,8 +352,9 @@ fn a_pack_of_sixteen_thousand_entries_is_not_small() {
 
 #[test]
 fn a_damaged_input_frame_keeps_that_input_and_the_others_proceed() {
-    // The mark refuses a damaged live blob, so the damage sits in an
-    // unreachable entry that survives inside grace.
+    // The mark refuses a damaged live blob reached as a file, so the damage
+    // sits in an unreachable entry that survives inside grace. A damaged live
+    // chunk is the next test.
     let (_dir, layout, store) = fresh();
     let objects: Vec<_> = (0..9).map(|n| obj(&format!("young{n}"), 2000)).collect();
     let pairs: Vec<_> = objects

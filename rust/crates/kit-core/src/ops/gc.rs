@@ -822,8 +822,8 @@ pub struct GcReport {
     /// meant to copy and went on with the rest of the run.
     pub pack_copy_error: Option<String>,
     /// Milliseconds that pack retirement held the exclusive `format` lock,
-    /// from the successful try to the release. A writer that starts then
-    /// waits that long.
+    /// from the successful try to the release; the longest hold if the run
+    /// took it more than once. A writer that starts then waits that long.
     pub retire_hold_ms: u64,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,

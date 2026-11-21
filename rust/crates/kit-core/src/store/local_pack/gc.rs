@@ -440,7 +440,9 @@ impl PackSweep {
         }
         drop(guard);
         let held = locked_at.elapsed();
-        report.retire_hold_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX);
+        report.retire_hold_ms = report
+            .retire_hold_ms
+            .max(u64::try_from(held.as_millis()).unwrap_or(u64::MAX));
         #[cfg(test)]
         SWEEP_HOLD.set(held);
         Ok(true)

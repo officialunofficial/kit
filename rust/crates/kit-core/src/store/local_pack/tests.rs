@@ -2297,7 +2297,12 @@ fn a_pack_retired_between_listing_and_open_is_absent() {
 }
 
 /// A ref that names a manifest of `chunks`.
-fn manifest_root(store: &ObjectStore, layout: &RepoLayout, name: &str, chunks: &[Hash]) -> Hash {
+pub(super) fn manifest_root(
+    store: &ObjectStore,
+    layout: &RepoLayout,
+    name: &str,
+    chunks: &[Hash],
+) -> Hash {
     let manifest = serialize(&Object::ChunkedBlob(
         crate::object::testing::spread(chunks.len() as u64, 0, chunks.to_vec()).unwrap(),
     ))
@@ -2308,7 +2313,7 @@ fn manifest_root(store: &ObjectStore, layout: &RepoLayout, name: &str, chunks: &
 }
 
 /// Change one byte of an object's frame, `at` bytes into its bytes.
-fn damage_frame(pair: &Pair, id: &Hash, at: usize, change: impl FnOnce(&mut u8)) {
+pub(super) fn damage_frame(pair: &Pair, id: &Hash, at: usize, change: impl FnOnce(&mut u8)) {
     let frame = super::Index::open(pair).unwrap().find(id).unwrap();
     let mut bytes = fs::read(&pair.pack).unwrap();
     change(&mut bytes[usize::try_from(frame.offset).unwrap() + at]);
