@@ -269,7 +269,7 @@ fn a_covering_copy_that_cannot_be_read_stops_the_run_and_keeps_every_pack() {
     if fs::File::open(&younger.pack).is_err() {
         let error = run_gc(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).unwrap_err();
         assert!(
-            matches!(&error, crate::store::StoreError::Io(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            matches!(&error, crate::ops::gc::GcRootsError::Store(crate::store::StoreError::Io(e)) if e.kind() == std::io::ErrorKind::PermissionDenied),
             "{error:?}"
         );
         assert!(exists(&older) && exists(&younger), "nothing was retired");
