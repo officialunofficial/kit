@@ -531,24 +531,25 @@ fn check_frames_in(
         next: HEADER_LEN as u64,
         end,
     };
-    let mut buf = Vec::new();
+    // One buffer for the whole check, never grown, and no larger than the
+    // frames: a small pack must not pay for a full segment.
+    let frames_len = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
+    let mut buf = vec![0; segment.min(frames_len).max(ENTRY_FRAME_LEN)];
     let mut rows = rows.iter().peekable();
     while let Some((_, first)) = rows.peek() {
         let first_len = ENTRY_FRAME_LEN + first.len as usize;
-        if first_len > segment {
+        if first_len > buf.len() {
             // One frame larger than the buffer: check its header from the
             // first piece, then digest the rest piece by piece.
             let (_, row) = rows.next().expect("peeked");
-            buf.resize(segment, 0);
             file.read_exact(&mut buf)?;
             checked.frame(&buf, row)?;
             update(&mut digest, &buf);
-            let mut left = first_len - segment;
+            let mut left = first_len - buf.len();
             while left > 0 {
-                let piece = left.min(segment);
-                buf.resize(piece, 0);
-                file.read_exact(&mut buf)?;
-                update(&mut digest, &buf);
+                let piece = left.min(buf.len());
+                file.read_exact(&mut buf[..piece])?;
+                update(&mut digest, &buf[..piece]);
                 left -= piece;
             }
             continue;
@@ -558,19 +559,18 @@ fn check_frames_in(
         let mut len = 0;
         while let Some((_, row)) = rows.peek() {
             let frame_len = ENTRY_FRAME_LEN + row.len as usize;
-            if len + frame_len > segment {
+            if len + frame_len > buf.len() {
                 break;
             }
             len += frame_len;
             group.push(&rows.next().expect("peeked").1);
         }
-        buf.resize(len, 0);
-        file.read_exact(&mut buf)?;
+        file.read_exact(&mut buf[..len])?;
         let mut at = 0;
         for row in group {
-            at += checked.frame(&buf[at..], row)?;
+            at += checked.frame(&buf[at..len], row)?;
         }
-        update(&mut digest, &buf);
+        update(&mut digest, &buf[..len]);
     }
     if checked.next != end || file.read(&mut [0])? != 0 {
         return Err(index::invalid("local pack does not end at its last frame"));
@@ -578,12 +578,36 @@ fn check_frames_in(
     Ok(digest)
 }
 
-/// Digest `bytes` on the rayon pool, as one hasher would serially.
+/// Digest `bytes` on a few threads, as one hasher would serially.
 fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
     #[cfg(not(target_arch = "wasm32"))]
-    digest.update_rayon(bytes);
-    #[cfg(target_arch = "wasm32")]
+    if let Some(pool) = digest_pool() {
+        pool.install(|| digest.update_rayon(bytes));
+        return;
+    }
     digest.update(bytes);
+}
+
+/// The threads that digest a pack, apart from the global rayon pool: BLAKE3's
+/// split into 4 KiB leaves wastes more CPU the more threads it spreads over,
+/// and the seal gains little past a handful. `None` when threads cannot start.
+#[cfg(not(target_arch = "wasm32"))]
+fn digest_pool() -> Option<&'static rayon::ThreadPool> {
+    const DIGEST_THREADS: usize = 8;
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        (threads > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads.min(DIGEST_THREADS))
+                    .thread_name(|n| format!("kit-digest-{n}"))
+                    .build()
+                    .ok()
+            })
+            .flatten()
+    })
+    .as_ref()
 }
 
 /// Where the next frame must start, and where the frames must end.
