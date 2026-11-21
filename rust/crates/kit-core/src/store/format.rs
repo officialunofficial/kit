@@ -60,14 +60,39 @@ pub(super) fn try_check(path: &Path) -> StoreResult<bool> {
     parse(&read_marker(&file)?)
 }
 
-pub(super) fn try_activate(path: &Path) -> StoreResult<()> {
+/// The marker a new store starts with.
+pub(super) fn init_marker(path: &Path) -> &'static [u8] {
     #[cfg(feature = "fault-injection")]
     if crate::fault::keeps_loose(path) {
-        return Ok(());
+        return LEGACY;
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = path;
+    PACKED
+}
+
+/// Try the one-way activation without blocking. Returns whether this call
+/// left the marker packed. A busy lock leaves the store loose, and so does a
+/// marker this user cannot write, so objects stay writable in a shared
+/// repository. Any other error is returned.
+pub(super) fn try_activate(path: &Path) -> StoreResult<bool> {
+    #[cfg(feature = "fault-injection")]
+    if crate::fault::keeps_loose(path) {
+        return Ok(false);
     }
     match activate(path) {
-        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
-        result => result,
+        Ok(()) => Ok(true),
+        Err(StoreError::Io(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock
+                    | io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -295,5 +320,218 @@ mod tests {
         std::os::unix::fs::symlink(&marker, &marker).unwrap();
 
         assert!(matches!(ObjectStore::open(&layout), Err(StoreError::Io(_))));
+    }
+
+    fn loose_store(state: &[u8]) -> (tempfile::TempDir, RepoLayout, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        ObjectStore::init(&layout).unwrap();
+        fs::write(layout.format_file(), state).unwrap();
+        let store = ObjectStore::open(&layout).unwrap();
+        (dir, layout, store)
+    }
+
+    #[test]
+    fn init_writes_the_packed_marker_through_a_synced_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        crate::atomic::testing::reset_dir_sync_calls();
+
+        let store = ObjectStore::init(&layout).unwrap();
+
+        assert!(crate::atomic::testing::dir_sync_calls() >= 1);
+        assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+        assert!(store.local_packs_enabled().unwrap());
+        assert!(
+            ObjectStore::open(&layout)
+                .unwrap()
+                .local_packs_enabled()
+                .unwrap()
+        );
+        let mut names: Vec<_> = fs::read_dir(layout.common_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["format", "objects"], "no temporary marker is left");
+    }
+
+    #[test]
+    fn the_first_write_of_any_kind_activates_a_loose_store() {
+        for state in [LEGACY, LOST_APPEND] {
+            let (_dir, layout, store) = loose_store(state);
+            let batch = store.batch();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), state);
+            batch.write(b"staged").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+            batch.commit().unwrap();
+
+            let (_dir, layout, store) = loose_store(state);
+            store.write(b"direct").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+
+            let (_dir, layout, store) = loose_store(state);
+            let mut bulk = store.bulk_writer();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), state);
+            bulk.write(b"bulk").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+            bulk.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_reader_and_an_empty_batch_leave_a_loose_store_loose() {
+        for state in [LEGACY, LOST_APPEND] {
+            let (_dir, layout, store) = loose_store(state);
+            let id = crate::object::object_id_from_bytes(b"absent");
+
+            assert!(store.read(&id).is_err());
+            assert!(store.object_size(&id).is_err());
+            assert!(store.check_presence(&id).is_err());
+            store.batch().commit().unwrap();
+            store.sync_shards([]).unwrap();
+            drop(store.bulk_writer());
+
+            assert_eq!(fs::read(layout.format_file()).unwrap(), state);
+        }
+    }
+
+    #[test]
+    fn a_batch_that_activates_the_store_gets_its_pack_catalog_afterwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let publisher = ObjectStore::init(&layout).unwrap();
+        let bytes =
+            crate::serialize::serialize(&crate::object::Object::Blob(crate::object::Blob {
+                data: b"already in a pack".to_vec(),
+            }))
+            .unwrap();
+        let guard = publisher.prune_guard().unwrap();
+        let mut pack = crate::store::LocalPackWriter::new(&publisher, &guard).unwrap();
+        let id = pack.write(&bytes).unwrap();
+        pack.publish().unwrap();
+        drop(guard);
+        fs::write(layout.format_file(), LEGACY).unwrap();
+
+        let writer = ObjectStore::open(&layout).unwrap();
+        let batch = writer.batch();
+        assert_eq!(batch.write(&bytes).unwrap(), id);
+        batch.commit().unwrap();
+
+        assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+        assert!(
+            !writer.path_for(&id).exists(),
+            "reused from the pack, not rewritten loose"
+        );
+    }
+
+    #[test]
+    fn a_missed_activation_writes_loose_and_the_handle_does_not_try_again() {
+        for state in [LEGACY, LOST_APPEND] {
+            let (_dir, layout, store) = loose_store(state);
+            let guard = store.prune_guard().unwrap();
+
+            let batch = store.batch();
+            let first = batch.write(b"first").unwrap();
+            batch.commit().unwrap();
+            let direct = store.write(b"second").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), state);
+            assert!(store.path_for(&first).exists());
+            assert!(store.path_for(&direct).exists());
+
+            drop(guard);
+            let batch = store.batch();
+            let third = batch.write(b"third").unwrap();
+            batch.commit().unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), state);
+            assert!(store.path_for(&third).exists());
+
+            // A new handle tries again.
+            let fresh = ObjectStore::open(&layout).unwrap();
+            fresh.write(b"fourth").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_marker_that_cannot_be_written_leaves_writes_loose() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, layout, store) = loose_store(LEGACY);
+        let marker = layout.format_file();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new()
+            .write(true)
+            .open(&marker)
+            .is_ok()
+        {
+            return; // running as a user that ignores the mode bits
+        }
+
+        let batch = store.batch();
+        let staged = batch.write(b"staged").unwrap();
+        batch.commit().unwrap();
+        let direct = store.write(b"direct").unwrap();
+        let mut bulk = store.bulk_writer();
+        bulk.write(b"bulk").unwrap();
+        bulk.commit().unwrap();
+
+        assert_eq!(fs::read(&marker).unwrap(), LEGACY);
+        assert!(store.path_for(&staged).exists());
+        assert!(store.path_for(&direct).exists());
+        assert!(matches!(try_activate(&marker), Ok(false)));
+    }
+
+    #[test]
+    fn a_failure_other_than_contention_or_a_read_only_marker_is_returned_every_time() {
+        let (_dir, layout, store) = loose_store(LEGACY);
+        fs::write(layout.format_file(), b"bmt-v2\nX").unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                store.write(b"refused"),
+                Err(StoreError::IncompatibleRepoFormat { .. })
+            ));
+        }
+        let batch = store.batch();
+        assert!(matches!(
+            batch.write(b"refused"),
+            Err(StoreError::IncompatibleRepoFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn a_handle_that_is_packed_never_reads_the_marker_again_to_write() {
+        for state in [LEGACY, PACKED] {
+            let (_dir, layout, store) = loose_store(state);
+            let mut bulk = store.bulk_writer();
+            bulk.write(b"first").unwrap();
+            bulk.commit().unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+
+            // Neither the handle that activated the store nor one opened packed
+            // looks at the marker again, so a bad one does not stop a writer.
+            fs::write(layout.format_file(), b"bmt-v2\nX").unwrap();
+            let mut bulk = store.bulk_writer();
+            bulk.write(b"second").unwrap();
+            bulk.commit().unwrap();
+            fs::write(layout.format_file(), PACKED).unwrap();
+            let packed = ObjectStore::open(&layout).unwrap();
+            fs::write(layout.format_file(), b"bmt-v2\nX").unwrap();
+            let mut bulk = packed.bulk_writer();
+            bulk.write(b"third").unwrap();
+            bulk.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn each_marker_state_a_crash_at_the_byte_can_leave_reopens_and_the_next_write_activates() {
+        for state in [LEGACY, LOST_APPEND, PACKED] {
+            let (_dir, layout, store) = loose_store(state);
+            let id = store.write(b"before").unwrap();
+            assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
+
+            let reopened = ObjectStore::open(&layout).unwrap();
+            assert_eq!(reopened.read(&id).unwrap(), b"before");
+        }
     }
 }

@@ -486,7 +486,8 @@ fn unknown_version_on_an_unpublished_pack_does_not_block_open() {
 
 #[test]
 fn a_loose_store_skips_pack_discovery_on_a_miss() {
-    let (_dir, _layout, store) = fresh();
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init_loose(&RepoLayout::single(dir.path())).unwrap();
     fs::write(store.pack_dir(), b"unrelated file").unwrap();
 
     assert!(matches!(
@@ -1010,8 +1011,8 @@ fn fetch_writer_requires_its_own_packed_guard_and_writes_overlapping_objects() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     let layout = RepoLayout::single(a.path());
-    let store = ObjectStore::init(&layout).unwrap();
-    let other = ObjectStore::init(&RepoLayout::single(b.path())).unwrap();
+    let store = ObjectStore::init_loose(&layout).unwrap();
+    let other = ObjectStore::init_loose(&RepoLayout::single(b.path())).unwrap();
 
     assert!(!store.local_packs_enabled().unwrap());
     let busy = store.prune_guard().unwrap();

@@ -98,6 +98,14 @@ impl LocalPacks {
         }
     }
 
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn mark_enabled(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
     fn refresh_enabled(&self, store: &ObjectStore) -> StoreResult<bool> {
         if !self.enabled.load(Ordering::Relaxed) {
             let enabled = format::check(&store.format_path())?;
@@ -644,7 +652,37 @@ impl ObjectStore {
     /// An unreadable, incompatible or unwritable format marker.
     #[doc(hidden)]
     pub fn try_activate_local_packs(&self) -> StoreResult<()> {
-        format::try_activate(&self.format_path())
+        if format::try_activate(&self.format_path())? {
+            self.packs.mark_enabled();
+        }
+        Ok(())
+    }
+
+    /// Make this handle's one try at the activation, unless the store is
+    /// already packed. Call it before any write and before this process takes
+    /// a prune guard, which would make the try miss. Never blocks and never
+    /// retries: a miss leaves this handle's writes loose.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible marker, or a failed sync of the byte.
+    #[doc(hidden)]
+    pub fn ensure_packed_once(&self) -> StoreResult<()> {
+        if self.packs.is_enabled() {
+            return Ok(());
+        }
+        let mut tried = self
+            .pack_writes
+            .activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*tried {
+            if format::try_activate(&self.format_path())? {
+                self.packs.mark_enabled();
+            } else {
+                *tried = true;
+            }
+        }
+        Ok(())
     }
 
     /// Check whether the current marker selects packed storage.

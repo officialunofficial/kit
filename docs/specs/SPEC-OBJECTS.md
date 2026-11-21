@@ -515,8 +515,10 @@ both locations.
 
 ### Repository marker
 
-The common directory MUST contain a `format` file. Loose-only stores
-start with the legacy marker `bmt-v2` (canonical bytes `bmt-v2\n`).
+The common directory MUST contain a `format` file. A new store starts
+with the packed marker. A store made by an earlier kit that no later kit
+has written to keeps the legacy marker `bmt-v2` (canonical bytes
+`bmt-v2\n`) and is loose-only.
 The bytes after the canonical prefix `bmt-v2\n` are a required set of
 ASCII capability letters. Each letter occurs once. A reader MUST refuse
 the store with `IncompatibleRepoFormat` and tell the user to update kit
@@ -532,15 +534,22 @@ legacy value, and an absent marker, with `IncompatibleRepoFormat`. A
 legacy reader refuses the packed form. Readers check the marker under the
 shared lock and enable local-pack discovery only with `P`.
 
-Try activation before a fetch acquires its shared prune guard, once
-advertised work indicates the fetch may apply new data packs. An
-up-to-date fetch requires no activation. Under the exclusive `format`
+A writer of objects tries activation once per store handle, before its
+first write and before it takes a shared prune guard. That covers a
+staged batch at its first staged write, a single object write, a bulk
+write session at its first write and a fetch before its guard. A read, a
+ref write and an open do not activate. Creating a store writes the packed
+marker: write the bytes `bmt-v2\nP` to a temporary file in the common
+directory, sync it, rename it to `format`, then sync the directory.
+Under the exclusive `format`
 try-lock, validate the marker. For the canonical legacy marker or the
 exact zero-tail form, write only the ASCII byte `P` at offset 7 with a
 positional write through the locked handle, then sync the file. Preserve
 the seven-byte prefix and the inode, including on error. If the
-try-lock is busy and the marker still selects loose storage when the
-shared guard is acquired, use loose writes for that fetch.
+try-lock is busy, or the marker cannot be opened for writing because
+of permissions or a read-only filesystem, use loose writes and leave the
+marker as it is; the handle does not try again. Any other failure is
+an error.
 Lock details are in [SPEC-CONCURRENCY §3.4](SPEC-CONCURRENCY.md#34-object-refresh-versus-local-gc).
 
 An interrupted activation can leave the canonical legacy marker, the
@@ -550,7 +559,8 @@ the packed marker before publishing any pack, including on retry after
 an uncertain sync. Once activated durably, the packed marker is
 permanent even when no local packs remain. Upgrade all clients sharing
 the common directory and drain sessions opened by legacy clients before
-activation. The packed marker fences subsequent legacy opens.
+activation. The packed marker fences subsequent legacy opens, so a
+legacy kit refuses a repository that a later kit created or wrote to.
 
 ### Object lookup
 
@@ -673,6 +683,8 @@ This prevents trivial amplification and prologue-replay attacks.
 | `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
 | `0x02`  |          | `chunked_blob` only: 40-byte entries that carry end offsets (§7). |
 | marker `P` | 0.10 | Repository marker capability `P` (`bmt-v2\nP`): raw local packs and their index (§10). A reader that does not know `P` refuses the store. This reader accepts exactly the three marker byte strings of §10. |
+
+A new store starts with the packed marker, and a later kit's first object write activates an older loose store, so kit 0.9 and older refuse a repository that this version created or wrote to.
 
 A later marker capability is another letter after the `bmt-v2\n` prefix, and a reader that does not know it refuses the store.
 
