@@ -61,6 +61,7 @@ fn count(report: &mut GcReport, class: Class) {
     }
 }
 
+#[derive(Clone)]
 struct Member {
     pair: Pair,
     pack: Stamp,
@@ -817,5 +818,39 @@ mod select_tests {
             inputs: vec![relied(&spare, &[&covering], &[&spare])],
         };
         assert!(copied.select(&dir, &|_| false).is_empty());
+    }
+
+    #[test]
+    fn a_pack_is_small_below_sixteen_mib_and_below_sixteen_thousand_entries() {
+        let (_dir, _layout, store) = fresh();
+        let pair = pair(&store, "member");
+        let index = Arc::new(Index::open(&pair).unwrap());
+        let member = |payload: u64, entries: usize| Member {
+            pair: pair.clone(),
+            pack: Stamp::read(&pair.pack).unwrap(),
+            locator: Stamp::read(&pair.index).unwrap(),
+            index: Arc::clone(&index),
+            live_bytes: 0,
+            dead_bytes: payload,
+            entries,
+            old: false,
+        };
+        let cases = [
+            ("payload - 1", SMALL_PAYLOAD - 1, 10, true),
+            ("payload", SMALL_PAYLOAD, 10, false),
+            ("entries - 1", 100, SMALL_ENTRIES - 1, true),
+            ("entries", 100, SMALL_ENTRIES, false),
+        ];
+        for (label, payload, entries, small) in cases {
+            // Seven small packs make eight only when the edge pack counts.
+            let mut members = vec![member(500, 1); 7];
+            members.push(member(payload, entries));
+            let classes = classify(&members, &[0; 8]);
+            assert_eq!(
+                classes.iter().flatten().count(),
+                if small { 8 } else { 0 },
+                "{label}"
+            );
+        }
     }
 }
