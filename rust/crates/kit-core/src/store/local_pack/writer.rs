@@ -562,7 +562,7 @@ fn check_frames_in(
                 break;
             }
             len += frame_len;
-            group.push(rows.next().expect("peeked").1);
+            group.push(&rows.next().expect("peeked").1);
         }
         buf.resize(len, 0);
         file.read_exact(&mut buf)?;
