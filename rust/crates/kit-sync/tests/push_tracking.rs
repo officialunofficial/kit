@@ -4,7 +4,6 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::cell::Cell;
-use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -196,28 +195,30 @@ fn successful_push_records_only_packs_with_verified_signatures() {
     }
 }
 
-/// A push makes the directory entries of the objects its recorded packs carry
-/// durable before it records them, and no others: the shard of each object and,
-/// in a packed store, the pack directory.
+/// A push flushes no object directory. Every object it sends is named by a ref,
+/// so its bytes and locations are durable already (SPEC-OBJECTS §10.1), and the
+/// record of its packs needs nothing more.
 #[test]
-fn a_push_flushes_only_the_shards_of_the_packs_it_records() {
+fn a_push_flushes_no_object_directory() {
     let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
     let tx = MemoryTransport::new();
     let work = Work::new();
     let tip = work.commit(None);
     work.branch("main", tip);
     let objects = work.layout.objects_dir();
-    let barriers = Arc::new(Mutex::new(Vec::new()));
+    let steps = Arc::new(Mutex::new(Vec::new()));
     let hook = {
-        let (objects, barriers) = (objects.clone(), Arc::clone(&barriers));
+        let (objects, steps) = (objects.clone(), Arc::clone(&steps));
         fault::on_sync(move |step| {
-            if let SyncStep::DirBarrier(dir) = step
-                && dir.starts_with(&objects)
-            {
-                barriers
+            let at = match step {
+                SyncStep::DirBarrier(dir) => dir,
+                SyncStep::DeviceFlush(root) => root,
+            };
+            if at.starts_with(&objects) {
+                steps
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push(dir.clone());
+                    .push(step.clone());
             }
         })
     };
@@ -230,58 +231,8 @@ fn a_push_flushes_only_the_shards_of_the_packs_it_records() {
     .unwrap();
     drop(hook);
 
-    let Object::Commit(commit) = work.store.read_object(&tip).unwrap() else {
-        panic!("expected a commit");
-    };
-    let Object::Tree(tree) = work.store.read_object(&commit.tree_hash).unwrap() else {
-        panic!("expected a tree");
-    };
-    let ids = [tip, commit.tree_hash]
-        .into_iter()
-        .chain(tree.entries.iter().map(|entry| entry.object_hash));
-    let expected: BTreeSet<PathBuf> = ids
-        .map(|id| objects.join(format!("{:02x}", id[0])))
-        .collect();
-    let flushed = barriers.lock().unwrap().clone();
-    let shards: BTreeSet<PathBuf> = flushed
-        .iter()
-        .filter(|dir| !dir.ends_with("pack"))
-        .cloned()
-        .collect();
-    assert_eq!(shards, expected);
-    assert!(flushed.len() <= expected.len() + 1, "{flushed:?}");
-}
-
-/// A push killed after its packs are uploaded and its ref is written, before it
-/// records them, leaves the next fetch to apply every one of them.
-#[test]
-fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
-    let _serial = HOOK.lock().unwrap_or_else(PoisonError::into_inner);
-    let tx = MemoryTransport::new();
-    let work = Work::new();
-    let tip = work.commit(None);
-    work.branch("main", tip);
-    let objects = work.layout.objects_dir();
-    let killed = {
-        let _hook = fault::on_sync(move |step| {
-            if let SyncStep::DeviceFlush(at) = step
-                && *at == objects
-            {
-                panic!("the push is killed before it records its packs");
-            }
-        });
-        catch_unwind(AssertUnwindSafe(|| {
-            work.push(
-                &TransportSource::new(&tx),
-                "main",
-                PushLease::FastForward,
-                None,
-            )
-        }))
-    };
-
-    assert!(killed.is_err());
-    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    assert_eq!(*steps.lock().unwrap(), []);
+    // The push still recorded its packs.
     let map = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
     let bytes = tx
         .download_blob(&PackKey::from_hash(map), None, u64::MAX)
@@ -292,8 +243,39 @@ fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
     assert!(
         packs
             .iter()
-            .all(|pack| !applied.contains(&PackKey::from_hash(*pack)))
+            .all(|pack| applied.contains(&PackKey::from_hash(*pack)))
     );
+}
+
+/// A push killed right after the remote head moved, before it wrote its
+/// tracking ref and recorded its packs, records nothing, so the next fetch
+/// applies every pack.
+#[test]
+fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
+    let tx = MemoryTransport::new();
+    let work = Work::new();
+    let tip = work.commit(None);
+    work.branch("main", tip);
+    let killing = BeforeRead {
+        inner: &tx,
+        hook: Box::new(|_| {}),
+        after_update: Box::new(|name| {
+            assert!(name != MAIN, "the push is killed after it moved the head");
+        }),
+    };
+    let killed = catch_unwind(AssertUnwindSafe(|| {
+        work.push(
+            &TransportSource::new(&killing),
+            "main",
+            PushLease::FastForward,
+            None,
+        )
+    }));
+
+    assert!(killed.is_err());
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    assert_eq!(work.tracking("main"), None);
+    assert!(!work.layout.applied_packs_dir().join(REMOTE).exists());
     let report = kit_sync::fetch(
         &work.path,
         &TransportSource::new(&tx),
@@ -339,10 +321,12 @@ fn a_plain_push_refuses_a_divergent_tip_when_the_lease_holds() {
 
 type Hook<'a> = dyn Fn(&str) + Send + Sync + 'a;
 
-/// A transport that runs a hook before each ref read.
+/// A transport that runs a hook before each ref read and another after each
+/// ref update that succeeds.
 struct BeforeRead<'a> {
     inner: &'a dyn Transport,
     hook: Box<Hook<'a>>,
+    after_update: Box<Hook<'a>>,
 }
 
 impl Transport for BeforeRead<'_> {
@@ -374,7 +358,9 @@ impl Transport for BeforeRead<'_> {
         condition: RefWriteCondition,
         hash: &Hash,
     ) -> TransportResult<()> {
-        self.inner.update_ref(name, condition, hash)
+        self.inner.update_ref(name, condition, hash)?;
+        (self.after_update)(name);
+        Ok(())
     }
     fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
         self.inner.delete_ref(name, expected)
@@ -417,6 +403,7 @@ fn a_fetch_during_a_plain_push_cannot_make_it_rewind_the_remote() {
                 refs::write_remote_ref(layout, REMOTE, "main", &other).unwrap();
             }
         }),
+        after_update: Box::new(|_| {}),
     };
     let result = work.push(
         &TransportSource::new(&faulty),
