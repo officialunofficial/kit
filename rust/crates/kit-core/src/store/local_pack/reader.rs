@@ -104,7 +104,10 @@ impl Handles {
             }
             cache.retains
         };
-        let handle = Arc::new(self.open(locator, member)?);
+        #[cfg(test)]
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let handle = Arc::new(open_current(locator, member)?);
         #[cfg(test)]
         {
             let hook = self.after_open.lock().unwrap().0.take();
@@ -131,32 +134,26 @@ impl Handles {
         Ok(handle)
     }
 
-    fn open(&self, locator: &Arc<Locator>, member: Member) -> StoreResult<File> {
-        #[cfg(test)]
-        self.opens
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let (path, stamp) = match member {
-            Member::Index => (&locator.pair.index, &locator.index_stamp),
-            Member::Pack => (&locator.pair.pack, &locator.pack_stamp),
-        };
-        let file = open_regular(path)?;
-        let opened = Stamp::get(&file.metadata()?)?;
-        let current = match member {
-            Member::Index => opened == *stamp,
-            Member::Pack => opened.same_file(stamp),
-        };
-        if current {
-            Ok(file)
-        } else {
-            locator.changed()
-        }
-    }
-
     pub(super) fn retain(&self, mut live: impl FnMut(&Arc<Locator>) -> bool) {
         let mut cache = self.lock();
         cache.retains += 1;
         cache.entries.retain(|(locator, _, _)| live(locator));
     }
+}
+
+/// Opens a locator's pack or index file and checks it is still the one indexed.
+fn open_current(locator: &Arc<Locator>, member: Member) -> StoreResult<File> {
+    let (path, stamp) = match member {
+        Member::Index => (&locator.pair.index, &locator.index_stamp),
+        Member::Pack => (&locator.pair.pack, &locator.pack_stamp),
+    };
+    let file = open_regular(path)?;
+    let opened = Stamp::get(&file.metadata()?)?;
+    let current = match member {
+        Member::Index => opened == *stamp,
+        Member::Pack => opened.same_file(stamp),
+    };
+    if current { Ok(file) } else { locator.changed() }
 }
 
 #[derive(Debug)]
