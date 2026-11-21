@@ -28,6 +28,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
 - Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size.
 - Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
+- Fetch and clone write each object above 262,154 bytes once, to its final file, and no longer copy it through a spool and read it back, so a clone of such files reads and writes no more bytes than 0.9 did.
 - Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
 - **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
 

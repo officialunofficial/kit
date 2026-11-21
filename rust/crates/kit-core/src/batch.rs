@@ -395,27 +395,76 @@ impl<'s> WriteBatch<'s> {
         .collect()
     }
 
-    /// Stage the objects `ids` of `spool` as loose files, even where the loose
-    /// path already holds a copy, then join every worker before returning.
-    /// The caller commits the batch.
-    ///
-    /// Each object is read with the spool's checked read, which hashes it
-    /// once and refuses bytes that are not the object `id` names. The
-    /// checked id is then the write's name, so the bytes are not hashed again.
+    /// Stage the object `h`, whose bytes are in the temporary file `tmp`, as a
+    /// loose file, even where the loose path already holds a copy. The caller
+    /// has hashed the bytes it wrote and derived `h` from them, so they are
+    /// neither read nor hashed again. `tmp` must be in the shard directory of
+    /// `h`. The caller commits the batch.
     ///
     /// # Errors
-    /// An id the spool does not hold, bytes that fail the check, or a local
-    /// write error.
+    /// A local flush or rename error.
+    ///
+    /// # Panics
+    /// If `h` has no parent directory in the store, or a previous write
+    /// panicked while holding the batch mutex.
     #[doc(hidden)]
-    pub fn stage_spooled(&self, spool: &crate::pack::ObjectSpool, ids: &[Hash]) -> StoreResult<()> {
-        crate::pack::stage_independent(ids, |id| {
-            let bytes = spool
-                .read(id)?
-                .ok_or_else(|| StoreError::ObjectNotFound(crate::hash::to_hex(id)))?;
-            self.stage_prehashed(*id, &[&bytes], false).map(drop)
-        })
-        .into_iter()
-        .collect()
+    pub fn stage_temp(&self, h: Hash, tmp: TempPath, len: u64) -> StoreResult<()> {
+        let _gate = self.gate.read().expect("batch gate poisoned");
+        self.check_not_failed()?;
+        self.store.ensure_packed_once()?;
+        let final_path = self.store.path_for(&h);
+        let shard_dir = final_path
+            .parent()
+            .expect("object path always has a 2-hex parent")
+            .to_path_buf();
+        debug_assert_eq!(tmp.parent(), Some(shard_dir.as_path()));
+        match self.policy {
+            SyncPolicy::PerObject => {
+                let syncer = self.store.syncer();
+                syncer.full(&OpenOptions::new().write(true).open(&tmp)?, &tmp)?;
+                syncer.rename(tmp, &final_path)?;
+                syncer.dir_sync(&shard_dir)?;
+                let mut st = self.inner.lock().expect("batch state mutex poisoned");
+                st.created_shards.insert(shard_dir);
+            }
+            SyncPolicy::Batch => self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES),
+        }
+        Ok(())
+    }
+
+    /// Queue the temporary file `path` of the object `h` for the commit,
+    /// starting its barrier on a background worker.
+    fn queue_temp(&self, h: Hash, path: TempPath, shard_dir: PathBuf, small: bool) {
+        // No flush on this thread: the barrier is queued to the
+        // background pool below — sequential per-file barriers
+        // would re-serialise the batch on device latency
+        // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
+        // ~8s for a 100 MiB ingest).
+        let mut guard = self.inner.lock().expect("batch state mutex poisoned");
+        let st = &mut *guard;
+        // Lost race against a concurrent writer of the same
+        // object within this batch: keep theirs, drop our tmp
+        // (content-addressed — byte-identical by construction).
+        let staged_path = match st.staged.entry(h) {
+            std::collections::hash_map::Entry::Occupied(_) => None,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                if small {
+                    st.small_staged += 1;
+                }
+                let owned = path.to_path_buf();
+                slot.insert(path);
+                Some(owned)
+            }
+        };
+        st.touched_shards.insert(shard_dir.clone());
+        st.created_shards.insert(shard_dir);
+        drop(guard);
+        // Start this file's barrier now, on a background
+        // worker, so its device latency overlaps the caller's
+        // chunking and hashing instead of piling up at commit.
+        if let Some(path) = staged_path {
+            self.early.submit(path, small);
+        }
     }
 
     fn stage_prehashed(&self, h: Hash, parts: &[&[u8]], reuse_existing: bool) -> StoreResult<Hash> {
@@ -488,38 +537,12 @@ impl<'s> WriteBatch<'s> {
                 st.created_shards.insert(shard_dir);
             }
             SyncPolicy::Batch => {
-                // No flush on this thread: the barrier is queued to the
-                // background pool below — sequential per-file barriers
-                // would re-serialise the batch on device latency
-                // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
-                // ~8s for a 100 MiB ingest).
-                let small = total_len <= SMALL_OBJECT_BYTES;
-                let mut guard = self.inner.lock().expect("batch state mutex poisoned");
-                let st = &mut *guard;
-                // Lost race against a concurrent writer of the same
-                // object within this batch: keep theirs, drop our tmp
-                // (content-addressed — byte-identical by construction).
-                let staged_path = match st.staged.entry(h) {
-                    std::collections::hash_map::Entry::Occupied(_) => None,
-                    std::collections::hash_map::Entry::Vacant(slot) => {
-                        if small {
-                            st.small_staged += 1;
-                        }
-                        let path = tmp.into_temp_path();
-                        let owned = path.to_path_buf();
-                        slot.insert(path);
-                        Some(owned)
-                    }
-                };
-                st.touched_shards.insert(shard_dir.clone());
-                st.created_shards.insert(shard_dir);
-                drop(guard);
-                // Start this file's barrier now, on a background
-                // worker, so its device latency overlaps the caller's
-                // chunking and hashing instead of piling up at commit.
-                if let Some(path) = staged_path {
-                    self.early.submit(path, small);
-                }
+                self.queue_temp(
+                    h,
+                    tmp.into_temp_path(),
+                    shard_dir,
+                    total_len <= SMALL_OBJECT_BYTES,
+                );
             }
         }
         Ok(h)
@@ -2383,9 +2406,8 @@ mod tests {
     }
 
     #[test]
-    fn spooled_objects_over_the_pack_limit_are_written_once_after_one_check() {
-        let (dir, store, rec) = recording_store();
-        let spool = crate::pack::ObjectSpool::new(dir.path()).unwrap();
+    fn a_temporary_file_is_renamed_into_place_once_even_over_a_loose_copy() {
+        let (_dir, store, rec) = recording_store();
         let batch = store.batch();
         for (size, fill) in [(300usize << 10, 1u8), (1 << 20, 2u8)] {
             let object = crate::object::Object::Blob(crate::object::Blob {
@@ -2394,13 +2416,21 @@ mod tests {
             let id = object.id().unwrap();
             let bytes = crate::serialize::serialize(&object).unwrap();
             let path = store.path_for(&id);
+            let shard = path.parent().unwrap();
+            fs::create_dir_all(shard).unwrap();
+            // A damaged copy is already there: the temporary file replaces it.
+            fs::write(&path, b"damaged").unwrap();
+            let staged = || {
+                let mut file = crate::atomic::temp_file_in(shard).unwrap();
+                file.as_file_mut().write_all(&bytes).unwrap();
+                file.into_temp_path()
+            };
             let before = rec.events().len();
-            spool
-                .append(0, id, crate::object::ObjectType::Blob, &bytes)
-                .unwrap();
 
-            // A repeat of the same object stays one staged file.
-            batch.stage_spooled(&spool, &[id, id]).unwrap();
+            // A repeat of the same object stays one staged file, and the
+            // later temporary file is unlinked.
+            batch.stage_temp(id, staged(), bytes.len() as u64).unwrap();
+            batch.stage_temp(id, staged(), bytes.len() as u64).unwrap();
             batch.checkpoint().unwrap();
 
             let renames = rec.events()[before..]
@@ -2409,23 +2439,13 @@ mod tests {
                 .count();
             assert_eq!(renames, 1, "{size}");
             assert_eq!(fs::read(&path).unwrap(), bytes);
+            let names: Vec<_> = fs::read_dir(shard)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().len())
+                .collect();
+            assert_eq!(names, [62], "only the object is left in its shard");
         }
         batch.commit().unwrap();
-
-        // Bytes that are not the object the id names are refused.
-        let claimed = hash::hash(b"claimed");
-        spool
-            .append(0, claimed, crate::object::ObjectType::Blob, b"other")
-            .unwrap();
-        let batch = store.batch();
-        assert!(matches!(
-            batch.stage_spooled(&spool, &[claimed]),
-            Err(StoreError::HashMismatch { .. })
-        ));
-        assert!(matches!(
-            batch.stage_spooled(&spool, &[[0; 32]]),
-            Err(StoreError::ObjectNotFound(_))
-        ));
     }
 
     #[test]
