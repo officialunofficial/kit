@@ -17,9 +17,9 @@ pub(crate) struct PackSweep {
     pairs: BTreeMap<Hash, Retirement>,
     leftovers: BTreeMap<PathBuf, Stamp>,
     copy: Option<CopyPlan>,
-    /// Wholly dead packs past grace whose body planning did not verify,
-    /// because [`Verify::room`] said no. They stay for a later run.
-    unverified: usize,
+    /// Planning stopped before it verified every wholly dead pack past grace,
+    /// because [`Verify::room`] said no. The rest stay for a later run.
+    cut_short: bool,
 }
 
 /// The most items one exclusive `format` hold retires: pack pairs, copy
@@ -206,10 +206,9 @@ impl ObjectStore {
         })?;
         checkpoint()?;
         candidates.sort_by_key(|candidate| (candidate.pack.modified, candidate.pair.key));
-        let total = candidates.len();
-        for (at, candidate) in candidates.into_iter().enumerate() {
+        for candidate in candidates {
             if !(verify.room)() {
-                plan.unverified = total - at;
+                plan.cut_short = true;
                 break;
             }
             let Candidate {
@@ -418,7 +417,7 @@ impl PackSweep {
     /// Verification stopped before every wholly dead pack past grace was
     /// verified: the rest wait for a later run.
     pub(crate) fn verification_cut_short(&self) -> bool {
-        self.unverified != 0
+        self.cut_short
     }
 
     /// Whole packs planned for retirement.

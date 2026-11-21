@@ -920,3 +920,28 @@ fn planning_verifies_the_oldest_dead_packs_first_and_stops_when_told() {
     let planned: Vec<usize> = (0..5).filter(|&at| sweep.plans(&pairs[at])).collect();
     assert_eq!(planned, [0, 1, 3]);
 }
+
+/// Copy inputs count toward the byte cap by the size of their files.
+#[test]
+fn copy_inputs_count_by_their_file_bytes_toward_a_hold() {
+    let (_dir, layout, store) = fresh();
+    let mut inputs = Vec::new();
+    for n in 0..3 {
+        let live = obj(&format!("live{n}"), 2000);
+        let dead: Vec<_> = (0..9).map(|d| obj(&format!("dead{n}x{d}"), 2000)).collect();
+        let mut all = vec![&live];
+        all.extend(dead.iter());
+        let (pair, ids) = publish(&store, &all, OLD);
+        keep(&layout, &format!("live{n}"), &ids[0]);
+        inputs.push(pair);
+    }
+    let one = fs::metadata(&inputs[0].pack).unwrap().len()
+        + fs::metadata(&inputs[0].index).unwrap().len();
+    // Room for two inputs by bytes, though the item count would allow 32.
+    let _batch = super::tests::set_retire_batch_limits(32, 2 * one + one / 2);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_rewritten, 3, "{report:?}");
+    assert_eq!(report.retire_batches, 2, "2 + 1");
+    assert!(inputs.iter().all(|pair| !exists(pair)));
+}
