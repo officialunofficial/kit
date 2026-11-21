@@ -247,48 +247,35 @@ fn a_push_flushes_no_object_directory() {
     );
 }
 
-/// A push killed after it published and wrote its tracking ref, before it
-/// records its packs, leaves the next fetch to apply every one of them.
+/// A push killed right after the remote head moved, before it wrote its
+/// tracking ref and recorded its packs, records nothing, so the next fetch
+/// applies every pack.
 #[test]
 fn a_push_killed_before_it_records_its_packs_leaves_them_to_the_next_fetch() {
-    struct KillAfterPublish;
-    impl Observer<SyncEvent> for KillAfterPublish {
-        fn event(&self, event: &SyncEvent) {
-            if matches!(event, SyncEvent::PushStepCommitted { .. }) {
-                panic!("the push is killed before it records its packs");
-            }
-        }
-    }
-
     let tx = MemoryTransport::new();
     let work = Work::new();
     let tip = work.commit(None);
     work.branch("main", tip);
+    let killing = BeforeRead {
+        inner: &tx,
+        hook: Box::new(|_| {}),
+        after_update: Box::new(|name| {
+            assert!(name != MAIN, "the push is killed after it moved the head");
+        }),
+    };
     let killed = catch_unwind(AssertUnwindSafe(|| {
         work.push(
-            &TransportSource::new(&tx),
+            &TransportSource::new(&killing),
             "main",
             PushLease::FastForward,
-            Some(&KillAfterPublish),
+            None,
         )
     }));
 
     assert!(killed.is_err());
     assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
-    assert_eq!(work.tracking("main"), Some(tip));
+    assert_eq!(work.tracking("main"), None);
     assert!(!work.layout.applied_packs_dir().join(REMOTE).exists());
-    let map = tx.read_ref("refs/kit/packmap/main").unwrap().unwrap();
-    let bytes = tx
-        .download_blob(&PackKey::from_hash(map), None, u64::MAX)
-        .unwrap();
-    let packs = kit_core::transfer::decode_packlist(&bytes).unwrap().packs;
-    assert!(!packs.is_empty());
-    let applied = kit_sync::AppliedPacks::load(&work.layout, REMOTE).unwrap();
-    assert!(
-        packs
-            .iter()
-            .all(|pack| !applied.contains(&PackKey::from_hash(*pack)))
-    );
     let report = kit_sync::fetch(
         &work.path,
         &TransportSource::new(&tx),
@@ -334,10 +321,12 @@ fn a_plain_push_refuses_a_divergent_tip_when_the_lease_holds() {
 
 type Hook<'a> = dyn Fn(&str) + Send + Sync + 'a;
 
-/// A transport that runs a hook before each ref read.
+/// A transport that runs a hook before each ref read and another after each
+/// ref update that succeeds.
 struct BeforeRead<'a> {
     inner: &'a dyn Transport,
     hook: Box<Hook<'a>>,
+    after_update: Box<Hook<'a>>,
 }
 
 impl Transport for BeforeRead<'_> {
@@ -369,7 +358,9 @@ impl Transport for BeforeRead<'_> {
         condition: RefWriteCondition,
         hash: &Hash,
     ) -> TransportResult<()> {
-        self.inner.update_ref(name, condition, hash)
+        self.inner.update_ref(name, condition, hash)?;
+        (self.after_update)(name);
+        Ok(())
     }
     fn delete_ref(&self, name: &str, expected: &Hash) -> TransportResult<()> {
         self.inner.delete_ref(name, expected)
@@ -412,6 +403,7 @@ fn a_fetch_during_a_plain_push_cannot_make_it_rewind_the_remote() {
                 refs::write_remote_ref(layout, REMOTE, "main", &other).unwrap();
             }
         }),
+        after_update: Box::new(|_| {}),
     };
     let result = work.push(
         &TransportSource::new(&faulty),
