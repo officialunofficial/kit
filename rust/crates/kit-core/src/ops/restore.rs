@@ -4844,7 +4844,7 @@ mod tests {
     fn sparse_matcher_answers_like_the_plain_functions() {
         let names = ["a", "b", "src", "lib", "Makefile", "x.rs", ""];
         let mut rng = Lcg(7);
-        let mut path_of = |rng: &mut Lcg| {
+        let path_of = |rng: &mut Lcg| {
             let depth = 1 + rng.next(4);
             (0..depth)
                 .map(|_| names[rng.next(names.len() - 1)])
