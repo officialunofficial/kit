@@ -2033,6 +2033,7 @@ fn a_probe_that_loses_the_open_race_keeps_the_cached_handle() {
     assert_eq!(handles.opens(), 2);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_pack_retired_during_an_open_is_not_cached() {
     use std::io::Read;
@@ -2065,7 +2066,7 @@ fn a_pack_retired_during_an_open_is_not_cached() {
 
 #[cfg(unix)]
 #[test]
-fn a_pack_replaced_before_its_open_is_damage_or_absence_and_is_not_cached() {
+fn a_pack_replaced_before_its_open_is_absent_and_is_not_cached() {
     use std::sync::Arc;
 
     use super::reader::{Handles, Locator, Member};
