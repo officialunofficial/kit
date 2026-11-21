@@ -924,10 +924,14 @@ type HashedFile = (EntryStatus, Hash, (u64, u64, u64, u64));
 /// chunks win the most, by 31 percent. 4 chunks per thread puts the crossover
 /// at 16 chunks on 4 threads, the first size with a clean win. From end to
 /// end, the files of 8, 32 and 128 MiB ran 1.7 to 2.2 times as fast.
+///
+/// A batch holds at most [`worktree::STREAM_HASH_BATCH`] chunks, so the
+/// threshold stops there. Past 16 threads, 4 chunks per thread would put it
+/// above the size of a full batch, and no batch would take the parallel path.
 const CHUNK_FANOUT_CHUNKS_PER_THREAD: usize = 4;
 
 fn chunk_fanout_threshold() -> usize {
-    fanout::threshold(CHUNK_FANOUT_CHUNKS_PER_THREAD)
+    fanout::threshold(CHUNK_FANOUT_CHUNKS_PER_THREAD).min(worktree::STREAM_HASH_BATCH)
 }
 
 /// Hash and store the content of one pending file. The function reads no index
@@ -1784,5 +1788,86 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(idx.entries.len(), 1);
         assert_eq!(idx.serialize().len(), 41 + 67 + 4);
+    }
+
+    fn in_pool<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(f)
+    }
+
+    #[test]
+    fn chunk_fanout_threshold_never_exceeds_a_full_batch() {
+        for (threads, expected) in [
+            (1, 4),
+            (4, 16),
+            (8, 32),
+            (16, 64),
+            (17, 64),
+            (32, 64),
+            (128, 64),
+        ] {
+            assert_eq!(
+                in_pool(threads, chunk_fanout_threshold),
+                expected,
+                "{threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_batch_takes_the_parallel_path_on_a_large_pool() {
+        let full = vec![0u8; worktree::STREAM_HASH_BATCH];
+        let short = &full[..worktree::STREAM_HASH_BATCH - 1];
+        for threads in [4, 16, 17, 32, 64] {
+            let (full_par, short_par) = in_pool(threads, || {
+                let threshold = chunk_fanout_threshold();
+                let is_par = |items: &[u8]| fanout::map_seq_or_par(items, threshold, |_, p| p)[0];
+                (is_par(&full), is_par(short))
+            });
+            assert!(full_par, "a full batch on {threads} threads");
+            // A batch below the threshold stays in sequence, as before, on a
+            // pool whose threshold is under the batch size.
+            assert_eq!(short_par, threads * 4 <= short.len(), "{threads} threads");
+        }
+    }
+
+    #[test]
+    fn large_file_ids_match_the_serial_hash_on_a_large_pool() {
+        // Several full batches at the average chunk size.
+        let len = usize::try_from(worktree::CHUNK_THRESHOLD).unwrap() + 8 * 1024 * 1024;
+        let mut data = Vec::with_capacity(len);
+        let mut state: u64 = 0x5EED_0001;
+        while data.len() < len {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            data.extend_from_slice(&state.to_le_bytes());
+        }
+        data.truncate(len);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, &data).unwrap();
+        let pending = PendingHash {
+            abs: path.clone(),
+            rel_str: "big.bin".to_owned(),
+            previous_status: EntryStatus::Blob,
+            symlink_target: None,
+        };
+        let store = |name: &str| {
+            let root = dir.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            ObjectStore::init(&RepoLayout::single(&root)).unwrap()
+        };
+
+        let serial = store("serial");
+        let (_, expected, _) = hash_pending(&serial, &pending, false).unwrap();
+        for threads in [4, 32] {
+            let fanned = store(&format!("fanned-{threads}"));
+            let (_, got, _) = in_pool(threads, || hash_pending(&fanned, &pending, true)).unwrap();
+            assert_eq!(got, expected, "{threads} threads");
+        }
     }
 }

@@ -67,6 +67,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit add` hashes the chunks of a large file on several threads on a host with more than 16 of them, where a full batch of 64 chunks stayed on one thread. `kit_core::worktree::STREAM_HASH_BATCH` is public.
 - `kit restore Makefile` restores the top-level `Makefile` only, not also a `Makefile` in another directory that another pathspec selects.
 - `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.
 - A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
