@@ -421,9 +421,11 @@ than 256 MiB retires alone. Each batch is a
 complete retirement as described here: it rechecks its own items, makes what
 they rely on durable, unlinks the pack names, flushes, unlinks the indexes
 and flushes, then releases the lock, so a writer that waits for the lock waits
-for one batch. The two caps are policy, chosen so that a hold stays at or
-under about 50 ms on the reference VM: 32 packs of 64 MiB reached 130 ms,
-about 65 ms per GiB, and 256 MiB is an eighth of that. A failed try in any
+for one batch. The two caps are policy. The target is a hold of about 50 ms
+or less for the work that scales with size: 32 packs of 64 MiB took 150 ms
+and more on the reference VM, and 256 MiB (four packs of 64 MiB) took a
+median of 11 to 19 ms. A stalled flush on a busy disk can still stretch one
+hold to a few hundred ms, which no size cap bounds. A failed try in any
 batch ends the run with the earlier batches done. `kit gc` then prints one
 line to standard error that says retirement stopped and how many packs it
 retired; the exit code does not change, and the next run retires the rest. A crash between batches leaves only pairs and
