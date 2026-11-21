@@ -1456,7 +1456,8 @@ pub trait ObjectSink {
     /// Store the canonical blob at `origin`, with its prologue and payload
     /// in `parts`. This covers an inline file or a chunk of a file. A sink may
     /// keep the origin and read the payload back from the file. The default
-    /// stores the bytes.
+    /// stores the bytes. A batch that packs also sends the small files past
+    /// its first 64 to its open local pack.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
     }

@@ -21,6 +21,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the chunks of a large file into local packs in a repository that declares capability `P`, so adding a large file no longer leaves one loose file per chunk.
 - `kit add` seals a full local pack on a background thread while it hashes and writes the next one, so adding many large files is faster.
+- `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the small files of a large batch (past the first 64, up to 16,384 bytes each) into local packs, so adding 100,000 small files makes a few packs and about 150 syncs where it made one loose file and one sync each. Smaller batches and larger files keep the loose path.
 
 - Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
 - Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days.

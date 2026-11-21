@@ -726,7 +726,8 @@ impl<'s> WriteBatch<'s> {
     /// then all renames, then deduplicated shard-directory flushes.
     ///
     /// After `commit()` returns `Ok`, every hash returned by
-    /// [`Self::write`], [`Self::write_parts`] and [`Self::put_hashed_chunk`] is
+    /// [`Self::write`], [`Self::write_parts`], [`Self::put_hashed_chunk`] and
+    /// `put_chunk_parts` is
     /// durable AND visible. It publishes the open local pack first.
     /// Callers MUST call this before reading any object written by this
     /// batch and before writing any ref/index that references one.
