@@ -214,6 +214,7 @@ fn a_live_chunk_with_a_damaged_payload_is_never_dropped_for_a_copy_and_never_cop
         let (input, ids) = publish(&store, &all, OLD);
         manifest_root(&store, &layout, "live", &ids[..1]);
         damage_frame(&input, &ids[0], 10, |byte| *byte ^= 1);
+        set_pack_age(&input.pack, OLD);
         let healthy = covered.then(|| publish(&store, &[&chunk], YOUNG).0);
 
         let report = run(&store, &layout, false);
