@@ -1129,6 +1129,112 @@ fn two_attempts_in_a_row_that_run_out_of_time_wait_30_days() {
     assert!(dead.iter().all(|path| !path.exists()));
 }
 
+/// The mark has an age: a miss that comes more than a day after the one that
+/// left it is a first miss again, due in an hour, and not a second in a row.
+#[test]
+fn a_miss_more_than_a_day_after_the_last_is_due_in_an_hour_again() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    repo.old_pack(&[b"dead"]);
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(repo.run().collection, Collection::OverBudget);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert_ne!(stamp.complete_pairs & MISSED, 0);
+
+    // A day and an hour later: the mark is stale, so this is a first miss.
+    TEST_NOW.set(Some(TEST_NOW.get().unwrap() + DAY + HOUR));
+    assert_eq!(repo.run().collection, Collection::OverBudget);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress, "an hour, not 30 days");
+    assert_ne!(stamp.complete_pairs & MISSED, 0, "marked afresh");
+    assert!(stamp.due(stamp.attempted + HOUR, 3));
+
+    // Within the day, the next miss waits 30 days as before.
+    assert_eq!(step_later(&repo).collection, Collection::OverBudget);
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
+}
+
+/// The mark stands for exactly a day: a miss that comes a day after the last
+/// waits 30 days, and one a second later is a first miss again.
+#[test]
+fn the_miss_mark_stands_for_exactly_a_day() {
+    for (gap, outcome) in [
+        (86_400, Collection::OverBudget),
+        (86_401, Collection::Progress),
+    ] {
+        TEST_NOW.set(Some(now_secs()));
+        let repo = Repo::new();
+        repo.due_live();
+        repo.old_pack(&[b"dead"]);
+        TEST_VERIFY_ROOM.set(Some(0));
+        assert_eq!(repo.run().collection, Collection::OverBudget);
+        assert_ne!(stamp_of(&repo).complete_pairs & MISSED, 0);
+        TEST_NOW.set(Some(TEST_NOW.get().unwrap() + gap));
+        assert_eq!(repo.run().collection, Collection::OverBudget);
+        TEST_VERIFY_ROOM.set(None);
+        assert_eq!(stamp_of(&repo).outcome, outcome, "a gap of {gap} seconds");
+    }
+}
+
+/// A step that retires something after a miss clears the mark, so a later miss
+/// within the day is a first miss again.
+#[test]
+fn a_step_that_retires_after_a_miss_clears_the_mark() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    let dead: Vec<_> = (0..2)
+        .map(|n| repo.old_pack(&[format!("dead {n}").as_bytes()]).0)
+        .collect();
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(repo.run().collection, Collection::OverBudget);
+    assert_ne!(stamp_of(&repo).complete_pairs & MISSED, 0);
+
+    TEST_VERIFY_ROOM.set(Some(1));
+    assert_eq!(step_later(&repo).collection, Collection::Progress);
+    assert_eq!(stamp_of(&repo).complete_pairs & MISSED, 0);
+    assert_eq!(dead.iter().filter(|path| path.exists()).count(), 1);
+
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(step_later(&repo).collection, Collection::OverBudget);
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(
+        stamp_of(&repo).outcome,
+        Collection::Progress,
+        "a first miss"
+    );
+}
+
+/// A lock miss that comes more than a day after a miss does not carry the
+/// stale mark forward.
+#[test]
+fn a_lock_miss_a_day_after_a_miss_drops_the_stale_mark() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    repo.old_pack(&[b"dead"]);
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(repo.run().collection, Collection::OverBudget);
+    TEST_VERIFY_ROOM.set(None);
+    assert_ne!(stamp_of(&repo).complete_pairs & MISSED, 0);
+
+    let lock = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    TEST_NOW.set(Some(TEST_NOW.get().unwrap() + DAY + HOUR));
+    assert_eq!(repo.run().collection, Collection::Busy);
+    drop(lock);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert_eq!(stamp.complete_pairs & MISSED, 0);
+}
+
 /// A clock that ends as planning finishes, with no wholly dead pack planned,
 /// is a miss like any other: nothing was verified, so the first one is due in
 /// an hour and not stamped as a finished collection.
