@@ -674,10 +674,12 @@ fn pair_chunks(
 /// where it sits: some changed new chunk, among [`PROBE_POINTS`] spread over
 /// the run, has a min-hash feature in common with an old chunk within
 /// [`PROBE_SPAN`] of where it would sit if the run had been edited in place.
-/// Points alternate between counting that position from the start of the run
-/// and from its end, so a long insertion at either end does not hide the
-/// edits that follow or precede it. A run of edits shares at nearly every
-/// point; a rewritten region shares at none, and pairing it would read every
+/// Points alternate between walking in from the start of the run and from its
+/// end, each counting the position from the end it walks from, so a long
+/// insertion at either end does not hide the edits that follow or precede it:
+/// the first and the last sampled chunks are the ones that matter, and
+/// chunk-count drift makes the points between them less reliable. A run of
+/// edits shares at nearly every point; a rewritten region shares at none, and pairing it would read every
 /// chunk of both sides to find that out.
 ///
 /// The first and last changed chunks are not sampled: a rewrite that begins
@@ -705,9 +707,18 @@ fn run_shares_content(
     let mut features: HashSet<u64> = HashSet::new();
     let mut read: HashSet<&Hash> = HashSet::new();
     let mut reads = 0usize;
+    let half = points.div_ceil(2);
     for k in 0..points {
-        let (at, nj) = sampled[k * sampled.len() / points];
-        let centre = if k % 2 == 0 {
+        // Even points walk in from the start of the sample, odd ones from
+        // its end, each aligned from the end it walks from.
+        let (at, nj, from_start) = if k % 2 == 0 {
+            let (at, nj) = sampled[(k / 2) * sampled.len() / half];
+            (at, nj, true)
+        } else {
+            let (at, nj) = sampled[sampled.len() - 1 - (k / 2) * sampled.len() / half];
+            (at, nj, false)
+        };
+        let centre = if from_start {
             at
         } else {
             window.len().saturating_sub(new_run.len() - at)
@@ -2623,34 +2634,49 @@ mod tests {
         assert!(spent <= PROBE_MAX_READS, "{spent}");
     }
 
-    #[test]
-    fn a_dense_edit_after_a_long_insertion_still_pairs_from_the_end_of_the_run() {
-        let (_d, s) = store();
-        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
-        // New data in front of the edit, no unchanged chunk between: the
-        // edited chunks sit DENSE positions later than they do in the old
-        // manifest.
-        let mut new: Vec<Vec<u8>> = (0..DENSE as u64)
+    /// An edit of `EDIT` chunks next to an insertion of `INSERT` new chunks
+    /// with no unchanged chunk between: one run, the edit a small part of it.
+    const EDIT: usize = 32;
+    const INSERT: usize = 640;
+
+    fn edit_and_insertion(
+        s: &ObjectStore,
+        insertion_first: bool,
+    ) -> (Vec<Hash>, Vec<Hash>, HashMap<Hash, Hash>) {
+        let old: Vec<Vec<u8>> = (0..EDIT as u64).map(|i| wide_chunk(i, 400)).collect();
+        let edited: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
+        let inserted: Vec<Vec<u8>> = (0..INSERT as u64)
             .map(|i| wide_chunk(100_000 + i, 400))
             .collect();
-        new.extend(old.iter().map(|c| tweaked(c)));
-        let (new, old) = (put_all(&s, &new), put_all(&s, &old));
+        let new = if insertion_first {
+            [inserted, edited].concat()
+        } else {
+            [edited, inserted].concat()
+        };
+        let (new, old) = (put_all(s, &new), put_all(s, &old));
+        let at = if insertion_first { INSERT } else { 0 };
+        let want = new[at..at + EDIT].iter().copied().zip(old.iter().copied());
+        let want = want.collect();
+        (new, old, want)
+    }
+
+    #[test]
+    fn an_edit_after_a_long_insertion_still_pairs_from_the_end_of_the_run() {
+        let (_d, s) = store();
+        // The edit is under a sixteenth of the run, so only a point that
+        // walks in from the end reaches it.
+        let (new, old, want) = edit_and_insertion(&s, true);
         let mut out = HashMap::new();
         pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
-        let want: HashMap<Hash, Hash> = new[DENSE..].iter().copied().zip(old).collect();
         assert_eq!(out, want);
     }
 
     #[test]
-    fn a_dense_edit_before_a_long_insertion_still_pairs_from_the_start_of_the_run() {
+    fn an_edit_before_a_long_insertion_still_pairs_from_the_start_of_the_run() {
         let (_d, s) = store();
-        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
-        let mut new: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
-        new.extend((0..DENSE as u64).map(|i| wide_chunk(100_000 + i, 400)));
-        let (new, old) = (put_all(&s, &new), put_all(&s, &old));
+        let (new, old, want) = edit_and_insertion(&s, false);
         let mut out = HashMap::new();
         pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
-        let want: HashMap<Hash, Hash> = new[..DENSE].iter().copied().zip(old).collect();
         assert_eq!(out, want);
     }
 
