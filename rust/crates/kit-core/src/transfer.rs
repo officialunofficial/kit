@@ -239,7 +239,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// [`crate::object::ChunkedBlob`] (a file that grew past `CHUNK_THRESHOLD`),
 /// the old blob is the base of every new chunk that shares content with it
 /// (`pair_blob_to_chunks`), within a per-file budget. All content reads draw
-/// on one push-wide budget ([`MAX_PUSH_SKETCH_READS`]). A path that shrank
+/// on one push-wide budget (1,048,576 reads). A path that shrank
 /// from a chunked blob to a plain one, or that has no old-side counterpart at
 /// all (added path, or a rename), is left unpaired.
 ///
