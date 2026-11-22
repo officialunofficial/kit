@@ -550,7 +550,8 @@ than 32 packs, and the step costs a mark of the whole history.
    planned and the step reports `over_budget`; the same holds for a mark or
    listing that ran out of budget. The stamp says `progress`, due in an hour,
    because a busy disk can cause one such miss. The stamp marks it by the
-   top bit of its pair count, which is read only on a `complete` stamp. The
+   top bit of its pair count. The pair count is read on a `complete` stamp (to
+   decide when the next step is due) and the mark bit on a `progress` stamp. The
    next attempt that ends this way while that mark stands stamps
    `over_budget` with the 30-day interval and clears it, so a store that the
    budget cannot cover pays the step once and not every hour. A lock miss or

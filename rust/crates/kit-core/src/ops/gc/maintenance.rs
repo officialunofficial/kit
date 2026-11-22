@@ -16,8 +16,8 @@ use crate::store::{ObjectStore, PackSweep, StoreError, Verify};
 const MIN_PAIRS: usize = 32;
 /// Set in the pair count of a `progress` stamp written by an attempt that ran
 /// out of time and retired nothing, so that the next such attempt waits 30
-/// days. The count of a stamp that is not `complete` is only carried, never
-/// read, so this adds no field and no byte to the stamp.
+/// days. The pair count is read on a `complete` stamp and the mark bit on a
+/// `progress` stamp, so this adds no field and no byte to the stamp.
 const MISSED: u64 = 1 << 63;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;

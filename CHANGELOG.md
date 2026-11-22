@@ -11,23 +11,24 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading from 0.9
 
-- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints the line below. Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
+- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints a line like the one below (`fetch`, `push` and `pull` prefix it with `error: fetch: store: `, `error: push: store: ` and `error: pull: store: `, and the repository format is quoted the same way). Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
 
   ```text
   error: not a kit repo: repository object-addressing format is Some("bmt-v2\nP"), expected "bmt-v2". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.
   ```
+- Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back: `add`, `commit`, `stash`, and a `fetch` that downloads anything. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
 - Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository. A user config that holds `gc.auto` works with 0.9.
 - Embedders that build kit-core with `history-mmr`, or that cross-check kit proofs with the upstream verifiers, must move to Commonware 2026.11.0 together with kit.
 
 ### Added
 
-- Fetch and pull run best-effort local pack maintenance after applying packs or pruning remote-tracking refs. Set `gc.auto = false` to disable it.
+- Fetch, pull and clone (which runs pull) run best-effort local pack maintenance after applying packs or pruning remote-tracking refs, and `kit commit` runs it after it publishes. Set `gc.auto = false` to disable it.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
 - Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first. A pack is rewritten only when a quarter or more of its payload is garbage, so less than a quarter of an old pack's bytes can stay dead after `kit gc`.
-- The maintenance step after fetch and pull also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
+- The maintenance step after fetch, pull, clone and commit also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
 - Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
 - A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 256 MiB of pack and index files, so on Linux the median hold of 64 MiB packs is about 15 ms. On macOS (Apple silicon, APFS) each hold ends with two directory flushes, and holds of up to 124 ms were measured on a store of 28.7 GiB.
-- The maintenance step after fetch and pull verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
+- The maintenance step after fetch, pull, clone and commit verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
 - `kit commit` runs the due maintenance step after it publishes, so a repository that never fetches no longer builds up packs. The step prints only its maintenance line on standard error, and `kit add` alone does not run it. A step that has never run is due as soon as the store holds 32 packs, and not a week later. After that it is due again once the store holds 32 more packs than the last finished step left.
 - `kit commit`, `kit fetch` and `kit pull` can take up to about 5 seconds longer when a maintenance step is due, and longer when it retires packs. The first commit after a large `kit add` runs a full step: after adding 16 GiB (265 packs) it took about 1 s instead of 0.25 s on macOS and used several seconds of CPU on several threads. It happens once; the next commit is back to its usual time. Set `gc.auto = false` to turn the step off.
 - A `kit clone` that finds fewer than 32 pairs leaves an empty maintenance stamp, so the first fetch or commit that finds 32 pairs runs a full step. A clone that finds 32 or more pairs runs the step itself.
@@ -37,6 +38,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
 - A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
 - `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
+- `kit gc` prints `warning: kept damaged local pack: …` for each local pack it found damaged and kept, and `warning: kept the local packs gc meant to rewrite or merge: …` when copying the packs it meant to rewrite or merge failed. The exit code does not change.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
 - Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs, so a repository a 0.10 fetch or clone wrote to needs kit 0.10 or newer.
@@ -78,7 +80,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
 - A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
-- A push to a file or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. Packs below 8 MiB and pushes to a remote that issues upload tickets are unchanged, and a failed existence check uploads the pack.
+- A push to a file or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. It skips the pack only when the remote holds it at the pack's own length, with no retry on that check, so a short pack left under the key is sent again instead of getting a ref published over it. An ssh remote cannot give the stored length, and a remote that issues upload tickets is unchanged, so a push to either sends such a pack again. Packs below 8 MiB are unchanged, and a failed length check uploads the pack.
 
 ### Removed
 
@@ -87,7 +89,6 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- A push over a `kit+file` or S3 remote skips a pack of 8 MiB or more only when the remote holds it at the pack's own length, with no retry on that check, so a short pack left under the key is sent again instead of getting a ref published over it. An ssh remote cannot give the stored length, so a push to it sends such a pack again.
 - The `url` dependency is 2.5.9, which fixes a stack overflow in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
 - `kit add` hashes the chunks of a large file on several threads on a host with more than 16 of them, where a full batch of 64 chunks stayed on one thread. `kit_core::worktree::STREAM_HASH_BATCH` is public.
 - `kit restore Makefile` restores the top-level `Makefile` only, not also a `Makefile` in another directory that another pathspec selects.
