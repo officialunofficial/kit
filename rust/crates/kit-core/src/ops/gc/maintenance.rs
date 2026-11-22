@@ -14,6 +14,11 @@ use crate::repo_lock::{LockError, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK, acquir
 use crate::store::{ObjectStore, PackSweep, StoreError, Verify};
 
 const MIN_PAIRS: usize = 32;
+/// Set in the pair count of a `progress` stamp written by an attempt that ran
+/// out of time and retired nothing, so that the next such attempt waits 30
+/// days. The count of a stamp that is not `complete` is only carried, never
+/// read, so this adds no field and no byte to the stamp.
+const MISSED: u64 = 1 << 63;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;
 
@@ -34,6 +39,9 @@ pub enum Collection {
     /// Retention roots changed during the unlocked mark.
     RootsChanged,
     /// The mark, plan, verification or copy ran out of time before publish.
+    /// An attempt that ran out of time and retired nothing is stamped
+    /// `progress` the first time, so it is due again in an hour, and waits
+    /// 30 days when the attempt after it ran out of time too.
     OverBudget,
     /// The step retired or copied what its limits allowed and left planned
     /// work for the next step, which is due in an hour and ignores the
@@ -163,10 +171,17 @@ impl Stamp {
 
     /// A step that left planned work is due again whatever the pair count: a
     /// store can fall under the floor with garbage still planned, and the
-    /// step that made progress is the proof that the next one will too.
+    /// step that made progress is the proof that the next one will too. A
+    /// `complete` step is also due again once the store holds the floor's
+    /// worth of pairs more than it left, so a repository that never fetches
+    /// does not wait a week while its small packs build up.
     fn due(self, now: u64, pairs: usize) -> bool {
         (pairs >= MIN_PAIRS || self.outcome == Collection::Progress)
-            && (now < self.attempted || now - self.attempted >= self.outcome.interval())
+            && (now < self.attempted
+                || now - self.attempted >= self.outcome.interval()
+                || (self.outcome == Collection::Complete
+                    && pairs as u64
+                        >= (self.complete_pairs & !MISSED).saturating_add(MIN_PAIRS as u64)))
     }
 }
 
@@ -372,6 +387,7 @@ fn run(
     {
         collection.stamped = Collection::Progress;
     }
+    let marked = bound_misses(stamp, &mut collection.stamped, progressed);
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
@@ -379,12 +395,29 @@ fn run(
             (pairs + gc.packs_written).saturating_sub(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
+        } else if marked {
+            (stamp.complete_pairs & !MISSED) + MISSED
         } else {
-            stamp.complete_pairs
+            stamp.complete_pairs & !MISSED
         },
     }
     .write(&mut file);
     collection.reported
+}
+
+/// An attempt that ran out of time and retired nothing may have met a busy
+/// disk, so it is due again in an hour; the attempt after it that runs out of
+/// time too keeps the 30 days, so a store that cannot be marked in the budget
+/// does not pay it every hour. Returns whether the new stamp carries the mark
+/// of such a miss: a lock miss or changed roots that restamped `progress`
+/// with nothing retired keeps it, and a step that retired anything clears it.
+fn bound_misses(prior: Stamp, stamped: &mut Collection, progressed: bool) -> bool {
+    let marked = prior.outcome == Collection::Progress && prior.complete_pairs & MISSED != 0;
+    if *stamped == Collection::OverBudget && !marked {
+        *stamped = Collection::Progress;
+        return true;
+    }
+    *stamped == Collection::Progress && !progressed && marked
 }
 
 /// What a collection reports and what the stamp records. They differ only
@@ -459,6 +492,10 @@ impl Budget<'_> {
 }
 
 fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
+    #[cfg(test)]
+    if TEST_CLOCK_OUT.get() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE));
+    }
     if start.elapsed() >= limit {
         return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE));
     }
@@ -468,7 +505,9 @@ fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
 /// Plan the wholly dead retirement. The budget bounds the verification of
 /// those packs, oldest first, by stopping before the next pack and never
 /// inside one. What was verified by then still retires, so each step makes
-/// progress on a large dead set.
+/// progress on a large dead set, including a step whose clock ends inside
+/// its last pack: the later phases check the clock again and defer only
+/// their own part.
 fn plan_retirement(
     store: &ObjectStore,
     budget: &Budget<'_>,
@@ -496,7 +535,11 @@ fn plan_retirement(
             scan: &scan,
         },
     )?;
-    if retire.verification_cut_short() {
+    #[cfg(test)]
+    if TEST_PLAN_ENDS_CLOCK.get() {
+        TEST_CLOCK_OUT.set(true);
+    }
+    if retire.verification_cut_short() || retire.planned_packs() > 0 {
         budget.check_cancellation()?;
     } else {
         budget.check()?;
@@ -534,8 +577,7 @@ fn collect(
         return Ok(Outcome::same(Collection::Failed));
     }
     if cut && retire.planned_packs() == 0 {
-        // The budget ended before one pack was verified: no progress, so the
-        // long interval of an attempt that ran out of budget stands.
+        // The budget ended before one pack was verified: no progress.
         return Ok(Outcome::same(Collection::OverBudget));
     }
     // Copy-then-retire is the added part of the step. A budget that runs out
@@ -657,6 +699,10 @@ thread_local! {
     /// How many wholly dead packs verification may still start before the
     /// budget ends, in place of the clock.
     static TEST_VERIFY_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// The clock runs out as retirement planning ends.
+    static TEST_PLAN_ENDS_CLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The clock has run out, whatever it says.
+    static TEST_CLOCK_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
