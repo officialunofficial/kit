@@ -1129,6 +1129,25 @@ fn two_attempts_in_a_row_that_run_out_of_time_wait_30_days() {
     assert!(dead.iter().all(|path| !path.exists()));
 }
 
+/// A clock that ends as planning finishes, with no wholly dead pack planned,
+/// is a miss like any other: nothing was verified, so the first one is due in
+/// an hour and not stamped as a finished collection.
+#[test]
+fn a_clock_that_ends_as_planning_finishes_with_nothing_planned_is_a_miss() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    TEST_PLAN_ENDS_CLOCK.set(true);
+    let report = repo.run();
+    TEST_PLAN_ENDS_CLOCK.set(false);
+    TEST_CLOCK_OUT.set(false);
+    assert_eq!(report.collection, Collection::OverBudget, "{report:?}");
+    assert_eq!(report.packs_merged, 0);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert_ne!(stamp.complete_pairs & MISSED, 0);
+}
+
 /// A clock that ends inside the last wholly dead pack keeps every pack that
 /// was verified: the later phases defer only their own part.
 #[test]

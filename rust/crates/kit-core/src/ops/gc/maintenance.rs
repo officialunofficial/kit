@@ -410,7 +410,12 @@ fn run(
             let kept = collection.stamped == Collection::Progress
                 && !progressed
                 && stamp.complete_pairs & MISSED != 0;
-            (stamp.complete_pairs & !MISSED) | if missed || kept { MISSED } else { 0 }
+            let count = stamp.complete_pairs & !MISSED;
+            if missed || kept {
+                count + MISSED
+            } else {
+                count
+            }
         },
     }
     .write(&mut file);
@@ -532,6 +537,10 @@ fn plan_retirement(
             scan: &scan,
         },
     )?;
+    #[cfg(test)]
+    if TEST_PLAN_ENDS_CLOCK.get() {
+        TEST_CLOCK_OUT.set(true);
+    }
     if retire.verification_cut_short() || retire.planned_packs() > 0 {
         budget.check_cancellation()?;
     } else {
@@ -692,6 +701,8 @@ thread_local! {
     /// How many wholly dead packs verification may still start before the
     /// budget ends, in place of the clock.
     static TEST_VERIFY_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// The clock runs out as retirement planning ends.
+    static TEST_PLAN_ENDS_CLOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The clock has run out, whatever it says.
     static TEST_CLOCK_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
