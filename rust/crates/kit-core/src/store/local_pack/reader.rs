@@ -195,6 +195,14 @@ impl Handles {
         self.lock().entries.len()
     }
 
+    /// The cache's clock at the last use of a cached file, or `None` when it
+    /// is not cached.
+    #[cfg(test)]
+    pub(super) fn used(&self, locator: &Arc<Locator>, member: Member) -> Option<u64> {
+        let key = Cache::key(locator, member);
+        self.lock().entries.get(&key).map(|entry| entry.used)
+    }
+
     #[cfg(test)]
     pub(super) fn opens(&self) -> usize {
         self.opens.load(std::sync::atomic::Ordering::Relaxed)

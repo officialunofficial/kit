@@ -2730,6 +2730,34 @@ fn a_full_handle_cache_drops_the_least_recently_used_file() {
     assert_eq!(handles.cached(), 2);
 }
 
+#[test]
+fn each_use_of_a_cached_file_makes_it_newer_than_every_use_before() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let locators: Vec<_> = (0..2_u8)
+        .map(|n| {
+            let (pair, _) = publish_objects(&store, &[&blob(&[n; 64])]);
+            Arc::new(Locator::open(&pair, 0, 0).unwrap())
+        })
+        .collect();
+    let handles = Handles::limited(8);
+    let used = |n: usize| handles.used(&locators[n], Member::Pack).unwrap();
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    let first = used(0);
+    handles.get(&locators[1], Member::Pack).unwrap();
+    let second = used(1);
+    assert!(second > first, "a file opened later is newer");
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    assert!(used(0) > second, "a hit makes the file the newest");
+    assert_eq!(used(1), second, "and leaves the others as they were");
+    assert_eq!(handles.used(&locators[0], Member::Index), None);
+}
+
 pub(super) fn cut_pack_short(pair: &Pair) {
     let cut = fs::metadata(&pair.pack).unwrap().len() - 100;
     fs::OpenOptions::new()
