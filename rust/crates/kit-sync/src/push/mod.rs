@@ -1979,10 +1979,10 @@ mod tests {
                     Err(_) => Err(SourceError::ProtocolError),
                 }
             }
-            fn list_branches(&self) -> Result<Vec<kit_core::protocol::Ref>, SourceError> {
+            fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
                 unimplemented!()
             }
-            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::protocol::Ref>, SourceError> {
+            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
                 unimplemented!()
             }
             fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {

@@ -318,7 +318,7 @@ fn a_small_push_asks_the_remote_nothing_extra() {
 }
 
 /// A clone of `remote` into a new directory, with the tip it checked out.
-fn clone_tip(remote: &dyn Transport) -> Result<Hash, kit_sync::SyncError> {
+fn clone_tip(remote: &dyn Transport) -> Result<Hash, kit_sync::CloneError> {
     let temp = tempfile::tempdir().unwrap();
     let desc = CloneRemote {
         name: "origin".into(),
