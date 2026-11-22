@@ -7,6 +7,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-22
+
 ### Upgrading from 0.9
 
 - **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints the line below. Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
