@@ -2619,8 +2619,8 @@ fn the_one_read_probe_answers_a_head_of_any_size_and_a_whole_frame_up_to_its_lim
             let gc = ObjectStore::open(&layout).unwrap();
             crate::ops::gc::live_objects(&gc, &layout).unwrap();
             // A chunk is probed by its head, so its frame is never too large.
-            // A file is hashed, so its frame is read whole only up to the limit.
-            let whole = payload + 10 <= limit;
+            // A file is hashed, so its frame is read whole only up to 16 KiB.
+            let whole = payload + 10 <= 16 * 1024;
             let expected = u64::from(as_chunk || whole);
             assert_eq!(
                 gc.gc_one_read_probe_count(),
