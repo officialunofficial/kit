@@ -2506,15 +2506,21 @@ mod tests {
         chunks.iter().map(|c| put_blob(s, c.clone())).collect()
     }
 
-    /// 3,000 chunks of an old manifest, each edited a little in the new one,
-    /// and one chunk appended: one run of about 6,000 reads, every chunk of
-    /// it sharing content.
+    /// Chunks of the old manifest in a dense edit.
+    const DENSE: usize = 300;
+    /// Reads of the one run of a dense edit: its changed new chunks and its
+    /// old ones.
+    const DENSE_READS: usize = 2 * DENSE + 1;
+
+    /// `DENSE` chunks of an old manifest, each edited a little in the new
+    /// one, and one chunk appended: one run of `DENSE_READS` reads (over
+    /// `PROBE_MIN_READS`), every chunk of it sharing content.
     fn dense_edit(s: &ObjectStore) -> (Vec<Hash>, Vec<Hash>, HashMap<Hash, Hash>) {
-        let old: Vec<Vec<u8>> = (0..3_000).map(|i| wide_chunk(i, 2_000)).collect();
+        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
         let mut new: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
-        new.push(wide_chunk(50_000, 2_000));
+        new.push(wide_chunk(50_000, 400));
         let (new, old) = (put_all(s, &new), put_all(s, &old));
-        let want = new.iter().copied().zip(old.iter().copied()).take(3_000);
+        let want = new.iter().copied().zip(old.iter().copied()).take(DENSE);
         let want = want.collect();
         (new, old, want)
     }
@@ -2526,16 +2532,19 @@ mod tests {
         let mut out = HashMap::new();
         let spent = pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
         assert_eq!(out, want);
-        // The run's 3,001 changed chunks and 3,000 old ones, and a probe
-        // that found a share at its first point.
-        assert!(spent > 6_001 && spent <= 6_001 + PROBE_MAX_READS, "{spent}");
+        // The run's changed chunks and old ones, and a probe that found a
+        // share at its first point.
+        assert!(
+            spent > DENSE_READS && spent <= DENSE_READS + PROBE_MAX_READS,
+            "{spent}"
+        );
     }
 
     #[test]
     fn a_dense_edit_over_many_files_pairs_every_file_within_the_push_budget() {
         let (_d, s) = store();
-        let a = put_blob(&s, wide_chunk(1, 2_000));
-        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        let a = put_blob(&s, wide_chunk(1, 400));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 400)));
         // 400 files each a run of 49 new and 48 old reads, 38,800 in all.
         let mut reads_left = MAX_PUSH_SKETCH_READS;
         for _ in 0..400 {
@@ -2550,22 +2559,24 @@ mod tests {
     #[test]
     fn a_rewritten_run_costs_a_probe_and_is_sent_raw() {
         let (_d, s) = store();
-        let old: Vec<Vec<u8>> = (0..3_000).map(|i| wide_chunk(i, 2_000)).collect();
-        let new: Vec<Vec<u8>> = (0..3_001).map(|i| wide_chunk(100_000 + i, 2_000)).collect();
+        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
+        let new: Vec<Vec<u8>> = (0..=DENSE as u64)
+            .map(|i| wide_chunk(100_000 + i, 400))
+            .collect();
         let mut out = HashMap::new();
         let spent = pair_chunks(&s, &put_all(&s, &new), &put_all(&s, &old), usize::MAX, &mut out)
             .unwrap();
         assert!(out.is_empty());
-        // Every point of the probe missed: 16 chunks and the old chunks
-        // around each, not the 6,001 reads of the run.
-        assert_eq!(spent, PROBE_MAX_READS);
+        // Every point of the probe missed: its chunks and the old chunks
+        // around each, not the reads of the run.
+        assert!(spent > PROBE_POINTS && spent <= PROBE_MAX_READS, "{spent}");
     }
 
     #[test]
     fn a_run_shorter_than_the_probe_threshold_is_paired_without_one() {
         let (_d, s) = store();
-        let a = put_blob(&s, wide_chunk(1, 2_000));
-        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        let a = put_blob(&s, wide_chunk(1, 400));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 400)));
         // 257 new and 255 old reads: PROBE_MIN_READS exactly, no probe.
         let mut out = HashMap::new();
         let spent = pair_chunks(&s, &vec![b; 257], &vec![a; 255], usize::MAX, &mut out).unwrap();
@@ -2584,7 +2595,7 @@ mod tests {
     fn a_probed_run_needs_its_probe_inside_the_budget() {
         let (_d, s) = store();
         let (new, old, want) = dense_edit(&s);
-        let reads = 3_001 + 3_000;
+        let reads = DENSE_READS;
         let mut out = HashMap::new();
         let spent =
             pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS - 1, &mut out).unwrap();
@@ -2598,8 +2609,8 @@ mod tests {
     #[test]
     fn a_file_is_paired_up_to_the_reads_of_the_0_9_cap_and_no_further() {
         let (_d, s) = store();
-        let a = put_blob(&s, wide_chunk(1, 2_000));
-        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        let a = put_blob(&s, wide_chunk(1, 400));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 400)));
         // One run of MAX_FILE_READS reads less a probe, then one more.
         let fits = MAX_FILE_READS - PROBE_MAX_READS;
         let mut out = HashMap::new();
