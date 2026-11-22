@@ -455,7 +455,7 @@ const PROBE_MIN_READS: usize = 512;
 /// Changed chunks a probe samples, spread evenly over the run.
 const PROBE_POINTS: usize = 16;
 /// Old chunks on each side of the aligned position that a probe reads for
-/// each sampled chunk: the run's own shifts are far smaller than this.
+/// each sampled chunk: an edit shifts chunk boundaries by far fewer.
 const PROBE_SPAN: usize = 8;
 /// Most chunk reads a probe makes: each point reads its chunk and the old
 /// chunks around the aligned position.
@@ -576,8 +576,8 @@ fn pair_blob_to_chunks(
 ///   to the edit; a run that needs more than [`MAX_FILE_READS`] chunk reads,
 ///   or more than `max_reads` (what is left of the push's budget), is sent
 ///   raw. A run of more than [`PROBE_MIN_READS`] reads is first probed, and
-///   sent raw when the sample shares nothing: a rewritten region costs a
-///   probe, not the run. A chunk that moved far from where its old version
+///   sent raw when the sample shares nothing where it sits: a rewritten
+///   region costs a probe, not the run. A chunk that moved far from where its old version
 ///   sits and was edited too is outside its run's window and goes raw.
 ///   Returns the chunk reads made.
 fn pair_chunks(
@@ -673,11 +673,20 @@ fn pair_chunks(
 /// Whether a sample of one unmatched run shares content with the old chunks
 /// where it sits: some changed new chunk, among [`PROBE_POINTS`] spread over
 /// the run, has a min-hash feature in common with an old chunk within
-/// [`PROBE_SPAN`] of its aligned position. A run of edits shares at every
+/// [`PROBE_SPAN`] of where it would sit if the run had been edited in place.
+/// Points alternate between counting that position from the start of the run
+/// and from its end, so a long insertion at either end does not hide the
+/// edits that follow or precede it. A run of edits shares at nearly every
 /// point; a rewritten region shares at none, and pairing it would read every
-/// chunk of both sides to find that out. Returns the answer and the chunk
-/// reads made, at most [`PROBE_MAX_READS`]. A run with no changed chunk
-/// shares nothing.
+/// chunk of both sides to find that out.
+///
+/// The first and last changed chunks are not sampled: a rewrite that begins
+/// or ends inside a chunk leaves that chunk half old, and it would pass the
+/// probe for a region that shares nothing else. A run of fewer than three
+/// changed chunks therefore shares nothing.
+///
+/// Returns the answer and the chunk reads made, at most
+/// [`PROBE_MAX_READS`].
 fn run_shares_content(
     store: &ObjectStore,
     new_run: &[Hash],
@@ -689,13 +698,21 @@ fn run_shares_content(
         .enumerate()
         .filter(|(_, nj)| !old_set.contains(*nj))
         .collect();
-    let points = PROBE_POINTS.min(changed.len());
+    let sampled = changed
+        .get(1..changed.len().saturating_sub(1))
+        .unwrap_or(&[]);
+    let points = PROBE_POINTS.min(sampled.len());
     let mut features: HashSet<u64> = HashSet::new();
     let mut read: HashSet<&Hash> = HashSet::new();
     let mut reads = 0usize;
     for k in 0..points {
-        let (at, nj) = changed[k * changed.len() / points];
-        let centre = at * window.len() / new_run.len();
+        let (at, nj) = sampled[k * sampled.len() / points];
+        let centre = if k % 2 == 0 {
+            at
+        } else {
+            window.len().saturating_sub(new_run.len() - at)
+        };
+        let centre = centre.min(window.len().saturating_sub(1));
         let lo = centre.saturating_sub(PROBE_SPAN);
         let hi = (centre + PROBE_SPAN + 1).min(window.len());
         for oc in &window[lo..hi] {
@@ -2536,11 +2553,9 @@ mod tests {
         let spent = pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
         assert_eq!(out, want);
         // The run's changed chunks and old ones, and a probe that found a
-        // share at its first point.
-        assert!(
-            spent > DENSE_READS && spent <= DENSE_READS + PROBE_MAX_READS,
-            "{spent}"
-        );
+        // share at its first point: its chunk and the ten old chunks around
+        // it.
+        assert_eq!(spent, DENSE_READS + 11);
     }
 
     #[test]
@@ -2582,6 +2597,64 @@ mod tests {
     }
 
     #[test]
+    fn a_rewrite_that_begins_and_ends_inside_a_chunk_is_still_sent_raw() {
+        let (_d, s) = store();
+        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
+        // The first new chunk keeps the head of an old chunk and the last
+        // keeps the tail of another, as a rewrite that does not fall on chunk
+        // boundaries leaves them; everything between is new.
+        let mut first = old[0][..300].to_vec();
+        first.extend(wide_chunk(200_000, 100));
+        let mut last = wide_chunk(200_001, 100);
+        last.extend_from_slice(&old[DENSE - 1][100..]);
+        let mut new = vec![first];
+        new.extend((0..DENSE as u64).map(|i| wide_chunk(100_000 + i, 400)));
+        new.push(last);
+        let mut out = HashMap::new();
+        let spent = pair_chunks(
+            &s,
+            &put_all(&s, &new),
+            &put_all(&s, &old),
+            usize::MAX,
+            &mut out,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert!(spent <= PROBE_MAX_READS, "{spent}");
+    }
+
+    #[test]
+    fn a_dense_edit_after_a_long_insertion_still_pairs_from_the_end_of_the_run() {
+        let (_d, s) = store();
+        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
+        // New data in front of the edit, no unchanged chunk between: the
+        // edited chunks sit DENSE positions later than they do in the old
+        // manifest.
+        let mut new: Vec<Vec<u8>> = (0..DENSE as u64)
+            .map(|i| wide_chunk(100_000 + i, 400))
+            .collect();
+        new.extend(old.iter().map(|c| tweaked(c)));
+        let (new, old) = (put_all(&s, &new), put_all(&s, &old));
+        let mut out = HashMap::new();
+        pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        let want: HashMap<Hash, Hash> = new[DENSE..].iter().copied().zip(old).collect();
+        assert_eq!(out, want);
+    }
+
+    #[test]
+    fn a_dense_edit_before_a_long_insertion_still_pairs_from_the_start_of_the_run() {
+        let (_d, s) = store();
+        let old: Vec<Vec<u8>> = (0..DENSE as u64).map(|i| wide_chunk(i, 400)).collect();
+        let mut new: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
+        new.extend((0..DENSE as u64).map(|i| wide_chunk(100_000 + i, 400)));
+        let (new, old) = (put_all(&s, &new), put_all(&s, &old));
+        let mut out = HashMap::new();
+        pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        let want: HashMap<Hash, Hash> = new[..DENSE].iter().copied().zip(old).collect();
+        assert_eq!(out, want);
+    }
+
+    #[test]
     fn a_run_shorter_than_the_probe_threshold_is_paired_without_one() {
         let (_d, s) = store();
         let a = put_blob(&s, wide_chunk(1, 400));
@@ -2615,7 +2688,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_is_paired_up_to_the_reads_of_the_0_9_cap_and_no_further() {
+    fn a_probed_run_is_paired_up_to_the_file_cap_less_its_probe() {
         let (_d, s) = store();
         let a = put_blob(&s, wide_chunk(1, 400));
         let b = put_blob(&s, tweaked(&wide_chunk(1, 400)));
