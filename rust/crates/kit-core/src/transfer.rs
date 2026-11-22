@@ -2705,14 +2705,18 @@ mod tests {
     fn a_probed_run_needs_its_probe_inside_the_budget() {
         let (_d, s) = store();
         let (new, old, want) = dense_edit(&s);
-        let reads = DENSE_READS;
+        // A probe is budgeted 288 reads: 16 points, each its own chunk and
+        // the 17 old chunks around its aligned position. It reads fewer
+        // where windows overlap or meet the edge of the old run, and a run is
+        // probed only when the whole bound fits.
+        assert_eq!(PROBE_MAX_READS, 288);
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS - 1, &mut out).unwrap();
+        let spent = pair_chunks(&s, &new, &old, DENSE_READS + 287, &mut out).unwrap();
         assert!(out.is_empty());
         assert_eq!(spent, 0);
-        let spent = pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS, &mut out).unwrap();
+        let spent = pair_chunks(&s, &new, &old, DENSE_READS + 288, &mut out).unwrap();
         assert_eq!(out, want);
-        assert!(spent <= reads + PROBE_MAX_READS);
+        assert_eq!(spent, DENSE_READS + 11);
     }
 
     #[test]
