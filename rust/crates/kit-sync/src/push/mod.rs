@@ -1235,7 +1235,8 @@ const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
 /// push sends only the packs it missed. A key whose stored length differs, as
 /// a damaged or truncated file would give, is not that pack: the push
 /// uploads over it, and never publishes a ref over a pack the remote does
-/// not fully hold. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
+/// not fully hold. The length is the test, not a hash of the stored bytes: a
+/// pack damaged in place at its own length is not caught here. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
 /// a remote that issues no upload tickets is checked, with one request that
 /// is not retried. Any answer but a stored length equal to `len`, an error
 /// and an unknown length included, is "not stored": the push uploads.
