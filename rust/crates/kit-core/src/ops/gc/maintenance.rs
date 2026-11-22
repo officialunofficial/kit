@@ -387,15 +387,7 @@ fn run(
     {
         collection.stamped = Collection::Progress;
     }
-    // An attempt that ran out of time and retired nothing may have met a busy
-    // disk, so it is due again in an hour; the attempt after it that runs out
-    // of time too keeps the 30 days, so a store that cannot be marked in the
-    // budget does not pay it every hour.
-    let missed = collection.stamped == Collection::OverBudget
-        && !(stamp.outcome == Collection::Progress && stamp.complete_pairs & MISSED != 0);
-    if missed {
-        collection.stamped = Collection::Progress;
-    }
+    let marked = bound_misses(stamp, &mut collection.stamped, progressed);
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
@@ -403,23 +395,29 @@ fn run(
             (pairs + gc.packs_written).saturating_sub(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
+        } else if marked {
+            (stamp.complete_pairs & !MISSED) + MISSED
         } else {
-            // The mark survives a lock miss or changed roots that restamped
-            // `progress` with nothing retired, so such a step cannot reset
-            // the bound; a step that retired something clears it.
-            let kept = collection.stamped == Collection::Progress
-                && !progressed
-                && stamp.complete_pairs & MISSED != 0;
-            let count = stamp.complete_pairs & !MISSED;
-            if missed || kept {
-                count + MISSED
-            } else {
-                count
-            }
+            stamp.complete_pairs & !MISSED
         },
     }
     .write(&mut file);
     collection.reported
+}
+
+/// An attempt that ran out of time and retired nothing may have met a busy
+/// disk, so it is due again in an hour; the attempt after it that runs out of
+/// time too keeps the 30 days, so a store that cannot be marked in the budget
+/// does not pay it every hour. Returns whether the new stamp carries the mark
+/// of such a miss: a lock miss or changed roots that restamped `progress`
+/// with nothing retired keeps it, and a step that retired anything clears it.
+fn bound_misses(prior: Stamp, stamped: &mut Collection, progressed: bool) -> bool {
+    let marked = prior.outcome == Collection::Progress && prior.complete_pairs & MISSED != 0;
+    if *stamped == Collection::OverBudget && !marked {
+        *stamped = Collection::Progress;
+        return true;
+    }
+    *stamped == Collection::Progress && !progressed && marked
 }
 
 /// What a collection reports and what the stamp records. They differ only
