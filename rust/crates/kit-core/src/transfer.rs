@@ -2706,6 +2706,18 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_between_two_insertions_pairs_from_a_point_in_the_middle_aligned_from_the_end() {
+        let (_d, s) = store();
+        // The mirror image: the edit ends 6 chunks from the end of the run,
+        // so only a point walking in from the end that sits inside the edit
+        // shares.
+        let (new, old, want, _) = edit_between(&s, 540, 100, 6);
+        let mut out = HashMap::new();
+        pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        assert_eq!(out, want);
+    }
+
+    #[test]
     fn a_run_shorter_than_the_probe_threshold_is_paired_without_one() {
         let (_d, s) = store();
         let a = put_blob(&s, wide_chunk(1, 400));
