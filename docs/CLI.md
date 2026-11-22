@@ -1288,7 +1288,7 @@ attestation support warn once per command and skip the log.
   They periodically retire wholly dead packs past grace, and rewrite,
   merge and retire covered packs. `kit commit` runs the same step after
   it publishes, so a repository that never fetches does not build up
-  packs, and `kit add` alone does not run it. Fetch and clone create the advisory stamp. A clone that finds fewer than
+  packs, and `kit add` alone does not run it. A fetch or clone that applies packs creates the advisory stamp. A clone that finds fewer than
   32 pairs leaves it empty, and an empty stamp counts as never run, so the
   first fetch or commit that finds 32 pairs runs a full step. Set `gc.auto = false` in repo or user config to disable the
   step. A step has a 5 second budget before retirement, so a command that
