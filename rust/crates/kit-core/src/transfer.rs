@@ -574,11 +574,12 @@ fn pair_blob_to_chunks(
 ///   chunk is sent raw, with no position fallback. Content is read only for
 ///   the unmatched runs, so a small edit to a large file costs in proportion
 ///   to the edit; a run that needs more than [`MAX_FILE_READS`] chunk reads,
-///   or more than `max_reads` (what is left of the push's budget), is sent
-///   raw. A run of more than [`PROBE_MIN_READS`] reads is first probed, and
-///   sent raw when the sample shares nothing where it sits: a rewritten
-///   region costs a probe, not the run. A chunk that moved far from where its old version
-///   sits and was edited too is outside its run's window and goes raw.
+///   or more than what is left of the file's cap and of `max_reads` (the
+///   push's budget), is sent raw. A run of more than [`PROBE_MIN_READS`]
+///   reads is first probed, and sent raw when the sample shares nothing where
+///   it sits: a rewritten region costs a probe, not the run. A chunk that
+///   moved far from where its old version sits and was edited too is outside
+///   its run's window and goes raw.
 ///   Returns the chunk reads made.
 fn pair_chunks(
     store: &ObjectStore,
@@ -674,13 +675,15 @@ fn pair_chunks(
 /// where it sits: some changed new chunk, among [`PROBE_POINTS`] spread over
 /// the run, has a min-hash feature in common with an old chunk within
 /// [`PROBE_SPAN`] of where it would sit if the run had been edited in place.
-/// Points alternate between walking in from the start of the run and from its
-/// end, each counting the position from the end it walks from, so a long
-/// insertion at either end does not hide the edits that follow or precede it:
-/// the first and the last sampled chunks are the ones that matter, and
-/// chunk-count drift makes the points between them less reliable. A run of
-/// edits shares at nearly every point; a rewritten region shares at none, and pairing it would read every
-/// chunk of both sides to find that out.
+/// Points alternate between walking in from the start of the sample and from
+/// its end, each counting the position from the end it walks from (each walk
+/// spans the whole sample, so a small sample may test a chunk at both
+/// alignments). A long insertion at either end therefore does not hide the
+/// edits that follow or precede it: the first and the last sampled chunks are
+/// the ones that matter, and chunk-count drift makes the points between them
+/// less reliable. A run of edits shares at nearly every point; a rewritten
+/// region shares at none, and pairing it would read every chunk of both sides
+/// to find that out.
 ///
 /// The first and last changed chunks are not sampled: a rewrite that begins
 /// or ends inside a chunk leaves that chunk half old, and it would pass the
