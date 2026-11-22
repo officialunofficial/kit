@@ -2266,6 +2266,7 @@ dependencies = [
  "proptest",
  "reqwest",
  "rmcp",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
