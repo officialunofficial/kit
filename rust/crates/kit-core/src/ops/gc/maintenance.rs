@@ -34,6 +34,9 @@ pub enum Collection {
     /// Retention roots changed during the unlocked mark.
     RootsChanged,
     /// The mark, plan, verification or copy ran out of time before publish.
+    /// A step that had seen wholly dead packs past grace but verified none is
+    /// reported this way and stamped `progress`, so it is due again in an
+    /// hour; any other attempt that ran out of time waits 30 days.
     OverBudget,
     /// The step retired or copied what its limits allowed and left planned
     /// work for the next step, which is due in an hour and ignores the
@@ -163,10 +166,16 @@ impl Stamp {
 
     /// A step that left planned work is due again whatever the pair count: a
     /// store can fall under the floor with garbage still planned, and the
-    /// step that made progress is the proof that the next one will too.
+    /// step that made progress is the proof that the next one will too. A
+    /// `complete` step is also due again once the store holds the floor's
+    /// worth of pairs more than it left, so a repository that never fetches
+    /// does not wait a week while its small packs build up.
     fn due(self, now: u64, pairs: usize) -> bool {
         (pairs >= MIN_PAIRS || self.outcome == Collection::Progress)
-            && (now < self.attempted || now - self.attempted >= self.outcome.interval())
+            && (now < self.attempted
+                || now - self.attempted >= self.outcome.interval()
+                || (self.outcome == Collection::Complete
+                    && pairs as u64 >= self.complete_pairs.saturating_add(MIN_PAIRS as u64)))
     }
 }
 
@@ -459,6 +468,10 @@ impl Budget<'_> {
 }
 
 fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
+    #[cfg(test)]
+    if TEST_CLOCK_OUT.get() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE));
+    }
     if start.elapsed() >= limit {
         return Err(io::Error::new(io::ErrorKind::TimedOut, DEADLINE));
     }
@@ -468,7 +481,9 @@ fn check_deadline(start: Instant, limit: Duration) -> io::Result<()> {
 /// Plan the wholly dead retirement. The budget bounds the verification of
 /// those packs, oldest first, by stopping before the next pack and never
 /// inside one. What was verified by then still retires, so each step makes
-/// progress on a large dead set.
+/// progress on a large dead set, including a step whose clock ends inside
+/// its last pack: the later phases check the clock again and defer only
+/// their own part.
 fn plan_retirement(
     store: &ObjectStore,
     budget: &Budget<'_>,
@@ -496,7 +511,7 @@ fn plan_retirement(
             scan: &scan,
         },
     )?;
-    if retire.verification_cut_short() {
+    if retire.verification_cut_short() || retire.planned_packs() > 0 {
         budget.check_cancellation()?;
     } else {
         budget.check()?;
@@ -534,9 +549,14 @@ fn collect(
         return Ok(Outcome::same(Collection::Failed));
     }
     if cut && retire.planned_packs() == 0 {
-        // The budget ended before one pack was verified: no progress, so the
-        // long interval of an attempt that ran out of budget stands.
-        return Ok(Outcome::same(Collection::OverBudget));
+        // The budget ended before one pack was verified, with wholly dead
+        // packs past grace in view: a busy disk, not a reason to wait 30
+        // days. The next step is due in an hour and ignores the pair floor.
+        return Ok(Outcome {
+            reported: Collection::OverBudget,
+            stamped: Collection::Progress,
+            left: true,
+        });
     }
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
@@ -657,6 +677,8 @@ thread_local! {
     /// How many wholly dead packs verification may still start before the
     /// budget ends, in place of the clock.
     static TEST_VERIFY_ROOM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// The clock has run out, whatever it says.
+    static TEST_CLOCK_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]

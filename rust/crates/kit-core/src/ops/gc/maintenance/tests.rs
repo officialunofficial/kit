@@ -1043,11 +1043,11 @@ fn a_step_that_runs_out_of_time_retires_what_it_verified_oldest_first() {
     }
 }
 
-/// With no time to verify one pack, nothing is retired and the long interval
-/// of an attempt that ran out of budget stands: the step cannot loop on
-/// work it never does.
+/// With no time to verify one pack, nothing is retired, but the step saw dead
+/// packs past grace: a busy disk is not a reason to wait 30 days. It reports
+/// the budget, stamps progress and is due again in an hour, under the floor.
 #[test]
-fn a_step_that_verifies_no_pack_keeps_the_long_interval() {
+fn a_step_that_verifies_no_pack_is_due_again_in_an_hour() {
     TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
@@ -1058,7 +1058,72 @@ fn a_step_that_verifies_no_pack_keeps_the_long_interval() {
     assert_eq!(report.collection, Collection::OverBudget);
     assert_eq!(report.packs_retired, 0);
     assert!(dead.exists());
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert!(!stamp.due(stamp.attempted + HOUR - 1, 3));
+    assert!(stamp.due(stamp.attempted + HOUR, 3));
+    assert_eq!(repo.run().collection, Collection::NotDue, "not due yet");
+
+    let next = step_later(&repo);
+    assert_eq!(next.packs_retired, 1);
+    assert!(!dead.exists());
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+}
+
+/// A mark that runs out of time has seen no dead pack, so the long interval
+/// of an attempt that ran out of budget stands.
+#[test]
+fn a_mark_that_runs_out_of_time_keeps_the_long_interval() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    repo.old_pack(&[b"dead"]);
+    TEST_CLOCK_OUT.set(true);
+    let report = repo.run();
+    TEST_CLOCK_OUT.set(false);
+    assert_eq!(report.collection, Collection::OverBudget);
     assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
+}
+
+/// A clock that ends inside the last wholly dead pack keeps every pack that
+/// was verified: the later phases defer only their own part.
+#[test]
+fn a_clock_that_ends_inside_the_last_pack_keeps_the_verified_packs() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    let ids = repo.due_live();
+    let dead: Vec<_> = (0..3)
+        .map(|n| {
+            let (path, _) = repo.old_pack(&[format!("dead {n}").as_bytes()]);
+            age_file(&path, DEFAULT_GRACE_SECS + 86_400 * (n + 1));
+            path
+        })
+        .collect();
+    // Room for all three; the clock ends while the last one is verified.
+    TEST_VERIFY_ROOM.set(Some(3));
+    let report = maintain_with(
+        &repo.layout,
+        &repo.store,
+        &|| {
+            if TEST_VERIFY_ROOM.get() == Some(0) {
+                TEST_CLOCK_OUT.set(true);
+            }
+            false
+        },
+        BUDGET,
+        || {},
+    );
+    TEST_VERIFY_ROOM.set(None);
+    TEST_CLOCK_OUT.set(false);
+    assert_eq!(report.packs_retired, 3, "{report:?}");
+    assert_eq!(report.collection, Collection::OverBudget, "the copy waited");
+    assert!(dead.iter().all(|path| !path.exists()));
+    // Everything wholly dead is gone: the weekly interval of a finished
+    // collection, not an hour and not 30 days.
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+    for id in &ids {
+        assert!(repo.store.read(id).is_ok());
+    }
 }
 
 /// Every step on a large dead set that retires at least one pack leaves the
@@ -1239,4 +1304,67 @@ fn the_progress_stamp_round_trips_and_an_unknown_one_is_unreadable() {
     let mut bytes = stamp.encode();
     bytes[8] = 8;
     assert!(Stamp::decode(&bytes).is_none());
+}
+
+/// A `complete` stamp is due again once the store holds the floor's worth of
+/// pairs more than it left; no other outcome gains that rule.
+#[test]
+fn only_a_complete_stamp_is_due_by_pair_growth() {
+    for outcome in [
+        Collection::Complete,
+        Collection::NotDue,
+        Collection::Failed,
+        Collection::OverBudget,
+    ] {
+        let stamp = Stamp {
+            attempted: 100,
+            outcome,
+            complete_pairs: 40,
+        };
+        let grown = 40 + MIN_PAIRS;
+        assert!(!stamp.due(101, grown - 1));
+        assert_eq!(
+            stamp.due(101, grown),
+            outcome == Collection::Complete,
+            "{outcome:?}"
+        );
+        assert!(!stamp.due(101, 0));
+    }
+    // A stamp that stored no count is due at the floor, as a first step is.
+    let stamp = Stamp {
+        attempted: 100,
+        outcome: Collection::Complete,
+        complete_pairs: 0,
+    };
+    assert!(!stamp.due(101, MIN_PAIRS - 1));
+    assert!(stamp.due(101, MIN_PAIRS));
+}
+
+/// A repository that never fetches: after the step merges its first small
+/// packs, the 32nd new pair makes the next step due, not the next week.
+#[test]
+fn a_repository_that_never_fetches_merges_again_every_floor_of_new_pairs() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    for n in 0..MIN_PAIRS {
+        repo.pack(&[format!("first {n}").as_bytes()]);
+    }
+    assert_eq!(repo.run().collection, Collection::Complete);
+    for round in 0..2 {
+        let left = stamp_of(&repo).complete_pairs as usize;
+        assert_eq!(left, repo.pack_count(), "the stamp holds the count left");
+        assert!(left < MIN_PAIRS, "the step merged the small packs");
+        for n in 0..MIN_PAIRS - 1 {
+            repo.pack(&[format!("round {round} pack {n}").as_bytes()]);
+        }
+        assert_eq!(
+            repo.run().collection,
+            Collection::NotDue,
+            "31 new pairs wait"
+        );
+        repo.pack(&[format!("round {round} last").as_bytes()]);
+        let report = repo.run();
+        assert_eq!(report.collection, Collection::Complete);
+        assert!(report.packs_merged >= MIN_PAIRS, "{report:?}");
+    }
 }
