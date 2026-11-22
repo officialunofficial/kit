@@ -17,7 +17,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   error: not a kit repo: repository object-addressing format is Some("bmt-v2\nP"), expected "bmt-v2". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.
   ```
 - Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back. Examples are `add`, `commit`, `stash`, and a `fetch` that finds the remote changed or runs with `--prune`, even if it downloads nothing. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
-- Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository. A user config that holds `gc.auto` works with 0.9.
+- Kit 0.9 and older reject `gc.auto` as an unknown config key, in the repository config and in the user config (`$XDG_CONFIG_HOME/kit/config`), so remove the key before running one of them.
 - Embedders that build kit-core with `history-mmr`, or that cross-check kit proofs with the upstream verifiers, must move to Commonware 2026.11.0 together with kit.
 
 ### Added
