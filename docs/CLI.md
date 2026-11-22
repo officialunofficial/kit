@@ -1288,10 +1288,9 @@ attestation support warn once per command and skip the log.
   They periodically retire wholly dead packs past grace, and rewrite,
   merge and retire covered packs. `kit commit` runs the same step after
   it publishes, so a repository that never fetches does not build up
-  packs, and `kit add` alone does not run it. `kit clone` and the first
-  fetch create the advisory stamp; a stamp with no recorded outcome counts
-  as never run, so the first fetch or commit that finds 32 pairs runs a
-  full step. Set `gc.auto = false` in repo or user config to disable the
+  packs, and `kit add` alone does not run it. Fetch and clone create the advisory stamp. A clone that finds fewer than
+  32 pairs leaves it empty, and an empty stamp counts as never run, so the
+  first fetch or commit that finds 32 pairs runs a full step. Set `gc.auto = false` in repo or user config to disable the
   step. A step has a 5 second budget before retirement, so a command that
   runs a due step can take about 5 seconds longer, and more when it retires
   packs. A maintenance failure leaves the command's exit status unchanged.
@@ -2024,6 +2023,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
 | `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
