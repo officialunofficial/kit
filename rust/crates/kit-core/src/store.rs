@@ -434,6 +434,9 @@ pub struct ObjectStore {
     /// Test-only: bytes of packed blobs that a gc type probe hashed.
     #[cfg(test)]
     gc_hashed_bytes: Arc<AtomicU64>,
+    /// Test-only: gc type probes that the one-read path answered.
+    #[cfg(test)]
+    gc_one_read_probes: Arc<AtomicU64>,
     /// Test-only: set to send every gc type probe down the streaming path,
     /// to compare it with the one-read path.
     #[cfg(test)]
@@ -461,6 +464,8 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_stream_only: Arc::default(),
         })
@@ -491,6 +496,8 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_stream_only: Arc::default(),
         })
@@ -538,6 +545,12 @@ impl ObjectStore {
     #[cfg(test)]
     pub(crate) fn gc_hashed_byte_count(&self) -> u64 {
         self.gc_hashed_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: gc type probes that the one-read path answered so far.
+    #[cfg(test)]
+    pub(crate) fn gc_one_read_probe_count(&self) -> u64 {
+        self.gc_one_read_probes.load(Ordering::Relaxed)
     }
 
     /// Test-only: probe every packed object through the streaming path.
@@ -965,6 +978,8 @@ impl ObjectStore {
 
         self.packs.lookup(self, h, true, |location| {
             if let Some(ty) = self.gc_probe_in_one_read(&location, h, verify)? {
+                #[cfg(test)]
+                self.gc_one_read_probes.fetch_add(1, Ordering::Relaxed);
                 return Ok(ty);
             }
             let mut contents = location.open()?;

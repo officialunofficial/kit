@@ -2601,6 +2601,36 @@ fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
 }
 
 #[test]
+fn the_one_read_probe_answers_a_head_of_any_size_and_a_whole_frame_up_to_its_limit() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    // A frame is ten bytes longer than its payload.
+    for payload in [0, 1, limit - 11, limit - 10, limit - 9, 3 * limit] {
+        for as_chunk in [false, true] {
+            let (_dir, layout, store) = fresh();
+            let bytes = blob(&vec![0x33; payload]);
+            let (_, ids) = publish_objects(&store, &[&bytes]);
+            if as_chunk {
+                manifest_root(&store, &layout, "chunked", &ids);
+            } else {
+                files_root(&store, &layout, &ids);
+            }
+
+            let gc = ObjectStore::open(&layout).unwrap();
+            crate::ops::gc::live_objects(&gc, &layout).unwrap();
+            // A chunk is probed by its head, so its frame is never too large.
+            // A file is hashed, so its frame is read whole only up to the limit.
+            let whole = payload + 10 <= limit;
+            let expected = u64::from(as_chunk || whole);
+            assert_eq!(
+                gc.gc_one_read_probe_count(),
+                expected,
+                "payload {payload}, chunk {as_chunk}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_packed_blob_above_the_one_read_limit_is_hashed_by_streaming() {
     let limit = crate::store::GC_SMALL_FRAME;
     for payload in [limit - 10, limit - 9] {
