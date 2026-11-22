@@ -855,6 +855,20 @@ pub trait Transport: Send + Sync {
     /// transports. `ref_hint` as for [`Self::download_pack`].
     fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool>;
 
+    /// The length in bytes of the pack stored under `key`, read without
+    /// fetching it, or `None` when it is not stored or this transport cannot
+    /// tell the length cheaply. A caller that wants to know a stored pack is
+    /// whole compares this with the length it expects, and treats `None` as
+    /// "not known to be whole". One attempt: no retry ladder. The default
+    /// is `None`.
+    ///
+    /// # Errors
+    /// The transport's error when the check itself fails.
+    fn pack_len(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let _ = (key, ref_hint);
+        Ok(None)
+    }
+
     /// Upload a content-addressed **auxiliary blob**: transfer metadata
     /// that is NOT a packfile, such as a packlist chain node. The key is
     /// BLAKE3 of `bytes`, exactly like a pack.

@@ -1323,6 +1323,22 @@ impl Transport for S3Transport {
         }
     }
 
+    /// One `HEAD`, not retried: the stored length is the answer's
+    /// `Content-Length`, and an answer without one is no length.
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self
+            .signed_request(&Method::HEAD, &object_key, "", &sha256_hex(&[]), &[])
+            .send()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        match resp.status().as_u16() {
+            200 => Ok(header(&resp, "content-length").and_then(|value| value.parse().ok())),
+            404 => Ok(None),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
     /// Refused, with no request sent (SPEC-TRANSPORT §6.3). A conditional
     /// `DELETE` is not something every S3 store honours, and one that
     /// ignores `If-Match` would delete without the check. So this transport
