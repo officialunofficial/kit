@@ -735,13 +735,12 @@ fn run_shares_content(
             }
         }
         reads += 1;
-        if let Some(content) = chunk_bytes(store, nj)? {
-            if chunk_features(&content)
+        if let Some(content) = chunk_bytes(store, nj)?
+            && chunk_features(&content)
                 .iter()
                 .any(|f| features.contains(f))
-            {
-                return Ok((true, reads));
-            }
+        {
+            return Ok((true, reads));
         }
     }
     Ok((false, reads))
