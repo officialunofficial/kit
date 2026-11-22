@@ -17,10 +17,13 @@ const MIN_PAIRS: usize = 32;
 /// Set in the pair count of a `progress` stamp written by an attempt that ran
 /// out of time and retired nothing, so that the next such attempt waits 30
 /// days. The pair count is read on a `complete` stamp and the mark bit on a
-/// `progress` stamp, so this adds no field and no byte to the stamp.
+/// `progress` stamp, so this adds no field and no byte to the stamp. The mark
+/// counts only while its stamp is under a day old, so a miss now and a miss
+/// weeks later are not two in a row.
 const MISSED: u64 = 1 << 63;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;
+const DAY: u64 = 24 * HOUR;
 
 const INTERRUPTED: &str = "automatic maintenance interrupted";
 const DEADLINE: &str = "automatic maintenance deadline";
@@ -387,7 +390,7 @@ fn run(
     {
         collection.stamped = Collection::Progress;
     }
-    let marked = bound_misses(stamp, &mut collection.stamped, progressed);
+    let marked = bound_misses(stamp, now, &mut collection.stamped, progressed);
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
@@ -411,8 +414,12 @@ fn run(
 /// does not pay it every hour. Returns whether the new stamp carries the mark
 /// of such a miss: a lock miss or changed roots that restamped `progress`
 /// with nothing retired keeps it, and a step that retired anything clears it.
-fn bound_misses(prior: Stamp, stamped: &mut Collection, progressed: bool) -> bool {
-    let marked = prior.outcome == Collection::Progress && prior.complete_pairs & MISSED != 0;
+/// A mark on a stamp more than a day old is ignored, so only two misses within
+/// a day wait 30 days; a clock that moved back reads as recent.
+fn bound_misses(prior: Stamp, now: u64, stamped: &mut Collection, progressed: bool) -> bool {
+    let marked = prior.outcome == Collection::Progress
+        && prior.complete_pairs & MISSED != 0
+        && now.saturating_sub(prior.attempted) <= DAY;
     if *stamped == Collection::OverBudget && !marked {
         *stamped = Collection::Progress;
         return true;
