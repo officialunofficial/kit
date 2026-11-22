@@ -2636,30 +2636,35 @@ mod tests {
         assert!(spent <= PROBE_MAX_READS, "{spent}");
     }
 
-    /// An edit of `EDIT` chunks next to an insertion of `INSERT` new chunks
-    /// with no unchanged chunk between: one run, the edit a small part of it.
-    const EDIT: usize = 32;
-    const INSERT: usize = 640;
+    /// `n` hashes of objects no store holds, for chunks a run has to count
+    /// and the probe has to read, and that share nothing with anything.
+    fn absent(tag: u8, n: usize) -> Vec<Hash> {
+        (0..n)
+            .map(|i| {
+                let mut h = [tag; 32];
+                h[..8].copy_from_slice(&u64::try_from(i).unwrap().to_le_bytes());
+                h
+            })
+            .collect()
+    }
 
-    fn edit_and_insertion(
+    /// An old manifest of `edit` chunks, and a new one that has the edited
+    /// versions of them between `before` and `after` new chunks that share
+    /// nothing with it, with no unchanged chunk anywhere: one run. Returns
+    /// the manifests, the pairing the edit should get, and the run's reads.
+    fn edit_between(
         s: &ObjectStore,
-        insertion_first: bool,
-    ) -> (Vec<Hash>, Vec<Hash>, HashMap<Hash, Hash>) {
-        let old: Vec<Vec<u8>> = (0..EDIT as u64).map(|i| wide_chunk(i, 400)).collect();
+        before: usize,
+        edit: usize,
+        after: usize,
+    ) -> (Vec<Hash>, Vec<Hash>, HashMap<Hash, Hash>, usize) {
+        let old: Vec<Vec<u8>> = (0..edit as u64).map(|i| wide_chunk(i, 400)).collect();
         let edited: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
-        let inserted: Vec<Vec<u8>> = (0..INSERT as u64)
-            .map(|i| wide_chunk(100_000 + i, 400))
-            .collect();
-        let new = if insertion_first {
-            [inserted, edited].concat()
-        } else {
-            [edited, inserted].concat()
-        };
-        let (new, old) = (put_all(s, &new), put_all(s, &old));
-        let at = if insertion_first { INSERT } else { 0 };
-        let want = new[at..at + EDIT].iter().copied().zip(old.iter().copied());
-        let want = want.collect();
-        (new, old, want)
+        let (edited, old) = (put_all(s, &edited), put_all(s, &old));
+        let want = edited.iter().copied().zip(old.iter().copied()).collect();
+        let new = [absent(1, before), edited, absent(2, after)].concat();
+        let reads = new.len() + old.len();
+        (new, old, want, reads)
     }
 
     #[test]
@@ -2667,16 +2672,34 @@ mod tests {
         let (_d, s) = store();
         // The edit is under a sixteenth of the run, so only a point that
         // walks in from the end reaches it.
-        let (new, old, want) = edit_and_insertion(&s, true);
+        let (new, old, want, reads) = edit_between(&s, 640, 32, 0);
         let mut out = HashMap::new();
-        pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        let spent = pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
         assert_eq!(out, want);
+        // The first point, from the start, finds nothing: its chunk and the
+        // ten old chunks at the start of the old run. The second, from the
+        // end, shares: its chunk and the ten old chunks at the end.
+        assert_eq!(spent, reads + 11 + 11);
     }
 
     #[test]
     fn an_edit_before_a_long_insertion_still_pairs_from_the_start_of_the_run() {
         let (_d, s) = store();
-        let (new, old, want) = edit_and_insertion(&s, false);
+        let (new, old, want, reads) = edit_between(&s, 0, 32, 640);
+        let mut out = HashMap::new();
+        let spent = pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        assert_eq!(out, want);
+        // The first point, from the start, shares.
+        assert_eq!(spent, reads + 11);
+    }
+
+    #[test]
+    fn an_edit_between_two_insertions_pairs_from_a_point_in_the_middle_of_the_run() {
+        let (_d, s) = store();
+        // Neither end reaches the edit: it starts 6 chunks in, so only a
+        // point in the middle of the sample that sits inside the edit
+        // shares.
+        let (new, old, want, _) = edit_between(&s, 6, 100, 540);
         let mut out = HashMap::new();
         pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
         assert_eq!(out, want);
