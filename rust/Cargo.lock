@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "kit-attest"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "blake3",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "kit-benches"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "blake2",
  "criterion",
@@ -2225,7 +2225,7 @@ dependencies = [
 
 [[package]]
 name = "kit-bin"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "assert_cmd",
  "assert_fs",
@@ -2283,7 +2283,7 @@ dependencies = [
 
 [[package]]
 name = "kit-client"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "kit-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bao",
  "blake3",
@@ -2328,7 +2328,7 @@ dependencies = [
 
 [[package]]
 name = "kit-formal-conformance"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "kit-core",
  "kit-transport-file",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "kit-git-bridge"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "flate2",
  "kit-core",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "kit-keystore"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -2394,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "kit-rpc"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "arbitrary",
  "buffa",
@@ -2408,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "kit-serve"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "kit-core",
  "kit-rpc",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "kit-sign-file"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "buffa",
  "kit-attest",
@@ -2430,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "kit-sync"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2464,11 +2464,11 @@ dependencies = [
 
 [[package]]
 name = "kit-test-util"
-version = "0.9.0"
+version = "0.10.0"
 
 [[package]]
 name = "kit-transport-connect"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
  "buffa",
@@ -2503,7 +2503,7 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-file"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "getrandom 0.4.3",
  "kit-core",
@@ -2514,14 +2514,14 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-memory"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "kit-core",
 ]
 
 [[package]]
 name = "kit-transport-s3"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bytes",
  "hex",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "kit-transport-ssh"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "buffa",
  "kit-core",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "kit-wasm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bao",
  "base64 0.23.1",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "libkit"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
