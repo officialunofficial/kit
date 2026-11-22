@@ -1061,8 +1061,15 @@ Branches / refs:
   entries, computes the live set reachable from the retention roots (refs,
   stash, in-progress operations, attestations, and the recovery log of
   commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
-  unreachable objects older than the grace window (default 14 days).
-  `-n`/`--dry-run` reports what would be pruned without deleting.
+  unreachable objects older than the grace window (default 14 days). It also
+  retires local packs that are wholly dead past grace, rewrites packs that
+  hold a quarter or more garbage, merges small packs and retires duplicate
+  packs, copying what must survive into new packs before it retires the
+  old ones. A damaged pack or a failed copy is kept and reported as a
+  warning on standard error, and so is a retirement that stopped because a
+  fetch, push or add held the store lock; the exit code does not change.
+  `-n`/`--dry-run` reports what would be pruned without deleting, and
+  reports packed garbage.
   `--grace-secs 0` prunes every unreachable object, but **bypasses the
   grace window** &mdash; the grace window is gc's concurrency-safety net (some
   root-publishing paths such as `tag` and `fetch` write an object before

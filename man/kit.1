@@ -1146,7 +1146,15 @@ older than the grace window
 .Pq default 14 days .
 .Fl n
 .Pq Fl Fl dry-run
-previews without deleting.
+previews without deleting, and reports packed garbage.
+Local packs are handled too: gc retires packs that are wholly dead past the
+grace window, rewrites packs that hold a quarter or more garbage, merges small
+packs and retires duplicate packs, copying what must survive into new packs
+before it retires the old ones.
+A damaged pack or a failed copy is kept and
+reported as a warning on standard error, and so is a retirement that stopped
+because a fetch, push or add held the store lock; the exit code does not
+change.
 .Fl Fl grace-secs Ar 0
 prunes every unreachable object, but bypasses the grace window — that window is
 gc's concurrency-safety net (some root publishers such as
