@@ -47,6 +47,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Fetch and clone write each object above 262,154 bytes once, to its final file, and no longer copy it through a spool and read it back, so a clone of such files reads and writes no more bytes than 0.9 did.
 - Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
 - Opening a local pack no longer holds the shared handle-cache lock, so concurrent reads and the garbage collection mark no longer queue behind one slow open.
+- The garbage collection mark reads a packed chunk head, and a packed object of at most 16 KiB, in one read instead of three or four. The local pack handle cache keeps up to a quarter of the open-file limit (96 to 1,024 files), looks a handle up in a hash table, and closes an evicted file after it releases the lock, so a warm `kit gc -n` on a store of hundreds of packs no longer queues on that lock or reopens packs.
 - **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
 
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.

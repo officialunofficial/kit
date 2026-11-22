@@ -632,6 +632,14 @@ impl Location {
         Ok(crate::store::read_header_prefix(&mut contents, head))
     }
 
+    /// The length of the frame a packed copy occupies. `None` for a loose file.
+    pub(super) fn frame_len(&self) -> Option<u32> {
+        match self {
+            Self::Loose(_) => None,
+            Self::Packed(_, frame) | Self::Cached(_, frame, ..) => Some(frame.len),
+        }
+    }
+
     pub(super) fn size(&self) -> StoreResult<u64> {
         match self {
             Self::Loose(path) => Ok(fs::metadata(path)?.len()),

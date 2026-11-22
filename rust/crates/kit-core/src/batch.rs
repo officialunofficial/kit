@@ -1358,8 +1358,8 @@ fn cap_for_soft_limit(soft: u64) -> usize {
 
 /// The process's soft limit on open files, `RLIM_INFINITY` (`u64::MAX`)
 /// when there is none.
-#[cfg(target_os = "linux")]
-fn soft_open_file_limit() -> Option<u64> {
+#[cfg(unix)]
+pub(crate) fn soft_open_file_limit() -> Option<u64> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -2273,7 +2273,7 @@ mod tests {
         assert_eq!(cap_for_soft_limit(u64::MAX), SMALL_OBJECT_SYNC_WORKERS);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn the_open_file_limit_reads() {
         assert!(soft_open_file_limit().is_some_and(|soft| soft > 0));

@@ -1838,7 +1838,9 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
         ));
     }
     assert_eq!(loads(), objects.len());
-    assert_eq!(reader.packs.handles.cached(), 96);
+    let handles = &reader.packs.handles;
+    assert!(handles.limit() >= super::reader::HANDLE_FLOOR);
+    assert_eq!(handles.cached(), objects.len().min(handles.limit()));
 }
 
 #[test]
@@ -2505,6 +2507,279 @@ fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
         // The file probe hashes the blob once. The chunk pass skips it.
         assert_eq!(gc.gc_hashed_byte_count(), bytes.len() as u64);
     }
+}
+
+/// A ref whose tree lists each of `ids` as a file.
+fn files_root(store: &ObjectStore, layout: &RepoLayout, ids: &[Hash]) -> Hash {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    let entries = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| TreeEntry {
+            name: format!("f{n}").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: *id,
+        })
+        .collect();
+    let root = store
+        .write(&serialize(&Object::Tree(Tree { entries })).unwrap())
+        .unwrap();
+    crate::refs::write_ref(layout, "files", &root).unwrap();
+    root
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    None,
+    Payload,
+    Prologue,
+    TypeTag,
+    FrameHeader,
+}
+
+/// The mark of the store at `layout`, through the one-read probe or the
+/// streaming probe: its result as text, and the bytes the probes hashed.
+fn marked(layout: &RepoLayout, streaming: bool) -> (String, u64) {
+    let gc = ObjectStore::open(layout).unwrap();
+    if streaming {
+        gc.gc_probe_streaming_only();
+    }
+    let result = crate::ops::gc::live_objects(&gc, layout);
+    (format!("{result:?}"), gc.gc_hashed_byte_count())
+}
+
+#[test]
+fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    // A frame is ten bytes longer than its payload. These payloads put the
+    // frame below, at and above the largest frame the probe reads whole.
+    for payload in [0, 1, 4096, limit - 11, limit - 10, limit - 9, 3 * limit] {
+        for as_chunk in [false, true] {
+            for damage in [
+                Damage::None,
+                Damage::Payload,
+                Damage::Prologue,
+                Damage::TypeTag,
+                Damage::FrameHeader,
+            ] {
+                if payload == 0 && matches!(damage, Damage::Payload) {
+                    continue;
+                }
+                let (_dir, layout, store) = fresh();
+                let bytes = blob(&vec![0x5a; payload]);
+                let (pair, ids) = publish_objects(&store, &[&bytes]);
+                if as_chunk {
+                    manifest_root(&store, &layout, "chunked", &ids);
+                } else {
+                    files_root(&store, &layout, &ids);
+                }
+                match damage {
+                    Damage::None => {}
+                    Damage::Payload => damage_frame(&pair, &ids[0], 10 + payload / 2, |b| *b ^= 1),
+                    Damage::Prologue => damage_frame(&pair, &ids[0], 6, |b| *b ^= 1),
+                    Damage::TypeTag => damage_frame(&pair, &ids[0], 0, |b| *b = 0xee),
+                    Damage::FrameHeader => damage_header(&pair, &ids[0], 1, |b| *b ^= 1),
+                }
+
+                let streamed = marked(&layout, true);
+                let one_read = marked(&layout, false);
+                let case = format!("payload {payload}, chunk {as_chunk}, {damage:?}");
+                assert_eq!(one_read, streamed, "{case}");
+                // A chunk is checked by its head only, so a bad payload passes.
+                let passes = matches!(damage, Damage::None)
+                    || (as_chunk && matches!(damage, Damage::Payload));
+                assert_eq!(
+                    streamed.0.starts_with("Ok("),
+                    passes,
+                    "{case}: {}",
+                    streamed.0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_one_read_probe_answers_a_head_of_any_size_and_a_whole_frame_up_to_its_limit() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    // A frame is ten bytes longer than its payload. 4096 is a fixed size, so
+    // that a limit changed to another value moves the answer.
+    for payload in [0, 1, 4096, limit - 11, limit - 10, limit - 9, 3 * limit] {
+        for as_chunk in [false, true] {
+            let (_dir, layout, store) = fresh();
+            let bytes = blob(&vec![0x33; payload]);
+            let (_, ids) = publish_objects(&store, &[&bytes]);
+            if as_chunk {
+                manifest_root(&store, &layout, "chunked", &ids);
+            } else {
+                files_root(&store, &layout, &ids);
+            }
+
+            let gc = ObjectStore::open(&layout).unwrap();
+            crate::ops::gc::live_objects(&gc, &layout).unwrap();
+            // A chunk is probed by its head, so its frame is never too large.
+            // A file is hashed, so its frame is read whole only up to 16 KiB.
+            let whole = payload + 10 <= 16 * 1024;
+            let expected = u64::from(as_chunk || whole);
+            assert_eq!(
+                gc.gc_one_read_probe_count(),
+                expected,
+                "payload {payload}, chunk {as_chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_packed_blob_above_the_one_read_limit_is_hashed_by_streaming() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    for payload in [limit - 10, limit - 9] {
+        let (_dir, layout, store) = fresh();
+        let bytes = blob(&vec![7; payload]);
+        let (_, ids) = publish_objects(&store, &[&bytes]);
+        files_root(&store, &layout, &ids);
+
+        let gc = ObjectStore::open(&layout).unwrap();
+        crate::ops::gc::live_objects(&gc, &layout).unwrap();
+        assert_eq!(gc.gc_hashed_byte_count(), bytes.len() as u64);
+    }
+}
+
+#[test]
+fn a_delta_frame_in_a_local_pack_stops_the_mark_through_either_probe() {
+    for as_chunk in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&blob(&[9; 64])]);
+        if as_chunk {
+            manifest_root(&store, &layout, "chunked", &ids);
+        } else {
+            files_root(&store, &layout, &ids);
+        }
+        // The type byte now names a delta, which a local pack never holds.
+        damage_frame(&pair, &ids[0], 0, |b| *b = 0x06);
+
+        let streamed = marked(&layout, true);
+        let one_read = marked(&layout, false);
+        assert_eq!(one_read, streamed, "chunk {as_chunk}");
+        assert!(
+            one_read.0.contains("delta object in local pack"),
+            "chunk {as_chunk}: {}",
+            one_read.0
+        );
+    }
+}
+
+#[test]
+fn the_one_read_probe_marks_non_blob_frames_as_the_streaming_probe_does() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    // A tree is probed by its type and read afterwards. The frame is small
+    // enough to arrive whole, and no byte of it counts as hashed by the probe.
+    let (_dir, layout, store) = fresh();
+    let (_, ids) = publish_objects(&store, &[&blob(b"inner")]);
+    let inner = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"leaf".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: ids[0],
+        }],
+    }))
+    .unwrap();
+    let (_, trees) = publish_objects(&store, &[&inner]);
+    let outer = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"dir".to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: trees[0],
+        }],
+    }))
+    .unwrap();
+    let root = store.write(&outer).unwrap();
+    crate::refs::write_ref(&layout, "nested", &root).unwrap();
+
+    let streamed = marked(&layout, true);
+    let one_read = marked(&layout, false);
+    assert_eq!(one_read, streamed);
+    assert!(one_read.0.starts_with("Ok("), "{}", one_read.0);
+}
+
+#[test]
+fn the_handle_limit_is_a_quarter_of_the_open_file_limit_within_its_bounds() {
+    use super::reader::{HANDLE_CEILING, HANDLE_FLOOR, handle_limit_for};
+
+    assert_eq!(handle_limit_for(0), HANDLE_FLOOR);
+    assert_eq!(handle_limit_for(256), HANDLE_FLOOR);
+    assert_eq!(handle_limit_for(1024), 256);
+    assert_eq!(handle_limit_for(2048), 512);
+    assert_eq!(handle_limit_for(1 << 20), HANDLE_CEILING);
+    assert_eq!(handle_limit_for(u64::MAX), HANDLE_CEILING);
+}
+
+#[test]
+fn a_full_handle_cache_drops_the_least_recently_used_file() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let locators: Vec<_> = (0..3_u8)
+        .map(|n| {
+            let (pair, _) = publish_objects(&store, &[&blob(&[n; 64])]);
+            Arc::new(Locator::open(&pair, 0, 0).unwrap())
+        })
+        .collect();
+    let handles = Handles::limited(2);
+    let a = handles.get(&locators[0], Member::Pack).unwrap();
+    let b = handles.get(&locators[1], Member::Pack).unwrap();
+    // A is used again, so B is the least recently used.
+    assert!(Arc::ptr_eq(
+        &a,
+        &handles.get(&locators[0], Member::Pack).unwrap()
+    ));
+    assert_eq!(handles.opens(), 2);
+
+    handles.get(&locators[2], Member::Pack).unwrap();
+    assert_eq!(handles.cached(), 2);
+    assert_eq!(Arc::strong_count(&b), 1, "the cache let go of B");
+    assert!(Arc::ptr_eq(
+        &a,
+        &handles.get(&locators[0], Member::Pack).unwrap()
+    ));
+    assert_eq!(handles.opens(), 3);
+
+    let reopened = handles.get(&locators[1], Member::Pack).unwrap();
+    assert!(!Arc::ptr_eq(&b, &reopened));
+    assert_eq!(handles.opens(), 4);
+    assert_eq!(handles.cached(), 2);
+}
+
+#[test]
+fn each_use_of_a_cached_file_makes_it_newer_than_every_use_before() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let locators: Vec<_> = (0..2_u8)
+        .map(|n| {
+            let (pair, _) = publish_objects(&store, &[&blob(&[n; 64])]);
+            Arc::new(Locator::open(&pair, 0, 0).unwrap())
+        })
+        .collect();
+    let handles = Handles::limited(8);
+    let used = |n: usize| handles.used(&locators[n], Member::Pack).unwrap();
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    let first = used(0);
+    handles.get(&locators[1], Member::Pack).unwrap();
+    let second = used(1);
+    assert!(second > first, "a file opened later is newer");
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    assert!(used(0) > second, "a hit makes the file the newest");
+    assert_eq!(used(1), second, "and leaves the others as they were");
+    assert_eq!(handles.used(&locators[0], Member::Index), None);
 }
 
 pub(super) fn cut_pack_short(pair: &Pair) {

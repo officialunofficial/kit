@@ -164,6 +164,11 @@ pub const FORMAT_VALUE: &str = "bmt-v2";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;
+
+/// The largest packed frame the mark's probe reads whole in one call, to hash
+/// it. A larger one streams, so the probe never holds more than this.
+const GC_SMALL_FRAME: usize = 16 * 1024;
+
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
@@ -429,6 +434,13 @@ pub struct ObjectStore {
     /// Test-only: bytes of packed blobs that a gc type probe hashed.
     #[cfg(test)]
     gc_hashed_bytes: Arc<AtomicU64>,
+    /// Test-only: gc type probes that the one-read path answered.
+    #[cfg(test)]
+    gc_one_read_probes: Arc<AtomicU64>,
+    /// Test-only: set to send every gc type probe down the streaming path,
+    /// to compare it with the one-read path.
+    #[cfg(test)]
+    gc_stream_only: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ObjectStore {
@@ -452,6 +464,10 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
     }
 
@@ -480,6 +496,10 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
     }
 
@@ -525,6 +545,18 @@ impl ObjectStore {
     #[cfg(test)]
     pub(crate) fn gc_hashed_byte_count(&self) -> u64 {
         self.gc_hashed_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: gc type probes that the one-read path answered so far.
+    #[cfg(test)]
+    pub(crate) fn gc_one_read_probe_count(&self) -> u64 {
+        self.gc_one_read_probes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: probe every packed object through the streaming path.
+    #[cfg(test)]
+    pub(crate) fn gc_probe_streaming_only(&self) {
+        self.gc_stream_only.store(true, Ordering::Relaxed);
     }
 
     /// Start a batched write with the store's configured policy
@@ -945,6 +977,11 @@ impl ObjectStore {
         use crate::object::ObjectType;
 
         self.packs.lookup(self, h, true, |location| {
+            if let Some(ty) = self.gc_probe_in_one_read(&location, h, verify)? {
+                #[cfg(test)]
+                self.gc_one_read_probes.fetch_add(1, Ordering::Relaxed);
+                return Ok(ty);
+            }
             let mut contents = location.open()?;
             let mut header = [0; serialize::BLOB_PROLOGUE_LEN];
             contents
@@ -982,6 +1019,70 @@ impl ObjectStore {
                 _ => Ok(ty),
             }
         })
+    }
+
+    /// [`Self::gc_probe`] of a packed copy whose probe one read answers: the
+    /// head of any frame when `verify` is false, and the whole frame when
+    /// `verify` is true and the frame is at most [`GC_SMALL_FRAME`] bytes.
+    /// The read checks the frame header against the index first, as opening
+    /// the frame does. Each check below is the one the streaming path makes.
+    /// `None` leaves the probe to that path: a loose copy, a frame too short
+    /// for a blob head, a frame too large to hold in memory, or a failed read,
+    /// so that a damaged pack gives the same error.
+    #[cfg_attr(not(test), allow(clippy::unused_self))] // the counters exist only in tests
+    fn gc_probe_in_one_read(
+        &self,
+        location: &local_pack::Location,
+        h: &Hash,
+        verify: bool,
+    ) -> StoreResult<Option<crate::object::ObjectType>> {
+        use crate::object::ObjectType;
+
+        #[cfg(test)]
+        if self.gc_stream_only.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(raw_len) = location.frame_len() else {
+            return Ok(None);
+        };
+        let frame_len = raw_len as usize;
+        let whole = verify && frame_len <= GC_SMALL_FRAME;
+        if frame_len < serialize::BLOB_PROLOGUE_LEN || (verify && !whole) {
+            return Ok(None);
+        }
+        let want = if whole {
+            frame_len
+        } else {
+            serialize::BLOB_PROLOGUE_LEN
+        };
+        let mut bytes = vec![0; want];
+        if !matches!(location.read_head(&mut bytes)?, Ok(len) if len == bytes.len()) {
+            return Ok(None);
+        }
+        let ty = parse_type(&bytes[..6])?;
+        match ty {
+            ObjectType::Blob => {
+                let payload_len = raw_capacity(u64::from(raw_len))? - serialize::BLOB_PROLOGUE_LEN;
+                if bytes[..serialize::BLOB_PROLOGUE_LEN] != serialize::blob_prologue(payload_len)? {
+                    return Err(local_pack::invalid_at(
+                        location.path(),
+                        "invalid packed blob header",
+                    ));
+                }
+                if whole {
+                    #[cfg(test)]
+                    self.gc_hashed_bytes
+                        .fetch_add(frame_len as u64, Ordering::Relaxed);
+                    check_hash(h, blake3::hash(&bytes).as_bytes())?;
+                }
+                Ok(Some(ty))
+            }
+            ObjectType::Delta => Err(local_pack::invalid_at(
+                location.path(),
+                "delta object in local pack",
+            )),
+            _ => Ok(Some(ty)),
+        }
     }
 
     /// The object's type tag and, for a `Blob`, its content length, from the
