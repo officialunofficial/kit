@@ -11,12 +11,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrading from 0.9
 
-- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints a line like the one below (`fetch`, `push` and `pull` prefix it with `error: fetch: store: `, `error: push: store: ` and `error: pull: store: `, and the repository format is quoted the same way). Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
+- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints a line like the one below. `fetch`, `push` and `pull` print `error: fetch: store: `, `error: push: store: ` and `error: pull: store: ` in place of `error: not a kit repo: `, and the rest of the text is the same. Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
 
   ```text
   error: not a kit repo: repository object-addressing format is Some("bmt-v2\nP"), expected "bmt-v2". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.
   ```
-- Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back: `add`, `commit`, `stash`, and a `fetch` that downloads anything. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
+- Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back. Examples are `add`, `commit`, `stash`, and a `fetch` that finds the remote changed or runs with `--prune`, even if it downloads nothing. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
 - Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository. A user config that holds `gc.auto` works with 0.9.
 - Embedders that build kit-core with `history-mmr`, or that cross-check kit proofs with the upstream verifiers, must move to Commonware 2026.11.0 together with kit.
 
