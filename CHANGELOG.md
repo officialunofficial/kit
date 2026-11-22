@@ -71,6 +71,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A push over a `kit+file` or S3 remote skips a pack of 8 MiB or more only when the remote holds it at the pack's own length, with no retry on that check, so a short pack left under the key is sent again instead of getting a ref published over it. An ssh remote cannot give the stored length, so a push to it sends such a pack again.
 - `kit add` hashes the chunks of a large file on several threads on a host with more than 16 of them, where a full batch of 64 chunks stayed on one thread. `kit_core::worktree::STREAM_HASH_BATCH` is public.
 - `kit restore Makefile` restores the top-level `Makefile` only, not also a `Makefile` in another directory that another pathspec selects.
 - `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.

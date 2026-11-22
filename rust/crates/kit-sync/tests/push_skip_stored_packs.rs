@@ -122,20 +122,20 @@ fn noise(seed: u64, len: usize) -> Vec<u8> {
 struct Calls {
     /// The keys of the packs uploaded, in order.
     uploads: Vec<PackKey>,
-    /// How many existence checks were made.
-    exists: usize,
+    /// How many stored-length checks were made.
+    checks: usize,
     /// The packs uploaded when each ref write began.
     uploaded_at_ref_write: Vec<usize>,
 }
 
 /// A transport that counts what the push sends, fails the upload number
-/// `fail_upload` (counting from one) and answers existence checks with
-/// `exists_error`.
+/// `fail_upload` (counting from one) and answers stored-length checks with
+/// `check_error`.
 struct Recording<'a> {
     inner: &'a dyn Transport,
     calls: Mutex<Calls>,
     fail_upload: Option<usize>,
-    exists_error: bool,
+    check_error: bool,
 }
 
 impl<'a> Recording<'a> {
@@ -144,7 +144,7 @@ impl<'a> Recording<'a> {
             inner,
             calls: Mutex::new(Calls::default()),
             fail_upload: None,
-            exists_error: false,
+            check_error: false,
         }
     }
 
@@ -186,11 +186,14 @@ impl Transport for Recording<'_> {
         self.inner.download_pack(key, hint, sink)
     }
     fn pack_exists(&self, key: &PackKey, hint: Option<&str>) -> TransportResult<bool> {
-        self.calls.lock().unwrap().exists += 1;
-        if self.exists_error {
+        self.inner.pack_exists(key, hint)
+    }
+    fn pack_len(&self, key: &PackKey, hint: Option<&str>) -> TransportResult<Option<u64>> {
+        self.calls.lock().unwrap().checks += 1;
+        if self.check_error {
             return Err(TransportError::AccessDenied);
         }
-        self.inner.pack_exists(key, hint)
+        self.inner.pack_len(key, hint)
     }
     fn update_ref(
         &self,
@@ -292,10 +295,10 @@ fn an_existence_check_that_fails_falls_back_to_the_upload() {
     refs::write_ref(&work.layout, "main", &tip).unwrap();
 
     let mut recording = Recording::new(&remote);
-    recording.exists_error = true;
+    recording.check_error = true;
     work.push(&recording).unwrap();
     let calls = recording.calls.into_inner().unwrap();
-    assert!(calls.exists > 0, "the push asked");
+    assert!(calls.checks > 0, "the push asked");
     assert_eq!(calls.uploads.len(), 2);
     assert_eq!(remote.read_ref(MAIN).unwrap(), Some(tip));
 }
@@ -310,6 +313,56 @@ fn a_small_push_asks_the_remote_nothing_extra() {
     let recording = Recording::new(&remote);
     work.push(&recording).unwrap();
     let calls = recording.calls.into_inner().unwrap();
-    assert_eq!(calls.exists, 0);
+    assert_eq!(calls.checks, 0);
     assert_eq!(calls.uploads.len(), 1);
+}
+
+/// A clone of `remote` into a new directory, with the tip it checked out.
+fn clone_tip(remote: &dyn Transport) -> Result<Hash, kit_sync::SyncError> {
+    let temp = tempfile::tempdir().unwrap();
+    let desc = CloneRemote {
+        name: "origin".into(),
+        url: "kit+file://x".into(),
+        kind: "file".into(),
+    };
+    kit_sync::clone(
+        temp.path(),
+        &TransportSource::new(remote),
+        &desc,
+        &kit_sync::SyncOptions::default(),
+        &kit_sync::NoopObserver,
+    )?;
+    Ok(refs::read_ref(&RepoLayout::single(temp.path()), "main")
+        .unwrap()
+        .unwrap())
+}
+
+#[test]
+fn a_short_pack_under_a_key_is_sent_again_and_the_clone_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = FileTransport::new(dir.path());
+    let work = Work::new();
+    let tip = work.commit(3, BLOB);
+    refs::write_ref(&work.layout, "main", &tip).unwrap();
+
+    // The first run stores two packs and fails on the third; one of the two
+    // is cut to half its bytes.
+    let mut first = Recording::new(&remote);
+    first.fail_upload = Some(3);
+    assert!(work.push(&first).is_err());
+    let stored = first.calls.into_inner().unwrap().uploads;
+    assert_eq!(stored.len(), 2);
+    let short = dir.path().join("packs").join(stored[0].to_hex());
+    let whole = std::fs::read(&short).unwrap();
+    std::fs::write(&short, &whole[..whole.len() / 2]).unwrap();
+
+    let second = Recording::new(&remote);
+    work.push(&second).unwrap();
+    let calls = second.calls.into_inner().unwrap();
+    assert_eq!(calls.uploads.len(), 2, "the short pack and the missing one");
+    assert!(calls.uploads.contains(&stored[0]));
+    assert!(!calls.uploads.contains(&stored[1]), "a whole pack is kept");
+    assert_eq!(std::fs::read(&short).unwrap(), whole);
+    assert_eq!(remote.read_ref(MAIN).unwrap(), Some(tip));
+    assert_eq!(clone_tip(&remote).unwrap(), tip);
 }

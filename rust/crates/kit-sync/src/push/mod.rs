@@ -1230,11 +1230,15 @@ const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
 /// the upload can be skipped. A pack key is the hash of the pack's bytes, and
 /// every transport that is not ticketed stores a pack whole or not at all (a
 /// file or ssh remote renames a finished temp file into place, an S3 `PUT`
-/// takes effect when it completes), so a key that is there names a complete
-/// pack and a re-run of an interrupted push sends only the packs it missed.
-/// Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on a remote that
-/// issues no upload tickets is checked. Any answer but "present", an error
-/// included, is "not stored": the push uploads.
+/// takes effect when it completes), so a key that is there with the length
+/// of the local pack names a complete pack and a re-run of an interrupted
+/// push sends only the packs it missed. A key whose stored length differs, as
+/// a damaged or truncated file would give, is not that pack: the push
+/// uploads over it, and never publishes a ref over a pack the remote does
+/// not fully hold. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
+/// a remote that issues no upload tickets is checked, with one request that
+/// is not retried. Any answer but a stored length equal to `len`, an error
+/// and an unknown length included, is "not stored": the push uploads.
 fn already_stored(
     tx: &PushContext<'_>,
     key: &PackKey,
@@ -1244,7 +1248,7 @@ fn already_stored(
 ) -> bool {
     limits.data_packs_per_advance.is_none()
         && len >= STORED_PACK_CHECK_MIN_BYTES
-        && tx.pack_exists(key, head_ref).unwrap_or(false)
+        && tx.pack_len(key, head_ref).ok().flatten() == Some(len)
 }
 
 /// The exact seal of `plan` that [`build_and_upload_packs`] would make, with
@@ -1926,7 +1930,8 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_pack_is_skipped_only_from_the_check_size_on_a_remote_with_no_tickets() {
+    fn a_stored_pack_is_skipped_only_at_its_own_length_from_the_check_size_on_a_remote_with_no_tickets()
+     {
         use kit_core::protocol::Transport as _;
         let remote = kit_transport_memory::MemoryTransport::new();
         let source = crate::source::TransportSource::new(&remote);
@@ -1939,17 +1944,74 @@ mod tests {
         };
         let none = UploadLimits::default();
         let check = |len, limits| already_stored(&tx, &key, len, "refs/heads/main", limits);
+        let min = STORED_PACK_CHECK_MIN_BYTES;
 
         // Not stored: every size uploads.
-        assert!(!check(STORED_PACK_CHECK_MIN_BYTES, none));
+        assert!(!check(min, none));
+        // A short pack under the key, whatever the local length, uploads.
         remote
             .upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
             .unwrap();
-        assert!(!check(STORED_PACK_CHECK_MIN_BYTES - 1, none));
-        assert!(check(STORED_PACK_CHECK_MIN_BYTES, none));
-        assert!(check(STORED_PACK_CHECK_MIN_BYTES + 1, none));
+        assert!(!check(min, none));
+        assert!(!check(min + 1, none));
+        // The whole pack is there: skipped, from the check size on.
+        let whole = vec![0u8; usize::try_from(min).unwrap()];
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(&whole), &key, None)
+            .unwrap();
+        assert!(check(min, none));
+        // A longer or shorter pack under the key is not the local pack.
+        assert!(!check(min + 1, none));
+        assert!(!check(min - 1, none));
         // A ticketed remote is never asked.
-        assert!(!check(STORED_PACK_CHECK_MIN_BYTES, ticketed));
+        assert!(!check(min, ticketed));
+    }
+
+    #[test]
+    fn a_stored_pack_of_unknown_length_or_a_failing_check_is_uploaded() {
+        struct Source {
+            answer: Result<Option<u64>, SourceError>,
+        }
+        impl RemoteSource for Source {
+            fn pack_len(&self, _: &PackKey, _: &str) -> Result<Option<u64>, SourceError> {
+                match &self.answer {
+                    Ok(len) => Ok(*len),
+                    Err(_) => Err(SourceError::ProtocolError),
+                }
+            }
+            fn list_branches(&self) -> Result<Vec<kit_core::protocol::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::protocol::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+                unimplemented!()
+            }
+            fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+                unimplemented!()
+            }
+            fn download_pack(
+                &self,
+                _: &PackKey,
+                _: &str,
+                _: &mut dyn kit_core::protocol::PackSink,
+            ) -> Result<(), SourceError> {
+                unimplemented!()
+            }
+        }
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+        let key = PackKey::new([7; 32]);
+        let stored = |answer| {
+            let source = Source { answer };
+            let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+            already_stored(&tx, &key, min, "refs/heads/main", UploadLimits::default())
+        };
+        assert!(stored(Ok(Some(min))));
+        // A transport that cannot give the length, a missing pack and a failed
+        // check all upload.
+        assert!(!stored(Ok(None)));
+        assert!(!stored(Err(SourceError::ProtocolError)));
     }
 
     #[test]

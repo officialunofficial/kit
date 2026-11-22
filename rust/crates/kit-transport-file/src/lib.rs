@@ -1812,6 +1812,14 @@ impl Transport for FileTransport {
         Ok(fs::symlink_metadata(self.pack_path(key)).is_ok_and(|meta| meta.is_file()))
     }
 
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        // The same regular file `pack_exists` accepts, with its length.
+        Ok(fs::symlink_metadata(self.pack_path(key))
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|meta| meta.len()))
+    }
+
     // ------------------------------------------------------------------
     // Ref verbs
     // ------------------------------------------------------------------
