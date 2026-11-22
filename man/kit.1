@@ -1454,6 +1454,12 @@ list is checked only when
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
 emits the closure report as JSON.
+.It Cm closure Cm repair-indexes
+Rebuild damaged local pack indexes beside verified packs.
+Run it from any
+worktree, even if no revision resolves.
+A pack that fails verification is kept; fetch again from the remote that
+supplied it.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple
@@ -1561,8 +1567,18 @@ pair, sets it. On the show forms,
 emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
+.Cm ssh.identity_file ,
 and
-.Cm ssh.identity_file .
+.Cm gc.auto .
+Setting
+.Cm gc.auto
+to
+.Cm false
+turns off the automatic local pack maintenance step that
+.Cm commit , fetch
+and
+.Cm pull
+run.
 .It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm kit+ssh://

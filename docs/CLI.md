@@ -302,7 +302,9 @@ History / commits:
   <subject>` (with `(root-commit)` for the first commit, `detached HEAD`
   when detached) followed by a diffstat and `create/delete mode` lines;
   `-q`/`--quiet` suppresses it. kit always signs commits and has no
-  hooks.
+  hooks. After the commit is durable, `commit` runs the due automatic
+  local pack maintenance step (see `kit fetch`); it can take about 5
+  seconds longer when one is due, and `gc.auto = false` turns it off.
   `--format=json` additionally emits one JSON object to stdout on success:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
@@ -1283,14 +1285,25 @@ attestation support warn once per command and skip the log.
 - **Automatic local pack maintenance (default on).** After applying a
   pack or pruning a remote-tracking ref, fetch and pull remove abandoned
   staging files and lone pack members past the 14-day grace period.
-  They periodically retire wholly dead packs past grace. The first fetch
-  creates the advisory stamp. Set `gc.auto = false` in repo or user config
-  to disable the step. A maintenance failure leaves the command's exit
-  status unchanged. Use `-q` to hide the removal summary. Fetch and
-  fast-forward pull add a `maintenance` object to `--format=json` when
-  collection was attempted or a file was removed. It contains
-  `leftovers_removed`, `packs_retired`, `bytes_reclaimed`,
-  `collection`, and `elapsed` in milliseconds.
+  They periodically retire wholly dead packs past grace, and rewrite,
+  merge and retire covered packs. `kit commit` runs the same step after
+  it publishes, so a repository that never fetches does not build up
+  packs, and `kit add` alone does not run it. `kit clone` and the first
+  fetch create the advisory stamp; a stamp with no recorded outcome counts
+  as never run, so the first fetch or commit that finds 32 pairs runs a
+  full step. Set `gc.auto = false` in repo or user config to disable the
+  step. A step has a 5 second budget before retirement, so a command that
+  runs a due step can take about 5 seconds longer, and more when it retires
+  packs. A maintenance failure leaves the command's exit status unchanged.
+  Use `-q` to hide the maintenance lines. Fetch and fast-forward pull add a
+  `maintenance` object to `--format=json` when collection was attempted or
+  a file was removed. It contains `leftovers_removed`, `packs_retired`,
+  `packs_rewritten`, `packs_merged`, `packs_retired_covered`,
+  `bytes_copied`, `bytes_reclaimed`, `collection` and `elapsed` in
+  milliseconds. `collection` is one of `not_due`, `complete`, `busy`,
+  `roots_changed`, `over_budget`, `progress` (planned work is left; the
+  next step is due in an hour) and `failed`. `kit commit` prints its
+  maintenance line on standard error and adds nothing to its JSON.
 - **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `kit verify <rev>` runs manually

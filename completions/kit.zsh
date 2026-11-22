@@ -650,8 +650,13 @@ _kit() {
                                 '--force[overwrite a non-empty directory]' \
                                 '--format[output format]:fmt:(default json)' \
                                 '--help[show help]' \
-                                '1:subcommand:(export verify)' \
+                                '1:subcommand:(export verify repair-indexes)' \
                                 '2:revision:'
+                            ;;
+                        repair-indexes)
+                            _arguments \
+                                '--help[show help]' \
+                                '1:subcommand:(export verify repair-indexes)'
                             ;;
                         verify)
                             _arguments \
@@ -660,13 +665,14 @@ _kit() {
                                 '--show-unreferenced[show unreferenced objects (local mode)]' \
                                 '--format[output format]:fmt:(default json)' \
                                 '--help[show help]' \
-                                '1:subcommand:(export verify)' \
+                                '1:subcommand:(export verify repair-indexes)' \
                                 '2:commit-id:'
                             ;;
                         *)
                             _values 'closure subcommand' \
                                 'export[export a commit object-set closure]' \
-                                'verify[verify a commit object-set closure]'
+                                'verify[verify a commit object-set closure]' \
+                                'repair-indexes[rebuild damaged local pack indexes from verified packs]'
                             ;;
                     esac
                     ;;
