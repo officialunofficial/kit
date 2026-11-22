@@ -1395,9 +1395,13 @@ fn a_repository_that_never_fetches_merges_again_every_floor_of_new_pairs() {
     }
     assert_eq!(repo.run().collection, Collection::Complete);
     for round in 0..2 {
-        let left = stamp_of(&repo).complete_pairs as usize;
-        assert_eq!(left, repo.pack_count(), "the stamp holds the count left");
-        assert!(left < MIN_PAIRS, "the step merged the small packs");
+        let left = stamp_of(&repo).complete_pairs;
+        assert_eq!(
+            left,
+            repo.pack_count() as u64,
+            "the stamp holds the count left"
+        );
+        assert!(left < MIN_PAIRS as u64, "the step merged the small packs");
         for n in 0..MIN_PAIRS - 1 {
             repo.pack(&[format!("round {round} pack {n}").as_bytes()]);
         }
@@ -1429,7 +1433,7 @@ fn a_complete_step_that_merged_nothing_waits_for_32_more_pairs() {
     assert_eq!(first.collection, Collection::OverBudget, "{first:?}");
     assert_eq!(first.packs_merged, 0);
     assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
-    assert_eq!(stamp_of(&repo).complete_pairs as usize, MIN_PAIRS);
+    assert_eq!(stamp_of(&repo).complete_pairs, MIN_PAIRS as u64);
     assert_eq!(repo.run().collection, Collection::NotDue);
     for n in 0..MIN_PAIRS - 1 {
         repo.pack(&[format!("later {n}").as_bytes()]);
