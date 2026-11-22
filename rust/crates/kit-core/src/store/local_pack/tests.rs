@@ -2603,8 +2603,9 @@ fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
 #[test]
 fn the_one_read_probe_answers_a_head_of_any_size_and_a_whole_frame_up_to_its_limit() {
     let limit = crate::store::GC_SMALL_FRAME;
-    // A frame is ten bytes longer than its payload.
-    for payload in [0, 1, limit - 11, limit - 10, limit - 9, 3 * limit] {
+    // A frame is ten bytes longer than its payload. 4096 is a fixed size, so
+    // that a limit changed to another value moves the answer.
+    for payload in [0, 1, 4096, limit - 11, limit - 10, limit - 9, 3 * limit] {
         for as_chunk in [false, true] {
             let (_dir, layout, store) = fresh();
             let bytes = blob(&vec![0x33; payload]);
