@@ -1179,7 +1179,11 @@ fn a_step_that_retires_after_a_miss_clears_the_mark() {
     TEST_VERIFY_ROOM.set(Some(0));
     assert_eq!(step_later(&repo).collection, Collection::OverBudget);
     TEST_VERIFY_ROOM.set(None);
-    assert_eq!(stamp_of(&repo).outcome, Collection::Progress, "a first miss");
+    assert_eq!(
+        stamp_of(&repo).outcome,
+        Collection::Progress,
+        "a first miss"
+    );
 }
 
 /// A lock miss that comes more than a day after a miss does not carry the
