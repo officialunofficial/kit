@@ -285,16 +285,27 @@ fn equivalent_roots_allow_retirement_after_a_ref_changes_back() {
 
 #[test]
 fn an_expired_budget_backs_off_without_retiring_a_pair() {
+    TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
     repo.due();
     let (dead, _) = repo.old_pack(&[b"dead"]);
-    let report = maintain_with(&repo.layout, &repo.store, &|| false, Duration::ZERO, || {
-        panic!("an expired mark must not reach the locks");
-    });
-    assert_eq!(report.collection, Collection::OverBudget);
+    let expired = |repo: &Repo| {
+        maintain_with(&repo.layout, &repo.store, &|| false, Duration::ZERO, || {
+            panic!("an expired mark must not reach the locks");
+        })
+    };
+    // The first attempt may have met a busy disk: it is due in an hour.
+    assert_eq!(expired(&repo).collection, Collection::OverBudget);
     assert_eq!(repo.run().collection, Collection::NotDue);
-    let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
-    let stamp = Stamp::read(&mut file).unwrap();
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert!(!stamp.due(stamp.attempted + HOUR - 1, MIN_PAIRS));
+    assert!(stamp.due(stamp.attempted + HOUR, 3));
+    // The attempt after it that runs out of time too waits 30 days.
+    TEST_NOW.set(Some(TEST_NOW.get().unwrap() + HOUR + 1));
+    assert_eq!(expired(&repo).collection, Collection::OverBudget);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::OverBudget);
     let interval = 30 * 24 * HOUR;
     assert!(!stamp.due(stamp.attempted + interval - 1, MIN_PAIRS));
     assert!(stamp.due(stamp.attempted + interval, MIN_PAIRS));
@@ -1045,9 +1056,9 @@ fn a_step_that_runs_out_of_time_retires_what_it_verified_oldest_first() {
     }
 }
 
-/// With no time to verify one pack, nothing is retired, but the step saw dead
-/// packs past grace: a busy disk is not a reason to wait 30 days. It reports
-/// the budget, stamps progress and is due again in an hour, under the floor.
+/// With no time to verify one pack, nothing is retired: a busy disk is not a
+/// reason to wait 30 days. The step reports the budget, stamps progress and is
+/// due again in an hour, under the floor.
 #[test]
 fn a_step_that_verifies_no_pack_is_due_again_in_an_hour() {
     TEST_NOW.set(Some(now_secs()));
@@ -1072,75 +1083,50 @@ fn a_step_that_verifies_no_pack_is_due_again_in_an_hour() {
     assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
 }
 
-/// A mark that runs out of time has seen no dead pack, so the long interval
-/// of an attempt that ran out of budget stands.
+/// The attempt that runs out of time again right after one that did keeps the
+/// 30 days, so a store that cannot be marked in the budget pays 5 seconds once,
+/// not every hour; a step that retired something clears the mark.
 #[test]
-fn a_mark_that_runs_out_of_time_keeps_the_long_interval() {
+fn two_attempts_in_a_row_that_run_out_of_time_wait_30_days() {
     TEST_NOW.set(Some(now_secs()));
     let repo = Repo::new();
-    repo.due();
-    repo.old_pack(&[b"dead"]);
-    TEST_CLOCK_OUT.set(true);
-    let report = repo.run();
-    TEST_CLOCK_OUT.set(false);
-    assert_eq!(report.collection, Collection::OverBudget);
-    assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
-}
+    repo.due_live();
+    let dead: Vec<_> = (0..2)
+        .map(|n| {
+            let (path, _) = repo.old_pack(&[format!("dead {n}").as_bytes()]);
+            age_file(&path, DEFAULT_GRACE_SECS + 86_400 * (n + 1));
+            path
+        })
+        .collect();
+    // A step of progress, then a miss, then a miss, then room again.
+    TEST_VERIFY_ROOM.set(Some(1));
+    assert_eq!(repo.run().collection, Collection::Progress);
+    assert_eq!(stamp_of(&repo).complete_pairs & MISSED, 0);
 
-/// A clock that ends in the pass over the packs, after the mark and after a
-/// wholly dead pack was seen, retires nothing and is due again in an hour. The
-/// clock is made to end at the n-th look at it, for each n in turn, until it
-/// ends in that pass: nothing is retired on the way, and the step never
-/// stamps `progress` for a mark that ran out of time.
-#[test]
-fn a_clock_that_ends_in_the_pass_over_the_packs_after_a_dead_one_is_due_in_an_hour() {
-    TEST_NOW.set(Some(now_secs()));
-    let repo = Repo::new();
-    repo.due();
-    let (dead, _) = repo.old_pack(&[b"dead"]);
-    let mut seen = Vec::new();
-    for ends_at in 1..2_000 {
-        let looks = std::cell::Cell::new(0);
-        let report = maintain_with(
-            &repo.layout,
-            &repo.store,
-            &|| {
-                looks.set(looks.get() + 1);
-                if looks.get() == ends_at {
-                    TEST_CLOCK_OUT.set(true);
-                }
-                false
-            },
-            BUDGET,
-            || {},
-        );
-        TEST_CLOCK_OUT.set(false);
-        assert_eq!(report.packs_retired, 0, "{report:?}");
-        assert_eq!(report.collection, Collection::OverBudget, "{report:?}");
-        assert!(dead.exists());
-        let stamp = stamp_of(&repo);
-        seen.push(stamp.outcome);
-        if stamp.outcome == Collection::Progress {
-            assert!(stamp.due(stamp.attempted + HOUR, 3));
-            assert!(!stamp.due(stamp.attempted + HOUR - 1, 3));
-            break;
-        }
-        assert_eq!(stamp.outcome, Collection::OverBudget);
-        // Make the next attempt due again.
-        let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
-        Stamp {
-            attempted: 1,
-            outcome: Collection::Complete,
-            complete_pairs: 10,
-        }
-        .write(&mut file)
-        .unwrap();
-    }
-    assert_eq!(seen.last(), Some(&Collection::Progress), "{seen:?}");
-    assert!(
-        seen[..seen.len() - 1].len() > 1,
-        "the mark ran out first: {seen:?}"
+    TEST_VERIFY_ROOM.set(Some(0));
+    let first = step_later(&repo);
+    assert_eq!(first.collection, Collection::OverBudget);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress, "an hour, not 30 days");
+    assert_ne!(stamp.complete_pairs & MISSED, 0);
+
+    TEST_VERIFY_ROOM.set(Some(0));
+    let second = step_later(&repo);
+    assert_eq!(second.collection, Collection::OverBudget);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::OverBudget);
+    assert_eq!(stamp.complete_pairs & MISSED, 0);
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(dead.iter().filter(|path| path.exists()).count(), 1);
+
+    // Thirty days later it takes the rest and finishes.
+    TEST_NOW.set(Some(TEST_NOW.get().unwrap() + 30 * 24 * HOUR));
+    let last = repo.run();
+    assert_eq!(
+        (last.collection, last.packs_retired),
+        (Collection::Complete, 1)
     );
+    assert!(dead.iter().all(|path| !path.exists()));
 }
 
 /// A clock that ends inside the last wholly dead pack keeps every pack that

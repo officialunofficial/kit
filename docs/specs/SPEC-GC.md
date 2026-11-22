@@ -513,9 +513,10 @@ collection that follows stops without retiring any pack.
 **Collection.** The listing must show at least 32 published pairs, or the
 stamp must record a step that made progress (below). The stamp allows a new
 collection 7 days after a complete collection or an error, 1 hour after a
-lock miss, changed roots, a step that made progress or a step that ran out
-of budget before it verified one wholly dead pack, or 30 days after any
-other attempt that ran out of budget before it retired anything. A
+lock miss, changed roots, a step that made progress or the first attempt
+that ran out of budget before it retired anything, or 30 days after an
+attempt that ran out of budget before it retired anything right after
+another such attempt. A
 complete collection is also due again, whatever its age, once the listing
 shows at least 32 more published pairs than the stamp's pair count at that
 collection, so a repository that never fetches merges its small packs
@@ -547,10 +548,13 @@ than 32 packs, and the step costs a mark of the whole history.
    verified so far stay planned and the rest wait for the next step; the
    step then skips the copy and, once it has retired at least one of them,
    reports `progress`. If it ended before one pack was verified, nothing is
-   planned: the step reports `over_budget` and stamps `progress`, due in an
-   hour, because it had wholly dead packs past grace in view. A mark or
-   listing that ran out of budget before any dead pack was seen reports
-   `over_budget` with the 30-day interval. If the budget ends inside the last
+   planned and the step reports `over_budget`; the same holds for a mark or
+   listing that ran out of budget. The stamp says `progress`, due in an hour,
+   because a busy disk can cause one such miss. The stamp marks it by the
+   top bit of its pair count, which is read only on a `complete` stamp; the
+   next attempt that ends this way while that mark stands stamps
+   `over_budget` with the 30-day interval and clears it, so a store that the
+   budget cannot cover pays the step once and not every hour. If the budget ends inside the last
    wholly dead pack, every pack verified stays planned, and the copy
    planning that follows defers only the copy. If
    every verified pack fails its recheck before retirement, the step

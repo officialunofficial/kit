@@ -14,6 +14,11 @@ use crate::repo_lock::{LockError, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK, acquir
 use crate::store::{ObjectStore, PackSweep, StoreError, Verify};
 
 const MIN_PAIRS: usize = 32;
+/// Set in the pair count of a `progress` stamp written by an attempt that ran
+/// out of time and retired nothing, so that the next such attempt waits 30
+/// days. The count of a stamp that is not `complete` is only carried, never
+/// read, so this adds no field and no byte to the stamp.
+const MISSED: u64 = 1 << 63;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;
 
@@ -34,9 +39,9 @@ pub enum Collection {
     /// Retention roots changed during the unlocked mark.
     RootsChanged,
     /// The mark, plan, verification or copy ran out of time before publish.
-    /// A step that had seen wholly dead packs past grace but verified none is
-    /// reported this way and stamped `progress`, so it is due again in an
-    /// hour; any other attempt that ran out of time waits 30 days.
+    /// An attempt that ran out of time and retired nothing is stamped
+    /// `progress` the first time, so it is due again in an hour, and waits
+    /// 30 days when the attempt after it ran out of time too.
     OverBudget,
     /// The step retired or copied what its limits allowed and left planned
     /// work for the next step, which is due in an hour and ignores the
@@ -175,7 +180,8 @@ impl Stamp {
             && (now < self.attempted
                 || now - self.attempted >= self.outcome.interval()
                 || (self.outcome == Collection::Complete
-                    && pairs as u64 >= self.complete_pairs.saturating_add(MIN_PAIRS as u64)))
+                    && pairs as u64
+                        >= (self.complete_pairs & !MISSED).saturating_add(MIN_PAIRS as u64)))
     }
 }
 
@@ -381,6 +387,15 @@ fn run(
     {
         collection.stamped = Collection::Progress;
     }
+    // An attempt that ran out of time and retired nothing may have met a busy
+    // disk, so it is due again in an hour; the attempt after it that runs out
+    // of time too keeps the 30 days, so a store that cannot be marked in the
+    // budget does not pay it every hour.
+    let missed = collection.stamped == Collection::OverBudget
+        && !(stamp.outcome == Collection::Progress && stamp.complete_pairs & MISSED != 0);
+    if missed {
+        collection.stamped = Collection::Progress;
+    }
     let _ = Stamp {
         attempted: now,
         outcome: collection.stamped,
@@ -389,20 +404,18 @@ fn run(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
         } else {
-            stamp.complete_pairs
+            (stamp.complete_pairs & !MISSED) | if missed { MISSED } else { 0 }
         },
     }
     .write(&mut file);
     collection.reported
 }
 
-/// What a collection reports and what the stamp records. They differ when the
-/// copy was cut short, by the budget or an I/O error, but wholly dead
+/// What a collection reports and what the stamp records. They differ only
+/// when the copy was cut short, by the budget or an I/O error, but wholly dead
 /// retirement finished: the report says `over_budget` or `failed`, and the
 /// stamp keeps the weekly interval of a finished collection, so the
-/// retirement main would do is not postponed. They also differ when the
-/// budget ended before one wholly dead pack was verified: the report says
-/// `over_budget` and the stamp says `progress`, due in an hour.
+/// retirement main would do is not postponed.
 struct Outcome {
     reported: Collection,
     stamped: Collection,
@@ -551,20 +564,7 @@ fn collect(
         return Ok(Outcome::same(Collection::Failed));
     }
     if cut && retire.planned_packs() == 0 {
-        if retire.dead_packs_seen() {
-            // The budget ended before one pack was verified, with wholly
-            // dead packs past grace in view: a busy disk, not a reason to
-            // wait 30 days. The next step is due in an hour and ignores the
-            // pair floor.
-            return Ok(Outcome {
-                reported: Collection::OverBudget,
-                stamped: Collection::Progress,
-                left: true,
-            });
-        }
-        // The budget ended in the pass over the packs before any dead one
-        // was seen: the long interval of an attempt that ran out of budget
-        // stands.
+        // The budget ended before one pack was verified: no progress.
         return Ok(Outcome::same(Collection::OverBudget));
     }
     // Copy-then-retire is the added part of the step. A budget that runs out
