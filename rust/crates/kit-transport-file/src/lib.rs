@@ -2373,6 +2373,30 @@ mod tests {
     }
 
     #[test]
+    fn pack_len_is_the_stored_length_of_a_regular_file_only() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"length test";
+        let key = pack_key_for(data);
+        assert_eq!(t.pack_len(&key, None).unwrap(), None);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert_eq!(t.pack_len(&key, None).unwrap(), Some(data.len() as u64));
+        // A link or a directory at the key is no stored pack.
+        let linked = pack_key_for(b"linked");
+        let target = dir.path().join("target");
+        fs::write(&target, b"linked").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, t.pack_path(&linked)).unwrap();
+            assert_eq!(t.pack_len(&linked, None).unwrap(), None);
+        }
+        let dir_key = pack_key_for(b"dir");
+        fs::create_dir(t.pack_path(&dir_key)).unwrap();
+        assert_eq!(t.pack_len(&dir_key, None).unwrap(), None);
+    }
+
+    #[test]
     fn pack_exists_before_and_after_upload() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
