@@ -708,7 +708,10 @@ fn run_shares_content(
         }
         reads += 1;
         if let Some(content) = chunk_bytes(store, nj)? {
-            if chunk_features(&content).iter().any(|f| features.contains(f)) {
+            if chunk_features(&content)
+                .iter()
+                .any(|f| features.contains(f))
+            {
                 return Ok((true, reads));
             }
         }
@@ -2564,8 +2567,14 @@ mod tests {
             .map(|i| wide_chunk(100_000 + i, 400))
             .collect();
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &put_all(&s, &new), &put_all(&s, &old), usize::MAX, &mut out)
-            .unwrap();
+        let spent = pair_chunks(
+            &s,
+            &put_all(&s, &new),
+            &put_all(&s, &old),
+            usize::MAX,
+            &mut out,
+        )
+        .unwrap();
         assert!(out.is_empty());
         // Every point of the probe missed: its chunks and the old chunks
         // around each, not the reads of the run.
@@ -2597,8 +2606,7 @@ mod tests {
         let (new, old, want) = dense_edit(&s);
         let reads = DENSE_READS;
         let mut out = HashMap::new();
-        let spent =
-            pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS - 1, &mut out).unwrap();
+        let spent = pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS - 1, &mut out).unwrap();
         assert!(out.is_empty());
         assert_eq!(spent, 0);
         let spent = pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS, &mut out).unwrap();
@@ -2614,13 +2622,25 @@ mod tests {
         // One run of MAX_FILE_READS reads less a probe, then one more.
         let fits = MAX_FILE_READS - PROBE_MAX_READS;
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &vec![b; fits - 1_000], &vec![a; 1_000], usize::MAX, &mut out)
-            .unwrap();
+        let spent = pair_chunks(
+            &s,
+            &vec![b; fits - 1_000],
+            &vec![a; 1_000],
+            usize::MAX,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(out, HashMap::from([(b, a)]));
         assert_eq!(spent, fits + 2);
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &vec![b; fits - 999], &vec![a; 1_000], usize::MAX, &mut out)
-            .unwrap();
+        let spent = pair_chunks(
+            &s,
+            &vec![b; fits - 999],
+            &vec![a; 1_000],
+            usize::MAX,
+            &mut out,
+        )
+        .unwrap();
         assert!(out.is_empty());
         assert_eq!(spent, 0);
     }
