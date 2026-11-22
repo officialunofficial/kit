@@ -575,6 +575,63 @@ fn pack_exists_403_access_denied() {
     ));
 }
 
+// -- pack_len ----------------------------------------------------------------
+
+#[test]
+fn pack_len_is_the_content_length_of_one_head() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("HEAD", mockito::Matcher::Any)
+        .with_status(200)
+        .with_header("content-length", "12345")
+        .expect(1)
+        .create();
+    let t = build_transport(&server.url());
+    assert_eq!(t.pack_len(&sample_key(), None).unwrap(), Some(12345));
+    m.assert();
+}
+
+#[test]
+fn pack_len_is_none_for_404() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("HEAD", mockito::Matcher::Any)
+        .with_status(404)
+        .create();
+    let t = build_transport(&server.url());
+    assert_eq!(t.pack_len(&sample_key(), None).unwrap(), None);
+}
+
+#[test]
+fn pack_len_403_access_denied() {
+    let mut server = mockito::Server::new();
+    let _m = server
+        .mock("HEAD", mockito::Matcher::Any)
+        .with_status(403)
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.pack_len(&sample_key(), None),
+        Err(TransportError::AccessDenied)
+    ));
+}
+
+#[test]
+fn pack_len_5xx_is_one_attempt_with_no_retry() {
+    let mut server = mockito::Server::new();
+    let m = server
+        .mock("HEAD", mockito::Matcher::Any)
+        .with_status(503)
+        .expect(1)
+        .create();
+    let t = build_transport(&server.url());
+    assert!(matches!(
+        t.pack_len(&sample_key(), None),
+        Err(TransportError::ServerError { status: 503 })
+    ));
+    m.assert();
+}
+
 // -- writeRef / updateRef ----------------------------------------------------
 
 #[test]
