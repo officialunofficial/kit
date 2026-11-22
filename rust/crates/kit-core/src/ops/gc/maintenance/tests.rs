@@ -1305,6 +1305,7 @@ fn a_lock_miss_after_progress_still_ignores_the_pair_floor() {
     let stamp = stamp_of(&repo);
     assert_eq!(stamp.outcome, Collection::Progress);
     assert!(stamp.due(stamp.attempted + HOUR, 3));
+    assert_eq!(stamp.complete_pairs & MISSED, 0, "no miss to remember");
 }
 
 /// A lock miss between two attempts that ran out of time does not reset the
