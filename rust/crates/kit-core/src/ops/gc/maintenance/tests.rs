@@ -1162,8 +1162,8 @@ fn a_miss_more_than_a_day_after_the_last_is_due_in_an_hour_again() {
 #[test]
 fn the_miss_mark_stands_for_exactly_a_day() {
     for (gap, outcome) in [
-        (DAY, Collection::OverBudget),
-        (DAY + 1, Collection::Progress),
+        (86_400, Collection::OverBudget),
+        (86_401, Collection::Progress),
     ] {
         TEST_NOW.set(Some(now_secs()));
         let repo = Repo::new();
