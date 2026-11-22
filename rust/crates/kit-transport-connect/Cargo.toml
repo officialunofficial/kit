@@ -73,7 +73,7 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 bytes = "1.12.1"
 futures = "0.3.34"
-url = "2.5.8"
+url = "2.5.9"
 
 # CSPRNG for the write-envelope idempotency key (`envelope::EnvelopeTransport`)
 # — same crate/version kit-core, kit-bin, and kit-keystore already pull in
