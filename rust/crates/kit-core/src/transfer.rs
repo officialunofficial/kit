@@ -239,7 +239,7 @@ const MAX_TREE_DEPTH: usize = 64;
 /// [`crate::object::ChunkedBlob`] (a file that grew past `CHUNK_THRESHOLD`),
 /// the old blob is the base of every new chunk that shares content with it
 /// (`pair_blob_to_chunks`), within a per-file budget. All content reads draw
-/// on one push-wide budget (32,768 reads). A path that shrank
+/// on one push-wide budget ([`MAX_PUSH_SKETCH_READS`]). A path that shrank
 /// from a chunked blob to a plain one, or that has no old-side counterpart at
 /// all (added path, or a rename), is left unpaired.
 ///
@@ -440,17 +440,26 @@ const FEATURE_WINDOW: usize = 16;
 /// index cheap; the delta size-gate in [`plan_pack_with`] is the final judge of a
 /// pick, so a few features are enough signal to rank candidates.
 const FEATURE_COUNT: usize = 4;
-/// Most chunk reads, old and new together, that pairing one unmatched run of
-/// a shifted file may spend sketching content: about 256 MiB of chunk
-/// content. Runs whose margins touch count as one run. A run that needs more
-/// (a rewritten region, not an edit) is sent raw: a rewrite that large rarely
-/// shares content, and finding out costs about as much CPU as the rest of the
-/// push.
-const MAX_RUN_READS: usize = 4_096;
+/// Most chunk reads, old and new together, that pairing one file may spend
+/// sketching content: about 8 GiB of chunk content. A run that does not fit in
+/// what is left is sent raw.
+const MAX_FILE_READS: usize = 131_072;
 /// Most chunk reads that pairing may spend sketching content over one push,
-/// across every file and every tip: about 2 GiB of chunk content. What is
-/// left when the budget runs out is sent raw.
-const MAX_PUSH_SKETCH_READS: usize = 32_768;
+/// across every file and every tip: about 64 GiB of chunk content, eight
+/// files at their cap. It is a last bound for a push of many such files; what
+/// is left when it runs out is sent raw.
+const MAX_PUSH_SKETCH_READS: usize = 1_048_576;
+/// A run that needs more chunk reads than this (about 32 MiB of content) is
+/// probed before it is paired: see [`run_shares_content`].
+const PROBE_MIN_READS: usize = 512;
+/// Changed chunks a probe samples, spread evenly over the run.
+const PROBE_POINTS: usize = 16;
+/// Old chunks on each side of the aligned position that a probe reads for
+/// each sampled chunk: the run's own shifts are far smaller than this.
+const PROBE_SPAN: usize = 8;
+/// Most chunk reads a probe makes: each point reads its chunk and the old
+/// chunks around the aligned position.
+const PROBE_MAX_READS: usize = PROBE_POINTS * (2 * PROBE_SPAN + 2);
 /// Old chunks on each side of an unmatched run that may also serve as a base,
 /// so a new chunk can still pair with a neighbour of the run it replaces.
 const ANCHOR_MARGIN: usize = 2;
@@ -564,11 +573,13 @@ fn pair_blob_to_chunks(
 ///   (deterministic tiebreak: lowest hash). No overlap means no base and the
 ///   chunk is sent raw, with no position fallback. Content is read only for
 ///   the unmatched runs, so a small edit to a large file costs in proportion
-///   to the edit; a run that needs more than [`MAX_RUN_READS`] chunk reads,
+///   to the edit; a run that needs more than [`MAX_FILE_READS`] chunk reads,
 ///   or more than `max_reads` (what is left of the push's budget), is sent
-///   raw. A chunk that moved far from where its old version sits and was
-///   edited too is outside its run's window and goes raw. Returns the chunk
-///   reads made.
+///   raw. A run of more than [`PROBE_MIN_READS`] reads is first probed, and
+///   sent raw when the sample shares nothing: a rewritten region costs a
+///   probe, not the run. A chunk that moved far from where its old version
+///   sits and was edited too is outside its run's window and goes raw.
+///   Returns the chunk reads made.
 fn pair_chunks(
     store: &ObjectStore,
     new_chunks: &[Hash],
@@ -617,15 +628,35 @@ fn pair_chunks(
         }
     }
 
-    let mut budget = max_reads;
+    let cap = max_reads.min(MAX_FILE_READS);
+    let mut budget = cap;
     for (new_run, window) in windows {
         let changed = new_chunks[new_run.clone()]
             .iter()
             .filter(|nj| !old_set.contains(*nj))
             .count();
         let reads = changed + window.len();
-        if reads > budget.min(MAX_RUN_READS) {
+        let probe = if reads > PROBE_MIN_READS {
+            PROBE_MAX_READS
+        } else {
+            0
+        };
+        // The probe's reads are on top of the run's own, so a run is probed
+        // only when both fit.
+        if reads + probe > budget {
             continue;
+        }
+        if probe > 0 {
+            let (shares, spent) = run_shares_content(
+                store,
+                &new_chunks[new_run.clone()],
+                &old_chunks[window.clone()],
+                &old_set,
+            )?;
+            budget -= spent;
+            if !shares {
+                continue;
+            }
         }
         budget -= reads;
         pair_run(
@@ -636,7 +667,53 @@ fn pair_chunks(
             out,
         )?;
     }
-    Ok(max_reads - budget)
+    Ok(cap - budget)
+}
+
+/// Whether a sample of one unmatched run shares content with the old chunks
+/// where it sits: some changed new chunk, among [`PROBE_POINTS`] spread over
+/// the run, has a min-hash feature in common with an old chunk within
+/// [`PROBE_SPAN`] of its aligned position. A run of edits shares at every
+/// point; a rewritten region shares at none, and pairing it would read every
+/// chunk of both sides to find that out. Returns the answer and the chunk
+/// reads made, at most [`PROBE_MAX_READS`]. A run with no changed chunk
+/// shares nothing.
+fn run_shares_content(
+    store: &ObjectStore,
+    new_run: &[Hash],
+    window: &[Hash],
+    old_set: &HashSet<&Hash>,
+) -> Result<(bool, usize), StoreError> {
+    let changed: Vec<(usize, &Hash)> = new_run
+        .iter()
+        .enumerate()
+        .filter(|(_, nj)| !old_set.contains(*nj))
+        .collect();
+    let points = PROBE_POINTS.min(changed.len());
+    let mut features: HashSet<u64> = HashSet::new();
+    let mut read: HashSet<&Hash> = HashSet::new();
+    let mut reads = 0usize;
+    for k in 0..points {
+        let (at, nj) = changed[k * changed.len() / points];
+        let centre = at * window.len() / new_run.len();
+        let lo = centre.saturating_sub(PROBE_SPAN);
+        let hi = (centre + PROBE_SPAN + 1).min(window.len());
+        for oc in &window[lo..hi] {
+            if read.insert(oc) {
+                reads += 1;
+                if let Some(content) = chunk_bytes(store, oc)? {
+                    features.extend(chunk_features(&content));
+                }
+            }
+        }
+        reads += 1;
+        if let Some(content) = chunk_bytes(store, nj)? {
+            if chunk_features(&content).iter().any(|f| features.contains(f)) {
+                return Ok((true, reads));
+            }
+        }
+    }
+    Ok((false, reads))
 }
 
 /// Split two manifests, whose chunk counts differ, into the runs between
@@ -2401,28 +2478,138 @@ mod tests {
         let old = vec![a; 500];
         let new = vec![b; 700];
         let mut out = HashMap::new();
-        // One run of 700 new and 500 old chunks: over a budget of 1,000.
+        // One run of 700 new and 500 old chunks, and the probe it needs: over
+        // a budget of 1,000, and still over one of 1,200.
         pair_chunks(&s, &new, &old, 1_000, &mut out).unwrap();
         assert!(out.is_empty());
         pair_chunks(&s, &new, &old, 1_200, &mut out).unwrap();
+        assert!(out.is_empty());
+        pair_chunks(&s, &new, &old, 1_200 + PROBE_MAX_READS, &mut out).unwrap();
         assert_eq!(out, HashMap::from([(b, a)]));
     }
 
+    /// A chunk of `len` bytes that depends on `seed` alone, for as many
+    /// distinct chunks as a test needs.
+    fn wide_chunk(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state & 0xff) as u8
+            })
+            .collect()
+    }
+
+    fn put_all(s: &ObjectStore, chunks: &[Vec<u8>]) -> Vec<Hash> {
+        chunks.iter().map(|c| put_blob(s, c.clone())).collect()
+    }
+
+    /// 3,000 chunks of an old manifest, each edited a little in the new one,
+    /// and one chunk appended: one run of about 6,000 reads, every chunk of
+    /// it sharing content.
+    fn dense_edit(s: &ObjectStore) -> (Vec<Hash>, Vec<Hash>, HashMap<Hash, Hash>) {
+        let old: Vec<Vec<u8>> = (0..3_000).map(|i| wide_chunk(i, 2_000)).collect();
+        let mut new: Vec<Vec<u8>> = old.iter().map(|c| tweaked(c)).collect();
+        new.push(wide_chunk(50_000, 2_000));
+        let (new, old) = (put_all(s, &new), put_all(s, &old));
+        let want = new.iter().copied().zip(old.iter().copied()).take(3_000);
+        let want = want.collect();
+        (new, old, want)
+    }
+
     #[test]
-    fn a_run_over_the_per_run_bound_is_sent_raw_whatever_the_budget_left() {
+    fn a_dense_edit_over_a_long_run_still_pairs_every_chunk() {
         let (_d, s) = store();
-        let a = put_blob(&s, chunk_content(1, 2_000));
-        let b = put_blob(&s, tweaked(&chunk_content(1, 2_000)));
-        // One run of 1,000 new and the rest of MAX_RUN_READS old chunks (the
-        // counts differ, so the run is read): exactly the bound, so it pairs;
-        // one more new chunk and it is sent raw.
-        let old = vec![a; MAX_RUN_READS - 1_000];
+        let (new, old, want) = dense_edit(&s);
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &vec![b; 1_000], &old, usize::MAX, &mut out).unwrap();
+        let spent = pair_chunks(&s, &new, &old, usize::MAX, &mut out).unwrap();
+        assert_eq!(out, want);
+        // The run's 3,001 changed chunks and 3,000 old ones, and a probe
+        // that found a share at its first point.
+        assert!(spent > 6_001 && spent <= 6_001 + PROBE_MAX_READS, "{spent}");
+    }
+
+    #[test]
+    fn a_dense_edit_over_many_files_pairs_every_file_within_the_push_budget() {
+        let (_d, s) = store();
+        let a = put_blob(&s, wide_chunk(1, 2_000));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        // 400 files each a run of 49 new and 48 old reads, 38,800 in all.
+        let mut reads_left = MAX_PUSH_SKETCH_READS;
+        for _ in 0..400 {
+            let mut out = HashMap::new();
+            let spent = pair_chunks(&s, &vec![b; 49], &vec![a; 48], reads_left, &mut out).unwrap();
+            assert_eq!(out, HashMap::from([(b, a)]));
+            reads_left -= spent;
+        }
+        assert_eq!(MAX_PUSH_SKETCH_READS - reads_left, 400 * 97);
+    }
+
+    #[test]
+    fn a_rewritten_run_costs_a_probe_and_is_sent_raw() {
+        let (_d, s) = store();
+        let old: Vec<Vec<u8>> = (0..3_000).map(|i| wide_chunk(i, 2_000)).collect();
+        let new: Vec<Vec<u8>> = (0..3_001).map(|i| wide_chunk(100_000 + i, 2_000)).collect();
+        let mut out = HashMap::new();
+        let spent = pair_chunks(&s, &put_all(&s, &new), &put_all(&s, &old), usize::MAX, &mut out)
+            .unwrap();
+        assert!(out.is_empty());
+        // Every point of the probe missed: 16 chunks and the old chunks
+        // around each, not the 6,001 reads of the run.
+        assert_eq!(spent, PROBE_MAX_READS);
+    }
+
+    #[test]
+    fn a_run_shorter_than_the_probe_threshold_is_paired_without_one() {
+        let (_d, s) = store();
+        let a = put_blob(&s, wide_chunk(1, 2_000));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        // 257 new and 255 old reads: PROBE_MIN_READS exactly, no probe.
+        let mut out = HashMap::new();
+        let spent = pair_chunks(&s, &vec![b; 257], &vec![a; 255], usize::MAX, &mut out).unwrap();
         assert_eq!(out, HashMap::from([(b, a)]));
-        assert_eq!(spent, MAX_RUN_READS);
+        assert_eq!(spent, PROBE_MIN_READS);
+        // One more read and the run is probed first: it shares, so it pairs.
+        // The probe reads the sampled chunk and one distinct old chunk, and
+        // its reads are on top of the run's.
         let mut out = HashMap::new();
-        let spent = pair_chunks(&s, &vec![b; 1_001], &old, usize::MAX, &mut out).unwrap();
+        let spent = pair_chunks(&s, &vec![b; 258], &vec![a; 255], usize::MAX, &mut out).unwrap();
+        assert_eq!(out, HashMap::from([(b, a)]));
+        assert_eq!(spent, PROBE_MIN_READS + 1 + 2);
+    }
+
+    #[test]
+    fn a_probed_run_needs_its_probe_inside_the_budget() {
+        let (_d, s) = store();
+        let (new, old, want) = dense_edit(&s);
+        let reads = 3_001 + 3_000;
+        let mut out = HashMap::new();
+        let spent =
+            pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS - 1, &mut out).unwrap();
+        assert!(out.is_empty());
+        assert_eq!(spent, 0);
+        let spent = pair_chunks(&s, &new, &old, reads + PROBE_MAX_READS, &mut out).unwrap();
+        assert_eq!(out, want);
+        assert!(spent <= reads + PROBE_MAX_READS);
+    }
+
+    #[test]
+    fn a_file_is_paired_up_to_the_reads_of_the_0_9_cap_and_no_further() {
+        let (_d, s) = store();
+        let a = put_blob(&s, wide_chunk(1, 2_000));
+        let b = put_blob(&s, tweaked(&wide_chunk(1, 2_000)));
+        // One run of MAX_FILE_READS reads less a probe, then one more.
+        let fits = MAX_FILE_READS - PROBE_MAX_READS;
+        let mut out = HashMap::new();
+        let spent = pair_chunks(&s, &vec![b; fits - 1_000], &vec![a; 1_000], usize::MAX, &mut out)
+            .unwrap();
+        assert_eq!(out, HashMap::from([(b, a)]));
+        assert_eq!(spent, fits + 2);
+        let mut out = HashMap::new();
+        let spent = pair_chunks(&s, &vec![b; fits - 999], &vec![a; 1_000], usize::MAX, &mut out)
+            .unwrap();
         assert!(out.is_empty());
         assert_eq!(spent, 0);
     }
