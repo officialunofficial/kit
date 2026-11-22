@@ -18,8 +18,9 @@ const MIN_PAIRS: usize = 32;
 /// out of time and retired nothing, so that the next such attempt waits 30
 /// days. The pair count is read on a `complete` stamp and the mark bit on a
 /// `progress` stamp, so this adds no field and no byte to the stamp. The mark
-/// counts only while its stamp is under a day old, so a miss now and a miss
-/// weeks later are not two in a row.
+/// counts only while its stamp is at most a day old, so a miss now and a miss
+/// weeks later are not two in a row. A lock miss that keeps the mark restamps
+/// it, so the day runs from the latest stamp.
 const MISSED: u64 = 1 << 63;
 const BUDGET: Duration = Duration::from_secs(5);
 const HOUR: u64 = 3600;

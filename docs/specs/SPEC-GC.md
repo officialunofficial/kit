@@ -556,7 +556,10 @@ than 32 packs, and the step costs a mark of the whole history.
    `over_budget` with the 30-day interval and clears it, so a store that the
    budget cannot cover pays the step once and not every hour. The mark stands
    only while its stamp is at most a day old; after that the attempt is a
-   first miss again, due in an hour. A lock miss or
+   first miss again, due in an hour. A store whose budget never covers the
+   step and that is used less than once a day pays the step on every run.
+   A lock miss that keeps the mark restamps it, so the day runs from the
+   latest stamp. A lock miss or
    changed roots that restamps `progress` with nothing retired keeps the
    mark; a step that retires anything clears it. If the budget ends inside
    the last wholly dead pack, every pack verified stays planned, and the

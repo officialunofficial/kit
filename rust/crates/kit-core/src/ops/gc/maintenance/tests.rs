@@ -1157,6 +1157,28 @@ fn a_miss_more_than_a_day_after_the_last_is_due_in_an_hour_again() {
     assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
 }
 
+/// The mark stands for exactly a day: a miss that comes a day after the last
+/// waits 30 days, and one a second later is a first miss again.
+#[test]
+fn the_miss_mark_stands_for_exactly_a_day() {
+    for (gap, outcome) in [
+        (DAY, Collection::OverBudget),
+        (DAY + 1, Collection::Progress),
+    ] {
+        TEST_NOW.set(Some(now_secs()));
+        let repo = Repo::new();
+        repo.due_live();
+        repo.old_pack(&[b"dead"]);
+        TEST_VERIFY_ROOM.set(Some(0));
+        assert_eq!(repo.run().collection, Collection::OverBudget);
+        assert_ne!(stamp_of(&repo).complete_pairs & MISSED, 0);
+        TEST_NOW.set(Some(TEST_NOW.get().unwrap() + gap));
+        assert_eq!(repo.run().collection, Collection::OverBudget);
+        TEST_VERIFY_ROOM.set(None);
+        assert_eq!(stamp_of(&repo).outcome, outcome, "a gap of {gap} seconds");
+    }
+}
+
 /// A step that retires something after a miss clears the mark, so a later miss
 /// within the day is a first miss again.
 #[test]
