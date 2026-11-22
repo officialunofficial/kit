@@ -1307,6 +1307,39 @@ fn a_lock_miss_after_progress_still_ignores_the_pair_floor() {
     assert!(stamp.due(stamp.attempted + HOUR, 3));
 }
 
+/// A lock miss between two attempts that ran out of time does not reset the
+/// bound: the second one still waits 30 days.
+#[test]
+fn a_lock_miss_between_two_misses_keeps_the_bound() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due_live();
+    repo.old_pack(&[b"dead"]);
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(repo.run().collection, Collection::OverBudget);
+    TEST_VERIFY_ROOM.set(None);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert_ne!(stamp.complete_pairs & MISSED, 0);
+
+    let lock = acquire(
+        repo.layout.worktree_state_dir(),
+        WORKTREE_LOCK,
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(step_later(&repo).collection, Collection::Busy);
+    drop(lock);
+    let stamp = stamp_of(&repo);
+    assert_eq!(stamp.outcome, Collection::Progress);
+    assert_ne!(stamp.complete_pairs & MISSED, 0, "the mark stands");
+
+    TEST_VERIFY_ROOM.set(Some(0));
+    assert_eq!(step_later(&repo).collection, Collection::OverBudget);
+    TEST_VERIFY_ROOM.set(None);
+    assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
+}
+
 /// A cancellation during the verification of a pack stops the step with
 /// nothing retired: it is not a deadline, so it never reads as progress.
 #[test]

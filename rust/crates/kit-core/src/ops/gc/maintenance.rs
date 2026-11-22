@@ -404,7 +404,13 @@ fn run(
                 gc.packs_retired + gc.packs_rewritten + gc.packs_merged + gc.packs_retired_covered,
             ) as u64
         } else {
-            (stamp.complete_pairs & !MISSED) | if missed { MISSED } else { 0 }
+            // The mark survives a lock miss or changed roots that restamped
+            // `progress` with nothing retired, so such a step cannot reset
+            // the bound; a step that retired something clears it.
+            let kept = collection.stamped == Collection::Progress
+                && !progressed
+                && stamp.complete_pairs & MISSED != 0;
+            (stamp.complete_pairs & !MISSED) | if missed || kept { MISSED } else { 0 }
         },
     }
     .write(&mut file);

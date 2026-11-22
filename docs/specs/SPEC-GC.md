@@ -516,11 +516,10 @@ collection 7 days after a complete collection or an error, 1 hour after a
 lock miss, changed roots, a step that made progress or the first attempt
 that ran out of budget before it retired anything, or 30 days after an
 attempt that ran out of budget before it retired anything right after
-another such attempt. A
-complete collection is also due again, whatever its age, once the listing
-shows at least 32 more published pairs than the stamp's pair count at that
-collection, so a repository that never fetches merges its small packs
-again after every 32 new pairs and not once a week. These intervals and the
+another such attempt. A complete collection is also due again, whatever its
+age, once the listing shows at least 32 more published pairs than the
+stamp's pair count at that collection, so a repository that never fetches
+merges its small packs again after every 32 new pairs and not once a week. These intervals and the
 growth step are policy.
 
 A step *made progress* when it retired or rewrote at least one pack and left
@@ -551,15 +550,17 @@ than 32 packs, and the step costs a mark of the whole history.
    planned and the step reports `over_budget`; the same holds for a mark or
    listing that ran out of budget. The stamp says `progress`, due in an hour,
    because a busy disk can cause one such miss. The stamp marks it by the
-   top bit of its pair count, which is read only on a `complete` stamp; the
+   top bit of its pair count, which is read only on a `complete` stamp. The
    next attempt that ends this way while that mark stands stamps
    `over_budget` with the 30-day interval and clears it, so a store that the
-   budget cannot cover pays the step once and not every hour. If the budget ends inside the last
-   wholly dead pack, every pack verified stays planned, and the copy
-   planning that follows defers only the copy. If
-   every verified pack fails its recheck before retirement, the step
-   reports `over_budget` and keeps the 7-day interval of a finished step. A damaged pair or cancellation ends collection
-   before retirement. Then plan
+   budget cannot cover pays the step once and not every hour. A lock miss or
+   changed roots that restamps `progress` with nothing retired keeps the
+   mark; a step that retires anything clears it. If the budget ends inside
+   the last wholly dead pack, every pack verified stays planned, and the
+   copy planning that follows defers only the copy. If every verified pack
+   fails its recheck before retirement, the step reports `over_budget` and
+   keeps the 7-day interval of a finished step. A damaged pair or
+   cancellation ends collection before retirement. Then plan
    copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
    keep only the inputs whose survivors fit in one output pack: at most
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
