@@ -72,6 +72,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 - **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
 - **Breaking:** Damage in a local pack or its index is `StoreError::LocalPackDamaged { pack, reason }`, not `StoreError::Io` with kind `InvalidData`. Match the variant instead of the I/O kind. A failed read of a pack or index stays `StoreError::Io`.
+- **Breaking:** `libkit::config::Config` has a new public `gc_auto` field. Build a `Config` from `Config::default()` instead of a struct literal.
 - **Breaking:** `GcReport` and `UnpackReport` are `#[non_exhaustive]`. Build one with `Default::default()` and read its fields. `GcReport` also reports packed payload bytes, packs retired, leftovers and loose duplicates pruned, and damaged packs it kept.
 - **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
 - `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
