@@ -79,9 +79,29 @@ fn three_pairs() -> (tempfile::TempDir, RepoLayout, Hash, Vec<Pair>, Vec<Hash>) 
     (dir, layout, root, pairs, chunks)
 }
 
+/// Waits until the pack directory's status time is a second old. A catalog
+/// rescans a directory that changed more recently, so each read of a walk
+/// would check its pair again.
+fn settle(store: &ObjectStore) {
+    if !cfg!(unix) {
+        return;
+    }
+    let dir = store.pack_dir();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let stamp = index::Stamp::get(&fs::symlink_metadata(&dir).unwrap()).unwrap();
+        if stamp.settled() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("the pack directory never settled");
+}
+
 #[test]
 fn a_guarded_walk_checks_each_pair_at_most_twice_and_an_unguarded_one_checks_each_read() {
     let (_dir, layout, root, _, chunks) = three_pairs();
+    settle(&ObjectStore::open(&layout).unwrap());
 
     for probing in [true, false] {
         // 120 chunk heads, so the reads run on several threads.

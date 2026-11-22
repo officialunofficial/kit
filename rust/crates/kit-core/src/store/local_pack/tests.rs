@@ -2704,6 +2704,7 @@ fn the_one_read_probe_marks_non_blob_frames_as_the_streaming_probe_does() {
     assert!(one_read.0.starts_with("Ok("), "{}", one_read.0);
 }
 
+#[cfg(unix)]
 #[test]
 fn the_handle_limit_is_a_quarter_of_the_open_file_limit_within_its_bounds() {
     use super::reader::{HANDLE_CEILING, HANDLE_FLOOR, handle_limit_for};

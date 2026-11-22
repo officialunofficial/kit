@@ -464,6 +464,8 @@ pub(crate) fn history_lock_name(branch: &str) -> String {
 }
 
 pub(crate) mod ancestry_state;
+/// The branch history a build with history records writes beside a branch.
+pub use ancestry_state::DIRECTORY as BRANCH_HISTORY_DIR;
 
 /// Retention roots of unfinished history publications, including when the
 /// history-mmr feature is disabled. Corruption must abort GC.
