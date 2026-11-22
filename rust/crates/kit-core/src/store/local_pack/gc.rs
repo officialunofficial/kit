@@ -20,6 +20,9 @@ pub(crate) struct PackSweep {
     /// Planning stopped before it verified every wholly dead pack past grace,
     /// because [`Verify::room`] said no. The rest stay for a later run.
     cut_short: bool,
+    /// Wholly dead packs past grace that planning saw, when it stopped before
+    /// it could verify any of them.
+    dead_seen: bool,
 }
 
 /// The most items one exclusive `format` hold retires: pack pairs, copy
@@ -171,7 +174,7 @@ impl ObjectStore {
         }
         let dir = self.pack_dir();
         let mut candidates = Vec::new();
-        visit_pairs(&dir, |pair| {
+        let scanned = visit_pairs(&dir, |pair| {
             checkpoint()?;
             report.packs_scanned += 1;
             let pack = Stamp::read(&pair.pack);
@@ -203,12 +206,25 @@ impl ObjectStore {
                 });
             }
             Ok(())
-        })?;
-        checkpoint()?;
+        })
+        .and_then(|()| checkpoint());
+        match scanned {
+            Ok(()) => {}
+            // The clock ended in the pass over the pairs. The packs seen so
+            // far are wholly dead by their own index, but none is verified:
+            // the step plans nothing and says what it saw.
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::TimedOut => {
+                plan.cut_short = true;
+                plan.dead_seen = !candidates.is_empty();
+                return Ok(plan);
+            }
+            Err(error) => return Err(error),
+        }
         candidates.sort_by_key(|candidate| (candidate.pack.modified, candidate.pair.key));
         for candidate in candidates {
             if !(verify.room)() {
                 plan.cut_short = true;
+                plan.dead_seen = true;
                 break;
             }
             let Candidate {
@@ -418,6 +434,12 @@ impl PackSweep {
     /// verified: the rest wait for a later run.
     pub(crate) fn verification_cut_short(&self) -> bool {
         self.cut_short
+    }
+
+    /// Planning stopped before it verified any pack, with wholly dead packs
+    /// past grace in view.
+    pub(crate) fn dead_packs_seen(&self) -> bool {
+        self.dead_seen
     }
 
     /// Whole packs planned for retirement.

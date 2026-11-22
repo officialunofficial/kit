@@ -1087,6 +1087,62 @@ fn a_mark_that_runs_out_of_time_keeps_the_long_interval() {
     assert_eq!(stamp_of(&repo).outcome, Collection::OverBudget);
 }
 
+/// A clock that ends in the pass over the packs, after the mark and after a
+/// wholly dead pack was seen, retires nothing and is due again in an hour. The
+/// clock is made to end at the n-th look at it, for each n in turn, until it
+/// ends in that pass: nothing is retired on the way, and the step never
+/// stamps `progress` for a mark that ran out of time.
+#[test]
+fn a_clock_that_ends_in_the_pass_over_the_packs_after_a_dead_one_is_due_in_an_hour() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    repo.due();
+    let (dead, _) = repo.old_pack(&[b"dead"]);
+    let mut seen = Vec::new();
+    for ends_at in 1..2_000 {
+        let looks = std::cell::Cell::new(0);
+        let report = maintain_with(
+            &repo.layout,
+            &repo.store,
+            &|| {
+                looks.set(looks.get() + 1);
+                if looks.get() == ends_at {
+                    TEST_CLOCK_OUT.set(true);
+                }
+                false
+            },
+            BUDGET,
+            || {},
+        );
+        TEST_CLOCK_OUT.set(false);
+        assert_eq!(report.packs_retired, 0, "{report:?}");
+        assert_eq!(report.collection, Collection::OverBudget, "{report:?}");
+        assert!(dead.exists());
+        let stamp = stamp_of(&repo);
+        seen.push(stamp.outcome);
+        if stamp.outcome == Collection::Progress {
+            assert!(stamp.due(stamp.attempted + HOUR, 3));
+            assert!(!stamp.due(stamp.attempted + HOUR - 1, 3));
+            break;
+        }
+        assert_eq!(stamp.outcome, Collection::OverBudget);
+        // Make the next attempt due again.
+        let mut file = lock_stamp(repo.layout.common_dir()).unwrap();
+        Stamp {
+            attempted: 1,
+            outcome: Collection::Complete,
+            complete_pairs: 10,
+        }
+        .write(&mut file)
+        .unwrap();
+    }
+    assert_eq!(seen.last(), Some(&Collection::Progress), "{seen:?}");
+    assert!(
+        seen[..seen.len() - 1].len() > 1,
+        "the mark ran out first: {seen:?}"
+    );
+}
+
 /// A clock that ends inside the last wholly dead pack keeps every pack that
 /// was verified: the later phases defer only their own part.
 #[test]
@@ -1369,4 +1425,30 @@ fn a_repository_that_never_fetches_merges_again_every_floor_of_new_pairs() {
         assert_eq!(report.collection, Collection::Complete);
         assert!(report.packs_merged >= MIN_PAIRS, "{report:?}");
     }
+}
+
+/// A complete step that could not shrink the store, here because its copy was
+/// deferred, stores the pair count it left: it is not due again until the
+/// store holds 32 more pairs, so it cannot run on every command.
+#[test]
+fn a_complete_step_that_merged_nothing_waits_for_32_more_pairs() {
+    TEST_NOW.set(Some(now_secs()));
+    let repo = Repo::new();
+    for n in 0..MIN_PAIRS {
+        repo.pack(&[format!("first {n}").as_bytes()]);
+    }
+    TEST_COPY_EXPIRES.set(Some(CopyPhase::Plan));
+    let first = repo.run();
+    TEST_COPY_EXPIRES.set(None);
+    assert_eq!(first.collection, Collection::OverBudget, "{first:?}");
+    assert_eq!(first.packs_merged, 0);
+    assert_eq!(stamp_of(&repo).outcome, Collection::Complete);
+    assert_eq!(stamp_of(&repo).complete_pairs as usize, MIN_PAIRS);
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    for n in 0..MIN_PAIRS - 1 {
+        repo.pack(&[format!("later {n}").as_bytes()]);
+    }
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    repo.pack(&[b"later last"]);
+    assert_eq!(repo.run().collection, Collection::Complete);
 }

@@ -396,11 +396,13 @@ fn run(
     collection.reported
 }
 
-/// What a collection reports and what the stamp records. They differ only
-/// when the copy was cut short, by the budget or an I/O error, but wholly dead
+/// What a collection reports and what the stamp records. They differ when the
+/// copy was cut short, by the budget or an I/O error, but wholly dead
 /// retirement finished: the report says `over_budget` or `failed`, and the
 /// stamp keeps the weekly interval of a finished collection, so the
-/// retirement main would do is not postponed.
+/// retirement main would do is not postponed. They also differ when the
+/// budget ended before one wholly dead pack was verified: the report says
+/// `over_budget` and the stamp says `progress`, due in an hour.
 struct Outcome {
     reported: Collection,
     stamped: Collection,
@@ -549,14 +551,21 @@ fn collect(
         return Ok(Outcome::same(Collection::Failed));
     }
     if cut && retire.planned_packs() == 0 {
-        // The budget ended before one pack was verified, with wholly dead
-        // packs past grace in view: a busy disk, not a reason to wait 30
-        // days. The next step is due in an hour and ignores the pair floor.
-        return Ok(Outcome {
-            reported: Collection::OverBudget,
-            stamped: Collection::Progress,
-            left: true,
-        });
+        if retire.dead_packs_seen() {
+            // The budget ended before one pack was verified, with wholly
+            // dead packs past grace in view: a busy disk, not a reason to
+            // wait 30 days. The next step is due in an hour and ignores the
+            // pair floor.
+            return Ok(Outcome {
+                reported: Collection::OverBudget,
+                stamped: Collection::Progress,
+                left: true,
+            });
+        }
+        // The budget ended in the pass over the packs before any dead one
+        // was seen: the long interval of an attempt that ran out of budget
+        // stands.
+        return Ok(Outcome::same(Collection::OverBudget));
     }
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
