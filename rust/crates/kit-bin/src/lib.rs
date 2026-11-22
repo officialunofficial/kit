@@ -22,6 +22,7 @@ pub mod editor;
 mod environment;
 pub mod exit;
 pub mod exit_map;
+pub mod fd_limit;
 pub mod format;
 pub mod grants;
 pub mod progress;
