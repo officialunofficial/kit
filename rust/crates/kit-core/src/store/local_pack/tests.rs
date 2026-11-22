@@ -2647,6 +2647,30 @@ fn a_packed_blob_above_the_one_read_limit_is_hashed_by_streaming() {
 }
 
 #[test]
+fn a_delta_frame_in_a_local_pack_stops_the_mark_through_either_probe() {
+    for as_chunk in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&blob(&[9; 64])]);
+        if as_chunk {
+            manifest_root(&store, &layout, "chunked", &ids);
+        } else {
+            files_root(&store, &layout, &ids);
+        }
+        // The type byte now names a delta, which a local pack never holds.
+        damage_frame(&pair, &ids[0], 0, |b| *b = 0x06);
+
+        let streamed = marked(&layout, true);
+        let one_read = marked(&layout, false);
+        assert_eq!(one_read, streamed, "chunk {as_chunk}");
+        assert!(
+            one_read.0.contains("delta object in local pack"),
+            "chunk {as_chunk}: {}",
+            one_read.0
+        );
+    }
+}
+
+#[test]
 fn the_one_read_probe_marks_non_blob_frames_as_the_streaming_probe_does() {
     use crate::object::{EntryMode, Tree, TreeEntry};
 
