@@ -18,6 +18,7 @@ use super::{StoreError, StoreResult, is_disappeared};
 /// room for loose objects, transports and other repository files.
 pub(super) const HANDLE_FLOOR: usize = 96;
 /// Handles the cache keeps at most.
+#[cfg(unix)]
 pub(super) const HANDLE_CEILING: usize = 1024;
 
 /// A quarter of the soft open-file limit `soft`, held between
@@ -25,6 +26,7 @@ pub(super) const HANDLE_CEILING: usize = 1024;
 /// fewer keeps a handle for each, so a scan that visits the packs in any order
 /// opens each once. The rest of the limit stays for loose objects, transports
 /// and other files.
+#[cfg(unix)]
 pub(super) fn handle_limit_for(soft: u64) -> usize {
     usize::try_from(soft / 4)
         .unwrap_or(usize::MAX)
