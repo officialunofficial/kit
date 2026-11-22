@@ -660,10 +660,12 @@ fn stamp_intervals_and_report_names_match_the_collection_outcomes() {
         (Collection::Progress, HOUR, "progress"),
         (Collection::Failed, 7 * 24 * HOUR, "failed"),
     ] {
+        // The pair count the stamp left equals the store's, so only the
+        // interval is in play, not the pair-growth rule.
         let stamp = Stamp {
             attempted: 100,
             outcome,
-            complete_pairs: 0,
+            complete_pairs: MIN_PAIRS as u64,
         };
         assert_eq!(outcome.as_str(), name);
         assert!(!stamp.due(stamp.attempted + interval - 1, MIN_PAIRS));
