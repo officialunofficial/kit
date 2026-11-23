@@ -145,8 +145,8 @@ fn resolve_root_repo(root: &Path, path: &str) -> Result<(PathBuf, WritePolicy), 
     };
     let root = std::fs::canonicalize(root).map_err(|_| exit::NOINPUT)?;
     let expected = root.join(namespace.to_string()).join(identity.name());
-    let resolved = std::fs::canonicalize(&expected)
-        .map_err(|_| not_a_repository(path, exit::NOINPUT))?;
+    let resolved =
+        std::fs::canonicalize(&expected).map_err(|_| not_a_repository(path, exit::NOINPUT))?;
     if resolved != expected {
         return Err(exit::NOPERM);
     }
