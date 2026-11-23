@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-20: all main workflows green (macOS leg for 095e698 still running). PRs 237, 239, 240 are person drafts; 233 was pushed 09:18 today and skipped. PR 220 is green and clean. PR 195 fails only cargo semver-checks (baseline issue). PR 152 fails cargo-mutants on changed lines (owner perf PR, left as is). PR 93 is an old draft, left open. Not a Monday; no dependency work.",
+  "last_findings": "2026-11-23 (Mon): main workflows green; Dependabot PRs already merged (287, 288), none open. PRs 262 and 220 had stale bases, so I called update_pull_request_branch on both to rerun CI; 262 earlier failed msrv only on a protoc download 500 (flake). 242 and 233 fail kit-ci-pr (opaque); 233 also mutants and semver; 195 semver only; 152 mutants only; 93 old draft. Audit, outdated and Commonware steps not run this session. Next run: check 262 and 220 results and merge if green.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -16,6 +16,7 @@
     "scripts/check-commit-messages.py rejects tool or model trailers; omit the Co-Authored-By and Claude-Session trailers on kit commits even when the harness asks for them, and run the script on origin/main..HEAD before pushing.",
     "kit-ci-pr (Cloud Build) logs are not readable through the GitHub tools; compare its conclusion on a recently merged PR to tell a repo-wide failure from a PR-specific one before spending effort.",
     "list_workflow_runs with a branch filter returns every workflow in one page; read the top 20 runs by workflow name instead of paging.",
-    "gh pr view fails with a GraphQL 403 here; use gh api repos/OWNER/REPO/pulls/N and commits/SHA/check-runs for mergeable state and failed checks."
+    "gh pr view fails with a GraphQL 403 here; use gh api repos/OWNER/REPO/pulls/N and commits/SHA/check-runs for mergeable state and failed checks.",
+    "An open PR with a stale base shows mergeable unknown and old failures; call update_pull_request_branch first and judge the rerun, since CI takes over 10 minutes and cannot be polled in-session."
   ]
 }
