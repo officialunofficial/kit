@@ -9,8 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. A branch that has diverged from the remote still fails with "would not fast-forward".
-- `kit serve` on a path that is not a kit repository now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It still exits 65 and writes nothing to standard output.
+- `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
+- `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.
 
 ## [0.10.0] - 2026-11-22
 
