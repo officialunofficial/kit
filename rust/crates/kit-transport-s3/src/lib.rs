@@ -590,6 +590,16 @@ impl S3Transport {
                         200 => sink.note_resume(ResumeOutcome::Restarted {
                             reason: RestartReason::Status,
                         }),
+                        status if refuses_range(status) => {
+                            // A store that does not take a conditional range
+                            // gets one plain read. Throttling and server
+                            // errors keep the retry's backoff and its range.
+                            sink.note_resume(ResumeOutcome::Restarted {
+                                reason: RestartReason::Status,
+                            });
+                            resume = None;
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -610,6 +620,14 @@ impl S3Transport {
             s => Err(TransportError::ServerError { status: s }),
         }
     }
+}
+
+/// Whether `status`, the answer to a ranged request, says the store does not
+/// take the range or its condition, as opposed to a refusal of the request
+/// itself (401, 403, 404) or a transient answer (408, 429, 5xx but 501).
+fn refuses_range(status: u16) -> bool {
+    status == 501
+        || ((400..500).contains(&status) && !matches!(status, 401 | 403 | 404 | 408 | 429))
 }
 
 /// The value of response header `name`, when it is text.
@@ -1300,6 +1318,22 @@ impl Transport for S3Transport {
         match resp.status {
             200 => Ok(true),
             404 => Ok(false),
+            403 | 401 => Err(TransportError::AccessDenied),
+            s => Err(TransportError::ServerError { status: s }),
+        }
+    }
+
+    /// One `HEAD`, not retried: the stored length is the answer's
+    /// `Content-Length`, and an answer without one is no length.
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let object_key = Self::pack_object_key(key.as_bytes());
+        let resp = self
+            .signed_request(&Method::HEAD, &object_key, "", &sha256_hex(&[]), &[])
+            .send()
+            .map_err(|_| TransportError::ConnectionFailed)?;
+        match resp.status().as_u16() {
+            200 => Ok(header(&resp, "content-length").and_then(|value| value.parse().ok())),
+            404 => Ok(None),
             403 | 401 => Err(TransportError::AccessDenied),
             s => Err(TransportError::ServerError { status: s }),
         }

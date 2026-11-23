@@ -655,6 +655,31 @@ discovered pack catalog. They MAY accept a loose file or packed frame of
 the exact serialized length without reading the object body. Fetch writes
 every object in its window.
 
+A local batched write (`kit add`, `kit add -u`, `kit commit -a`,
+`kit stash`) in a store with capability `P` writes each chunk of a chunked
+file it must store into a local pack of its own, in file order. Past the
+first 64 small files of a batch whose blob the store did not already hold, it
+also packs each small file, a plain blob of at most 16,384 serialized bytes,
+into that pack. A file whose blob the store already holds does not count. It stores everything
+else loose. The batch seals its open pack at 64 MiB of
+payload or 65,536 entries, and when it commits. Before it renames a loose
+manifest, tree or commit, it publishes the pack, so no such object is
+visible before the packed chunks it names. A pack's layout is checked
+against the writer's records when it is published, and an index entry or
+ref is written only after the batch's last pack is published. Per-object writes, loose stores, and a
+writer that cannot activate the marker keep every chunk loose.
+
+**Writer limit on entries.** Every writer of local packs seals a pack before
+it would hold more than 65,536 entries. The `kit add` batch above, a fetch
+publication window ([SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch)) and
+a gc output ([SPEC-GC](SPEC-GC.md)) share this limit, and they share the
+payload limit of 64 MiB of serialized bytes, with one exception: gc gives one
+object that alone passes 64 MiB an output pack of its own. These limits are
+writer policy and bound the locators, batch paths and index workspace of one
+pack. A reader accepts any pack within the format caps of 10,000,000 entries
+and 4 GiB of payload ([SPEC-PACKFILE](SPEC-PACKFILE.md) §5 and §3.1.1), so a
+pack from a writer with other limits stays readable.
+
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
 flush, the pack name or the complete pair can survive a power loss.
@@ -683,6 +708,7 @@ This prevents trivial amplification and prologue-replay attacks.
 | `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
 | `0x02`  |          | `chunked_blob` only: 40-byte entries that carry end offsets (§7). |
 | marker `P` | 0.10 | Repository marker capability `P` (`bmt-v2\nP`): raw local packs and their index (§10). A reader that does not know `P` refuses the store. This reader accepts exactly the three marker byte strings of §10. |
+| local add packs chunks and small files | 0.10.x | A batched write packs the chunks of a chunked file and the small files past the first 64 new ones of the batch into local packs, as §10.1 says. It is a writer policy. It changes no byte of a pack, an index or an object, and needs no marker beyond `P`. |
 
 A new store starts with the packed marker, and a later kit's first object write activates an older loose store, so kit 0.9 and older refuse a repository that this version created or wrote to.
 

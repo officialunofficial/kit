@@ -9,7 +9,7 @@ use crate::pack::{MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 use crate::serialize::serialize;
 use crate::store::{ObjectStore, StoreError};
 
-use super::writer::Writer;
+use super::writer::PackFixture;
 use super::{Pair, index};
 
 pub(super) fn fresh() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
@@ -26,8 +26,8 @@ pub(super) fn blob(data: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
-fn writer(store: &ObjectStore) -> Writer<'_> {
-    Writer::new(store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap()
+fn writer(store: &ObjectStore) -> PackFixture<'_> {
+    PackFixture::new(store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap()
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn staged_pair_and_lone_pack_are_invisible_until_index_publication() {
     assert!(after_pack.is_err());
     assert!(!reader.contains(&id));
 
-    let mut retry = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
     retry.write(&bytes).unwrap();
     retry.finish().unwrap();
     assert_eq!(reader.read(&id).unwrap(), bytes);
@@ -456,7 +456,7 @@ fn unknown_live_pack_versions_refuse_lookup_and_repair() {
         incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
         incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
         incompatible(&still_open.check_local_packs(true).unwrap_err(), kind);
-        let mut retry = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
         retry.write(&bytes).unwrap();
         incompatible(&retry.finish().unwrap_err(), kind);
         assert_eq!(fs::read(path).unwrap(), newer);
@@ -876,10 +876,20 @@ fn concurrent_publishers_deduplicate_and_make_the_pair_readable() {
 }
 
 #[test]
+fn the_writer_limits_are_the_ones_the_spec_states() {
+    // SPEC-OBJECTS §10.1: 65,536 entries and 64 MiB of payload per pack, for
+    // the batch, fetch windows and gc outputs alike.
+    assert_eq!(super::PACK_SEAL_ENTRIES, 65_536);
+    assert_eq!(super::PACK_SEAL_BYTES, 64 << 20);
+    assert_eq!(super::copy::OUTPUT_ENTRIES, super::PACK_SEAL_ENTRIES);
+    assert_eq!(super::copy::OUTPUT_PAYLOAD, super::PACK_SEAL_BYTES as u64);
+}
+
+#[test]
 fn rolls_over_at_count_and_payload_caps() {
     for (max_entries, max_payload) in [(1, 1024), (2, 12)] {
         let (_dir, _layout, store) = fresh();
-        let mut writer = Writer::new(&store, max_entries, max_payload).unwrap();
+        let mut writer = PackFixture::new(&store, max_entries, max_payload).unwrap();
         let a = writer.write(&blob(b"a")).unwrap();
         assert_eq!(writer.write(&blob(b"a")).unwrap(), a);
         let b = writer.write(&blob(b"b")).unwrap();
@@ -1574,8 +1584,12 @@ fn gc_previews_each_loose_duplicate_once_when_two_packs_hold_it() {
 }
 
 type AfterCopy = Box<dyn FnOnce() -> crate::store::StoreResult<()>>;
+type AfterBatch = Box<dyn FnMut(usize) -> crate::store::StoreResult<()>>;
 
 thread_local! {
+    static RETIRE_BATCH: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
+    static AFTER_RETIRE_BATCH: std::cell::RefCell<Option<AfterBatch>> =
+        const { std::cell::RefCell::new(None) };
     static AFTER_COPY_PUBLISH: std::cell::Cell<Option<AfterCopy>> =
         const { std::cell::Cell::new(None) };
     static IO_LOG: std::cell::RefCell<Option<Vec<(&'static str, std::path::PathBuf)>>> =
@@ -1584,6 +1598,44 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static PACK_SCAN_ERROR: std::cell::Cell<Option<(Hash, std::io::ErrorKind)>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Test override of the batch limits; reset when the guard drops.
+pub(super) struct RetireBatch;
+
+pub(super) fn set_retire_batch(size: usize) -> RetireBatch {
+    set_retire_batch_limits(size, super::gc::RETIRE_BATCH_BYTES)
+}
+
+pub(super) fn set_retire_batch_limits(size: usize, bytes: u64) -> RetireBatch {
+    RETIRE_BATCH.set(Some((size, bytes)));
+    RetireBatch
+}
+
+impl Drop for RetireBatch {
+    fn drop(&mut self) {
+        RETIRE_BATCH.set(None);
+        AFTER_RETIRE_BATCH.with(|hook| *hook.borrow_mut() = None);
+    }
+}
+
+pub(super) fn retire_batch() -> Option<(usize, u64)> {
+    RETIRE_BATCH.get()
+}
+
+/// Runs after each batch released the exclusive lock, with the number of
+/// batches done so far. An error stands for a crash.
+pub(super) fn after_retire_batch(done: usize) -> crate::store::StoreResult<()> {
+    AFTER_RETIRE_BATCH.with(|hook| match hook.borrow_mut().as_mut() {
+        Some(hook) => hook(done),
+        None => Ok(()),
+    })
+}
+
+pub(super) fn set_after_retire_batch(
+    hook: impl FnMut(usize) -> crate::store::StoreResult<()> + 'static,
+) {
+    AFTER_RETIRE_BATCH.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
 /// Runs after copy-then-retire published its outputs and dropped the shared
@@ -1786,7 +1838,9 @@ fn reads_and_misses_reuse_indexes_past_sixty_four_packs() {
         ));
     }
     assert_eq!(loads(), objects.len());
-    assert_eq!(reader.packs.handles.cached(), 96);
+    let handles = &reader.packs.handles;
+    assert!(handles.limit() >= super::reader::HANDLE_FLOOR);
+    assert_eq!(handles.cached(), objects.len().min(handles.limit()));
 }
 
 #[test]
@@ -1840,7 +1894,7 @@ fn cached_pack_handles_do_not_keep_unpublished_locations_visible() {
         assert_eq!(reader.read(&id).unwrap(), bytes);
         store.remove_object(&id).unwrap();
 
-        let mut replacement = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+        let mut replacement = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
         replacement.write(&bytes).unwrap();
         replacement.write(&blob(b"new pack key")).unwrap();
         replacement.finish().unwrap();
@@ -1862,7 +1916,7 @@ fn an_index_outside_the_row_budget_routes_without_reopening_on_misses() {
 
     let locator = std::sync::Arc::new(Locator::open(&pair, 0, 64).unwrap());
     assert_eq!(locator.row_charge(), 0);
-    let catalog = super::Catalog::from_packs(vec![std::sync::Arc::clone(&locator)], None);
+    let catalog = super::Catalog::from_packs(vec![std::sync::Arc::clone(&locator)], None, false);
     let routes: Vec<_> = catalog.candidates(&id).collect();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].1, Some(0));
@@ -1871,12 +1925,17 @@ fn an_index_outside_the_row_budget_routes_without_reopening_on_misses() {
     assert_ne!(prefix(&absent), prefix(&id));
     assert!(catalog.candidates(&absent).next().is_none());
     let handles = Handles::default();
-    assert!(locator.find(&handles, &id, routes[0].1).unwrap().is_some());
+    assert!(
+        locator
+            .find(&handles, &id, routes[0].1, None)
+            .unwrap()
+            .is_some()
+    );
     let mut different = id;
     different[31] ^= 1;
     assert!(
         locator
-            .find(&handles, &different, routes[0].1)
+            .find(&handles, &different, routes[0].1, None)
             .unwrap()
             .is_none()
     );
@@ -1895,7 +1954,7 @@ fn pack_discovery_notices_publication_with_restored_directory_mtime() {
     let mtime = dir.metadata().unwrap().modified().unwrap();
 
     let bytes = blob(b"published with unchanged directory mtime");
-    let mut writer = Writer::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    let mut writer = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
     let id = writer.write(&bytes).unwrap();
     writer.finish().unwrap();
     dir.set_modified(mtime).unwrap();
@@ -1938,12 +1997,12 @@ fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
             locator.route_charge(),
             expected_routes * (size_of::<Route>() + size_of::<u32>())
         );
-        let catalog = super::Catalog::from_packs(vec![Arc::clone(&locator)], None);
+        let catalog = super::Catalog::from_packs(vec![Arc::clone(&locator)], None, false);
         let handles = Handles::default();
         for id in &ids {
             let frames: Vec<_> = catalog
                 .candidates(id)
-                .filter_map(|(pack, row)| pack.find(&handles, id, row).unwrap())
+                .filter_map(|(pack, row)| pack.find(&handles, id, row, None).unwrap())
                 .collect();
             assert_eq!(frames, [strict.find(id).unwrap()]);
         }
@@ -1952,9 +2011,10 @@ fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
                 let mut absent = [trailing; 32];
                 absent[0] = first;
                 assert!(
-                    catalog
-                        .candidates(&absent)
-                        .all(|(pack, row)| pack.find(&handles, &absent, row).unwrap().is_none())
+                    catalog.candidates(&absent).all(|(pack, row)| pack
+                        .find(&handles, &absent, row, None)
+                        .unwrap()
+                        .is_none())
                 );
             }
         }
@@ -2320,6 +2380,14 @@ pub(super) fn damage_frame(pair: &Pair, id: &Hash, at: usize, change: impl FnOnc
     fs::write(&pair.pack, bytes).unwrap();
 }
 
+/// Change one byte of an object's five-byte frame header.
+pub(super) fn damage_header(pair: &Pair, id: &Hash, at: usize, change: impl FnOnce(&mut u8)) {
+    let frame = super::Index::open(pair).unwrap().find(id).unwrap();
+    let mut bytes = fs::read(&pair.pack).unwrap();
+    change(&mut bytes[usize::try_from(frame.offset).unwrap() - 5 + at]);
+    fs::write(&pair.pack, bytes).unwrap();
+}
+
 #[test]
 fn the_mark_checks_a_packed_chunk_by_its_head_and_hashes_none_of_it() {
     let (_dir, layout, store) = fresh();
@@ -2441,7 +2509,281 @@ fn an_id_reached_as_a_file_and_as_a_chunk_is_still_hashed() {
     }
 }
 
-fn cut_pack_short(pair: &Pair) {
+/// A ref whose tree lists each of `ids` as a file.
+fn files_root(store: &ObjectStore, layout: &RepoLayout, ids: &[Hash]) -> Hash {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    let entries = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| TreeEntry {
+            name: format!("f{n}").into_bytes(),
+            mode: EntryMode::Blob,
+            object_hash: *id,
+        })
+        .collect();
+    let root = store
+        .write(&serialize(&Object::Tree(Tree { entries })).unwrap())
+        .unwrap();
+    crate::refs::write_ref(layout, "files", &root).unwrap();
+    root
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    None,
+    Payload,
+    Prologue,
+    TypeTag,
+    FrameHeader,
+}
+
+/// The mark of the store at `layout`, through the one-read probe or the
+/// streaming probe: its result as text, and the bytes the probes hashed.
+fn marked(layout: &RepoLayout, streaming: bool) -> (String, u64) {
+    let gc = ObjectStore::open(layout).unwrap();
+    if streaming {
+        gc.gc_probe_streaming_only();
+    }
+    let result = crate::ops::gc::live_objects(&gc, layout);
+    (format!("{result:?}"), gc.gc_hashed_byte_count())
+}
+
+#[test]
+fn the_one_read_probe_marks_what_the_streaming_probe_marks() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    // A frame is ten bytes longer than its payload. These payloads put the
+    // frame below, at and above the largest frame the probe reads whole.
+    for payload in [0, 1, 4096, limit - 11, limit - 10, limit - 9, 3 * limit] {
+        for as_chunk in [false, true] {
+            for damage in [
+                Damage::None,
+                Damage::Payload,
+                Damage::Prologue,
+                Damage::TypeTag,
+                Damage::FrameHeader,
+            ] {
+                if payload == 0 && matches!(damage, Damage::Payload) {
+                    continue;
+                }
+                let (_dir, layout, store) = fresh();
+                let bytes = blob(&vec![0x5a; payload]);
+                let (pair, ids) = publish_objects(&store, &[&bytes]);
+                if as_chunk {
+                    manifest_root(&store, &layout, "chunked", &ids);
+                } else {
+                    files_root(&store, &layout, &ids);
+                }
+                match damage {
+                    Damage::None => {}
+                    Damage::Payload => damage_frame(&pair, &ids[0], 10 + payload / 2, |b| *b ^= 1),
+                    Damage::Prologue => damage_frame(&pair, &ids[0], 6, |b| *b ^= 1),
+                    Damage::TypeTag => damage_frame(&pair, &ids[0], 0, |b| *b = 0xee),
+                    Damage::FrameHeader => damage_header(&pair, &ids[0], 1, |b| *b ^= 1),
+                }
+
+                let streamed = marked(&layout, true);
+                let one_read = marked(&layout, false);
+                let case = format!("payload {payload}, chunk {as_chunk}, {damage:?}");
+                assert_eq!(one_read, streamed, "{case}");
+                // A chunk is checked by its head only, so a bad payload passes.
+                let passes = matches!(damage, Damage::None)
+                    || (as_chunk && matches!(damage, Damage::Payload));
+                assert_eq!(
+                    streamed.0.starts_with("Ok("),
+                    passes,
+                    "{case}: {}",
+                    streamed.0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_one_read_probe_answers_a_head_of_any_size_and_a_whole_frame_up_to_its_limit() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    // A frame is ten bytes longer than its payload. 4096 is a fixed size, so
+    // that a limit changed to another value moves the answer.
+    for payload in [0, 1, 4096, limit - 11, limit - 10, limit - 9, 3 * limit] {
+        for as_chunk in [false, true] {
+            let (_dir, layout, store) = fresh();
+            let bytes = blob(&vec![0x33; payload]);
+            let (_, ids) = publish_objects(&store, &[&bytes]);
+            if as_chunk {
+                manifest_root(&store, &layout, "chunked", &ids);
+            } else {
+                files_root(&store, &layout, &ids);
+            }
+
+            let gc = ObjectStore::open(&layout).unwrap();
+            crate::ops::gc::live_objects(&gc, &layout).unwrap();
+            // A chunk is probed by its head, so its frame is never too large.
+            // A file is hashed, so its frame is read whole only up to 16 KiB.
+            let whole = payload + 10 <= 16 * 1024;
+            let expected = u64::from(as_chunk || whole);
+            assert_eq!(
+                gc.gc_one_read_probe_count(),
+                expected,
+                "payload {payload}, chunk {as_chunk}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_packed_blob_above_the_one_read_limit_is_hashed_by_streaming() {
+    let limit = crate::store::GC_SMALL_FRAME;
+    for payload in [limit - 10, limit - 9] {
+        let (_dir, layout, store) = fresh();
+        let bytes = blob(&vec![7; payload]);
+        let (_, ids) = publish_objects(&store, &[&bytes]);
+        files_root(&store, &layout, &ids);
+
+        let gc = ObjectStore::open(&layout).unwrap();
+        crate::ops::gc::live_objects(&gc, &layout).unwrap();
+        assert_eq!(gc.gc_hashed_byte_count(), bytes.len() as u64);
+    }
+}
+
+#[test]
+fn a_delta_frame_in_a_local_pack_stops_the_mark_through_either_probe() {
+    for as_chunk in [false, true] {
+        let (_dir, layout, store) = fresh();
+        let (pair, ids) = publish_objects(&store, &[&blob(&[9; 64])]);
+        if as_chunk {
+            manifest_root(&store, &layout, "chunked", &ids);
+        } else {
+            files_root(&store, &layout, &ids);
+        }
+        // The type byte now names a delta, which a local pack never holds.
+        damage_frame(&pair, &ids[0], 0, |b| *b = 0x06);
+
+        let streamed = marked(&layout, true);
+        let one_read = marked(&layout, false);
+        assert_eq!(one_read, streamed, "chunk {as_chunk}");
+        assert!(
+            one_read.0.contains("delta object in local pack"),
+            "chunk {as_chunk}: {}",
+            one_read.0
+        );
+    }
+}
+
+#[test]
+fn the_one_read_probe_marks_non_blob_frames_as_the_streaming_probe_does() {
+    use crate::object::{EntryMode, Tree, TreeEntry};
+
+    // A tree is probed by its type and read afterwards. The frame is small
+    // enough to arrive whole, and no byte of it counts as hashed by the probe.
+    let (_dir, layout, store) = fresh();
+    let (_, ids) = publish_objects(&store, &[&blob(b"inner")]);
+    let inner = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"leaf".to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: ids[0],
+        }],
+    }))
+    .unwrap();
+    let (_, trees) = publish_objects(&store, &[&inner]);
+    let outer = serialize(&Object::Tree(Tree {
+        entries: vec![TreeEntry {
+            name: b"dir".to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: trees[0],
+        }],
+    }))
+    .unwrap();
+    let root = store.write(&outer).unwrap();
+    crate::refs::write_ref(&layout, "nested", &root).unwrap();
+
+    let streamed = marked(&layout, true);
+    let one_read = marked(&layout, false);
+    assert_eq!(one_read, streamed);
+    assert!(one_read.0.starts_with("Ok("), "{}", one_read.0);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_handle_limit_is_a_quarter_of_the_open_file_limit_within_its_bounds() {
+    use super::reader::{HANDLE_CEILING, HANDLE_FLOOR, handle_limit_for};
+
+    assert_eq!(handle_limit_for(0), HANDLE_FLOOR);
+    assert_eq!(handle_limit_for(256), HANDLE_FLOOR);
+    assert_eq!(handle_limit_for(1024), 256);
+    assert_eq!(handle_limit_for(2048), 512);
+    assert_eq!(handle_limit_for(1 << 20), HANDLE_CEILING);
+    assert_eq!(handle_limit_for(u64::MAX), HANDLE_CEILING);
+}
+
+#[test]
+fn a_full_handle_cache_drops_the_least_recently_used_file() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let locators: Vec<_> = (0..3_u8)
+        .map(|n| {
+            let (pair, _) = publish_objects(&store, &[&blob(&[n; 64])]);
+            Arc::new(Locator::open(&pair, 0, 0).unwrap())
+        })
+        .collect();
+    let handles = Handles::limited(2);
+    let a = handles.get(&locators[0], Member::Pack).unwrap();
+    let b = handles.get(&locators[1], Member::Pack).unwrap();
+    // A is used again, so B is the least recently used.
+    assert!(Arc::ptr_eq(
+        &a,
+        &handles.get(&locators[0], Member::Pack).unwrap()
+    ));
+    assert_eq!(handles.opens(), 2);
+
+    handles.get(&locators[2], Member::Pack).unwrap();
+    assert_eq!(handles.cached(), 2);
+    assert_eq!(Arc::strong_count(&b), 1, "the cache let go of B");
+    assert!(Arc::ptr_eq(
+        &a,
+        &handles.get(&locators[0], Member::Pack).unwrap()
+    ));
+    assert_eq!(handles.opens(), 3);
+
+    let reopened = handles.get(&locators[1], Member::Pack).unwrap();
+    assert!(!Arc::ptr_eq(&b, &reopened));
+    assert_eq!(handles.opens(), 4);
+    assert_eq!(handles.cached(), 2);
+}
+
+#[test]
+fn each_use_of_a_cached_file_makes_it_newer_than_every_use_before() {
+    use std::sync::Arc;
+
+    use super::reader::{Handles, Locator, Member};
+
+    let (_dir, _layout, store) = fresh();
+    let locators: Vec<_> = (0..2_u8)
+        .map(|n| {
+            let (pair, _) = publish_objects(&store, &[&blob(&[n; 64])]);
+            Arc::new(Locator::open(&pair, 0, 0).unwrap())
+        })
+        .collect();
+    let handles = Handles::limited(8);
+    let used = |n: usize| handles.used(&locators[n], Member::Pack).unwrap();
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    let first = used(0);
+    handles.get(&locators[1], Member::Pack).unwrap();
+    let second = used(1);
+    assert!(second > first, "a file opened later is newer");
+
+    handles.get(&locators[0], Member::Pack).unwrap();
+    assert!(used(0) > second, "a hit makes the file the newest");
+    assert_eq!(used(1), second, "and leaves the others as they were");
+    assert_eq!(handles.used(&locators[0], Member::Index), None);
+}
+
+pub(super) fn cut_pack_short(pair: &Pair) {
     let cut = fs::metadata(&pair.pack).unwrap().len() - 100;
     fs::OpenOptions::new()
         .write(true)
@@ -2589,4 +2931,603 @@ fn the_seal_limits_are_the_fetch_window_and_fit_the_pack_format() {
     assert_eq!(super::PACK_SEAL_ENTRIES, 65_536);
     assert!(super::PACK_SEAL_BYTES as u64 <= MAX_TOTAL_PAYLOAD);
     assert!(super::PACK_SEAL_ENTRIES <= MAX_ENTRIES as usize);
+}
+
+/// Hand-built pair holding `objects` as `(id, bytes)`. The ids need not be
+/// the hashes of the bytes unless a test reads the objects back.
+fn hand_pack(dir: &std::path::Path, objects: &[(Hash, Vec<u8>)]) -> Pair {
+    let mut objects = objects.to_vec();
+    objects.sort_by_key(|(id, _)| *id);
+    objects.dedup_by_key(|(id, _)| *id);
+    let mut pack = crate::pack::MAGIC.to_vec();
+    pack.extend_from_slice(&1_u32.to_le_bytes());
+    pack.extend_from_slice(&u32::try_from(objects.len()).unwrap().to_le_bytes());
+    let mut rows = Vec::new();
+    for (id, bytes) in &objects {
+        let len = u32::try_from(bytes.len()).unwrap();
+        pack.push(0);
+        pack.extend_from_slice(&len.to_le_bytes());
+        rows.push((
+            *id,
+            index::Frame {
+                offset: pack.len() as u64,
+                len,
+            },
+        ));
+        pack.extend_from_slice(bytes);
+    }
+    let trailer = blake3::hash(&pack);
+    pack.extend_from_slice(trailer.as_bytes());
+    let key = *blake3::hash(&pack).as_bytes();
+    let pair = Pair::new(dir, key);
+    fs::write(&pair.pack, pack).unwrap();
+    fs::write(&pair.index, index::encode(key, &rows)).unwrap();
+    pair
+}
+
+/// A packed store whose pairs hold the blobs `sets` name, a blob per byte.
+fn packed_store(sets: &[Vec<u8>]) -> (tempfile::TempDir, RepoLayout, Vec<Pair>) {
+    let (dir, layout, store) = fresh();
+    let packs = store.pack_dir();
+    fs::create_dir(&packs).unwrap();
+    store.try_activate_local_packs().unwrap();
+    let pairs = sets
+        .iter()
+        .map(|set| {
+            let objects: Vec<_> = set.iter().map(|&n| packed_blob(n)).collect();
+            hand_pack(&packs, &objects)
+        })
+        .collect();
+    (dir, layout, pairs)
+}
+
+fn packed_blob(n: u8) -> (Hash, Vec<u8>) {
+    let bytes = blob(&[n, 7]);
+    (index::canonical_id(&bytes).unwrap(), bytes)
+}
+
+/// The pack that serves `id`, or the debug text of the failure.
+fn serving_pack(store: &ObjectStore, id: &Hash) -> Result<std::path::PathBuf, String> {
+    store
+        .packs
+        .lookup(store, id, true, |location| {
+            if matches!(location, super::Location::Loose(_)) {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+            }
+            Ok(location.path().to_path_buf())
+        })
+        .map_err(|error| format!("{error:?}"))
+}
+
+fn next(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn is_lazy(store: &ObjectStore) -> bool {
+    store.packs.discovery.lock().unwrap().catalog.lazy
+}
+
+#[test]
+fn lazy_full_and_promoted_catalogs_return_the_same_location_for_every_id() {
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    // Duplicates across pairs, empty pairs and ids that no pair holds.
+    let sets: Vec<Vec<u8>> = (0..14)
+        .map(|n| {
+            let size = if n == 3 { 0 } else { 1 + next(&mut state) % 30 };
+            (0..size)
+                .map(|_| u8::try_from(next(&mut state) % 60).unwrap())
+                .collect()
+        })
+        .collect();
+    let (_dir, layout, _pairs) = packed_store(&sets);
+    let ids: Vec<_> = (0..=255).map(|n| packed_blob(n).0).collect();
+
+    let open = |full: bool, budgets: Option<(usize, usize)>| {
+        let store = ObjectStore::open(&layout).unwrap();
+        let mut discovery = store.packs.discovery.lock().unwrap();
+        discovery.full = full;
+        discovery.budgets = budgets;
+        drop(discovery);
+        store
+    };
+    let lazy = open(false, None);
+    let full = open(true, None);
+    let prefixes = open(true, Some((0, usize::MAX)));
+    let on_disk = open(true, Some((0, 0)));
+    let promoted = open(false, None);
+    // Spend the probe budget on misses so the next lookups promote.
+    for _ in 0..super::LAZY_PROBE_BUDGET {
+        let _ = promoted.check_presence(&[0xff; 32]);
+    }
+    promoted.check_presence(&ids[0]).ok();
+    assert!(promoted.packs.discovery.lock().unwrap().full);
+    assert!(!is_lazy(&promoted));
+
+    serving_pack(&lazy, &ids[0]).ok();
+    assert!(is_lazy(&lazy));
+    for (at, id) in ids.iter().enumerate() {
+        if at == 60 {
+            // Every object that a pair holds was answered by probing.
+            assert!(is_lazy(&lazy));
+        }
+        let expected = serving_pack(&full, id);
+        for (name, store) in [
+            ("lazy", &lazy),
+            ("prefixes", &prefixes),
+            ("on disk", &on_disk),
+            ("promoted", &promoted),
+        ] {
+            assert_eq!(serving_pack(store, id), expected, "{name} {id:?}");
+        }
+        assert_eq!(
+            lazy.check_presence(id).is_ok(),
+            expected.is_ok(),
+            "presence {id:?}"
+        );
+    }
+    assert!(!is_lazy(&full));
+}
+
+#[test]
+fn a_catalog_stays_lazy_up_to_the_pair_limit_and_loads_rows_above_it() {
+    let limit = u8::try_from(super::LAZY_PAIR_LIMIT).unwrap();
+    let sets: Vec<Vec<u8>> = (0..limit).map(|n| vec![n]).collect();
+    let (_dir, layout, _pairs) = packed_store(&sets);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(reader.check_presence(&packed_blob(0).0).is_ok());
+    {
+        let discovery = reader.packs.discovery.lock().unwrap();
+        assert!(discovery.catalog.lazy && !discovery.full);
+        assert!(discovery.catalog.routes.is_empty());
+        assert_eq!(discovery.catalog.on_disk.len(), sets.len());
+    }
+    // Index and pack handles of every pair fit the cache together.
+    for n in 0..limit {
+        assert!(reader.check_presence(&packed_blob(n).0).is_ok());
+    }
+    // No handle was opened twice, so the cache held every member.
+    assert!(reader.packs.handles.opens() <= 2 * sets.len());
+
+    // One more pair crosses the limit, and every pair loads its rows.
+    hand_pack(&reader.pack_dir(), &[packed_blob(200)]);
+    assert!(reader.check_presence(&packed_blob(200).0).is_ok());
+    let discovery = reader.packs.discovery.lock().unwrap();
+    assert!(discovery.full && !discovery.catalog.lazy);
+    assert_eq!(discovery.catalog.routes.len(), sets.len() + 1);
+    assert!(discovery.catalog.on_disk.is_empty());
+}
+
+#[test]
+fn a_write_session_gets_the_routes() {
+    let (_dir, layout, _pairs) = packed_store(&[vec![1, 2], vec![3]]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(reader.check_presence(&packed_blob(1).0).is_ok());
+    assert!(is_lazy(&reader));
+    let (_guard, catalog) = reader.discover_write_packs().unwrap();
+    assert!(!catalog.lazy);
+    assert_eq!(catalog.routes.len(), 3);
+    assert!(!catalog.may_contain(&packed_blob(99).0));
+}
+
+#[test]
+fn a_command_promotes_the_catalog_in_the_middle_of_its_lookups() {
+    let (_dir, layout, _pairs) = packed_store(&[vec![1, 2], vec![2, 3], vec![4]]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    let mut promoted_at = None;
+    for round in 0..super::LAZY_PROBE_BUDGET {
+        // Misses probe every pair. Hits keep returning the right bytes.
+        assert!(matches!(
+            reader.read(&[0xee; 32]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        for n in [1, 2, 3, 4] {
+            let (id, bytes) = packed_blob(n);
+            assert_eq!(reader.read(&id).unwrap(), bytes);
+        }
+        if promoted_at.is_none() && !is_lazy(&reader) {
+            promoted_at = Some(round);
+        }
+    }
+    assert!(promoted_at.is_some_and(|round| round > 0));
+    assert_eq!(
+        reader.packs.discovery.lock().unwrap().catalog.routes.len(),
+        5
+    );
+}
+
+#[test]
+fn a_pair_retired_after_a_lazy_probe_goes_stale_and_is_found_elsewhere() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2], vec![2, 3]]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    for n in [1, 2, 3] {
+        assert!(reader.check_presence(&packed_blob(n).0).is_ok());
+    }
+    assert!(is_lazy(&reader));
+    let first = serving_pack(&reader, &packed_blob(2).0).unwrap();
+    let retired = pairs.iter().find(|pair| pair.pack == first).unwrap();
+    let other = pairs.iter().find(|pair| pair.pack != first).unwrap();
+    fs::remove_file(&retired.pack).unwrap();
+    fs::remove_file(&retired.index).unwrap();
+
+    assert_eq!(
+        serving_pack(&reader, &packed_blob(2).0).unwrap(),
+        other.pack
+    );
+    let only_there = if retired.pack == pairs[0].pack { 1 } else { 3 };
+    assert!(matches!(
+        reader.read(&packed_blob(only_there).0),
+        Err(StoreError::ObjectNotFound(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_or_irregular_member_hides_its_pair_without_damage() {
+    for full in [false, true] {
+        let (dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3], vec![4]]);
+        let (linked, directory, healthy, pipe) = (&pairs[0], &pairs[1], &pairs[2], &pairs[3]);
+        let elsewhere = dir.path().join("elsewhere.idx");
+        fs::rename(&linked.index, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &linked.index).unwrap();
+        fs::remove_file(&directory.pack).unwrap();
+        fs::create_dir(&directory.pack).unwrap();
+        // Opening a pipe for reading would wait for a writer.
+        fs::remove_file(&pipe.index).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe.index)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let reader = ObjectStore::open(&layout).unwrap();
+        reader.packs.discovery.lock().unwrap().full = full;
+        for n in [1, 2, 4] {
+            assert!(
+                matches!(
+                    reader.read(&packed_blob(n).0),
+                    Err(StoreError::ObjectNotFound(_))
+                ),
+                "full {full}, object {n}"
+            );
+        }
+        assert_eq!(
+            serving_pack(&reader, &packed_blob(3).0).unwrap(),
+            healthy.pack
+        );
+        let discovery = reader.packs.discovery.lock().unwrap();
+        assert!(discovery.catalog.error.is_none());
+        assert_eq!(discovery.catalog.packs.len(), 1);
+    }
+}
+
+#[test]
+fn damage_to_an_index_header_or_fanout_reads_the_same_in_every_catalog_mode() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
+    let mut bytes = fs::read(&pairs[0].index).unwrap();
+    let mut damaged = bytes.clone();
+    // The first fanout entry says more ids than the pack holds.
+    damaged[12..16].copy_from_slice(&200_u32.to_le_bytes());
+    fs::write(&pairs[0].index, &damaged).unwrap();
+
+    let mut errors = Vec::new();
+    for full in [false, true] {
+        let reader = ObjectStore::open(&layout).unwrap();
+        reader.packs.discovery.lock().unwrap().full = full;
+        let error = reader.check_presence(&packed_blob(1).0).unwrap_err();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("repair-indexes"), "{error}");
+        errors.push(error.to_string());
+        let miss = reader.check_presence(&packed_blob(90).0).unwrap_err();
+        assert_eq!(miss.to_string(), error.to_string());
+    }
+    assert_eq!(errors[0], errors[1]);
+
+    bytes[0] ^= 1;
+    fs::write(&pairs[0].index, &bytes).unwrap();
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(matches!(
+        reader.check_presence(&packed_blob(1).0),
+        Err(StoreError::LocalPackDamaged { .. })
+    ));
+}
+
+#[test]
+fn a_shard_listing_matches_the_full_listing_in_every_catalog_mode() {
+    let mut state = 0x1234_5678_9abc_def1;
+    let sets: Vec<Vec<u8>> = (0..6)
+        .map(|_| {
+            (0..40)
+                .map(|_| u8::try_from(next(&mut state) % 90).unwrap())
+                .collect()
+        })
+        .collect();
+    let (_dir, layout, _pairs) = packed_store(&sets);
+    let reference = ObjectStore::open(&layout)
+        .unwrap()
+        .iter_object_hashes()
+        .unwrap();
+    assert!(!reference.is_empty());
+    for (full, budgets) in [
+        (false, None),
+        (true, None),
+        (true, Some((0, usize::MAX))),
+        (true, Some((0, 0))),
+    ] {
+        let reader = ObjectStore::open(&layout).unwrap();
+        {
+            let mut discovery = reader.packs.discovery.lock().unwrap();
+            discovery.full = full;
+            discovery.budgets = budgets;
+        }
+        let mut listed = Vec::new();
+        for shard in 0..=255 {
+            let ids = reader.list_shard(shard).unwrap();
+            assert!(ids.iter().all(|id| id[0] == shard));
+            listed.extend(ids);
+        }
+        assert_eq!(listed, reference, "full {full} budgets {budgets:?}");
+    }
+}
+
+#[test]
+fn a_shard_listing_checks_an_index_like_a_lookup_and_the_scans_still_check_the_checksum() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
+    let mut bytes = fs::read(&pairs[0].index).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    fs::write(&pairs[0].index, &bytes).unwrap();
+
+    let reader = ObjectStore::open(&layout).unwrap();
+    let id = packed_blob(1).0;
+    assert_eq!(reader.list_shard(id[0]).unwrap(), [id]);
+    assert!(reader.check_local_packs(false).is_err());
+    assert!(reader.iter_object_hashes().is_err());
+
+    // Damage that a lookup would report fails the listing too.
+    bytes[0] ^= 1;
+    fs::write(&pairs[0].index, &bytes).unwrap();
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert!(matches!(
+        reader.list_shard(id[0]),
+        Err(StoreError::LocalPackDamaged { .. })
+    ));
+}
+
+#[test]
+fn a_repaired_pair_loads_again_in_a_lazy_catalog() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2], vec![3]]);
+    let reader = ObjectStore::open(&layout).unwrap();
+    for n in [1, 2, 3] {
+        assert!(reader.check_presence(&packed_blob(n).0).is_ok());
+    }
+    assert!(is_lazy(&reader));
+    let before = reader.packs.discovery.lock().unwrap().catalog.packs.clone();
+    // Damage the index body so the checksum fails, then repair it in place.
+    let mut bytes = fs::read(&pairs[0].index).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    fs::write(&pairs[0].index, &bytes).unwrap();
+    assert_eq!(reader.check_local_packs(true).unwrap(), 1);
+
+    assert!(reader.check_presence(&packed_blob(1).0).is_ok());
+    let after = reader.packs.discovery.lock().unwrap().catalog.packs.clone();
+    let key = |packs: &[std::sync::Arc<super::Locator>]| {
+        packs
+            .iter()
+            .find(|pack| pack.pair.key == pairs[0].key)
+            .map(std::sync::Arc::as_ptr)
+    };
+    assert_ne!(key(&before), key(&after));
+}
+
+#[test]
+fn routes_come_out_in_prefix_then_pair_order_with_ties_and_crowded_buckets() {
+    use super::reader::Locator;
+
+    let mut state = 7;
+    let mut id = |lead: &[u8]| {
+        let mut id = [0; 32];
+        for byte in &mut id {
+            *byte = u8::try_from(next(&mut state) % 256).unwrap();
+        }
+        id[..lead.len()].copy_from_slice(lead);
+        id
+    };
+    for (name, leads) in [
+        ("spread", vec![vec![], vec![], vec![]]),
+        ("one bucket", vec![vec![0xab, 0xcd]]),
+        ("one prefix", vec![vec![1, 2, 3, 4]]),
+        ("two prefixes", vec![vec![9, 9, 9, 1], vec![9, 9, 9, 2]]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let locators: Vec<_> = (0..5)
+            .map(|_| {
+                let objects: Vec<_> = (0..300)
+                    .map(|n| {
+                        let lead = &leads[n % leads.len()];
+                        (id(lead), vec![0; 6])
+                    })
+                    .collect();
+                let pair = hand_pack(dir.path(), &objects);
+                std::sync::Arc::new(Locator::open(&pair, usize::MAX, usize::MAX).unwrap())
+            })
+            .collect();
+        let mut expected: Vec<_> = locators
+            .iter()
+            .enumerate()
+            .flat_map(|(pack, locator)| {
+                locator.prefixes().enumerate().map(move |(row, prefix)| {
+                    (
+                        prefix,
+                        u32::try_from(pack).unwrap(),
+                        u32::try_from(row).unwrap(),
+                    )
+                })
+            })
+            .collect();
+        expected.sort_unstable();
+        let routes = super::sorted_routes(&locators);
+        assert!(
+            routes
+                .windows(2)
+                .all(|w| (w[0].prefix, w[0].pack) <= (w[1].prefix, w[1].pack)),
+            "{name}"
+        );
+        let mut got: Vec<_> = routes.iter().map(|r| (r.prefix, r.pack, r.row)).collect();
+        got.sort_unstable();
+        assert_eq!(got, expected, "{name}");
+    }
+}
+
+#[test]
+fn a_bad_first_copy_gives_way_to_a_good_one_and_errors_rank_the_same_in_every_mode() {
+    let (id, bytes) = packed_blob(9);
+    let decoy = (id, blob(b"not the object"));
+    // The cut copy needs `id` as its first frame.
+    let filler = (10..=255)
+        .map(packed_blob)
+        .find(|(other, _)| *other > id)
+        .unwrap();
+    // A copy whose frame length disagrees with its index.
+    let cut = |dir: &std::path::Path| {
+        let pair = hand_pack(dir, &[(id, bytes.clone()), filler.clone()]);
+        let mut pack = fs::read(&pair.pack).unwrap();
+        pack[crate::pack::HEADER_LEN + 1] ^= 1;
+        fs::write(&pair.pack, pack).unwrap();
+        pair
+    };
+    // Pairs are probed in key order: the good copy must come after the bad ones.
+    let good = |dir: &std::path::Path, after: &[Hash]| {
+        for n in 11..=255 {
+            let pair = hand_pack(dir, &[(id, bytes.clone()), packed_blob(n)]);
+            if after.iter().all(|key| *key < pair.key) {
+                return;
+            }
+            fs::remove_file(&pair.pack).unwrap();
+            fs::remove_file(&pair.index).unwrap();
+        }
+        panic!("no good copy sorts after the bad ones");
+    };
+    let mut by_mode = Vec::new();
+    for full in [false, true] {
+        let mut outcomes = Vec::new();
+        for (decoys, cuts, good_copy) in [
+            (true, false, true),
+            (true, true, true),
+            (true, false, false),
+            (true, true, false),
+            (false, true, false),
+        ] {
+            let (_dir, layout, store) = fresh();
+            let dir = store.pack_dir();
+            fs::create_dir(&dir).unwrap();
+            store.try_activate_local_packs().unwrap();
+            let mut bad = Vec::new();
+            if decoys {
+                bad.push(hand_pack(&dir, std::slice::from_ref(&decoy)).key);
+            }
+            if cuts {
+                bad.push(cut(&dir).key);
+            }
+            if good_copy {
+                good(&dir, &bad);
+            }
+            let reader = ObjectStore::open(&layout).unwrap();
+            reader.packs.discovery.lock().unwrap().full = full;
+            outcomes.push(match reader.read(&id) {
+                Ok(read) => format!("ok {}", read == bytes),
+                Err(error) => format!("{error:?}")
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric())
+                    .collect(),
+            });
+        }
+        by_mode.push(outcomes);
+    }
+    assert_eq!(by_mode[0], by_mode[1]);
+    assert_eq!(
+        by_mode[0],
+        [
+            "ok true",
+            "ok true",
+            "HashMismatch",
+            // A mismatch outranks the damage of another copy.
+            "HashMismatch",
+            "LocalPackDamaged",
+        ]
+    );
+}
+
+/// Hands out its bytes a few at a time, after one interrupted call.
+struct Trickle {
+    bytes: Vec<u8>,
+    interrupted: bool,
+    failure: Option<std::io::ErrorKind>,
+}
+
+impl std::io::Read for Trickle {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(kind) = self.failure {
+            return Err(kind.into());
+        }
+        if !std::mem::replace(&mut self.interrupted, true) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let len = buffer.len().min(self.bytes.len()).min(3);
+        buffer[..len].copy_from_slice(&self.bytes[..len]);
+        self.bytes.drain(..len);
+        Ok(len)
+    }
+}
+
+#[test]
+fn a_vectored_read_fills_every_buffer_across_short_and_interrupted_reads() {
+    use std::io::IoSliceMut;
+
+    let fill = |reader: &mut Trickle| {
+        let (mut head, mut rows, mut empty, mut tail) = ([0; 4], vec![0; 7], [0; 0], [0; 5]);
+        let result = super::reader::read_exact_vectored(
+            reader,
+            &mut [
+                IoSliceMut::new(&mut head),
+                IoSliceMut::new(&mut rows),
+                IoSliceMut::new(&mut empty),
+                IoSliceMut::new(&mut tail),
+            ],
+        );
+        (result, [head.to_vec(), rows, tail.to_vec()].concat())
+    };
+    let bytes: Vec<u8> = (1..=16).collect();
+    let mut reader = Trickle {
+        bytes: bytes.clone(),
+        interrupted: false,
+        failure: None,
+    };
+    let (result, filled) = fill(&mut reader);
+    result.unwrap();
+    assert_eq!(filled, bytes);
+
+    let mut short = Trickle {
+        bytes: bytes[..9].to_vec(),
+        interrupted: false,
+        failure: None,
+    };
+    let error = fill(&mut short).0.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+
+    let mut broken = Trickle {
+        bytes,
+        interrupted: false,
+        failure: Some(std::io::ErrorKind::PermissionDenied),
+    };
+    let error = fill(&mut broken).0.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }

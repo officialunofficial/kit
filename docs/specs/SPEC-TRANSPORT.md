@@ -1157,6 +1157,17 @@ that ledger.
 same bytes produces the same digest and is a no-op on the server
 side).
 
+A transport stores a pack whole or not at all: a file or ssh remote renames
+a finished temporary file into place, and an S3 `PUT` takes effect when it
+completes. A pack key is the digest of the pack's bytes, so `pack_exists`
+true names a complete pack with those bytes. A push to a remote that issues
+no upload tickets (S3, file, ssh) therefore checks a sealed pack of 8 MiB or
+more with `pack_exists` first and does not upload one the remote holds; a
+re-run of a failed push sends only the packs it missed. A check that fails
+for any reason counts as "not stored", and the push uploads. Kit deletes no
+pack on these remotes, so no cleanup can run between the check and the ref
+write.
+
 `download_pack` and `pack_exists` are pure reads; no idempotency
 concerns.
 

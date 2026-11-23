@@ -34,7 +34,7 @@ mod soft;
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub use maintenance::fuzz_maintenance_stamp;
-pub use maintenance::{Collection, MaintenanceReport, maintain_packs};
+pub use maintenance::{Collection, MaintenanceReport, maintain_packs, maintain_packs_after_write};
 
 /// Basename of the advisory stamp and lock for automatic maintenance.
 #[doc(hidden)]
@@ -805,6 +805,8 @@ pub struct GcReport {
     pub packs_rewritten: usize,
     /// Small packs merged into larger ones by copy-then-retire.
     pub packs_merged: usize,
+    /// New packs that copy-then-retire published.
+    pub packs_written: usize,
     /// Packs retired with no copy, because a pair that stays holds a verified
     /// copy of every entry the pack must keep.
     pub packs_retired_covered: usize,
@@ -821,10 +823,18 @@ pub struct GcReport {
     /// Why copy-then-retire stopped, such as a full disk. Gc kept every pack it
     /// meant to copy and went on with the rest of the run.
     pub pack_copy_error: Option<String>,
+    /// Retirement could not take the exclusive `format` lock, because a
+    /// fetch, push or add held it, so it stopped before the rest of its
+    /// batches. Earlier batches stay done. Survivors that gc already copied
+    /// stay as duplicates, and the next gc retires what is left.
+    pub pack_retirement_cut_short: bool,
     /// Milliseconds that pack retirement held the exclusive `format` lock,
-    /// from the successful try to the release; the longest hold if the run
-    /// took it more than once. A writer that starts then waits that long.
+    /// from the successful try to the release; the longest of the holds. A
+    /// writer that starts then waits that long.
     pub retire_hold_ms: u64,
+    /// How many exclusive holds retirement took: one per batch of at most 32
+    /// items (SPEC-GC).
+    pub retire_batches: usize,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,
 }

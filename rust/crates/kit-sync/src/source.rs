@@ -72,6 +72,13 @@ pub trait RemoteSource {
         let _ = (key, hint);
         Ok(false)
     }
+    /// The length of the pack stored under `key`, when the source can read
+    /// it without fetching the pack; `None` when the pack is not stored or
+    /// the length is not known. One attempt, never a retry ladder.
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        let _ = (key, hint);
+        Ok(None)
+    }
     /// Upload a sealed pack using the head ref as its authorization hint.
     /// A retry reads `pack` again from its start.
     fn upload_pack(
@@ -247,6 +254,9 @@ impl RemoteSource for TransportSource<'_> {
         self.transport
             .pack_exists(key, Some(hint))
             .map_err(Into::into)
+    }
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        self.transport.pack_len(key, Some(hint)).map_err(Into::into)
     }
     fn supports_attestations(&self) -> bool {
         self.transport.supports_attestations()

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use kit_core::layout::{DiscoverError, RepoLayout};
 use kit_core::ops::gc::AUTO_MAINTENANCE_STAMP;
-use kit_core::refs::{self, RefError};
+use kit_core::refs::{self, BRANCH_HISTORY_DIR, RefError};
 use kit_core::store::{ObjectStore, StoreError};
 
 use crate::SyncOptions;
@@ -101,16 +101,13 @@ const UNFINISHED_CLONE_ENTRIES: [&str; 9] = [
     "attestations",
     "config",
     "format",
+    // A build with history records writes it beside a branch. A clone
+    // interrupted once it made its branch undoes the branch but leaves it.
     BRANCH_HISTORY_DIR,
     "objects",
     "refs",
     "tmp",
 ];
-
-/// The branch history a build with history records writes beside a branch.
-/// A clone interrupted once it made its branch undoes the branch but leaves
-/// this; a restart drops it.
-const BRANCH_HISTORY_DIR: &str = "history-v1";
 
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
 /// it made a branch or landed `HEAD`, or undid both: `dir` holds only the repository

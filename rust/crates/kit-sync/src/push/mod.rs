@@ -10,7 +10,7 @@ use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashSet;
 use std::path::Path;
 mod attestations;
 mod delete;
@@ -39,17 +39,12 @@ struct PreparedPlan {
     force: Option<force::Snapshot>,
 }
 
-/// The object shards of one pack: the first byte of the id of every object
-/// the pack carries. Each such object lives in the loose shard directory of
-/// that name or in a local pack, whose directory is flushed with them.
-type PackShards = BTreeSet<u8>;
-
 #[derive(Default)]
 struct PushRecord {
-    /// Packs uploaded and checked, with their shards.
-    checked: HashMap<Hash, PackShards>,
-    /// Checked packs a ref now names, with their shards.
-    advanced: Vec<(PackKey, PackShards)>,
+    /// Packs uploaded and checked.
+    checked: HashSet<Hash>,
+    /// Checked packs a ref now names.
+    advanced: Vec<PackKey>,
 }
 
 /// What the entries of one pack under construction carry, gathered for the
@@ -59,15 +54,11 @@ struct PackEntries {
     /// The commits, remixes and tags, with a bound of their size: checked
     /// after the upload.
     signed: Vec<(Hash, u32)>,
-    /// The shards of every object in the pack, whatever its kind and whether
-    /// it is a raw entry or the target of a delta.
-    shards: PackShards,
 }
 
 impl PackEntries {
     fn clear(&mut self) {
         self.signed.clear();
-        self.shards.clear();
     }
 }
 
@@ -124,43 +115,30 @@ impl PushContext<'_> {
         if let Some(record) = &self.record {
             let mut record = record.borrow_mut();
             for key in keys {
-                if let Some(shards) = record.checked.remove(&key) {
-                    record.advanced.push((PackKey::from_hash(key), shards));
+                if record.checked.remove(&key) {
+                    record.advanced.push(PackKey::from_hash(key));
                 }
             }
         }
     }
 
-    fn persist_advances(
-        &self,
-        store: &ObjectStore,
-        layout: &kit_core::layout::RepoLayout,
-        remote: &str,
-    ) {
+    fn persist_advances(&self, layout: &kit_core::layout::RepoLayout, remote: &str) {
         let Some(record) = &self.record else {
             return;
         };
         let mut record = record.borrow_mut();
-        // The record tells the next fetch that these packs' objects are in
-        // this store, so it can skip them. A visible object's bytes are
-        // durable, but the directory entry of a loose object another process
-        // renamed into place may not be (SPEC-OBJECTS §10.1), and nor may the
-        // pack pair of a packed one. Those entries are the objects of the
-        // advanced packs: each is in the shard directory its id starts with,
-        // or in the pack directory, which `sync_shards` flushes with any
-        // shard of a packed store. Nothing else this push read is named by
-        // the record, so no other directory is flushed.
-        let shards: PackShards = record
-            .advanced
-            .iter()
-            .flat_map(|(_, shards)| shards.iter().copied())
-            .collect();
-        if record.advanced.is_empty() || store.sync_shards(shards).is_err() {
+        if record.advanced.is_empty() {
             return;
         }
+        // The record tells the next fetch that these packs' objects are in
+        // this store, so it can skip them. Every object a pack carries is
+        // reachable from a ref this push published or read, and a ref only
+        // names objects whose bytes and locations are durable
+        // (SPEC-OBJECTS §10.1), so the record needs no flush of the object
+        // directories before it is written.
         let mut applied =
             crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
-        for (key, _) in record.advanced.drain(..) {
+        for key in record.advanced.drain(..) {
             if let Err(error) = applied.record_applied(&key) {
                 self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
                     remote: remote.to_owned(),
@@ -331,7 +309,7 @@ pub fn push(
         // never names a tip gc removed (see `ObjectStore::prune_guard`).
         let _prune_guard = store.prune_guard()?;
         let result = push_refs(&layout, &store, &tx, options);
-        tx.persist_advances(&store, &layout, options.remote_name);
+        tx.persist_advances(&layout, options.remote_name);
         result?
     };
     if options.attestations {
@@ -1216,20 +1194,20 @@ fn build_and_upload_packs(
         |writer, ticketed, entries| {
             let spooled = writer.finish_spool()?;
             let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
-            tx.upload_pack(&spooled, &PackKey::from_hash(spooled.key()), head_ref)
-                .map_err(|error| repository_operation_error(tx, error))?;
-            // Upload is complete — report the real byte count handed to the
-            // transport, not an estimate.
-            tx.observer.event(&SyncEvent::PackUploaded {
-                bytes: spooled.len(),
-            });
+            let key = PackKey::from_hash(spooled.key());
+            if !already_stored(tx, &key, spooled.len(), head_ref, limits) {
+                tx.upload_pack(&spooled, &key, head_ref)
+                    .map_err(|error| repository_operation_error(tx, error))?;
+                // Upload is complete — report the real byte count handed to
+                // the transport, not an estimate.
+                tx.observer.event(&SyncEvent::PackUploaded {
+                    bytes: spooled.len(),
+                });
+            }
             if let Some(record) = &tx.record
                 && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
             {
-                record
-                    .borrow_mut()
-                    .checked
-                    .insert(spooled.key(), entries.shards.clone());
+                record.borrow_mut().checked.insert(spooled.key());
             }
             pack_keys.push(spooled.key());
             Ok(is_ticketed)
@@ -1241,6 +1219,37 @@ fn build_and_upload_packs(
         tx.observer,
     )?;
     Ok(pack_keys)
+}
+
+/// Sealed packs smaller than this go straight to the upload, with no
+/// existence check: the common one-commit push makes no extra request, and a
+/// small pack costs less to send again than to ask about.
+const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
+
+/// Whether the remote already holds the sealed pack `key` of `len` bytes, so
+/// the upload can be skipped. A pack key is the hash of the pack's bytes, and
+/// every transport that is not ticketed stores a pack whole or not at all (a
+/// file or ssh remote renames a finished temp file into place, an S3 `PUT`
+/// takes effect when it completes), so a key that is there with the length
+/// of the local pack names a complete pack and a re-run of an interrupted
+/// push sends only the packs it missed. A key whose stored length differs, as
+/// a damaged or truncated file would give, is not that pack: the push
+/// uploads over it, and never publishes a ref over a pack the remote does
+/// not fully hold. The length is the test, not a hash of the stored bytes: a
+/// pack damaged in place at its own length is not caught here. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
+/// a remote that issues no upload tickets is checked, with one request that
+/// is not retried. Any answer but a stored length equal to `len`, an error
+/// and an unknown length included, is "not stored": the push uploads.
+fn already_stored(
+    tx: &PushContext<'_>,
+    key: &PackKey,
+    len: u64,
+    head_ref: &str,
+    limits: UploadLimits,
+) -> bool {
+    limits.data_packs_per_advance.is_none()
+        && len >= STORED_PACK_CHECK_MIN_BYTES
+        && tx.pack_len(key, head_ref).ok().flatten() == Some(len)
 }
 
 /// The exact seal of `plan` that [`build_and_upload_packs`] would make, with
@@ -1354,7 +1363,6 @@ fn build_packs<W: std::io::Write>(
                     &mut entries,
                 )?;
             }
-            entries.shards.insert(entry.hash()[0]);
             if signs {
                 entries.signed.push((
                     entry.hash(),
@@ -1383,13 +1391,9 @@ fn build_packs<W: std::io::Write>(
     let mut start = 0;
     for len in size_capped_batch_lens(&delta_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk: Vec<transfer::PlannedDelta> = deltas.drain(..len).collect();
-        let targets: Vec<u8> = chunk.iter().map(|delta| delta.target[0]).collect();
         let parallel = batch_fans_out(len, delta_sizes[start..start + len].iter().sum());
         start += len;
-        for (at, entry) in prepare_delta_batch(chunk, parallel)?
-            .into_iter()
-            .enumerate()
-        {
+        for entry in prepare_delta_batch(chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(&w),
@@ -1403,7 +1407,6 @@ fn build_packs<W: std::io::Write>(
                     &mut entries,
                 )?;
             }
-            entries.shards.insert(targets[at]);
             w.push_prepared_delta(entry)?;
             report_packed(kind, observer);
         }
@@ -1925,6 +1928,91 @@ mod tests {
         assert_eq!(sent, expected);
         let expected_keys: Vec<Hash> = expected.iter().map(|p| pack::pack_key(p)).collect();
         assert_eq!(keys, expected_keys);
+    }
+
+    #[test]
+    fn a_stored_pack_is_skipped_only_at_its_own_length_from_the_check_size_on_a_remote_with_no_tickets()
+     {
+        use kit_core::protocol::Transport as _;
+        let remote = kit_transport_memory::MemoryTransport::new();
+        let source = crate::source::TransportSource::new(&remote);
+        let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+        let key = PackKey::new([7; 32]);
+        let ticketed = UploadLimits {
+            data_packs_per_advance: Some(4),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        let none = UploadLimits::default();
+        let check = |len, limits| already_stored(&tx, &key, len, "refs/heads/main", limits);
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+
+        // Not stored: every size uploads.
+        assert!(!check(min, none));
+        // A short pack under the key, whatever the local length, uploads.
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
+        assert!(!check(min, none));
+        assert!(!check(min + 1, none));
+        // The whole pack is there: skipped, from the check size on.
+        let whole = vec![0u8; usize::try_from(min).unwrap()];
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(&whole), &key, None)
+            .unwrap();
+        assert!(check(min, none));
+        // A longer or shorter pack under the key is not the local pack.
+        assert!(!check(min + 1, none));
+        assert!(!check(min - 1, none));
+        // A ticketed remote is never asked.
+        assert!(!check(min, ticketed));
+    }
+
+    #[test]
+    fn a_stored_pack_of_unknown_length_or_a_failing_check_is_uploaded() {
+        struct Source {
+            answer: Result<Option<u64>, SourceError>,
+        }
+        impl RemoteSource for Source {
+            fn pack_len(&self, _: &PackKey, _: &str) -> Result<Option<u64>, SourceError> {
+                match &self.answer {
+                    Ok(len) => Ok(*len),
+                    Err(_) => Err(SourceError::ProtocolError),
+                }
+            }
+            fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+                unimplemented!()
+            }
+            fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+                unimplemented!()
+            }
+            fn download_pack(
+                &self,
+                _: &PackKey,
+                _: &str,
+                _: &mut dyn kit_core::protocol::PackSink,
+            ) -> Result<(), SourceError> {
+                unimplemented!()
+            }
+        }
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+        let key = PackKey::new([7; 32]);
+        let stored = |answer| {
+            let source = Source { answer };
+            let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+            already_stored(&tx, &key, min, "refs/heads/main", UploadLimits::default())
+        };
+        assert!(stored(Ok(Some(min))));
+        // A transport that cannot give the length, a missing pack and a failed
+        // check all upload.
+        assert!(!stored(Ok(None)));
+        assert!(!stored(Err(SourceError::ProtocolError)));
     }
 
     #[test]

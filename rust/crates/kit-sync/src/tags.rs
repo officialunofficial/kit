@@ -833,8 +833,11 @@ impl TagPhase<'_> {
         name: &str,
         value: Hash,
     ) -> Result<Proof, SyncError> {
+        // The guard is held for the whole phase, so the proof checks each
+        // local pack once.
+        let view = self.store.guarded(self.guard)?;
         prover.prove(
-            self.store,
+            &view,
             self.layout,
             self.observer,
             self.verified,

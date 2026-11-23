@@ -176,6 +176,16 @@ pub fn run(args: &[String]) -> u8 {
             "warning: kept the local packs gc meant to rewrite or merge: {error}"
         );
     }
+    if report.pack_retirement_cut_short {
+        let _ = writeln!(
+            stderr,
+            "warning: gc stopped retiring local packs because a fetch, push or add held the store lock; {} retired, the rest stay until the next gc",
+            report.packs_retired
+                + report.packs_rewritten
+                + report.packs_merged
+                + report.packs_retired_covered,
+        );
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(
@@ -247,8 +257,8 @@ pub fn run(args: &[String]) -> u8 {
     if !report.dry_run && report.retire_hold_ms != 0 {
         let _ = writeln!(
             stderr,
-            "gc: pack retirement held the exclusive lock for {} ms",
-            report.retire_hold_ms,
+            "gc: pack retirement held the exclusive lock for at most {} ms in {} hold(s)",
+            report.retire_hold_ms, report.retire_batches,
         );
     }
     if report.pack_leftovers_pruned != 0 {

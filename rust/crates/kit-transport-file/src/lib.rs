@@ -1807,7 +1807,17 @@ impl Transport for FileTransport {
     }
 
     fn pack_exists(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<bool> {
-        Ok(self.pack_path(key).exists())
+        // A regular file only, as `download_pack` reads: a link or a
+        // directory at the key is not a stored pack.
+        Ok(fs::symlink_metadata(self.pack_path(key)).is_ok_and(|meta| meta.is_file()))
+    }
+
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        // The same regular file `pack_exists` accepts, with its length.
+        Ok(fs::symlink_metadata(self.pack_path(key))
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|meta| meta.len()))
     }
 
     // ------------------------------------------------------------------
@@ -2077,6 +2087,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn pack_exists_is_false_for_a_link_or_a_directory_at_the_key() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"real pack";
+        let key = pack_key_for(data);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        let path = t.pack_path(&key);
+        fs::remove_file(&path).unwrap();
+        let outside = dir.path().join("outside");
+        fs::write(&outside, b"x").unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(!t.pack_exists(&key, None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn download_pack_refuses_a_symlink() {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
@@ -2340,6 +2370,30 @@ mod tests {
         let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(local.path())).unwrap();
         let report = PackReader::read(&fetched, &store).unwrap();
         assert_eq!(report.stored.len(), MAX_WRITE_ENTRIES);
+    }
+
+    #[test]
+    fn pack_len_is_the_stored_length_of_a_regular_file_only() {
+        let dir = tmp();
+        let t = FileTransport::new(dir.path());
+        let data = b"length test";
+        let key = pack_key_for(data);
+        assert_eq!(t.pack_len(&key, None).unwrap(), None);
+        t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
+            .unwrap();
+        assert_eq!(t.pack_len(&key, None).unwrap(), Some(data.len() as u64));
+        // A link or a directory at the key is no stored pack.
+        let linked = pack_key_for(b"linked");
+        let target = dir.path().join("target");
+        fs::write(&target, b"linked").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, t.pack_path(&linked)).unwrap();
+            assert_eq!(t.pack_len(&linked, None).unwrap(), None);
+        }
+        let dir_key = pack_key_for(b"dir");
+        fs::create_dir(t.pack_path(&dir_key)).unwrap();
+        assert_eq!(t.pack_len(&dir_key, None).unwrap(), None);
     }
 
     #[test]

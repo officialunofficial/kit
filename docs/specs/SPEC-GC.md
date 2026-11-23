@@ -245,6 +245,19 @@ its last remote-tracking ref write, and writes each of those refs under
 `worktree.lock`. A gc during the push therefore cannot prune the tip of a
 tracking ref the push writes, even when the local branch is deleted first.
 
+A local batch that writes the chunks of a large file, or small files past
+the first 64 new ones of the batch (`kit add`,
+`kit stash`) publishes the packs it fills, at 64 MiB, at commit, and at a
+checkpoint that stages a manifest, tree or commit, before any ref or index
+names their objects. It holds `worktree.lock` from its
+first write to its index or ref write, so gc's mark either sees the
+result or sweeps before the first write, as for loose objects. The batch
+holds a prune guard while it publishes packs. A pack that no index
+names, left by a crash or an aborted add, is a wholly dead pack, and
+the sweep retires it after grace. That grace protects the packs of a batch
+from a step that does not hold every `worktree.lock`, such as the sweep of
+leftover files.
+
 A push through the file transport (`kit push kit+file://...`) or one
 received by `kit serve` or a layout server is not such a writer. It stores
 packs as `<root>/packs/<hex>` and refs as `<root>/<name>` under the
@@ -401,6 +414,25 @@ select, stay in place. If a candidate's body
 fails integrity verification, gc reports the damage, keeps the pair,
 and continues collecting other eligible objects.
 
+Retirement takes the exclusive `format` try-lock once per batch of at most
+32 items and 256 MiB of pack and index files: pack pairs, copy inputs and
+leftovers together. A batch always takes at least one item, so a pack larger
+than 256 MiB retires alone. Each batch is a
+complete retirement as described here: it rechecks its own items, makes what
+they rely on durable, unlinks the pack names, flushes, unlinks the indexes
+and flushes, then releases the lock, so a writer that waits for the lock waits
+for one batch. The two caps are policy. The target is a hold of about 50 ms
+or less for the work that scales with size: 32 packs of 64 MiB took 150 ms
+and more on the reference VM, and 256 MiB (four packs of 64 MiB) took a
+median of 11 to 19 ms. A stalled flush on a busy disk can still stretch one
+hold to a few hundred ms, which no size cap bounds. A failed try in any
+batch ends the run with the earlier batches done. `kit gc` then prints one
+line to standard error that says retirement stopped and how many packs it
+retired; the exit code does not change, and the next run retires the rest. A crash between batches leaves only pairs and
+inputs that the next run reconsiders; an input whose survivors have an output
+is then covered by it and retires without a copy. No input relies on a pair
+that the same run retires, whichever batch takes it.
+
 Retirement after a copy takes the same try-lock and rechecks input
 identity and the file stamps of every output and covering pair it relies
 on, and durable coverage by the verified replacement packs.
@@ -444,11 +476,25 @@ It first releases its prune guard and every `worktree.lock`. It reports
 the original command result even if maintenance fails or is interrupted.
 Set `gc.auto = false` or disable the embedder's option to skip the step.
 
+A `kit commit` runs the same step after it has published the commit, printed
+its output and released `worktree.lock`, because a repository that never
+fetches would otherwise never run it: each `kit add` of a large file or of
+more than 64 new small files leaves one pack pair. The commit's exit code and
+standard output are unchanged; the step's only output is its maintenance line
+on standard error, which `--quiet` and `gc.auto = false` suppress. `kit add`
+alone does not run the step. It stages work that a commit follows, and the
+commit is where a version is published and the next step is due, so the add
+loop pays nothing. A commit in a repository whose `gc-auto` stamp does not exist and that holds fewer than 32 pairs does nothing and creates no file, so the `.kit` layout of a small repository is unchanged. The commit installs no signal handler for the step, so an
+interrupt during it ends the process with the usual interrupt status after
+the commit is durable. A step that is not due costs one lock try on the stamp, a
+read of it and a listing of the pack directory.
+
 The step only tries locks. It stops at the first miss. It tries the
 exclusive lock of `<common_dir>/gc-auto` first. The holder rewrites that
 file in place with the last attempt's time and outcome and the pair count
-at the last complete collection. A missing or unreadable stamp means
-the step has never run. The first gated fetch writes the stamp and stops.
+at the last complete collection. An empty stamp means the step has never
+run, so it is due as soon as the listing shows 32 published pairs. An
+unreadable stamp is rewritten and the step stops.
 The stamp is advisory and never authorizes deletion.
 
 **Sweep.** List `objects/pack/` by name to count published pairs and
@@ -464,26 +510,99 @@ wait for the rest of the exclusive hold, including the recheck,
 unlinks and both directory flushes. The sweep remains effective if the
 collection that follows stops without retiring any pack.
 
-**Collection.** The listing must show at least 32 published pairs.
-The stamp allows a new collection 7 days after a complete collection
-or an error, 1 hour after a lock miss or changed roots, or 30 days
-after an attempt that ran out of budget. These intervals are policy.
+**Collection.** The listing must show at least 32 published pairs, or the
+stamp must record a step that made progress (below). The stamp allows a new
+collection 7 days after a complete collection or an error, 1 hour after a
+lock miss, changed roots, a step that made progress or the first attempt
+that ran out of budget before it retired anything, or 30 days after an
+attempt that ran out of budget before it retired anything right after
+another such attempt. A complete collection is also due again, whatever its
+age, once the listing shows at least 32 more published pairs than the
+stamp's pair count at that collection, so a repository that never fetches
+merges its small packs again after every 32 new pairs and not once a week. These intervals and the
+growth step are policy.
+
+A step *made progress* when it retired or rewrote at least one pack and left
+planned work for the next step: wholly dead packs it had no time to verify,
+or copy inputs that did not fit in its one output pack. The step then stamps
+`progress`, which is due after an hour and ignores the 32-pair floor, because
+a store that a step brings under the floor can still hold garbage that the
+next step plans to remove. A lock miss or changed roots right after a
+step of progress keeps the `progress` stamp, so the retry is due in the same
+hour and still ignores the floor. A step that left work but retired nothing
+keeps the interval of its own outcome, so work that cannot be done never
+repeats every hour. A store under the floor with no stamp of progress is left
+alone until a manual `kit gc`: its garbage is bounded by the size of fewer
+than 32 packs, and the step costs a mark of the whole history.
 
 1. Read `now` and collect retention roots without the worktree locks.
 2. Mark the roots under a wall-clock budget of 5 seconds that also covers
-   retirement planning. A missing object or skipped soft root stops
-   collection.
+   retirement planning, coverage verification and the copy. A missing
+   object or skipped soft root stops collection.
 3. Plan retirement at the default grace. Validate the indexes, account
-   for each entry against the mark, verify the body of each wholly dead
-   pair past grace, and record each candidate's file stamps. A damaged
-   pair or expired budget ends collection before retirement. With no
-   candidate, record a complete collection and stop.
-4. Try `worktrees.lock`, then every registered tree's `worktree.lock`
+   for each entry against the mark, and record each wholly dead pair past
+   grace with its file stamps. Verify the body of those pairs oldest first.
+   The budget is checked before each pack and never inside one, so a pack
+   that has started is read to its end. When the budget ends, the packs
+   verified so far stay planned and the rest wait for the next step; the
+   step then skips the copy and, once it has retired at least one of them,
+   reports `progress`. If it ended before one pack was verified, nothing is
+   planned and the step reports `over_budget`; the same holds for a mark or
+   listing that ran out of budget. The stamp says `progress`, due in an hour,
+   because a busy disk can cause one such miss. The stamp marks it by the
+   top bit of its pair count. The pair count is read on a `complete` stamp (to
+   decide when the next step is due) and the mark bit on a `progress` stamp. The
+   next attempt that ends this way while that mark stands stamps
+   `over_budget` with the 30-day interval and clears it, so a store that the
+   budget cannot cover pays the step once and not every hour. The mark stands
+   only while its stamp is at most a day old; after that the attempt is a
+   first miss again, due in an hour. A store whose budget never covers the
+   step and that is used less than once a day pays the step on every run.
+   A lock miss that keeps the mark restamps it, so the day runs from the
+   latest stamp. A lock miss or
+   changed roots that restamps `progress` with nothing retired keeps the
+   mark; a step that retires anything clears it. If the budget ends inside
+   the last wholly dead pack, every pack verified stays planned, and the
+   copy planning that follows defers only the copy. If every verified pack
+   fails its recheck before retirement, the step reports `over_budget` and
+   keeps the 7-day interval of a finished step. A damaged pair or
+   cancellation ends collection before retirement. Then plan
+   copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
+   keep only the inputs whose survivors fit in one output pack: at most
+   64 MiB of payload and 65,536 entries, inputs that copy nothing first,
+   then the smallest. With no candidate and no input, record a complete
+   collection and stop. A budget that expires in this copy planning, in the
+   verification or in the copy, or an I/O error such as a full disk there,
+   defers only the copy: the wholly dead pairs planned above still retire
+   (steps 5 to 7), as they do without a copy. The collection reports
+   `over_budget` or `failed`, and the stamp keeps the 7-day interval of a
+   complete collection, not the 30 days of a step that ran out of budget
+   before it retired anything: the step did retire the wholly dead pairs, and
+   a longer wait would postpone the retirement that a step without a copy
+   did every week. If no pair is left to retire after a budget deferral,
+   the interval is the same. Interruption and damage still stop the step.
+4. Copy. Verify each covering copy that an input relies on, copy the
+   survivors into one output pack and publish it durably under the shared
+   `format` guard, which the step takes after planning and releases before
+   the next step. The copy reads pack bodies, so it runs before any
+   worktree lock. The budget can stop it before the publication, which then
+   publishes nothing and leaves no staging file. An unreadable input
+   frame, a frame that is not the object its index row names, or a covering
+   copy that fails verification stops collection with nothing published and
+   no pair retired: the automatic step never repairs or works around
+   damage, and it does not keep a damaged input and go on as `kit gc`
+   does. Once the output is published the budget no longer applies.
+5. Try `worktrees.lock`, then every registered tree's `worktree.lock`
    in the order of SPEC-CONCURRENCY §4.
-5. Read the roots again. If the hard set or the soft list differs, stop.
+6. Read the roots again. If the hard set or the soft list differs, stop.
    An unreadable root also stops collection before retirement.
-6. Retire the planned pairs under the exclusive `format` try-lock.
-   Apply the stamp recheck and removal order above. Release the locks.
+7. Retire the planned pairs and the copy inputs under the exclusive
+   `format` try-lock, in batches (see "Local pack maintenance"). Apply the
+   stamp recheck and removal order above. Release the locks.
+
+A lock miss or changed roots after the output was published leaves it beside
+its inputs. Those inputs are then covered by the output, and the next step
+retires them without copying.
 
 The mark depends on immutable objects and the retention roots. The
 second root read holds every lock that manual gc takes, so a locked
@@ -496,7 +615,7 @@ or pack body while holding them.
 
 Automatic maintenance never expires the recovery log, prunes loose
 objects or their temporary files, sweeps the spool, rebuilds an index,
-merges packs, or invalidates fetch records. Collection stops on an
+or invalidates fetch records. Collection stops on an
 integrity error without retiring a pair or repairing anything. A
 completed orphan sweep stands. An interruption during retirement can
 leave a lone index. The orphan rule removes it on a later sweep. A
@@ -532,7 +651,7 @@ remains an error.
 | Invariant | Enforced by |
 |---|---|
 | No live object loses its last copy | loose pruning uses the complete retention mark. Loose duplicate removal and copy-then-retire require verified, durable coverage by a copy that is not retired in the same run. Gc can also retire packs of unreachable entries ("Local pack maintenance") |
-| Automatic collection retires only wholly dead packs past the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
+| Automatic collection retires only what `kit gc` would retire at the default grace | Accept an unlocked mark only if the roots read under gc's full lock set equal the marked roots. See "Automatic maintenance". |
 | gc never prunes against a partial root set | `collect_roots` errors if **any** source is unreadable &mdash; strict ref walk, no lenient skips &mdash; and gc MUST abort on that error ("Fail-closed requirement") |
 | gc never prunes on an unsound "unreachable" verdict | a closure hitting `MAX_REACHABLE` returns `GcRootsError::Truncated`; gc aborts ("Fail-closed requirement") |
 | A missing root or referenced object aborts gc | `StoreError::ObjectNotFound` propagates from the closure walk ("Fail-closed requirement") |

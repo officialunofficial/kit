@@ -58,10 +58,15 @@ mod memory;
 mod memory_overlay;
 mod source;
 pub(crate) use local_pack::Catalog as PackCatalog;
-pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES};
+#[cfg(test)]
+pub(crate) use local_pack::set_test_output_entries;
+pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES, SealJob};
+pub(crate) use local_pack::{PackSweep, Verify};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
-pub use source::{ClosureSource, DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
+pub use source::{
+    ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
+};
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.
@@ -71,6 +76,77 @@ pub struct ChunkOrigin<'a> {
     pub path: &'a Path,
     /// The offset of the blob's first byte in that file.
     pub offset: u64,
+}
+
+/// A canonical blob chunk whose id is already computed, with its prologue and
+/// payload in order.
+///
+/// The fields are private and [`Self::new`] hashes the bytes, so code outside
+/// kit-core can make a chunk only by hashing it, and a sink may trust the id.
+/// The bytes are an owned buffer or a borrow of a reader window, never a
+/// mapping, so they cannot change between the hash and the write.
+#[derive(Debug, Clone, Copy)]
+pub struct HashedChunk<'a> {
+    id: Hash,
+    prologue: [u8; serialize::BLOB_PROLOGUE_LEN],
+    data: &'a [u8],
+    origin: Option<ChunkOrigin<'a>>,
+}
+
+impl<'a> HashedChunk<'a> {
+    /// Build the canonical blob of `data` and hash it, with the same id
+    /// dispatch as [`WriteBatch::write_parts`].
+    ///
+    /// # Errors
+    /// [`KitError`] when `data` is longer than a blob may be.
+    pub fn new(data: &'a [u8]) -> Result<Self, KitError> {
+        let prologue = serialize::blob_prologue(data.len())?;
+        let id = crate::object::object_id_from_parts(&[&prologue, data]);
+        Ok(Self {
+            id,
+            prologue,
+            data,
+            origin: None,
+        })
+    }
+
+    /// Record where the chunk sits in a worktree file, for a sink that keeps
+    /// the location instead of the bytes.
+    #[must_use]
+    pub fn at(mut self, origin: ChunkOrigin<'a>) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The content address of the blob.
+    #[must_use]
+    pub fn id(&self) -> Hash {
+        self.id
+    }
+
+    /// The prologue and the payload, in order.
+    #[must_use]
+    pub fn parts(&self) -> [&[u8]; 2] {
+        [&self.prologue, self.data]
+    }
+
+    /// The serialized length of the blob.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.prologue.len() + self.data.len()
+    }
+
+    /// Never true: a blob has a prologue.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Where the chunk sits in its worktree file, if the caller said.
+    #[must_use]
+    pub fn origin(&self) -> Option<ChunkOrigin<'a>> {
+        self.origin
+    }
 }
 
 /// Top-level repository directory name.
@@ -88,6 +164,11 @@ pub const FORMAT_VALUE: &str = "bmt-v2";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;
+
+/// The largest packed frame the mark's probe reads whole in one call, to hash
+/// it. A larger one streams, so the probe never holds more than this.
+const GC_SMALL_FRAME: usize = 16 * 1024;
+
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
@@ -353,6 +434,13 @@ pub struct ObjectStore {
     /// Test-only: bytes of packed blobs that a gc type probe hashed.
     #[cfg(test)]
     gc_hashed_bytes: Arc<AtomicU64>,
+    /// Test-only: gc type probes that the one-read path answered.
+    #[cfg(test)]
+    gc_one_read_probes: Arc<AtomicU64>,
+    /// Test-only: set to send every gc type probe down the streaming path,
+    /// to compare it with the one-read path.
+    #[cfg(test)]
+    gc_stream_only: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ObjectStore {
@@ -376,6 +464,10 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
     }
 
@@ -404,6 +496,10 @@ impl ObjectStore {
             read_calls: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
     }
 
@@ -449,6 +545,18 @@ impl ObjectStore {
     #[cfg(test)]
     pub(crate) fn gc_hashed_byte_count(&self) -> u64 {
         self.gc_hashed_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: gc type probes that the one-read path answered so far.
+    #[cfg(test)]
+    pub(crate) fn gc_one_read_probe_count(&self) -> u64 {
+        self.gc_one_read_probes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: probe every packed object through the streaming path.
+    #[cfg(test)]
+    pub(crate) fn gc_probe_streaming_only(&self) {
+        self.gc_stream_only.store(true, Ordering::Relaxed);
     }
 
     /// Start a batched write with the store's configured policy
@@ -696,9 +804,18 @@ impl ObjectStore {
         h: &Hash,
         use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
+        self.read_with_in(h, None, use_location)
+    }
+
+    fn read_with_in<T>(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+        use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        self.packs.lookup(self, h, true, use_location)
+        self.packs.lookup_in(self, h, true, currency, use_location)
     }
 
     fn verify_at(location: &local_pack::Location, h: &Hash, bytes: &[u8]) -> StoreResult<()> {
@@ -718,7 +835,11 @@ impl ObjectStore {
 
     /// Read and verify the contents of the requested object.
     pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_in(h, None)
+    }
+
+    fn read_in(&self, h: &Hash, currency: Option<&local_pack::Currency>) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             Self::verify_at(&location, h, &bytes)?;
             Ok(bytes)
@@ -786,7 +907,15 @@ impl ObjectStore {
     /// no-verify choice at the boundary instead of threading a flag
     /// through render code.
     pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_unverified_in(h, None)
+    }
+
+    fn read_unverified_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             if location.is_packed() {
                 Self::verify_at(&location, h, &bytes)?;
@@ -805,13 +934,20 @@ impl ObjectStore {
     /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
     /// for a short file, bad magic/version, or unknown tag.
     pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        self.packs.lookup(self, h, true, |location| {
+        self.object_type_in(h, None)
+    }
+
+    fn object_type_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<crate::object::ObjectType> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
             let mut prologue = [0; 6];
-            location
-                .open()?
-                .read_exact(&mut prologue)
-                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
-            parse_type(&prologue)
+            match location.read_head(&mut prologue)? {
+                Ok(6) => parse_type(&prologue),
+                _ => Err(StoreError::Decode(KitError::EmptyData)),
+            }
         })
     }
 
@@ -841,6 +977,11 @@ impl ObjectStore {
         use crate::object::ObjectType;
 
         self.packs.lookup(self, h, true, |location| {
+            if let Some(ty) = self.gc_probe_in_one_read(&location, h, verify)? {
+                #[cfg(test)]
+                self.gc_one_read_probes.fetch_add(1, Ordering::Relaxed);
+                return Ok(ty);
+            }
             let mut contents = location.open()?;
             let mut header = [0; serialize::BLOB_PROLOGUE_LEN];
             contents
@@ -880,6 +1021,70 @@ impl ObjectStore {
         })
     }
 
+    /// [`Self::gc_probe`] of a packed copy whose probe one read answers: the
+    /// head of any frame when `verify` is false, and the whole frame when
+    /// `verify` is true and the frame is at most [`GC_SMALL_FRAME`] bytes.
+    /// The read checks the frame header against the index first, as opening
+    /// the frame does. Each check below is the one the streaming path makes.
+    /// `None` leaves the probe to that path: a loose copy, a frame too short
+    /// for a blob head, a frame too large to hold in memory, or a failed read,
+    /// so that a damaged pack gives the same error.
+    #[cfg_attr(not(test), allow(clippy::unused_self))] // the counters exist only in tests
+    fn gc_probe_in_one_read(
+        &self,
+        location: &local_pack::Location,
+        h: &Hash,
+        verify: bool,
+    ) -> StoreResult<Option<crate::object::ObjectType>> {
+        use crate::object::ObjectType;
+
+        #[cfg(test)]
+        if self.gc_stream_only.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(raw_len) = location.frame_len() else {
+            return Ok(None);
+        };
+        let frame_len = raw_len as usize;
+        let whole = verify && frame_len <= GC_SMALL_FRAME;
+        if frame_len < serialize::BLOB_PROLOGUE_LEN || (verify && !whole) {
+            return Ok(None);
+        }
+        let want = if whole {
+            frame_len
+        } else {
+            serialize::BLOB_PROLOGUE_LEN
+        };
+        let mut bytes = vec![0; want];
+        if !matches!(location.read_head(&mut bytes)?, Ok(len) if len == bytes.len()) {
+            return Ok(None);
+        }
+        let ty = parse_type(&bytes[..6])?;
+        match ty {
+            ObjectType::Blob => {
+                let payload_len = raw_capacity(u64::from(raw_len))? - serialize::BLOB_PROLOGUE_LEN;
+                if bytes[..serialize::BLOB_PROLOGUE_LEN] != serialize::blob_prologue(payload_len)? {
+                    return Err(local_pack::invalid_at(
+                        location.path(),
+                        "invalid packed blob header",
+                    ));
+                }
+                if whole {
+                    #[cfg(test)]
+                    self.gc_hashed_bytes
+                        .fetch_add(frame_len as u64, Ordering::Relaxed);
+                    check_hash(h, blake3::hash(&bytes).as_bytes())?;
+                }
+                Ok(Some(ty))
+            }
+            ObjectType::Delta => Err(local_pack::invalid_at(
+                location.path(),
+                "delta object in local pack",
+            )),
+            _ => Ok(Some(ty)),
+        }
+    }
+
     /// The object's type tag and, for a `Blob`, its content length, from the
     /// first 10 bytes — without reading or hash-verifying the body. The
     /// chunk check of [`crate::ops::graph::check_closure_present`] uses it:
@@ -889,9 +1094,18 @@ impl ObjectStore {
     /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        self.packs.lookup(self, h, true, |location| {
-            let mut contents = location.open()?;
-            head_at(&mut contents)
+        self.object_head_in(h, None)
+    }
+
+    fn object_head_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
+            let mut head = [0; 10];
+            let len = location.read_head(&mut head)??;
+            head_of(&head[..len])
         })
     }
 
@@ -912,7 +1126,15 @@ impl ObjectStore {
     /// payload's length goes to [`serialize::deserialize`], so every
     /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        self.read_with(h, |location| {
+        self.read_object_in(h, None)
+    }
+
+    fn read_object_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Object> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             let (actual, decoded) = verified_id_and_object(&bytes);
             check_hash(h, &actual)?;
@@ -976,7 +1198,7 @@ impl ObjectStore {
             }
             read_shard_dir(&shard.path(), dir, &mut out)?;
         }
-        self.packs.collect(self, None, &mut out)?;
+        self.packs.collect(self, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -992,7 +1214,7 @@ impl ObjectStore {
     /// [`StoreError::Io`] if the directory cannot be read.
     pub fn list_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
         let mut out = self.list_loose_shard(shard)?;
-        self.packs.collect(self, Some(shard), &mut out)?;
+        self.packs.list_shard(self, shard, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -1299,11 +1521,16 @@ pub(crate) fn head_at(
 ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
     let mut head = [0; 10];
     let len = read_header_prefix(reader, &mut head)?;
-    let object_type = parse_type(&head[..len])?;
+    head_of(&head[..len])
+}
+
+/// The type and blob length that the first bytes of an object name.
+fn head_of(head: &[u8]) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+    let object_type = parse_type(head)?;
     if object_type != crate::object::ObjectType::Blob {
         return Ok((object_type, None));
     }
-    let size: [u8; 4] = head[..len]
+    let size: [u8; 4] = head
         .get(6..10)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(StoreError::Decode(KitError::EmptyData))?;
@@ -1384,13 +1611,41 @@ pub trait ObjectSink {
     /// Store the canonical blob at `origin`, with its prologue and payload
     /// in `parts`. This covers an inline file or a chunk of a file. A sink may
     /// keep the origin and read the payload back from the file. The default
-    /// stores the bytes.
+    /// stores the bytes. A batch that packs also sends the small files past
+    /// its first 64 to its open local pack.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
     }
-    /// Make the objects stored so far durable and visible, so a writer of many
-    /// objects keeps its staged set bounded. The default does nothing, for a
-    /// sink that is durable or keeps no state per object.
+    /// Store a chunk whose id is already computed. The default stores its
+    /// bytes through [`Self::put_chunk_parts`] when the chunk has an origin,
+    /// and through [`Self::put_parts`] when it has none.
+    fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let parts = chunk.parts();
+        match chunk.origin() {
+            Some(origin) => self.put_chunk_parts(&parts, origin),
+            None => self.put_parts(&parts),
+        }
+    }
+    /// True when this sink wants the chunks of a file in file order through
+    /// [`Self::put_hashed_chunk`], hashed once. A caller that can hash its
+    /// chunks in parallel hashes them first, then hands them over in order.
+    /// The default is false: such a sink takes chunks in any order.
+    fn orders_chunks(&self) -> bool {
+        false
+    }
+    /// Buffers that live as long as this sink, for the pipeline that cuts and
+    /// hashes the chunks of each large file it takes, so that a sequence of
+    /// files reuses one set. The default is none: each file allocates its own.
+    #[doc(hidden)]
+    fn chunk_buffers(&self) -> Option<&crate::chunker::ChunkBuffers> {
+        None
+    }
+    /// Make the loose objects stored so far durable and visible, so a writer
+    /// of many objects keeps its staged set bounded. An object in an open
+    /// local pack becomes visible when the pack seals or at commit, so a
+    /// caller must not read a chunk or small file back before its commit. A checkpoint never
+    /// makes an object visible before the objects it names. The default does
+    /// nothing, for a sink that is durable or keeps no state per object.
     fn checkpoint(&self) -> StoreResult<()> {
         Ok(())
     }

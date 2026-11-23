@@ -7,43 +7,80 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-22
+
+### Upgrading from 0.9
+
+- **Breaking:** A repository this version created or wrote to holds the packed marker `bmt-v2\nP`, and kit 0.9 and older refuse it. Open such a repository with kit 0.10 or newer. Kit 0.9 exits with status 1 and prints a line like the one below. `fetch`, `push` and `pull` print `error: fetch: store: `, `error: push: store: ` and `error: pull: store: ` in place of `error: not a kit repo: `, and the rest of the text is the same. Its advice to export with kit 0.7.3 is wrong for this case: the remedy is to upgrade kit.
+
+  ```text
+  error: not a kit repo: repository object-addressing format is Some("bmt-v2\nP"), expected "bmt-v2". This kit cannot read the repository. To move a `bmt-v1` repository, run `kit git export` with kit 0.7.3, then `kit git import` with this kit, or commit a checkout into a new `kit init` repository. See docs/specs/SPEC-MERKLE-OBJECTS.md.
+  ```
+- Any command that writes objects in a 0.9 repository switches its format for good, and nothing switches it back. Examples are `add`, `commit`, `stash`, and a `fetch` that finds the remote changed or runs with `--prune`, even if it downloads nothing. A command that only reads, such as `status` or `log`, leaves it alone. Keep a copy if you still need 0.9 on the repository.
+- Kit 0.9 and older reject `gc.auto` as an unknown config key, in the repository config and in the user config (`$XDG_CONFIG_HOME/kit/config`), so remove the key before running one of them.
+- Embedders that build kit-core with `history-mmr`, or that cross-check kit proofs with the upstream verifiers, must move to Commonware 2026.11.0 together with kit.
+
 ### Added
 
-- Fetch and pull run best-effort local pack maintenance after applying packs or pruning remote-tracking refs. Set `gc.auto = false` to disable it.
-- Kit 0.9 and older reject a repository config that holds `gc.auto` as an unknown key, so remove the key before using one of them on the repository.
+- Fetch, pull and clone (which runs pull) run best-effort local pack maintenance after applying packs or pruning remote-tracking refs, and `kit commit` runs it after it publishes. Set `gc.auto = false` to disable it.
 - Garbage collection retires wholly dead local packs after grace and reports packed garbage in dry runs.
-- Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first.
+- Garbage collection rewrites packs that hold mostly garbage, merges small packs and retires duplicate packs by copying what must survive into new packs first. A pack is rewritten only when a quarter or more of its payload is garbage, so less than a quarter of an old pack's bytes can stay dead after `kit gc`.
+- The maintenance step after fetch, pull, clone and commit also rewrites, merges and retires covered local packs, copying at most one 64 MiB output pack per step. It stops with nothing retired when it meets damage. A budget that runs out in the copy, or a copy that fails on a full disk, defers only the copy; wholly dead packs still retire and the report says `over_budget` or `failed`. The JSON report adds `packs_rewritten`, `packs_merged`, `packs_retired_covered` and `bytes_copied`.
+- Pack retirement takes the exclusive `format` lock once per batch of at most 32 items, so a writer waits for one batch and not for the whole retirement. `kit gc` reports the longest hold and the number of holds.
+- A batch of pack retirement holds the exclusive `format` lock for at most 32 items and 256 MiB of pack and index files, so on Linux the median hold of 64 MiB packs is about 15 ms. On macOS (Apple silicon, APFS) each hold ends with two directory flushes, and holds of up to 124 ms were measured on a store of 28.7 GiB.
+- The maintenance step after fetch, pull, clone and commit verifies wholly dead packs oldest first and retires those it checked when its 5 second budget ends, instead of retiring none, so a store with many dead packs reaches the state of a manual `kit gc` in a few steps. A step that retired something and left work runs again an hour later, even under 32 packs.
+- `kit commit` runs the due maintenance step after it publishes, so a repository that never fetches no longer builds up packs. The step prints only its maintenance line on standard error, and `kit add` alone does not run it. A step that has never run is due as soon as the store holds 32 packs, and not a week later. After that it is due again once the store holds 32 more packs than the last finished step left.
+- `kit commit`, `kit fetch` and `kit pull` can take up to about 5 seconds longer when a maintenance step is due, and longer when it retires packs. The first commit after a large `kit add` runs a full step: after adding 16 GiB (265 packs) it took about 1 s instead of 0.25 s on macOS and used several seconds of CPU on several threads. It happens once; the next commit is back to its usual time. Set `gc.auto = false` to turn the step off.
+- A `kit clone` that finds fewer than 32 pairs leaves an empty maintenance stamp, so the first fetch or commit that finds 32 pairs runs a full step. A clone that finds 32 or more pairs runs the step itself.
+- `gc.auto` is listed by `kit config`, and `kit config gc.auto false` sets it.
+- The `collection` value of the maintenance JSON can be `progress`: the step retired or copied what its limits allowed and left planned work, and the next step is due in an hour.
+- The library default `kit_sync::SyncOptions::auto_maintenance` is `true`. An embedder that calls fetch, pull or clone through `kit-sync` or `libkit` gets the maintenance step unless it calls `with_auto_maintenance(false)`.
+- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt, within a day, runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
+- A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
+- `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
+- `kit gc` prints `warning: kept damaged local pack: …` for each local pack it found damaged and kept, and `warning: kept the local packs gc meant to rewrite or merge: …` when copying the packs it meant to rewrite or merge failed. The exit code does not change.
 - Garbage collection drops loose objects when a verified, durable packed copy can take their place.
 - The full local integrity scan clears fetch records when it detects a damaged pack so the next fetch can repair it.
-- Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs.
-
+- Fetch and clone pack every object up to 262,154 bytes, chunks included, so a clone of large files no longer leaves one loose file per chunk. Once activated, the repository requires a reader that supports local packs, so a repository a 0.10 fetch or clone wrote to needs kit 0.10 or newer.
+- `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the chunks of a large file into local packs in a repository that declares capability `P`, so adding a large file no longer leaves one loose file per chunk.
+- `kit add` seals a full local pack on a background thread while it hashes and writes the next one, so adding many large files is faster.
+- The seal of a local pack digests the pack file on a pool of up to 8 threads, so adding or fetching many large files spends less wall time in the seal.
+- Fetch and clone seal each local pack on a worker thread while they receive the next window, so up to two windows are staged at once. On Linux a fetch of 1 GiB in four large files takes as long as 0.9 (3.2 s against 3.3 s), and a fetch of 1 GiB in files of 300 kB to 1 MB takes about 1.35 times as long (3.9 s against 2.9 s). The peak memory of a clone of 1 GiB of large files was about 29 MiB higher than 0.9 on macOS (median of six runs, 241 to 257 MiB against 216 to 220 MiB), and lower than 0.9 on Linux (97.5 against 106.7 MiB in the fetch of 1 GiB in four large files).
+- `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the small files of a large batch (past the first 64, up to 16,384 serialized bytes each) into local packs in a repository that declares capability `P`, so adding 100,000 small files makes a few packs and about 150 syncs where it made one loose file and one sync each. Smaller batches and larger files keep the loose path.
 - Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
-- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days.
+- Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days, and does not keep a pack longer than 1 GiB.
 - `FetchReport::savings` and the `DownloadResumed`, `DownloadRestarted` and `PackReused` events report the bytes a fetch did not download again.
-
 - Read and verify raw local object packs in repositories that declare capability `P`.
 - Run `kit closure repair-indexes` to rebuild damaged local pack indexes from verified packs.
 
 ### Changed
 
-- A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. Kit 0.9 and older cannot open a repository that this version created or wrote to.
-- Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size.
-- Re-pushing a file that grew past 1 MiB sends the chunks it shares with its old single-object version as deltas against that version, within a per-file read and pair budget.
+- **Breaking:** The Commonware crates move to 2026.11.0. Roots, proofs and ids do not change. The new `ruint` and `ruint-macro` crates enter the dependency tree through `commonware-codec`. A program that builds kit-core with the `history-mmr` feature or that cross-checks kit proofs with the upstream verifiers must use Commonware 2026.11.0 too, because the upstream inclusion verifiers take their arguments in a new order.
+- Fetch and clone of large files hash each packed object once on the way into a local pack, where each was hashed four times in all, so a fresh fetch or clone of 1 GiB of large files on Linux no longer costs more CPU than 0.9.
+- A new repository starts with the packed marker, and the first object write by this version activates an older loose repository, so a local-only repository no longer waits for its first fetch. **Breaking:** Kit 0.9 and older cannot open a repository that this version created or wrote to.
+- Re-pushing a large file after an edit that shifts chunk boundaries pairs deltas only inside the runs between unchanged chunks, so the CPU cost follows the edit instead of the file size. A run of more than about 512 chunk reads is first probed with a sample of its chunks, and one that shares nothing with the old file where it sits is sent without deltas, so a rewritten region costs a sample, not the region. A run that shares content is paired as before, within 131,072 chunk reads per file and 1,048,576 per push.
+- Re-pushing a file that grew past 1 MiB sends the chunks it shares with its old single-object version as deltas against that version, within a per-file read and pair budget. The search stops after 16 chunks in a row that share nothing with that version.
 - Re-pushing a rewritten large file to a `kit serve`, `kit+file` or direct `kit+s3` remote sends its new chunk manifest as a delta against the manifest the remote holds when that is smaller, so one edited chunk of a 1 GiB file no longer sends the whole manifest. Hosted remotes keep full manifests.
 - Local writes reuse matching objects in packs, keeping unchanged chunks out of loose storage.
 - Fetch and clone write each object above 262,154 bytes once, to its final file, and no longer copy it through a spool and read it back, so a clone of such files reads and writes no more bytes than 0.9 did.
 - Garbage collection checks a packed chunk by its head and frame length instead of reading and hashing its payload, so the mark costs one small read per chunk.
 - Opening a local pack no longer holds the shared handle-cache lock, so concurrent reads and the garbage collection mark no longer queue behind one slow open.
+- The garbage collection mark reads a packed chunk head, and a packed object of at most 16 KiB, in one read instead of three or four. The local pack handle cache keeps up to a quarter of the open-file limit (96 to 1,024 files), looks a handle up in a hash table, and closes an evicted file after it releases the lock, so a warm `kit gc -n` on a store of hundreds of packs no longer queues on that lock or reopens packs.
+- The `kit` command raises its soft open-file limit to at most 8,192 (never above the hard limit) at startup, so where the default is low (256 on macOS) the pack handle cache holds up to 1,024 handles and a warm `kit gc -n` on hundreds of packs no longer reopens packs.
 - **Breaking:** `ops::gc::run_gc` takes a `progress` callback as its last argument, and `run_gc_observed` is gone. Pass `&mut |_, _, _| {}` for no progress.
-
 - Open packed stores without scanning pack headers and speed up lookups across many local packs.
-
+- Commands that read a few objects, such as `cat-file`, `log -n 1` and a no-op `fetch`, find local packs with far less CPU: a store of up to 40 packs probes its index files instead of loading every row, and a larger one builds its object routes in near-linear time and with fewer system calls per pack. Resolving a short hash no longer checksums every index.
+- Fetch checks that each local pack is still current once, not at every read, while it checks that the fetched history is complete and while it verifies the signatures of that history, and it reads the type of an object and its payload head in one read. The full completeness check that an unsigned fetch makes on a large clone takes about half the CPU.
 - **Breaking:** Reverse blame returns `BlameError::History` when its walk cannot read a commit or finds another object type. The error carries the object's id.
 - **Breaking:** `StoreError`, `PackError`, `KitError`, `SyncError`, `PushError`, `SourceError`, `CloneInitError` and `libkit::config::ConfigError` are `#[non_exhaustive]`. Add a wildcard arm to an exhaustive `match` on them.
 - **Breaking:** Damage in a local pack or its index is `StoreError::LocalPackDamaged { pack, reason }`, not `StoreError::Io` with kind `InvalidData`. Match the variant instead of the I/O kind. A failed read of a pack or index stays `StoreError::Io`.
+- **Breaking:** `libkit::config::Config` has a new public `gc_auto` field. Build a `Config` from `Config::default()` instead of a struct literal.
 - **Breaking:** `GcReport` and `UnpackReport` are `#[non_exhaustive]`. Build one with `Default::default()` and read its fields. `GcReport` also reports packed payload bytes, packs retired, leftovers and loose duplicates pruned, and damaged packs it kept.
 - **Breaking:** The repository marker is exactly `bmt-v2\n`, `bmt-v2\n\0` or `bmt-v2\nP`. Kit refuses any other bytes, such as a legacy marker with trailing whitespace, with `IncompatibleRepoFormat`.
+- `kit_sync::fanout::try_map_seq_or_par` ties the closure's argument to the lifetime of the slice, so its result may borrow from the items. Ordinary closures still compile.
 - **Breaking:** `ObjectStore::remove_object` exists only in test builds and in builds with the `fault-injection` feature.
+- A killed `kit fetch` or `kit clone` can leave a few `.kit.tmp.*` files under `.kit/objects/xx/`. `kit gc` removes them after its 14-day grace; the maintenance step after fetch does not sweep them.
+- A push to a file or S3 remote that is run again after it failed no longer sends a pack of 8 MiB or more the remote already holds. It skips the pack only when the remote holds it at the pack's own length, with no retry on that check, so a short pack left under the key is sent again instead of getting a ref published over it. An ssh remote cannot give the stored length, and a remote that issues upload tickets is unchanged, so a push to either sends such a pack again. Packs below 8 MiB are unchanged, and a failed length check uploads the pack.
 
 ### Removed
 
@@ -52,14 +89,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The `url` dependency is 2.5.9, which fixes a stack overflow in `Url::origin()` on nested `blob:` URLs (RUSTSEC-2026-0592).
+- `kit add` hashes the chunks of a large file on several threads on a host with more than 16 of them, where a full batch of 64 chunks stayed on one thread. `kit_core::worktree::STREAM_HASH_BATCH` is public.
 - `kit restore Makefile` restores the top-level `Makefile` only, not also a `Makefile` in another directory that another pathspec selects.
 - `kit restore <dir>` takes time in proportion to the number of files it restores, where it took the square of that number: 100,000 files used 70 s of CPU and now use about 5 s.
 - A local pack cut short after its handle was cached is reported as `StoreError::LocalPackDamaged`, not as an `Io` error of kind `UnexpectedEof`.
 - `kit switch -` now says the previous HEAD was pruned (by an older kit's gc) instead of failing on a missing object.
-- Push records its verified data packs locally so the next fetch can skip them.
-- Push flushes only the object directories of the packs it records, not all 256.
-- Fetch and clone write an object larger than 262,154 bytes loose from the decoder's spool, without copying it to a second spool and back.
-
+- Push records its verified data packs locally so the next fetch can skip them. Writing the record adds two flush calls to a push.
 - Continue SSH transfers in a fresh session after 10,000 requests.
 - Report tags that landed before a tag push failed.
 - A clone interrupted after it made its branch, before it wrote the files, undoes the branch

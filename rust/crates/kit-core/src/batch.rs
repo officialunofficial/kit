@@ -66,15 +66,16 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, RwLock};
 use std::thread::JoinHandle;
 
 use tempfile::TempPath;
 
 use crate::hash::Hash;
 use crate::store::{
-    MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PackCatalog, PruneGuard, StoreError, StoreResult,
+    ChunkOrigin, HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore,
+    PackCatalog, PruneGuard, SealJob, StoreError, StoreResult,
 };
 
 /// When object writes become durable.
@@ -278,6 +279,10 @@ struct BatchState {
     /// reference it.
     touched_shards: HashSet<PathBuf>,
     reused_pack: bool,
+    /// Whether a staged loose object is anything but a plain blob, so it may
+    /// name objects of the open local pack. Cleared when the staged set is
+    /// taken.
+    names_objects: bool,
     /// Shard directories this batch has already `create_dir_all`'d —
     /// at most 256 exist, so memoizing saves ~one mkdir syscall per
     /// object on large ingests.
@@ -297,6 +302,13 @@ pub struct WriteBatch<'s> {
     // Interior mutability so `&self` writes work and a future parallel
     // ingest can share one batch across worker threads.
     inner: Mutex<BatchState>,
+    // The open local pack. Declared before `pack_catalog`, which holds the
+    // prune guard its writer was checked against, so the writer drops first.
+    pack: Mutex<Option<LocalPackWriter<'s>>>,
+    // The seal of the last full pack, running off the writing threads. Also
+    // declared before `pack_catalog`: a dropped batch joins it while the
+    // guard its pack was checked against is still held.
+    sealing: Sealing,
     // The shared guard keeps the discovered pairs in place until their
     // directory has been flushed. Callers hold the worktree lock through
     // publication, as with loose reuse.
@@ -308,6 +320,11 @@ pub struct WriteBatch<'s> {
     // can no longer promise that a hash it returned is durable. Every later
     // write, checkpoint and commit fails.
     failed: AtomicBool,
+    // How many new small blobs the batch has been given as inline files. Past
+    // `SMALL_PACK_AFTER`, the next ones go to the local pack sink.
+    small_files: AtomicUsize,
+    // Windows and chunk buffers that each large file of this batch reuses.
+    chunk_buffers: crate::chunker::ChunkBuffers,
 }
 
 impl<'s> WriteBatch<'s> {
@@ -317,9 +334,13 @@ impl<'s> WriteBatch<'s> {
             policy,
             early: EarlyBarriers::new(store.syncer().clone()),
             inner: Mutex::new(BatchState::default()),
+            pack: Mutex::new(None),
+            sealing: Sealing::default(),
             pack_catalog: OnceLock::new(),
             gate: RwLock::new(()),
             failed: AtomicBool::new(false),
+            small_files: AtomicUsize::new(0),
+            chunk_buffers: crate::chunker::ChunkBuffers::default(),
         }
     }
 
@@ -427,14 +448,25 @@ impl<'s> WriteBatch<'s> {
                 let mut st = self.inner.lock().expect("batch state mutex poisoned");
                 st.created_shards.insert(shard_dir);
             }
-            SyncPolicy::Batch => self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES),
+            // The type of a spooled object is not known here, so it may name others.
+            SyncPolicy::Batch => {
+                self.queue_temp(h, tmp, shard_dir, len <= SMALL_OBJECT_BYTES, true);
+            }
         }
         Ok(())
     }
 
     /// Queue the temporary file `path` of the object `h` for the commit,
-    /// starting its barrier on a background worker.
-    fn queue_temp(&self, h: Hash, path: TempPath, shard_dir: PathBuf, small: bool) {
+    /// starting its barrier on a background worker. `names_objects` is false
+    /// only for a plain blob, which names no other object.
+    fn queue_temp(
+        &self,
+        h: Hash,
+        path: TempPath,
+        shard_dir: PathBuf,
+        small: bool,
+        names_objects: bool,
+    ) {
         // No flush on this thread: the barrier is queued to the
         // background pool below — sequential per-file barriers
         // would re-serialise the batch on device latency
@@ -442,6 +474,7 @@ impl<'s> WriteBatch<'s> {
         // ~8s for a 100 MiB ingest).
         let mut guard = self.inner.lock().expect("batch state mutex poisoned");
         let st = &mut *guard;
+        st.names_objects |= names_objects;
         // Lost race against a concurrent writer of the same
         // object within this batch: keep theirs, drop our tmp
         // (content-addressed — byte-identical by construction).
@@ -537,15 +570,158 @@ impl<'s> WriteBatch<'s> {
                 st.created_shards.insert(shard_dir);
             }
             SyncPolicy::Batch => {
+                let names_objects = parts
+                    .first()
+                    .and_then(|part| part.first())
+                    .is_none_or(|kind| *kind != crate::object::ObjectType::Blob as u8);
                 self.queue_temp(
                     h,
                     tmp.into_temp_path(),
                     shard_dir,
                     total_len <= SMALL_OBJECT_BYTES,
+                    names_objects,
                 );
             }
         }
         Ok(h)
+    }
+
+    /// The prune guard of this batch when it packs the chunks it is given:
+    /// the policy is `Batch`, the batch has not failed and the store is
+    /// packed. The first call activates the store and freezes the catalog,
+    /// before any object is staged. A failed activation answers `None`, and
+    /// the batch's next write returns the same error.
+    fn pack_guard(&self) -> Option<&PruneGuard> {
+        if self.policy != SyncPolicy::Batch || self.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.store.ensure_packed_once().ok()?;
+        self.pack_catalog
+            .get_or_init(|| self.store.discover_write_packs())
+            .as_ref()
+            .map(|(guard, _)| guard)
+    }
+
+    fn pack_holds(&self, h: &Hash) -> bool {
+        self.pack
+            .lock()
+            .expect("batch pack mutex poisoned")
+            .as_ref()
+            .is_some_and(|writer| writer.holds(h))
+    }
+
+    /// Store a chunk whose id is already computed. A batch that packs appends
+    /// it to the open local pack unless a copy exists; any other batch stages
+    /// it as a loose object.
+    ///
+    /// A full pack seals on a worker thread, one at a time, while writes go
+    /// on into the next pack.
+    ///
+    /// # Errors
+    /// An error of the write, or of the seal of the previous full pack, which
+    /// a later call, checkpoint or commit returns, not the call that filled
+    /// the pack. A pack error fails the whole batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a previous write panicked while holding a batch lock,
+    /// or if the seal worker panicked.
+    pub fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let id = chunk.id();
+        let parts = chunk.parts();
+        // A chunk of the chunker's size or less fits any pack. A larger one
+        // is not a chunk of a cut file, so it takes the checked loose path.
+        if chunk.len() > crate::chunker::MAX_SIZE + crate::serialize::BLOB_PROLOGUE_LEN {
+            return self.write_parts(&parts);
+        }
+        let Some(guard) = self.pack_guard() else {
+            return self.write_prehashed(id, &parts);
+        };
+        let _gate = self.gate.read().expect("batch gate poisoned");
+        self.check_not_failed()?;
+        if self.pack_holds(&id) || self.copy_exists(&id, chunk.len() as u64) {
+            return Ok(id);
+        }
+        // From here an error, or a panic, leaves a writer in an unknown state.
+        let mut fail = FailUnlessDisarmed::new(&self.failed);
+        let (full, result) = {
+            let mut open = self.pack.lock().expect("batch pack mutex poisoned");
+            let full = match open.as_ref() {
+                Some(writer) if writer.holds(&id) || writer.has_room(chunk.len()) => None,
+                Some(_) => open.replace(LocalPackWriter::for_batch(self.store, guard)?),
+                None => {
+                    *open = Some(LocalPackWriter::for_batch(self.store, guard)?);
+                    None
+                }
+            };
+            let writer = open.as_mut().expect("an open pack");
+            (full, writer.write_hashed(id, &parts))
+        };
+        result?;
+        // The full pack seals on a worker while the gate's read side is held
+        // only to start it, so writers go on into the new pack. At most one
+        // seal runs: a second full pack waits for the first, and a
+        // checkpoint that shows a non-blob and the commit wait for it.
+        if let Some(full) = full {
+            self.sealing.start(full.detach())?;
+        }
+        fail.disarm();
+        Ok(id)
+    }
+
+    /// Store a small file's blob in a batch that packs. A blob the store
+    /// already holds is reused and does not count. A new one counts toward
+    /// `SMALL_PACK_AFTER`: the first ones are staged loose and the rest go to
+    /// the open local pack, so a batch with few new blobs opens no pack.
+    fn put_small_blob(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let id = chunk.id();
+        let parts = chunk.parts();
+        let held = {
+            let _gate = self.gate.read().expect("batch gate poisoned");
+            self.check_not_failed()?;
+            self.pack_holds(&id) || self.copy_exists(&id, chunk.len() as u64)
+        };
+        if held {
+            return Ok(id);
+        }
+        if self.small_files.fetch_add(1, Ordering::Relaxed) >= SMALL_PACK_AFTER {
+            return WriteBatch::put_hashed_chunk(self, chunk);
+        }
+        self.write_prehashed(id, &parts)
+    }
+
+    /// Whether an object of exactly `len` bytes is already staged, loose or in
+    /// a pack the batch discovered. A loose copy or a packed one is reused as
+    /// by [`Self::write_parts`]: its shard or the pack directory is flushed at
+    /// the next checkpoint, since another process may not have made the dirent
+    /// durable.
+    fn copy_exists(&self, id: &Hash, len: u64) -> bool {
+        if self.is_staged(id) {
+            return true;
+        }
+        let path = self.store.path_for(id);
+        if fs::metadata(&path).is_ok_and(|meta| meta.len() == len) {
+            if let Some(shard) = path.parent() {
+                self.inner
+                    .lock()
+                    .expect("batch state mutex poisoned")
+                    .touched_shards
+                    .insert(shard.to_path_buf());
+            }
+            return true;
+        }
+        let packed = self
+            .pack_catalog
+            .get()
+            .and_then(Option::as_ref)
+            .is_some_and(|(_, catalog)| self.store.has_packed_size(catalog, id, len));
+        if packed {
+            self.inner
+                .lock()
+                .expect("batch state mutex poisoned")
+                .reused_pack = true;
+        }
+        packed
     }
 
     /// True when `h` is staged in this batch or already in the store.
@@ -556,7 +732,7 @@ impl<'s> WriteBatch<'s> {
     /// mutex.
     #[must_use]
     pub fn contains(&self, h: &Hash) -> bool {
-        self.is_staged(h) || self.store.contains(h)
+        self.is_staged(h) || self.pack_holds(h) || self.store.contains(h)
     }
 
     fn is_staged(&self, h: &Hash) -> bool {
@@ -571,7 +747,9 @@ impl<'s> WriteBatch<'s> {
     /// then all renames, then deduplicated shard-directory flushes.
     ///
     /// After `commit()` returns `Ok`, every hash returned by
-    /// [`Self::write`]/[`Self::write_parts`] is durable AND visible.
+    /// [`Self::write`], [`Self::write_parts`], [`Self::put_hashed_chunk`] and
+    /// `put_chunk_parts` is
+    /// durable AND visible. It publishes the open local pack first.
     /// Callers MUST call this before reading any object written by this
     /// batch and before writing any ref/index that references one.
     ///
@@ -582,12 +760,18 @@ impl<'s> WriteBatch<'s> {
     /// # Errors
     /// A failed barrier, flush or rename.
     pub fn commit(self) -> StoreResult<()> {
-        self.checkpoint()
+        self.flush(true)
     }
 
     /// [`Self::commit`] for the objects staged so far, keeping the batch
     /// open. The batch then stages new objects from empty, so a caller that
     /// writes many objects bounds the batch by checkpointing in windows.
+    ///
+    /// A checkpoint leaves the open local pack open, so the chunks in it stay
+    /// invisible until the pack seals or the batch commits. It seals the pack
+    /// first when a staged loose object is not a plain blob, after the seal of
+    /// an earlier full pack finishes, so a manifest, tree or commit is never
+    /// visible before the chunks it names.
     ///
     /// The objects a checkpoint makes visible are not yet named by any ref or
     /// index. A crash leaves them unreferenced, which gc collects. The caller
@@ -603,9 +787,15 @@ impl<'s> WriteBatch<'s> {
     ///
     /// Panics only if a previous write panicked while holding a batch lock.
     pub fn checkpoint(&self) -> StoreResult<()> {
+        self.flush(false)
+    }
+
+    /// [`Self::checkpoint`], or the flush of [`Self::commit`] when
+    /// `seal_pack` is set, which always seals the open local pack.
+    fn flush(&self, seal_pack: bool) -> StoreResult<()> {
         let _gate = self.gate.write().expect("batch gate poisoned");
         self.check_not_failed()?;
-        let result = self.flush_staged();
+        let result = self.flush_staged(seal_pack);
         if result.is_err() {
             self.failed.store(true, Ordering::Relaxed);
         }
@@ -615,14 +805,30 @@ impl<'s> WriteBatch<'s> {
     fn check_not_failed(&self) -> StoreResult<()> {
         if self.failed.load(Ordering::Relaxed) {
             return Err(StoreError::Io(io::Error::other(
-                "an earlier checkpoint of this batch failed",
+                "an earlier write or checkpoint of this batch failed",
             )));
         }
         Ok(())
     }
 
     /// The flush of [`Self::checkpoint`], with the gate held.
-    fn flush_staged(&self) -> StoreResult<()> {
+    fn flush_staged(&self, seal_pack: bool) -> StoreResult<()> {
+        // A pack seals before the loose objects become visible when they may
+        // name its chunks: a manifest, tree or commit is never visible before
+        // the chunks it names. Chunks are loose-invisible-safe on their own,
+        // so a checkpoint of plain blobs leaves the pack open.
+        let names_objects = self
+            .inner
+            .lock()
+            .expect("batch state mutex poisoned")
+            .names_objects;
+        if seal_pack || names_objects {
+            self.sealing.wait()?;
+            let open = self.pack.lock().expect("batch pack mutex poisoned").take();
+            if let Some(writer) = open {
+                writer.publish()?;
+            }
+        }
         // Join the background barrier workers first: every barrier
         // they took has completed once this returns. Paths no worker
         // reached (none could be spawned) come back to be barriered
@@ -630,6 +836,7 @@ impl<'s> WriteBatch<'s> {
         let leftover = self.early.quiesce()?;
         let (staged, small_staged, mut touched_shards, reused_pack) = {
             let mut st = self.inner.lock().expect("batch state mutex poisoned");
+            st.names_objects = false;
             (
                 std::mem::take(&mut st.staged),
                 std::mem::take(&mut st.small_staged),
@@ -695,6 +902,104 @@ impl<'s> WriteBatch<'s> {
             store.mark_pack_parent_synced();
         }
         Ok(())
+    }
+}
+
+/// The seal of one full local pack, run on a worker thread. At most one runs
+/// at a time: a writer that fills another pack waits for it, and each such
+/// writer holds one full pack meanwhile, so the packs a batch holds are
+/// bounded by its writer threads.
+#[derive(Debug, Default)]
+struct Sealing {
+    worker: Mutex<Option<JoinHandle<StoreResult<()>>>>,
+}
+
+impl Sealing {
+    /// Seal `job` on a worker, after the seal in flight finishes. A thread
+    /// that cannot be spawned (wasm, resource limits) seals on this one.
+    ///
+    /// # Errors
+    /// The seal in flight failed, or, without a worker, this one did.
+    fn start(&self, job: SealJob) -> StoreResult<()> {
+        self.start_with(job, SealJob::publish)
+    }
+
+    fn start_with<J: Send + 'static>(
+        &self,
+        job: J,
+        run: impl FnOnce(J) -> StoreResult<()> + Send + 'static,
+    ) -> StoreResult<()> {
+        self.start_via(job, run, |work| {
+            std::thread::Builder::new()
+                .name("kit-seal".into())
+                .spawn(work)
+        })
+    }
+
+    fn start_via<J: Send + 'static, F: FnOnce(J) -> StoreResult<()> + Send + 'static>(
+        &self,
+        job: J,
+        run: F,
+        spawn: impl FnOnce(
+            Box<dyn FnOnce() -> StoreResult<()> + Send>,
+        ) -> io::Result<JoinHandle<StoreResult<()>>>,
+    ) -> StoreResult<()> {
+        let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::reap(&mut worker)?;
+        // The job stays reachable if the thread never starts.
+        let work = Arc::new(Mutex::new(Some((job, run))));
+        let handed = Arc::clone(&work);
+        let take = move || {
+            handed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("a seal job runs once")
+        };
+        let again = take.clone();
+        let started = spawn(Box::new(move || {
+            let (job, run) = take();
+            run(job)
+        }));
+        if let Ok(handle) = started {
+            *worker = Some(handle);
+            Ok(())
+        } else {
+            let (job, run) = again();
+            run(job)
+        }
+    }
+
+    /// Wait for the seal in flight and return its error. A panic of the worker
+    /// resumes here.
+    ///
+    /// # Errors
+    /// The seal failed.
+    fn wait(&self) -> StoreResult<()> {
+        let mut worker = self.worker.lock().unwrap_or_else(PoisonError::into_inner);
+        Self::reap(&mut worker)
+    }
+
+    fn reap(worker: &mut Option<JoinHandle<StoreResult<()>>>) -> StoreResult<()> {
+        match worker.take().map(JoinHandle::join) {
+            None | Some(Ok(Ok(()))) => Ok(()),
+            Some(Ok(Err(error))) => Err(error),
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+        }
+    }
+}
+
+impl Drop for Sealing {
+    fn drop(&mut self) {
+        // An aborted batch: the pack being sealed must not outlive the guard
+        // that keeps its directory in place.
+        let worker = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(handle) = worker.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -977,6 +1282,32 @@ const MAX_SYNC_WORKERS: usize = 64;
 /// 64 KiB and 256 KiB were level, within 0.2%.
 const SMALL_OBJECT_BYTES: u64 = crate::chunker::MIN_SIZE as u64;
 
+/// How many new small files a batch writes loose before it packs the rest. A
+/// file whose blob the store already holds does not count.
+///
+/// A pack costs a fixed set of syncs and a read-back at seal, about 5 to 8 ms
+/// on Linux/ext4, which the syncs and files it saves repay from about 35
+/// files. Below this count a batch keeps the loose path and its cost is
+/// unchanged; the first file past it pays that fixed cost, so the worst case
+/// is a batch of one more file, which measured at most 8 ms over loose (adds
+/// of 1 to 10,000 files of 1 to 4 KiB, median of 7 runs, against all-loose).
+const SMALL_PACK_AFTER: usize = 64;
+
+/// The data of `parts` when they are one canonical blob of at most
+/// [`SMALL_OBJECT_BYTES`] serialized bytes: a prologue that names the data's
+/// length, then the data. Anything else is not packed by the small-file
+/// route.
+fn small_blob<'a>(parts: &[&'a [u8]]) -> Option<&'a [u8]> {
+    let [prologue, data] = parts else {
+        return None;
+    };
+    let total = prologue.len().checked_add(data.len())?;
+    if u64::try_from(total).ok()? > SMALL_OBJECT_BYTES {
+        return None;
+    }
+    (crate::serialize::blob_prologue(data.len()).ok()?.as_slice() == *prologue).then_some(*data)
+}
+
 /// Worker cap for the barriers of small objects on Linux, before the
 /// open-file limit (see [`small_object_sync_workers`]).
 ///
@@ -1027,8 +1358,8 @@ fn cap_for_soft_limit(soft: u64) -> usize {
 
 /// The process's soft limit on open files, `RLIM_INFINITY` (`u64::MAX`)
 /// when there is none.
-#[cfg(target_os = "linux")]
-fn soft_open_file_limit() -> Option<u64> {
+#[cfg(unix)]
+pub(crate) fn soft_open_file_limit() -> Option<u64> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -1089,12 +1420,60 @@ impl ObjectSink for WriteBatch<'_> {
         self.write_parts(parts)
     }
 
+    fn put_chunk_parts(&self, parts: &[&[u8]], origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
+        if let Some(data) = small_blob(parts)
+            && self.pack_guard().is_some()
+            && let Ok(chunk) = HashedChunk::new(data)
+        {
+            return self.put_small_blob(&chunk.at(origin));
+        }
+        self.write_parts(parts)
+    }
+
+    fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        WriteBatch::put_hashed_chunk(self, chunk)
+    }
+
+    fn orders_chunks(&self) -> bool {
+        self.pack_guard().is_some()
+    }
+
+    fn chunk_buffers(&self) -> Option<&crate::chunker::ChunkBuffers> {
+        Some(&self.chunk_buffers)
+    }
+
     fn has(&self, h: &Hash) -> bool {
-        self.is_staged(h) || self.store.known_object(h)
+        self.is_staged(h) || self.pack_holds(h) || self.store.known_object(h)
     }
 
     fn checkpoint(&self) -> StoreResult<()> {
         WriteBatch::checkpoint(self)
+    }
+}
+
+/// Sets a flag when dropped, unless it was disarmed first. A guard over a
+/// step that must not be abandoned halfway, so a panic fails the batch like an
+/// error does.
+struct FailUnlessDisarmed<'a> {
+    flag: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> FailUnlessDisarmed<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        Self { flag, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for FailUnlessDisarmed<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1894,7 +2273,7 @@ mod tests {
         assert_eq!(cap_for_soft_limit(u64::MAX), SMALL_OBJECT_SYNC_WORKERS);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn the_open_file_limit_reads() {
         assert!(soft_open_file_limit().is_some_and(|soft| soft > 0));
@@ -2406,6 +2785,32 @@ mod tests {
     }
 
     #[test]
+    fn a_spooled_object_counts_as_small_up_to_the_limit() {
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        // The length is the caller's claim; only the count of small files
+        // depends on it.
+        for (fill, len, small) in [
+            (1u8, SMALL_OBJECT_BYTES, 1),
+            (2u8, SMALL_OBJECT_BYTES + 1, 1),
+            (3u8, 1, 2),
+        ] {
+            let object = crate::object::Object::Blob(crate::object::Blob {
+                data: vec![fill; 64],
+            });
+            let id = object.id().unwrap();
+            let bytes = crate::serialize::serialize(&object).unwrap();
+            let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+            fs::create_dir_all(&shard).unwrap();
+            let mut file = crate::atomic::temp_file_in(&shard).unwrap();
+            file.as_file_mut().write_all(&bytes).unwrap();
+            batch.stage_temp(id, file.into_temp_path(), len).unwrap();
+            assert_eq!(batch.inner.lock().unwrap().small_staged, small, "{len}");
+        }
+        batch.commit().unwrap();
+    }
+
+    #[test]
     fn a_temporary_file_is_renamed_into_place_once_even_over_a_loose_copy() {
         let (_dir, store, rec) = recording_store();
         let batch = store.batch();
@@ -2498,3 +2903,9 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod pack_sink_tests;
+
+#[cfg(test)]
+mod small_pack_tests;

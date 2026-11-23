@@ -15,7 +15,7 @@ use super::tests::{
 use super::{Index, Pair};
 use crate::hash::Hash;
 use crate::layout::RepoLayout;
-use crate::ops::gc::{GcReport, run_gc};
+use crate::ops::gc::{GcReport, LiveSet, run_gc};
 use crate::store::ObjectStore;
 
 const NOW: u64 = 100;
@@ -732,4 +732,216 @@ fn a_write_failure_during_the_copy_keeps_the_inputs_and_the_run_goes_on() {
     let report = run(&store, &layout, false);
     assert_eq!(report.packs_rewritten, 1);
     assert_eq!(store.read(&ids[0]).unwrap(), x);
+}
+
+fn dead_packs(store: &ObjectStore, n: usize) -> Vec<Pair> {
+    let mut pairs: Vec<Pair> = (0..n)
+        .map(|n| publish(store, &[&obj(&format!("dead {n}"), 500)], OLD).0)
+        .collect();
+    pairs.sort_by_key(|pair| pair.key);
+    pairs
+}
+
+#[test]
+fn retirement_takes_the_exclusive_lock_once_per_batch() {
+    let _batch = super::tests::set_retire_batch(2);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 5);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 5);
+    assert_eq!(report.retire_batches, 3, "2 + 2 + 1");
+    assert!(
+        pairs
+            .iter()
+            .all(|pair| !pair.pack.exists() && !pair.index.exists())
+    );
+    assert!(report.retire_hold_ms <= 1000 * 60);
+}
+
+#[test]
+fn a_pair_that_changes_between_batches_stays() {
+    let _batch = super::tests::set_retire_batch(2);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 5);
+    let touched = pairs[4].clone();
+    super::tests::set_after_retire_batch(move |done| {
+        if done == 1 {
+            set_pack_age(&touched.pack, OLD + 1);
+        }
+        Ok(())
+    });
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 4);
+    assert!(exists(&pairs[4]), "the refreshed pair stays");
+    assert!(pairs[..4].iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_crash_between_batches_leaves_only_pairs_and_inputs_the_next_run_retires() {
+    let _batch = super::tests::set_retire_batch(1);
+    let (_dir, layout, store) = fresh();
+    let dead = dead_packs(&store, 2);
+    let live = obj("live", 2000);
+    let more: Vec<_> = (0..9).map(|n| obj(&format!("more{n}"), 2000)).collect();
+    let mut all = vec![&live];
+    all.extend(more.iter());
+    let (mixed, ids) = publish(&store, &all, OLD);
+    keep(&layout, "live", &ids[0]);
+
+    // The two wholly dead pairs go in the first two batches. The crash comes
+    // before the copy input's batch.
+    super::tests::set_after_retire_batch(|done| {
+        if done == 2 {
+            return Err(std::io::Error::other("crash between batches").into());
+        }
+        Ok(())
+    });
+    assert!(run_gc(&store, &layout, NOW, GRACE, false, &mut |_, _, _| {}).is_err());
+    assert!(dead.iter().all(|pair| !exists(pair)));
+    assert!(exists(&mixed), "the input waits");
+    assert_eq!(packs(&store).len(), 2, "the input and its output");
+    assert_eq!(store.read(&ids[0]).unwrap(), live);
+
+    // The next run finds the input covered by the output and copies nothing.
+    super::tests::set_after_retire_batch(|_| Ok(()));
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired_covered, 1);
+    assert_eq!(report.survivor_bytes_copied, 0);
+    assert!(!exists(&mixed));
+    assert_eq!(packs(&store).len(), 1);
+    assert_eq!(store.read(&ids[0]).unwrap(), live);
+}
+
+#[test]
+fn a_busy_try_in_a_later_batch_ends_the_run_and_the_next_run_finishes() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let _batch = super::tests::set_retire_batch(1);
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 3);
+    let publisher = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&publisher);
+    let holder = ObjectStore::open(&layout).unwrap();
+    super::tests::set_after_retire_batch(move |done| {
+        if done == 1 {
+            *slot.borrow_mut() = Some(holder.prune_guard().unwrap());
+        }
+        Ok(())
+    });
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 1, "the first batch only");
+    assert!(report.pack_retirement_cut_short, "gc reports the stop");
+    assert_eq!(pairs.iter().filter(|pair| exists(pair)).count(), 2);
+    drop(publisher.borrow_mut().take());
+
+    super::tests::set_after_retire_batch(|_| Ok(()));
+    let report = run(&store, &layout, false);
+    assert!(!report.pack_retirement_cut_short);
+    assert_eq!(report.packs_retired, 2);
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_hold_is_bounded_by_bytes_as_well_as_by_items() {
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 6);
+    let one =
+        fs::metadata(&pairs[0].pack).unwrap().len() + fs::metadata(&pairs[0].index).unwrap().len();
+    // Room for two packs by bytes, though the item count would allow 32.
+    let _batch = super::tests::set_retire_batch_limits(32, 2 * one + one / 2);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 6);
+    assert_eq!(report.retire_batches, 3, "2 + 2 + 2");
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_pack_larger_than_the_byte_cap_still_retires_alone() {
+    let (_dir, layout, store) = fresh();
+    let pairs = dead_packs(&store, 3);
+    let _batch = super::tests::set_retire_batch_limits(32, 1);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_retired, 3);
+    assert_eq!(report.retire_batches, 3, "one pack per hold");
+    assert!(pairs.iter().all(|pair| !exists(pair)));
+}
+
+#[test]
+fn a_run_that_retires_everything_does_not_report_a_stop() {
+    let (_dir, layout, store) = fresh();
+    dead_packs(&store, 3);
+    assert!(!run(&store, &layout, false).pack_retirement_cut_short);
+}
+
+/// Verification takes the oldest wholly dead packs first and stops before the
+/// next one when `room` says no: what it verified stays planned.
+#[test]
+fn planning_verifies_the_oldest_dead_packs_first_and_stops_when_told() {
+    use std::cell::Cell;
+
+    use super::Verify;
+
+    let (_dir, _layout, store) = fresh();
+    // Modification times, in the order the packs were created: not age order.
+    let mtimes = [5, 2, 7, 1, 9];
+    let pairs: Vec<Pair> = mtimes
+        .iter()
+        .enumerate()
+        .map(|(n, &mtime)| publish(&store, &[&obj(&format!("dead {n}"), 500)], mtime).0)
+        .collect();
+
+    let calls = Cell::new(0_usize);
+    let mut report = GcReport::default();
+    let sweep = store
+        .plan_pack_retirement_within(
+            &LiveSet::default(),
+            NOW,
+            GRACE,
+            &mut report,
+            &|| Ok(()),
+            &Verify {
+                room: &|| {
+                    calls.set(calls.get() + 1);
+                    calls.get() <= 3
+                },
+                scan: &|| Ok(()),
+            },
+        )
+        .unwrap();
+    assert!(sweep.verification_cut_short());
+    assert_eq!(sweep.planned_packs(), 3);
+    // The three smallest modification times: 1, 2 and 5.
+    let planned: Vec<usize> = (0..5).filter(|&at| sweep.plans(&pairs[at])).collect();
+    assert_eq!(planned, [0, 1, 3]);
+}
+
+/// Copy inputs count toward the byte cap by the size of their files.
+#[test]
+fn copy_inputs_count_by_their_file_bytes_toward_a_hold() {
+    let (_dir, layout, store) = fresh();
+    let mut inputs = Vec::new();
+    for n in 0..3 {
+        let live = obj(&format!("live{n}"), 2000);
+        let dead: Vec<_> = (0..9).map(|d| obj(&format!("dead{n}x{d}"), 2000)).collect();
+        let mut all = vec![&live];
+        all.extend(dead.iter());
+        let (pair, ids) = publish(&store, &all, OLD);
+        keep(&layout, &format!("live{n}"), &ids[0]);
+        inputs.push(pair);
+    }
+    let one = fs::metadata(&inputs[0].pack).unwrap().len()
+        + fs::metadata(&inputs[0].index).unwrap().len();
+    // Room for two inputs by bytes, though the item count would allow 32.
+    let _batch = super::tests::set_retire_batch_limits(32, 2 * one + one / 2);
+
+    let report = run(&store, &layout, false);
+    assert_eq!(report.packs_rewritten, 3, "{report:?}");
+    assert_eq!(report.retire_batches, 2, "2 + 1");
+    assert!(inputs.iter().all(|pair| !exists(pair)));
 }

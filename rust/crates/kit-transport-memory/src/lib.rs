@@ -179,6 +179,11 @@ impl Transport for MemoryTransport {
         Ok(g.packs.contains_key(key))
     }
 
+    fn pack_len(&self, key: &PackKey, _ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let g = self.inner.lock().expect("MemoryTransport mutex poisoned");
+        Ok(g.packs.get(key).map(|bytes| bytes.len() as u64))
+    }
+
     // ------------------------------------------------------------------
     // Ref verbs
     // ------------------------------------------------------------------

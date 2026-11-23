@@ -317,10 +317,8 @@ impl Index {
         self.bucket(shard).map(|i| (*self.id(i), self.frame(i)))
     }
 
-    pub(super) fn ids(&self, shard: Option<u8>) -> impl Iterator<Item = Hash> + '_ {
-        shard
-            .map_or(0..self.count, |byte| self.bucket(byte))
-            .map(|i| *self.id(i))
+    pub(super) fn ids(&self) -> impl Iterator<Item = Hash> + '_ {
+        (0..self.count).map(|i| *self.id(i))
     }
 
     pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
@@ -417,14 +415,21 @@ fn frame_count_is_supported(count: usize) -> bool {
 }
 
 pub(super) fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+    let len = file.metadata()?.len();
+    read_header_sized(file, len)
+}
+
+/// Read a pack header from a file whose length the caller already knows.
+pub(super) fn read_header_sized(
+    file: &mut File,
+    len: u64,
+) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if !frame_count_is_supported(count as usize) {
         return Err(invalid("local pack frame count exceeds the limit"));
     }
-    let trailer = file
-        .metadata()?
-        .len()
+    let trailer = len
         .checked_sub(TRAILER_LEN as u64)
         .ok_or_else(|| invalid("local pack has no trailer"))?;
     let frames = u64::from(count) * FRAME_LEN;
@@ -441,6 +446,11 @@ pub(super) fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEAD
 pub(super) fn read_frame_header(reader: &mut impl Read) -> StoreResult<u32> {
     let mut header = [0; ENTRY_FRAME_LEN];
     reader.read_exact(&mut header)?;
+    parse_frame_header(&header)
+}
+
+/// The length a raw frame's header gives, if its reserved byte is 0.
+pub(super) fn parse_frame_header(header: &[u8]) -> StoreResult<u32> {
     if header[0] != 0 {
         return Err(invalid("local pack frame is not raw"));
     }
