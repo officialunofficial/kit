@@ -31,7 +31,7 @@ use kit_core::ops::restore::RestoreOptions;
 pub enum PullOutcome {
     /// The remote advertises no branches, so there was nothing to land.
     NoRemoteBranches,
-    /// The local branch already pointed at the remote tip.
+    /// The local branch already holds the remote tip: it is equal to it or ahead of it.
     UpToDate { branch: String },
     /// The branch, HEAD and worktree moved to the remote tip.
     FastForwarded {
@@ -90,8 +90,9 @@ pub fn verify_pull_tip(
 /// `refs/remotes/<remote>/<branch>`. Fresh repos with no local branch tip
 /// initialise from the current branch's remote-tracking ref, or the first
 /// advertised remote branch when the current default branch is absent.
-/// Anything that is not a fast-forward is refused with
-/// [`SyncError::NonFastForwardPull`].
+/// A branch that already holds the remote tip, equal to it or ahead of it,
+/// is up to date and nothing moves. Any other history that is not a
+/// fast-forward is refused with [`SyncError::NonFastForwardPull`].
 ///
 /// `options.target_branch`, when `Some`, overrides which remote branch to land
 /// on (used by clone `-b <branch>`): it MUST exist among the remote's refs or
@@ -178,7 +179,27 @@ fn land_pull(
     let restored = resume_pull(layout, store, &branch, pending, local_tip, observer)?;
     let original_head = refs::read_head(layout).ok();
     let ref_condition = if let Some(local_tip) = local_tip {
-        if local_tip == remote_tip {
+        // A missing commit would read as "not a fast-forward" or as "not
+        // ahead", so each walk reads every commit and names the one it cannot
+        // read. The error keeps the id of the commit it names.
+        let ancestor = |ancestor, descendant| {
+            is_ancestor_strict(store, ancestor, descendant).map_err(|e| match e {
+                AncestorError::Limit(source) => SyncError::Store(source),
+                other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
+            })
+        };
+        // A walk runs from the descendant down to the ancestor and ends only
+        // when it finds it or runs out of commits. The common pull is a
+        // fast-forward, so that walk goes first: it reads only the new commits.
+        let holds_remote_tip = if local_tip == remote_tip || ancestor(local_tip, remote_tip)? {
+            local_tip == remote_tip
+        } else if ancestor(remote_tip, local_tip)? {
+            // The branch is ahead of the remote. Nothing moves, as in git.
+            true
+        } else {
+            return Err(SyncError::NonFastForwardPull { branch });
+        };
+        if holds_remote_tip {
             return Ok(PullReport {
                 fetch,
                 maintenance: None,
@@ -186,23 +207,12 @@ fn land_pull(
                     PullOutcome::FastForwarded {
                         branch,
                         old: Some(local_tip),
-                        new: remote_tip,
+                        new: local_tip,
                     }
                 } else {
                     PullOutcome::UpToDate { branch }
                 },
             });
-        }
-        // A missing commit would read as "not a fast-forward", so the walk
-        // reads every commit and names the one it cannot read.
-        let fast_forward =
-            is_ancestor_strict(store, local_tip, remote_tip).map_err(|e| match e {
-                AncestorError::Limit(source) => SyncError::Store(source),
-                // The error keeps the id of the commit it names.
-                other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
-            })?;
-        if !fast_forward {
-            return Err(SyncError::NonFastForwardPull { branch });
         }
         refs::RefWriteCondition::Match(local_tip)
     } else {

@@ -56,6 +56,14 @@ impl Remote {
         tip
     }
 
+    /// Move `main` to a new commit on `parent`, even when that is not a
+    /// fast-forward of the branch.
+    fn publish_on(&self, parent: Hash, files: &[(&str, &[u8])]) -> Hash {
+        let (objects, tip) = self.build(Some(parent), files, true);
+        self.publish_objects(&objects, tip, true);
+        tip
+    }
+
     /// Publish one commit on `main` carrying `items`, each a path with `/`
     /// separators, a mode and its content (a symlink's content is its target),
     /// parented on `parent`.
@@ -1191,6 +1199,87 @@ fn a_failed_download_keeps_the_applied_packs_recorded() {
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(fourth)
     );
+}
+
+#[test]
+fn pull_when_the_branch_is_ahead_changes_nothing_and_is_up_to_date() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // The remote branch goes back to `first`: the local branch is ahead of it.
+    remote.repoint(first);
+
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.outcome,
+        PullOutcome::UpToDate {
+            branch: "main".to_owned()
+        }
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(second));
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+}
+
+#[test]
+fn pull_refuses_a_branch_that_has_diverged_from_the_remote() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let local = remote.publish(Some(first), &[("a.txt", b"local\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // Another commit on `first`, so neither tip contains the other.
+    let other = remote.publish_on(first, &[("a.txt", b"other\n")]);
+    assert_ne!(local, other);
+
+    let err = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, SyncError::NonFastForwardPull { ref branch } if branch == "main"),
+        "{err:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(local));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"local\n");
 }
 
 #[test]
