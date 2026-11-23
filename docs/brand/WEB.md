@@ -64,6 +64,8 @@ request and preserves the custom wordmark.
 
 ### Run the example
 
+The example pins Bun 1.4.5 in the `packageManager` field of `og/package.json`.
+
 ```sh
 python3 docs/brand/generate-web-assets.py
 cd docs/brand/og
