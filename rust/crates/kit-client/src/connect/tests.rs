@@ -356,3 +356,103 @@ fn membership_lag_needs_unavailable_and_a_matching_signal() {
         assert!(!membership_lag(&error), "{error:?}");
     }
 }
+
+/// A sink that keeps its bytes and says how many it can continue from.
+#[derive(Default)]
+struct Held {
+    bytes: Vec<u8>,
+    claims: u64,
+    resumed: Option<(u64, u64)>,
+    outcomes: Vec<ResumeOutcome>,
+}
+
+impl PackSink for Held {
+    fn begin(&mut self, _: Option<u64>) -> TransportResult<()> {
+        self.bytes.clear();
+        Ok(())
+    }
+    fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    fn failed(&self) -> Option<std::io::ErrorKind> {
+        None
+    }
+    fn retained(&self) -> u64 {
+        self.claims
+    }
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        self.resumed = Some((total, offset));
+        Ok(())
+    }
+    fn note_resume(&mut self, outcome: ResumeOutcome) {
+        self.outcomes.push(outcome);
+    }
+}
+
+/// A location sink over `held`, with 40 of its 100 bytes received.
+fn partial(held: &mut Held) -> LocationSink<'_> {
+    let mut sink = LocationSink::new(held, 100);
+    sink.begin(Some(100)).unwrap();
+    sink.write(&[1; 40]).unwrap();
+    sink
+}
+
+#[test]
+fn a_location_sink_continues_a_prefix_that_both_sinks_hold() {
+    let mut held = Held {
+        claims: 40,
+        ..Held::default()
+    };
+    let mut sink = partial(&mut held);
+    assert_eq!(sink.retained(), 40);
+    sink.resume(100, 40).unwrap();
+    sink.write(&[2; 60]).unwrap();
+    assert!(sink.verified(&kit_core::hash::hash(
+        &[[1; 40].as_slice(), &[2; 60]].concat()
+    )));
+    sink.note_resume(ResumeOutcome::Resumed { bytes: 40 });
+    drop(sink);
+    assert_eq!(held.resumed, Some((100, 40)));
+    assert_eq!(held.outcomes, [ResumeOutcome::Resumed { bytes: 40 }]);
+}
+
+#[test]
+fn a_location_sink_refuses_a_continuation_it_cannot_vouch_for() {
+    // The inner sink holds a different prefix than was received.
+    let mut held = Held {
+        claims: 7,
+        ..Held::default()
+    };
+    let mut sink = partial(&mut held);
+    assert_eq!(sink.retained(), 0);
+    assert!(sink.resume(100, 40).is_err());
+    drop(sink);
+    assert_eq!(held.resumed, None);
+
+    // The inner sink keeps nothing.
+    let mut held = Held::default();
+    let mut sink = partial(&mut held);
+    assert_eq!(sink.retained(), 0);
+    assert!(sink.resume(100, 40).is_err());
+
+    // A length or an offset that is not the received prefix.
+    let mut held = Held {
+        claims: 40,
+        ..Held::default()
+    };
+    let mut sink = partial(&mut held);
+    assert!(sink.resume(99, 40).is_err());
+    assert!(sink.resume(100, 39).is_err());
+    drop(sink);
+    assert_eq!(held.resumed, None);
+
+    // Nothing has been received.
+    let mut held = Held {
+        claims: 0,
+        ..Held::default()
+    };
+    let mut sink = LocationSink::new(&mut held, 100);
+    sink.begin(Some(100)).unwrap();
+    assert!(sink.resume(100, 0).is_err());
+}

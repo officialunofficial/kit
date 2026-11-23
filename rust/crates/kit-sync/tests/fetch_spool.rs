@@ -10,10 +10,10 @@ use std::cell::Cell;
 use std::io::ErrorKind;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use kit_core::fault::{self, Site};
+use kit_core::fault::{self, Site, SyncStep};
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
@@ -58,12 +58,24 @@ struct Remote {
     tx: MemoryTransport,
     tip: Hash,
     pack: Hash,
+    /// The id the tree names for the big file.
+    blob: Hash,
 }
 
 fn remote() -> Remote {
+    remote_carrying(7)
+}
+
+/// [`remote`], but the pack carries the big file with the noise of `seed`
+/// while the tree names the file of seed 7, so any other seed is a corrupt
+/// object: bytes that are not the ones its id names.
+fn remote_carrying(seed: u8) -> Remote {
     let tx = MemoryTransport::new();
     let blob = Object::Blob(Blob {
         data: noise(3 << 20, 7),
+    });
+    let carried = Object::Blob(Blob {
+        data: noise(3 << 20, seed),
     });
     let tree = Object::Tree(Tree {
         entries: vec![TreeEntry {
@@ -85,7 +97,7 @@ fn remote() -> Remote {
     commit.signature = sign::sign_commit(&commit, &key).unwrap().0;
     let commit = Object::Commit(commit);
     let mut writer = PackWriter::new();
-    for object in [&blob, &tree, &commit] {
+    for object in [&carried, &tree, &commit] {
         writer
             .push_raw(object.id().unwrap(), &serialize::serialize(object).unwrap())
             .unwrap();
@@ -107,7 +119,12 @@ fn remote() -> Remote {
     let tip = commit.id().unwrap();
     tx.update_ref("refs/heads/main", RefWriteCondition::Missing, &tip)
         .unwrap();
-    Remote { tx, tip, pack }
+    Remote {
+        tx,
+        tip,
+        pack,
+        blob: blob.id().unwrap(),
+    }
 }
 
 /// A clone directory with nothing fetched yet.
@@ -275,6 +292,32 @@ fn a_fetch_killed_mid_pack_leaves_no_record_and_no_spool_and_the_next_one_applie
     assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
 }
 
+/// A big object whose bytes are not the ones its id names is not fetched: the
+/// decoder derives its id from the bytes it writes, so the tree's name for
+/// the file stays missing, the fetch fails and no ref moves. No temporary file
+/// is left, and the object the pack really carries is never taken for the
+/// one the tree names.
+#[test]
+fn a_corrupt_big_object_is_refused_and_leaves_no_ref_and_no_file() {
+    let _guard = serial();
+    let remote = remote_carrying(8);
+    let (_dir, work) = target();
+    let source = Downloads::new(&remote, &work, false);
+
+    assert!(run_fetch(&work, &source).is_err());
+
+    assert_eq!(remote_tip(&work), None);
+    let store = kit_core::store::ObjectStore::open(&RepoLayout::single(&work)).unwrap();
+    assert!(!store.contains(&remote.blob));
+    // The tree's commit and trees are packed; no temporary file is left.
+    let temporary: Vec<_> = stray_object_files(&work)
+        .into_iter()
+        .filter(|path| path.contains(".kit.tmp"))
+        .collect();
+    assert_eq!(temporary, Vec::<String>::new());
+    assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new());
+}
+
 /// A full disk under the spool, or under the store, ends the fetch as
 /// `SyncError::Io` after one download, with no file left behind. The next
 /// fetch, on a disk with room, applies the pack.
@@ -306,13 +349,78 @@ fn a_full_disk_ends_the_fetch_as_an_io_error_without_a_retry_or_a_file() {
             1,
             "{site:?}: the download is not retried"
         );
-        assert_eq!(entries(&spool_dir(&work)), Vec::<String>::new(), "{site:?}");
+        // A pack that verified and then failed to store stays for the retry,
+        // in its own directory. A download that failed leaves nothing.
+        let kept = if site == Site::Store {
+            vec!["retained".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(entries(&spool_dir(&work)), kept, "{site:?}");
         assert_eq!(stray_object_files(&work), Vec::<String>::new(), "{site:?}");
         assert!(!recorded(&work, remote.pack), "{site:?}");
         assert_eq!(remote_tip(&work), None, "{site:?}");
 
         run_fetch(&work, &source).unwrap();
         assert_eq!(remote_tip(&work), Some(remote.tip), "{site:?}");
+        let downloads = if site == Site::Store { 1 } else { 2 };
+        assert_eq!(source.packs.get(), downloads, "{site:?}");
+    }
+}
+
+/// A crash after the pack of a window is published, whether before or after
+/// its loose batch is complete, leaves no record. The replay of the same
+/// window gives the same pack key: the one pack pair stays, with no second
+/// copy of its objects, and the clone ends complete.
+#[test]
+fn a_replayed_window_after_a_crash_reuses_the_published_pack() {
+    let _guard = serial();
+    let remote = remote();
+    for crash_at_device_flush in [false, true] {
+        let (_dir, work) = target();
+        let objects = work.join(".kit").join("objects");
+        let pack_dir = objects.join("pack");
+        let fired = Arc::new(Mutex::new(false));
+
+        let killed = {
+            let (objects, fired) = (objects.clone(), Arc::clone(&fired));
+            let _hook = fault::on_sync(move |step| {
+                let crash = match step {
+                    // The loose shards of the window, flushed after the pack.
+                    SyncStep::DirBarrier(dir) => {
+                        !crash_at_device_flush
+                            && dir.starts_with(&objects)
+                            && !dir.ends_with("pack")
+                    }
+                    // Every loose shard is durable; only the record is missing.
+                    SyncStep::DeviceFlush(at) => crash_at_device_flush && *at == objects,
+                };
+                if crash {
+                    *fired.lock().unwrap_or_else(PoisonError::into_inner) = true;
+                    panic!("the fetch is killed after its pack is published");
+                }
+            });
+            catch_unwind(AssertUnwindSafe(|| {
+                run_fetch(&work, &TransportSource::new(&remote.tx))
+            }))
+        };
+
+        assert!(killed.is_err(), "{crash_at_device_flush}");
+        assert!(*fired.lock().unwrap(), "{crash_at_device_flush}");
+        let published = entries(&pack_dir);
+        assert_eq!(published.len(), 2, "one pack and its index");
+        assert!(!recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), None);
+
+        run_fetch(&work, &TransportSource::new(&remote.tx)).unwrap();
+
+        let mut replayed = entries(&pack_dir);
+        replayed.sort();
+        let mut published = published;
+        published.sort();
+        assert_eq!(replayed, published, "the replay publishes no second pack");
+        assert!(recorded(&work, remote.pack));
+        assert_eq!(remote_tip(&work), Some(remote.tip));
     }
 }
 

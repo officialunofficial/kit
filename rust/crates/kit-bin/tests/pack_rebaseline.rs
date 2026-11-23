@@ -30,7 +30,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
-use common::Repo;
+use common::{Repo, push_branch_with_depth};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -40,9 +40,7 @@ use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_file::FileTransport;
 use kit_transport_memory::MemoryTransport;
-use libkit::transfer::{
-    Error as TransferError, fetch_all, pull_all, push_all, push_branch_with_depth,
-};
+use libkit::transfer::{Error as TransferError, fetch_all, pull_all, push_all};
 
 /// The small threshold the in-process concurrency tests inject via
 /// `push_branch_with_depth` — reachable with a handful of pushes,

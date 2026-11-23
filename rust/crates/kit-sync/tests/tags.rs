@@ -6,8 +6,11 @@
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::cell::Cell;
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
+use kit_core::fault::{self, SyncStep};
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
 use kit_core::object::{
@@ -533,10 +536,10 @@ fn an_unsigned_annotated_tag_is_refused_when_signatures_are_required() {
     }
 }
 
-/// A refused tag's objects stay in the store. A tag the remote then points
-/// at them is refused too, and nothing is downloaded for it.
+/// A tag pointing at an unsigned commit already in the store is refused
+/// without downloading a pack.
 #[test]
-fn a_tag_repointed_at_objects_a_refused_fetch_left_is_refused_with_no_download() {
+fn a_tag_pointing_at_local_unsigned_objects_is_refused_with_no_download() {
     for kind in KINDS {
         let remote = Remote::new(kind);
         let (c1, main) = remote.grow("main", true);
@@ -546,7 +549,12 @@ fn a_tag_repointed_at_objects_a_refused_fetch_left_is_refused_with_no_download()
         let report = clone_from(&remote, &target);
         assert_eq!(report.tags_rejected.len(), 1, "{kind:?}");
         let store = ObjectStore::open(&RepoLayout::single(&target)).unwrap();
-        assert!(store.contains(&forged), "the refused objects stay");
+        assert!(!store.contains(&forged), "a refused pack stays private");
+        for object in objects {
+            store
+                .write(&kit_core::serialize::serialize(&object).unwrap())
+                .unwrap();
+        }
 
         remote.set("refs/kit/tagmap/t2", map);
         remote.set("refs/tags/t2", forged);
@@ -683,6 +691,83 @@ fn a_tag_whose_closure_is_local_publishes_with_no_tag_map_read() {
         assert_eq!(count(&calls, "ReadRef refs/kit/tagmap/"), 0, "{calls:?}");
         assert_eq!(count(&calls, "ReadRef refs/tags/"), 0, "{calls:?}");
     }
+}
+
+/// Each step a store took, with a tag ref's value at that time.
+type Steps = Arc<Mutex<Vec<(SyncStep, Option<Hash>)>>>;
+
+/// A tag over objects the store already holds, as a concurrent fetch leaves
+/// them, publishes only once their directory entries are durable: that fetch
+/// may have made them visible and not yet flushed them (SPEC-OBJECTS §10.1).
+/// So a barrier on every shard, the objects' among them, and a device flush
+/// come before the tag ref. The hook sees every store in the process, so it
+/// keeps only this repository's steps.
+#[test]
+fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    let (_dir, target) = work();
+    clone_from(&remote, &target);
+    let (mut objects, c2) = remote.commit(Some(c1), true);
+    let (tag, v2) = remote.tag_object("v2", c2, true);
+    objects.push(tag);
+    remote.push_tag("v2", &objects, v2, Some(main));
+    let store = ObjectStore::open(&RepoLayout::single(&target)).unwrap();
+    let batch = store.batch();
+    for object in &objects {
+        let id = batch
+            .write(&kit_core::serialize::serialize(object).unwrap())
+            .unwrap();
+        assert_eq!(id, object.id().unwrap());
+    }
+    batch.commit().unwrap();
+    let root = store.objects_root().to_path_buf();
+    let shards: BTreeSet<PathBuf> = objects
+        .iter()
+        .map(|o| root.join(&hash::to_hex(&o.id().unwrap())[..2]))
+        .collect();
+    let steps: Steps = Arc::default();
+    let _hook = {
+        let steps = Arc::clone(&steps);
+        let root = root.clone();
+        let target = target.clone();
+        fault::on_sync(move |step| {
+            let ours = match step {
+                SyncStep::DirBarrier(dir) => dir.starts_with(&root),
+                SyncStep::DeviceFlush(at) => *at == root,
+            };
+            if ours {
+                let tag = local_tag(&target, "v2");
+                steps.lock().unwrap().push((step.clone(), tag));
+            }
+        })
+    };
+
+    let report = fetch_from(&remote, &target);
+
+    assert_eq!(report.tags_fetched, ["v2"]);
+    assert_eq!(report.packs_downloaded, 0, "the closure was local");
+    let steps = steps.lock().unwrap();
+    let flush = steps
+        .iter()
+        .position(|(step, _)| *step == SyncStep::DeviceFlush(root.clone()))
+        .unwrap_or_else(|| panic!("no device flush: {steps:?}"));
+    let barriered: BTreeSet<PathBuf> = steps[..flush]
+        .iter()
+        .filter_map(|(step, _)| match step {
+            SyncStep::DirBarrier(dir) => Some(dir.clone()),
+            SyncStep::DeviceFlush(_) => None,
+        })
+        .collect();
+    assert!(shards.is_subset(&barriered), "{steps:?}");
+    // The flush covers every loose shard and the pack directory.
+    assert!(barriered.contains(&root.join("pack")));
+    assert_eq!(barriered.len(), 257);
+    assert!(
+        steps[..=flush].iter().all(|(_, tag)| tag.is_none()),
+        "the tag ref was written before the flush: {steps:?}"
+    );
+    assert_eq!(local_tag(&target, "v2"), Some(v2));
 }
 
 /// A remote whose branch chain names every pack, tag objects included, and
@@ -849,11 +934,14 @@ fn a_deleted_and_collected_tag_is_restored_through_self_heal() {
         let (tag, v1) = remote.tag_object("v1", c1, true);
         remote.push_tag("v1", std::slice::from_ref(&tag), v1, Some(main));
         let (_dir, target) = work();
+        let layout = kit_sync::init_clone_dir(&target, &default_remote()).unwrap();
+        kit_core::fault::keep_loose(&layout);
         clone_from(&remote, &target);
         let layout = RepoLayout::single(&target);
         refs::delete_tag(&layout, "v1").unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false).unwrap();
+        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false, &mut |_, _, _| {})
+            .unwrap();
         assert!(!store.contains(&v1), "gc removed the tag object");
 
         let report = fetch_from(&remote, &target);
@@ -1012,6 +1100,73 @@ fn the_cursor_record_refetches_after_a_local_tag_delete() {
     assert!(!report.remote_unchanged);
     assert_eq!(report.tags_fetched, ["light"]);
     assert!(fetch_from(&remote, &target).remote_unchanged);
+}
+
+/// A source that deletes local tag `tag` of `dir` when the fetch first lists
+/// tag maps, after the tag phase compared that tag with the remote.
+struct DeleteTagOnTagMapListing<'a> {
+    inner: &'a dyn RemoteSource,
+    dir: &'a Path,
+    tag: &'static str,
+}
+
+impl RemoteSource for DeleteTagOnTagMapListing<'_> {
+    fn list_branches(&self) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        self.inner.list_branches()
+    }
+    fn list_refs(&self, prefix: &str) -> Result<Vec<refs::Ref>, kit_sync::SourceError> {
+        if prefix == "refs/kit/tagmap/" && local_tag(self.dir, self.tag).is_some() {
+            refs::delete_tag(&RepoLayout::single(self.dir), self.tag).unwrap();
+        }
+        self.inner.list_refs(prefix)
+    }
+    fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        self.inner.read_ref(name)
+    }
+    fn download_blob(&self, key: &PackKey, name: &str) -> Result<Vec<u8>, kit_sync::SourceError> {
+        self.inner.download_blob(key, name)
+    }
+    fn download_pack(
+        &self,
+        key: &PackKey,
+        name: &str,
+        sink: &mut dyn kit_core::protocol::PackSink,
+    ) -> Result<(), kit_sync::SourceError> {
+        self.inner.download_pack(key, name, sink)
+    }
+    fn repo_cursor(&self) -> Result<Option<kit_core::protocol::RepoCursor>, kit_sync::SourceError> {
+        self.inner.repo_cursor()
+    }
+}
+
+/// A local tag the remote also holds, deleted while a fetch runs after the
+/// fetch compared it, is not recorded as matching the remote: the next fetch
+/// lists the tags again and restores it.
+#[test]
+fn the_cursor_record_refetches_after_a_local_tag_delete_during_a_fetch() {
+    let remote = Remote::new(Kind::Memory);
+    let (c1, main) = remote.grow("main", true);
+    remote.push_tag("a", &[], c1, Some(main));
+    let (_dir, target) = work();
+    clone_from(&remote, &target);
+    let (tag, b) = remote.tag_object("b", c1, true);
+    remote.push_tag("b", std::slice::from_ref(&tag), b, Some(main));
+    let source = remote.source();
+    let deleting = DeleteTagOnTagMapListing {
+        inner: &source,
+        dir: &target,
+        tag: "a",
+    };
+
+    let report = fetch_with(&deleting, &target, &SyncOptions::default());
+
+    assert_eq!(report.tags_fetched, ["b"]);
+    assert_eq!(local_tag(&target, "a"), None);
+    // The same source: this fetch lists no tag map, so it deletes nothing.
+    let report = fetch_with(&deleting, &target, &SyncOptions::default());
+    assert!(!report.remote_unchanged);
+    assert_eq!(report.tags_fetched, ["a"]);
+    assert_eq!(local_tag(&target, "a"), Some(c1));
 }
 
 /// A failed tag listing stops only the tag phase: the branches are

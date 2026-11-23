@@ -21,7 +21,7 @@ verify the result.
 | CLI on a dev machine (Linux/macOS)    | Release archive or `cargo install --git` | `curl kit.storage \| sh` *or* `cargo install --git https://github.com/officialunofficial/kit kit-bin` |
 | CLI on a dev machine (Windows)        | Not supported &mdash; use WSL         | run the above `install.sh` (or `cargo install`) inside WSL |
 | CI / backend (pin a version)          | Release archive                      | `curl -LO …/releases/download/v<VERSION>/kit-<VERSION>-<target>.tar.gz && tar -xzf kit-<VERSION>-<target>.tar.gz` |
-| Library inside another Rust crate     | crates.io (or git dependency)        | `libkit = "0.9.0"` ([`LIBKIT.md`](LIBKIT.md))                                                      |
+| Library inside another Rust crate     | crates.io (or git dependency)        | `libkit = "0.10.0"` ([`LIBKIT.md`](LIBKIT.md))                                                      |
 
 Pick the leftmost channel that satisfies your constraints &mdash; release
 archives are the lowest-overhead path for end users, source builds the
@@ -127,7 +127,7 @@ by default. Direct release URLs are best when you want a pinned artifact.
 **Download a pinned release for your platform:**
 
 ```sh
-VERSION=0.9.0
+VERSION=0.10.0
 TARGET=aarch64-apple-darwin
 curl -LO "https://github.com/officialunofficial/kit/releases/download/v${VERSION}/kit-${VERSION}-${TARGET}.tar.gz"
 tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
@@ -136,7 +136,7 @@ tar -xzf "kit-${VERSION}-${TARGET}.tar.gz"
 **Pin a version (recommended for CI):**
 
 ```sh
-VERSION=0.9.0
+VERSION=0.10.0
 TARGET=x86_64-unknown-linux-gnu
 TAG="v${VERSION}"
 URL="https://github.com/officialunofficial/kit/releases/download/${TAG}/kit-${VERSION}-${TARGET}.tar.gz"
@@ -194,7 +194,7 @@ version:
 
 ```sh
 $ kit version
-kit 0.9.0
+kit 0.10.0
 ```
 
 The exact format `kit <X.Y.Z>\n` (no extra whitespace, no banner) is
@@ -215,7 +215,7 @@ binary can update itself:
 ```sh
 kit self update            # update to the latest release
 kit self update --check    # just report whether an update exists
-kit self update --version v0.9.0   # pin a specific release
+kit self update --version v0.10.0   # pin a specific release
 ```
 
 `self update` downloads the release archive for your platform. It needs

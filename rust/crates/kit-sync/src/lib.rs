@@ -52,6 +52,7 @@ mod pull;
 pub mod push;
 pub use push::{PushError, PushLease, PushOptions, PushReport, PushTarget, push};
 mod apply;
+mod publication;
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;
@@ -71,7 +72,8 @@ pub use clone::{
     clone, init_clone_dir,
 };
 pub use error::SyncError;
-pub use fetch::FetchReport;
+pub use fetch::{DownloadSavings, FetchReport};
+pub use kit_core::ops::gc::{Collection, MaintenanceReport};
 #[cfg(feature = "connect-native")]
 pub use native::{
     DEFAULT_METADATA_TIMEOUT, DEFAULT_TRANSFER_TIMEOUT, NativeClock, NativeHttp, NativeHttpError,
@@ -98,6 +100,8 @@ pub struct SyncOptions {
     /// The branch to land on (clone `-b`, pull). It must exist on the remote;
     /// there is no silent fallback. `None` selects by HEAD.
     pub target_branch: Option<String>,
+    /// Run best-effort local pack maintenance after publishing a fetch. Enabled by default.
+    pub auto_maintenance: bool,
     /// Object-store durability schedule.
     pub sync_policy: SyncPolicy,
     /// After a complete fetch, delete the remote-tracking refs whose branch
@@ -134,6 +138,13 @@ pub struct SyncOptions {
 }
 
 impl SyncOptions {
+    /// Set [`auto_maintenance`](Self::auto_maintenance).
+    #[must_use]
+    pub fn with_auto_maintenance(mut self, enabled: bool) -> Self {
+        self.auto_maintenance = enabled;
+        self
+    }
+
     /// Set [`tags`](Self::tags).
     #[must_use]
     pub fn with_tags(mut self, tags: bool) -> Self {
@@ -181,6 +192,7 @@ impl Default for SyncOptions {
     fn default() -> Self {
         Self {
             verify_signatures: true,
+            auto_maintenance: true,
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
             prune: false,

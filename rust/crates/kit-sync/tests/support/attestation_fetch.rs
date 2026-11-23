@@ -44,6 +44,49 @@ mod attestation_fetch {
         env.payload = format!(r#"{{"_type":"https://in-toto.io/Statement/v1","predicate":{{}},"predicateType":"https://example.com/test/v1","subject":[{{"name":"commit","digest":{{"blake3":"{}"}}}}]}}"#, to_hex(&subject)).into_bytes();
         env.encode().unwrap().into_bytes()
     }
+    #[allow(dead_code)] // Some transport harnesses only use generic attestations.
+    pub(crate) fn git_locator_envelope(subject: Hash, kind: &str, locator: &str) -> Vec<u8> {
+        use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, RepoKeySigner, Sig, Signer};
+
+        let (field, version) = if kind == "git-bridge" {
+            ("mirror", 1)
+        } else {
+            ("remoteUrl", 2)
+        };
+        let predicate = serde_json::json!({
+            "gitCommit": "0000000000000000000000000000000000000000",
+            (field): locator,
+            "refName": "refs/heads/main",
+            "schemaVersion": 1,
+            "specVersion": version,
+        });
+        let payload = kit_attest::statement::encode(&kit_attest::Statement {
+            subjects: vec![kit_attest::Subject {
+                name: Some("refs/heads/main".into()),
+                digest_blake3_hex: to_hex(&subject),
+                digest_sha256_hex: "0".repeat(64),
+            }],
+            predicate_type: format!("https://kit.storage/spec/predicate/{kind}/v1"),
+            predicate_jcs: predicate.to_string().as_bytes(),
+        })
+        .unwrap()
+        .into_bytes();
+        let mut signer = RepoKeySigner::new(KeyPair::from_seed([7; 32]));
+        let sig = signer
+            .sign(&kit_attest::pae_of(PAYLOAD_TYPE_IN_TOTO, &payload))
+            .unwrap();
+        Envelope {
+            payload_type: PAYLOAD_TYPE_IN_TOTO.into(),
+            payload,
+            signatures: vec![Sig {
+                keyid: signer.keyid().unwrap(),
+                sig,
+            }],
+        }
+        .encode()
+        .unwrap()
+        .into_bytes()
+    }
     pub(crate) fn code(tx: &dyn Transport) -> (Hash, Hash) {
         let key = KeyPair::generate().unwrap();
         let tree = Object::Tree(Tree { entries: vec![] });
@@ -101,6 +144,9 @@ mod attestation_fetch {
             kind: "memory".into(),
         };
         options.remote_url.clone_from(&descriptor.url);
+        // The gc assertion below needs to remove an individual tree.
+        let layout = kit_sync::init_clone_dir(&dir, &descriptor).unwrap();
+        kit_core::fault::keep_loose(&layout);
         let report = kit_sync::clone(&dir, &source, &descriptor, &options, &NoopObserver).unwrap();
         assert_eq!(report.pull.fetch.attestations_stored, 1);
         assert_eq!(report.pull.fetch.attestations_dropped, 1);
@@ -149,7 +195,7 @@ mod attestation_fetch {
         let hex = to_hex(&tree);
         std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             gc.skipped_state_files
                 .contains(&layout.attestations_dir().join(to_hex(&tip)))

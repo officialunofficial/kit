@@ -856,6 +856,8 @@ impl TagPush<'_, '_> {
         };
         let refused = match outcome {
             CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                self.tx
+                    .record_advance(keys.iter().copied().map(PackKey::into_hash));
                 return Ok(Advance::Landed { members: true });
             }
             // The tag map's condition failed: this write may have landed
@@ -952,7 +954,16 @@ impl TagPush<'_, '_> {
 
     fn record(&mut self, local: &Local, row: Row, advance: Advance) {
         match advance {
-            Advance::Landed { .. } => self.finish(local, row.landed(local.value)),
+            Advance::Landed { .. } => {
+                let outcome = row.landed(local.value);
+                self.tx
+                    .observer
+                    .event(&crate::SyncEvent::TagPublished(TagPushResult {
+                        name: local.name.clone(),
+                        outcome: outcome.clone(),
+                    }));
+                self.finish(local, outcome);
+            }
             Advance::Conflict => self.retry.push(local.clone()),
             Advance::Refused { message, .. }
             | Advance::Stale(message)

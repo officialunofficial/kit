@@ -113,6 +113,12 @@ pub enum Error {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would make the branch's pack chain longer than a fetch
+    /// reads. The advance that would cross the bound was not published.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// A packmap chain was malformed — it exceeded the depth cap, contained
     /// a cycle, or a node could not be downloaded/decoded. Indicates a
     /// corrupt or hostile remote.
@@ -414,6 +420,8 @@ impl From<kit_sync::SyncError> for Error {
                 Self::UnsignedOrInvalidObject { hash, reason }
             }
             S::InvalidRemoteName(n) => Self::InvalidRemoteName(n),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }
@@ -434,6 +442,7 @@ impl From<kit_sync::PushError> for Error {
             P::Sync(error) => error.into(),
             P::NonFastForwardPush { branch } => Self::NonFastForwardPush { branch },
             P::PackmapContended { branch } => Self::PackmapContended { branch },
+            P::PackChainTooLong { branch } => Self::PackChainTooLong { branch },
             P::PushTooLarge {
                 packs,
                 limit,
@@ -488,6 +497,8 @@ impl From<kit_sync::PushError> for Error {
                 ..
             }) if message == PENDING_INTERRUPTED_MESSAGE => Self::Interrupted,
             P::Delete(error) => Self::Delete(error),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }

@@ -73,10 +73,12 @@ where
 /// respect, modulo already-dispatched parallel work still running to
 /// completion — see `verify_new_object_signatures`'s doc for why that
 /// distinction matters enough to keep it bespoke there).
-pub fn try_map_seq_or_par<T, U, E>(
-    items: &[T],
+///
+/// The result may borrow from `items`.
+pub fn try_map_seq_or_par<'a, T, U, E>(
+    items: &'a [T],
     threshold: usize,
-    f: impl Fn(&T) -> Result<U, E> + Sync + Send,
+    f: impl Fn(&'a T) -> Result<U, E> + Sync + Send,
 ) -> Result<Vec<U>, E>
 where
     T: Sync,

@@ -36,8 +36,9 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::hash::Hash;
-use kit_core::ops::blame::format_blame_text;
-use kit_core::store::ObjectStore;
+use kit_core::ops::blame::{BlameError, format_blame_text};
+use kit_core::ops::graph::AncestorError;
+use kit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_args;
 use crate::exit;
@@ -242,10 +243,7 @@ pub fn run(args: &[String]) -> u8 {
     };
     let result = match blame::blame(&repo, &request) {
         Ok(result) => result,
-        Err(error) => {
-            let error = libkit::Error::from(error);
-            return emit_err(&exit_map::message(&error), exit_map::exit_code(&error));
-        }
+        Err(error) => return emit_blame_error(error, request.reverse),
     };
 
     if opts.porcelain || opts.line_porcelain {
@@ -458,6 +456,20 @@ fn render_porcelain(
         i += group_len;
     }
     exit::OK
+}
+
+fn emit_blame_error(error: blame::Error, reverse: bool) -> u8 {
+    // These store errors already name the commit.
+    let message = match &error {
+        blame::Error::Blame(BlameError::History(AncestorError::Unreadable {
+            source: source @ (StoreError::ObjectNotFound(_) | StoreError::HashMismatch { .. }),
+            ..
+        })) if reverse => Some(format!("blame: {source}")),
+        _ => None,
+    };
+    let error = libkit::Error::from(error);
+    let message = message.unwrap_or_else(|| exit_map::message(&error));
+    emit_err(&message, exit_map::exit_code(&error))
 }
 
 use super::error as emit_err;

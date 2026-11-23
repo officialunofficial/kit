@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use kit_core::hash::{self, Hash};
+use kit_core::index;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
 use kit_core::refs;
@@ -30,6 +31,19 @@ fn ok(dir: &Path, args: &[&str]) {
     );
 }
 
+/// Seed an entry that an earlier version of add could stage.
+fn stage_historical_temporary(dir: &Path, path: &str, from: &str) {
+    let layout = RepoLayout::single(dir);
+    let mut staged = index::read_index(&layout).unwrap();
+    let mut entry = staged.entries[staged.find_entry(from).unwrap()].clone();
+    let target = dir.join(path);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::copy(dir.join(from), target).unwrap();
+    path.clone_into(&mut entry.path);
+    staged.upsert_entry(entry);
+    index::write_index(&layout, &staged).unwrap();
+}
+
 fn tree(dir: &Path, tip: Hash) -> Hash {
     let store = ObjectStore::open(&RepoLayout::single(dir)).unwrap();
     let Object::Commit(commit) = store.read_object(&tip).unwrap() else {
@@ -48,7 +62,7 @@ fn marker_bytes(target: Hash, before_tree: Hash) -> Vec<u8> {
 }
 
 struct Pending {
-    _upstream: tempfile::TempDir,
+    upstream: tempfile::TempDir,
     _bare: tempfile::TempDir,
     local: tempfile::TempDir,
     target: Hash,
@@ -56,6 +70,10 @@ struct Pending {
 
 impl Pending {
     fn new() -> Self {
+        Self::with_dropped_path(None)
+    }
+
+    fn with_dropped_path(dropped: Option<&str>) -> Self {
         let upstream = tempfile::tempdir().unwrap();
         let bare = tempfile::tempdir().unwrap();
         let local = tempfile::tempdir().unwrap();
@@ -63,12 +81,13 @@ impl Pending {
         ok(upstream.path(), &["keygen"]);
         fs::write(upstream.path().join("a.txt"), b"one\n").unwrap();
         fs::write(upstream.path().join("b.txt"), b"same\n").unwrap();
-        fs::write(
-            upstream.path().join(".kit-restore-tmp.1.2"),
-            b"tracked value\n",
-        )
-        .unwrap();
+        if let Some(path) = dropped {
+            let path = upstream.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"tracked\n").unwrap();
+        }
         ok(upstream.path(), &["add", "."]);
+        stage_historical_temporary(upstream.path(), ".kit-restore-tmp.1.2", "b.txt");
         ok(upstream.path(), &["commit", "-m", "base"]);
         let url = format!("kit+file://{}", bare.path().display());
         ok(upstream.path(), &["remote", "add", &url]);
@@ -81,6 +100,9 @@ impl Pending {
         let before = tree(local.path(), refs::resolve_head(&layout).unwrap().unwrap());
         fs::write(upstream.path().join("a.txt"), b"two\n").unwrap();
         ok(upstream.path(), &["add", "a.txt"]);
+        if let Some(path) = dropped {
+            ok(upstream.path(), &["rm", path]);
+        }
         ok(upstream.path(), &["commit", "-m", "update"]);
         ok(upstream.path(), &["push"]);
         ok(local.path(), &["fetch"]);
@@ -90,7 +112,7 @@ impl Pending {
         fs::write(layout.pull_head_file(), marker_bytes(target, before)).unwrap();
         refs::write_ref(&layout, "main", &target).unwrap();
         Self {
-            _upstream: upstream,
+            upstream,
             _bare: bare,
             local,
             target,
@@ -274,13 +296,76 @@ fn recovery_refuses_symlinks_with_temporary_names() {
     assert_eq!(fs::read(dir.join("b.txt")).unwrap(), b"same\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn recovery_preserves_a_symlink_that_replaced_a_tracked_directory() {
+    let name = ".kit-restore-tmp.17.18";
+    let pending = Pending::with_dropped_path(Some(".kit-restore-tmp.17.18/kept.txt"));
+    let dir = pending.local.path().join(name);
+    fs::remove_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink("b.txt", &dir).unwrap();
+    pending.refuses_without_changes();
+    assert_eq!(fs::read_link(dir).unwrap(), Path::new("b.txt"));
+}
+
 #[test]
 fn recovery_protects_tracked_files_with_temporary_names() {
     let pending = Pending::new();
-    let path = pending.local.path().join(".kit-restore-tmp.1.2");
+    let dir = pending.local.path();
+    let name = ".kit-restore-tmp.1.2";
+    let layout = RepoLayout::single(dir);
+    assert!(
+        index::read_index(&layout)
+            .unwrap()
+            .has_tracked_file_at(name)
+    );
+    let path = dir.join(name);
     fs::write(&path, b"local edit\n").unwrap();
     pending.refuses_without_changes();
     assert_eq!(fs::read(path).unwrap(), b"local edit\n");
+}
+
+#[test]
+fn a_historical_restore_temp_path_can_be_staged_again() {
+    let pending = Pending::new();
+    let dir = pending.upstream.path();
+    let path = ".kit-restore-tmp.1.2";
+    ok(dir, &["rm", "--cached", path]);
+    let status = run(dir, &["status", "--porcelain"]);
+    assert!(status.status.success());
+    assert_eq!(status.stdout, format!("D  {path}\n?? {path}\n").as_bytes());
+    ok(dir, &["add", path]);
+    assert!(run(dir, &["status", "--porcelain"]).stdout.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tracked_directory_alias_cannot_pick_up_a_restore_temp_file() {
+    for symlink in [false, true] {
+        let local = tempfile::tempdir().unwrap();
+        let dir = local.path();
+        ok(dir, &["init"]);
+        ok(dir, &["keygen"]);
+        fs::write(dir.join("file.txt"), b"historical\n").unwrap();
+        ok(dir, &["add", "file.txt"]);
+        let tracked = "Dir/.kit-restore-tmp.1.2";
+        stage_historical_temporary(dir, tracked, "file.txt");
+        ok(dir, &["commit", "-m", "base"]);
+        if symlink {
+            fs::rename(dir.join("Dir"), dir.join("other")).unwrap();
+            std::os::unix::fs::symlink("other", dir.join("Dir")).unwrap();
+        } else {
+            if !dir.join("dir").exists() {
+                continue;
+            }
+            fs::rename(dir.join("Dir"), dir.join("dir")).unwrap();
+        }
+        fs::write(dir.join(tracked), b"left by a stopped restore\n").unwrap();
+
+        assert!(!run(dir, &["add", tracked]).status.success());
+        ok(dir, &["add", "-u"]);
+        assert_eq!(run(dir, &["ls-files"]).stdout, b"file.txt\n");
+    }
 }
 
 #[test]

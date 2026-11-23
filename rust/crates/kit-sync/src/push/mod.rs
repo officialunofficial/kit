@@ -1,12 +1,16 @@
 //! Native repository push: bounded packs and conditioned ref publication.
+use crate::packmap::packmap_ref;
 use crate::{Observer, RemoteSource, SourceError, SyncError, SyncEvent};
 use kit_core::hash::{HASH_LEN, Hash};
+use kit_core::object::ObjectType;
 use kit_core::pack::{self, Incoming, PackFill, PackWriter, PreparedDelta, PreparedRaw};
 use kit_core::protocol::{self, PackKey, UploadLimits};
 use kit_core::refs;
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::transfer;
 use rayon::prelude::*;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
 mod attestations;
 mod delete;
@@ -23,7 +27,7 @@ use deltas::encode_delta_candidates_batch;
 #[cfg(test)]
 use deltas::{DELTA_CANDIDATE_BATCH_CAP, cache_delta_bases, delta_plan_fanout_threshold};
 pub use error::PushError;
-use packmap::{advance_packmap, commit_head};
+use packmap::{PACKMAP_CAS_ATTEMPTS, advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
 pub use tags::{
     MAX_BASE_WALK_COMMITS, MAX_TAG_LISTING_BYTES, TagPushOutcome, TagPushRejection, TagPushResult,
@@ -35,6 +39,29 @@ struct PreparedPlan {
     force: Option<force::Snapshot>,
 }
 
+#[derive(Default)]
+struct PushRecord {
+    /// Packs uploaded and checked.
+    checked: HashSet<Hash>,
+    /// Checked packs a ref now names.
+    advanced: Vec<PackKey>,
+}
+
+/// What the entries of one pack under construction carry, gathered for the
+/// push record.
+#[derive(Default)]
+struct PackEntries {
+    /// The commits, remixes and tags, with a bound of their size: checked
+    /// after the upload.
+    signed: Vec<(Hash, u32)>,
+}
+
+impl PackEntries {
+    fn clear(&mut self) {
+        self.signed.clear();
+    }
+}
+
 struct PushContext<'a> {
     source: &'a dyn RemoteSource,
     observer: &'a dyn Observer<SyncEvent>,
@@ -42,6 +69,7 @@ struct PushContext<'a> {
     /// directory.
     deltas: DeltaEncoder,
     spool_dir: std::path::PathBuf,
+    record: Option<RefCell<PushRecord>>,
 }
 impl<'a> PushContext<'a> {
     fn new(
@@ -54,8 +82,18 @@ impl<'a> PushContext<'a> {
         Self {
             source,
             observer,
-            deltas: DeltaEncoder::new(spool_dir.clone()),
+            // A replacement manifest goes as a delta only to a remote that
+            // says it takes one; every other source, a hosted one included,
+            // is sent full manifests.
+            deltas: DeltaEncoder::new(spool_dir.clone()).with_manifests(
+                if source.accepts_manifest_deltas() {
+                    transfer::ManifestDeltas::Held
+                } else {
+                    transfer::ManifestDeltas::Full
+                },
+            ),
             spool_dir,
+            record: None,
         }
     }
 
@@ -68,10 +106,49 @@ impl<'a> PushContext<'a> {
             observer,
             deltas: DeltaEncoder::new(spool_dir.clone()),
             spool_dir,
+            record: None,
         }
     }
 }
 impl PushContext<'_> {
+    fn record_advance(&self, keys: impl IntoIterator<Item = Hash>) {
+        if let Some(record) = &self.record {
+            let mut record = record.borrow_mut();
+            for key in keys {
+                if record.checked.remove(&key) {
+                    record.advanced.push(PackKey::from_hash(key));
+                }
+            }
+        }
+    }
+
+    fn persist_advances(&self, layout: &kit_core::layout::RepoLayout, remote: &str) {
+        let Some(record) = &self.record else {
+            return;
+        };
+        let mut record = record.borrow_mut();
+        if record.advanced.is_empty() {
+            return;
+        }
+        // The record tells the next fetch that these packs' objects are in
+        // this store, so it can skip them. Every object a pack carries is
+        // reachable from a ref this push published or read, and a ref only
+        // names objects whose bytes and locations are durable
+        // (SPEC-OBJECTS §10.1), so the record needs no flush of the object
+        // directories before it is written.
+        let mut applied =
+            crate::applied_packs::AppliedPacks::load_or_empty(layout, remote, self.observer);
+        for key in record.advanced.drain(..) {
+            if let Err(error) = applied.record_applied(&key) {
+                self.observer.event(&SyncEvent::AppliedPacksPersistFailed {
+                    remote: remote.to_owned(),
+                    error: error.to_string(),
+                });
+            }
+        }
+        crate::fetch::persist_record(&mut applied, self.observer, remote);
+    }
+
     /// Whether force pushes take the guarded force driver. It needs only a
     /// serialized advance: it appends, and it re-plans when a concurrent
     /// reset drops the chain its plan depends on, which an ordered force
@@ -93,7 +170,7 @@ fn repository_operation_error(tx: &PushContext<'_>, error: SourceError) -> PushE
 /// How the tracking lease is used for a branch push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushLease {
-    /// Unconditional head update; split steps still lease the prior step.
+    /// Overwrite the remote head even if the new tip does not fast-forward it.
     Force,
     /// Require the last locally tracked remote tip, allowing divergence.
     WithLease,
@@ -224,10 +301,19 @@ pub fn push(
     let layout = kit_core::layout::discover(dir)?;
     let mut store = ObjectStore::open(&layout)?;
     store.set_sync_policy(options.sync_policy);
-    let tx = PushContext::new(source, options.control.observer, &store);
-    let mut report = push_refs(&layout, &store, &tx, options)?;
+    let mut tx = PushContext::new(source, options.control.observer, &store);
+    tx.record = Some(RefCell::default());
+    let mut report = {
+        // Held until the last tracking ref is written, as a fetch holds it:
+        // a gc that runs during the push deletes nothing, so a tracking ref
+        // never names a tip gc removed (see `ObjectStore::prune_guard`).
+        let _prune_guard = store.prune_guard()?;
+        let result = push_refs(&layout, &store, &tx, options);
+        tx.persist_advances(&layout, options.remote_name);
+        result?
+    };
     if options.attestations {
-        attestations::run(&layout, &store, &tx, options, &mut report);
+        attestations::run(&layout, &store, &tx, options, &mut report)?;
         tx.observer.event(&SyncEvent::AttestationsPushed {
             count: report.attestations_pushed,
         });
@@ -295,17 +381,22 @@ fn push_refs(
                     tx.observer.event(&SyncEvent::PushBranchStarted {
                         branch: r.name.clone(),
                     });
-                    report.steps += run_steps(
-                        tx,
-                        store,
-                        &r.name,
-                        tip,
-                        condition,
-                        options.rebaseline_threshold,
-                        options.pack_payload_cap,
-                        &options.control,
-                        &mut |published| Ok(tracking.write(&r.name, &published)?),
-                    )?;
+                    report.steps +=
+                        run_steps(
+                            tx,
+                            store,
+                            &r.name,
+                            tip,
+                            condition,
+                            options.rebaseline_threshold,
+                            options.pack_payload_cap,
+                            &options.control,
+                            &mut |published| {
+                                publish_tracking(layout, tx, || {
+                                    Ok(tracking.write(&r.name, &published)?)
+                                })
+                            },
+                        )?;
                     report.refs += 1;
                 }
                 Ok(())
@@ -322,11 +413,24 @@ fn push_refs(
             let tip = refs::read_ref(layout, local)?
                 .ok_or_else(|| SyncError::RemoteBranchMissing(local.clone()))?;
             refs::check_pushable_branch(remote)?;
+            // Read once: the fast-forward check and the lease must use the
+            // same value. A fetch that moved the tracking ref between two
+            // reads could pass the check against one tip and lease another,
+            // so a plain push would replace a head it never checked.
+            let tracked = refs::read_remote_ref(layout, options.remote_name, remote)?;
             // The remote's head decides, not the tracking ref: the remote
             // may have lost the branch since this repository last saw it.
             let head = tx.read_ref(&format!("refs/heads/{remote}"))?;
-            if head == Some(tip) {
-                refs::write_remote_ref(layout, options.remote_name, remote, &tip)?;
+            let at_tip = head == Some(tip);
+            if at_tip && tx.read_ref(&packmap_ref(remote))?.is_some() {
+                publish_tracking(layout, tx, || {
+                    Ok(refs::write_remote_ref(
+                        layout,
+                        options.remote_name,
+                        remote,
+                        &tip,
+                    )?)
+                })?;
                 return Ok(PushReport {
                     attestations_pushed: 0,
                     attestation_warnings: Vec::new(),
@@ -337,23 +441,35 @@ fn push_refs(
                     deleted: None,
                 });
             }
-            if matches!(policy, PushLease::FastForward)
+            if !at_tip
+                && matches!(policy, PushLease::FastForward)
                 && head.is_some()
-                && let Some(tracked) = refs::read_remote_ref(layout, options.remote_name, remote)?
+                && let Some(tracked) = tracked
                 && !kit_core::ops::merge::is_ancestor(store, tracked, tip)?
             {
                 return Err(PushError::NonFastForwardPush {
                     branch: remote.clone(),
                 });
             }
-            let condition = match (policy, lease(layout, options.remote_name, remote)?) {
-                (PushLease::Force, _) => refs::RefWriteCondition::Any,
-                // A fast-forward push of a branch the remote does not hold
-                // creates it: there is nothing on the remote to overwrite.
-                (PushLease::FastForward, refs::RefWriteCondition::Match(_)) if head.is_none() => {
-                    refs::RefWriteCondition::Missing
+            let condition = if at_tip {
+                // Rebuild the missing packmap only for the head we saw.
+                refs::RefWriteCondition::Match(tip)
+            } else {
+                let lease = tracked.map_or(
+                    refs::RefWriteCondition::Missing,
+                    refs::RefWriteCondition::Match,
+                );
+                match (policy, lease) {
+                    (PushLease::Force, _) => refs::RefWriteCondition::Any,
+                    // A fast-forward push of a branch the remote does not hold
+                    // creates it: there is nothing on the remote to overwrite.
+                    (PushLease::FastForward, refs::RefWriteCondition::Match(_))
+                        if head.is_none() =>
+                    {
+                        refs::RefWriteCondition::Missing
+                    }
+                    (_, condition) => condition,
                 }
-                (_, condition) => condition,
             };
             tx.observer.event(&SyncEvent::PushBranchStarted {
                 branch: remote.clone(),
@@ -368,12 +484,14 @@ fn push_refs(
                 options.pack_payload_cap,
                 &options.control,
                 &mut |published| {
-                    Ok(refs::write_remote_ref(
-                        layout,
-                        options.remote_name,
-                        remote,
-                        &published,
-                    )?)
+                    publish_tracking(layout, tx, || {
+                        Ok(refs::write_remote_ref(
+                            layout,
+                            options.remote_name,
+                            remote,
+                            &published,
+                        )?)
+                    })
                 },
             )?;
             Ok(PushReport {
@@ -428,6 +546,23 @@ fn push_tag_report(
         deleted: None,
     })
 }
+/// Write a tracking ref under the worktree lock, as a fetch publishes one.
+/// gc holds that lock across its mark and sweep, so it either marks from
+/// the new ref or finishes before the ref exists; the prune guard the push
+/// holds keeps its sweep from deleting anything meanwhile.
+fn publish_tracking(
+    layout: &kit_core::layout::RepoLayout,
+    tx: &PushContext<'_>,
+    write: impl FnOnce() -> Result<(), PushError>,
+) -> Result<(), PushError> {
+    let _lock = crate::lock::wait_for_worktree_lock(
+        layout,
+        tx.observer,
+        &crate::lock::LockWait::new(None),
+    )?;
+    write()
+}
+
 fn lease(
     layout: &kit_core::layout::RepoLayout,
     remote: &str,
@@ -519,6 +654,8 @@ fn run_steps(
     };
     refs::check_pushable_branch(branch)?;
     let LeaseHead::Holds(remote_tip) = lease_head(tx, branch, condition, tip)? else {
+        // A repair must rebuild the current tip in one advance. Publishing
+        // an intermediate commit would rewind the branch.
         return single(None, pack_payload_cap);
     };
     tx.observer.event(&SyncEvent::PushPlanning { done: 0 });
@@ -625,6 +762,9 @@ fn publish_steps(
         }
         if let Err(cause) = outcome {
             return Err(match published {
+                // Every later advance would be refused too: a re-run cannot
+                // resume, and the error says what to do instead.
+                Some(_) if matches!(cause, PushError::PackChainTooLong { .. }) => cause,
                 Some(head) => PushError::SplitInterrupted {
                     branch: branch.to_owned(),
                     head: kit_core::hash::to_hex(&head),
@@ -666,8 +806,7 @@ fn push_step_recovering(
             plan,
         );
     }
-    let plan = plan.map(|prepared| prepared.pack);
-    let once = |retry, plan| {
+    let once = |condition, retry, plan| {
         push_branch_once(
             tx,
             store,
@@ -680,20 +819,49 @@ fn push_step_recovering(
             plan,
         )
     };
-    match once(None, plan) {
+    let recovering = |condition, plan| match once(condition, None, plan) {
         Err(PushError::TicketRejected | PushError::PacklistNotInRepository) => {
-            once(Some(RetryReason::Replanned), None)
+            once(condition, Some(RetryReason::Replanned), None)
         }
-        Err(PushError::DeltaBaseUnavailable) => once(Some(RetryReason::LostDeltaBase), None),
+        Err(PushError::DeltaBaseUnavailable) => {
+            once(condition, Some(RetryReason::LostDeltaBase), None)
+        }
         result => result,
+    };
+    if !matches!(condition, refs::RefWriteCondition::Any) {
+        return recovering(condition, plan.map(|prepared| prepared.pack));
     }
+
+    // On an ordered transport a delete can remove both refs between the
+    // packmap write and the head write. Lease the observed head so this
+    // write cannot recreate it from a plan based on the deleted packmap.
+    refs::check_pushable_branch(branch)?;
+    let head_ref = crate::packmap::branch_head_ref(branch);
+    for _ in 0..PACKMAP_CAS_ATTEMPTS {
+        if tx.observer.cancelled() {
+            return Err(SyncError::Interrupted.into());
+        }
+        let condition = tx.read_ref(&head_ref)?.map_or(
+            refs::RefWriteCondition::Missing,
+            refs::RefWriteCondition::Match,
+        );
+        match recovering(condition, None) {
+            Err(PushError::NonFastForwardPush { .. }) => {}
+            result => return result,
+        }
+    }
+    Err(PushError::NonFastForwardPush {
+        branch: branch.to_owned(),
+    })
 }
 
 /// The remote head a push plans against, read before it plans.
 enum LeaseHead {
     /// The head, which the push's head condition holds for.
     Holds(Option<Hash>),
-    /// The head is already the tip: an earlier attempt landed.
+    /// The lease holds for the tip, but a repair must send its entire closure.
+    MissingPackmap,
+    /// The head is already the tip and has a packmap: an earlier attempt landed.
     Landed,
 }
 
@@ -705,8 +873,8 @@ enum LeaseHead {
 /// after the head moved away and back and a reset dropped what the plan
 /// left out; the head write would then publish a tip the packmap cannot
 /// rebuild. Such a push would fail its head condition at once, so it is
-/// refused before it plans. A head that is already `tip` means an earlier
-/// attempt landed, and the push writes nothing more.
+/// refused before it plans. A head at `tip` with a packmap can also be
+/// the result of an earlier attempt that landed.
 fn lease_head(
     tx: &PushContext<'_>,
     branch: &str,
@@ -719,10 +887,17 @@ fn lease_head(
         refs::RefWriteCondition::Missing => head.is_none(),
         refs::RefWriteCondition::Match(lease) => head == Some(lease),
     };
+    if head == Some(tip) {
+        let has_packmap = tx.read_ref(&packmap_ref(branch))?.is_some();
+        if holds && !has_packmap {
+            return Ok(LeaseHead::MissingPackmap);
+        }
+        if !holds && has_packmap {
+            return Ok(LeaseHead::Landed);
+        }
+    }
     if holds {
         Ok(LeaseHead::Holds(head))
-    } else if head == Some(tip) {
-        Ok(LeaseHead::Landed)
     } else {
         Err(PushError::NonFastForwardPush {
             branch: branch.to_owned(),
@@ -838,7 +1013,9 @@ fn push_branch_once(
         rebaseline_threshold,
         condition,
         tip,
-    )
+    )?;
+    tx.record_advance(pack_keys);
+    Ok(())
 }
 
 /// The plan for `tip`, or `None` when an earlier attempt already landed it.
@@ -860,6 +1037,7 @@ fn plan_branch(
     } else {
         match lease_head(tx, branch, condition, tip)? {
             LeaseHead::Holds(head) => head,
+            LeaseHead::MissingPackmap => None,
             LeaseHead::Landed => return Ok(None),
         }
     };
@@ -914,8 +1092,8 @@ fn estimate_pack_sizes_with(
         .iter()
         .map(|hash| {
             store
-                .object_metadata(hash)
-                .map(|meta| Incoming::raw(meta.len(), meta.len()))
+                .object_size(hash)
+                .map(|size| Incoming::raw(size, size))
         })
         .collect::<Result<Vec<_>, _>>()?;
     // An entry may compress on the wire, and then a reader counts its whole
@@ -1013,16 +1191,24 @@ fn build_and_upload_packs(
     build_packs(
         SealKind::Upload,
         || PackWriter::spool(&tx.spool_dir).map_err(PushError::from),
-        |writer, ticketed| {
+        |writer, ticketed, entries| {
             let spooled = writer.finish_spool()?;
             let is_ticketed = check_sealed(spooled.len(), limits, ticketed)?;
-            tx.upload_pack(&spooled, &PackKey::from_hash(spooled.key()), head_ref)
-                .map_err(|error| repository_operation_error(tx, error))?;
-            // Upload is complete — report the real byte count handed to the
-            // transport, not an estimate.
-            tx.observer.event(&SyncEvent::PackUploaded {
-                bytes: spooled.len(),
-            });
+            let key = PackKey::from_hash(spooled.key());
+            if !already_stored(tx, &key, spooled.len(), head_ref, limits) {
+                tx.upload_pack(&spooled, &key, head_ref)
+                    .map_err(|error| repository_operation_error(tx, error))?;
+                // Upload is complete — report the real byte count handed to
+                // the transport, not an estimate.
+                tx.observer.event(&SyncEvent::PackUploaded {
+                    bytes: spooled.len(),
+                });
+            }
+            if let Some(record) = &tx.record
+                && crate::verify::verify_new_object_signatures(store, &entries.signed, true).is_ok()
+            {
+                record.borrow_mut().checked.insert(spooled.key());
+            }
             pack_keys.push(spooled.key());
             Ok(is_ticketed)
         },
@@ -1033,6 +1219,37 @@ fn build_and_upload_packs(
         tx.observer,
     )?;
     Ok(pack_keys)
+}
+
+/// Sealed packs smaller than this go straight to the upload, with no
+/// existence check: the common one-commit push makes no extra request, and a
+/// small pack costs less to send again than to ask about.
+const STORED_PACK_CHECK_MIN_BYTES: u64 = 8 << 20;
+
+/// Whether the remote already holds the sealed pack `key` of `len` bytes, so
+/// the upload can be skipped. A pack key is the hash of the pack's bytes, and
+/// every transport that is not ticketed stores a pack whole or not at all (a
+/// file or ssh remote renames a finished temp file into place, an S3 `PUT`
+/// takes effect when it completes), so a key that is there with the length
+/// of the local pack names a complete pack and a re-run of an interrupted
+/// push sends only the packs it missed. A key whose stored length differs, as
+/// a damaged or truncated file would give, is not that pack: the push
+/// uploads over it, and never publishes a ref over a pack the remote does
+/// not fully hold. The length is the test, not a hash of the stored bytes: a
+/// pack damaged in place at its own length is not caught here. Only a pack of [`STORED_PACK_CHECK_MIN_BYTES`] or more on
+/// a remote that issues no upload tickets is checked, with one request that
+/// is not retried. Any answer but a stored length equal to `len`, an error
+/// and an unknown length included, is "not stored": the push uploads.
+fn already_stored(
+    tx: &PushContext<'_>,
+    key: &PackKey,
+    len: u64,
+    head_ref: &str,
+    limits: UploadLimits,
+) -> bool {
+    limits.data_packs_per_advance.is_none()
+        && len >= STORED_PACK_CHECK_MIN_BYTES
+        && tx.pack_len(key, head_ref).ok().flatten() == Some(len)
 }
 
 /// The exact seal of `plan` that [`build_and_upload_packs`] would make, with
@@ -1050,7 +1267,7 @@ fn dry_seal(
     build_packs(
         SealKind::Count,
         || Ok(pack::CountingWriter::counting()),
-        |writer, ticketed| {
+        |writer, ticketed, _| {
             let is_ticketed = check_sealed(writer.finish_count()?, limits, ticketed)?;
             packs += 1;
             Ok(is_ticketed)
@@ -1095,7 +1312,7 @@ fn check_sealed(len: u64, limits: UploadLimits, ticketed: usize) -> Result<bool,
 fn build_packs<W: std::io::Write>(
     kind: SealKind,
     mut fresh: impl FnMut() -> Result<PackWriter<W>, PushError>,
-    mut seal: impl FnMut(PackWriter<W>, usize) -> Result<bool, PushError>,
+    mut seal: impl FnMut(PackWriter<W>, usize, &PackEntries) -> Result<bool, PushError>,
     store: &ObjectStore,
     plan: transfer::PackPlan,
     limits: UploadLimits,
@@ -1103,13 +1320,15 @@ fn build_packs<W: std::io::Write>(
     observer: &dyn Observer<SyncEvent>,
 ) -> Result<(), PushError> {
     let mut ticketed = 0;
-    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize| {
+    let mut entries = PackEntries::default();
+    let mut seal_one = |w: PackWriter<W>, ticketed: &mut usize, entries: &mut PackEntries| {
         if observer.cancelled() {
             return Err(PushError::Sync(SyncError::Interrupted));
         }
-        if seal(w, *ticketed)? {
+        if seal(w, *ticketed, entries)? {
             *ticketed += 1;
         }
+        entries.clear();
         Ok(())
     };
     let mut w = fresh()?;
@@ -1123,14 +1342,14 @@ fn build_packs<W: std::io::Write>(
     // *before* any object's content is actually read into memory.
     let raw_sizes: Vec<u64> = raw
         .iter()
-        .map(|h| Ok(store.object_metadata(h)?.len()))
+        .map(|h| Ok(store.object_size(h)?))
         .collect::<Result<_, PushError>>()?;
     let mut start = 0;
     for len in size_capped_batch_lens(&raw_sizes, PUSH_BATCH_BYTES, max_entries) {
         let chunk = &raw[start..start + len];
         let parallel = batch_fans_out(len, raw_sizes[start..start + len].iter().sum());
         start += len;
-        for entry in prepare_raw_batch(store, chunk, parallel)? {
+        for (entry, signs) in prepare_raw_batch(store, chunk, parallel)? {
             if should_seal(
                 &w,
                 entry.incoming(),
@@ -1138,7 +1357,17 @@ fn build_packs<W: std::io::Write>(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_one(std::mem::replace(&mut w, fresh()?), &mut ticketed)?;
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut entries,
+                )?;
+            }
+            if signs {
+                entries.signed.push((
+                    entry.hash(),
+                    u32::try_from(entry.conservative_len()).expect("bounded object"),
+                ));
             }
             w.push_prepared_raw(entry)?;
             // Honest progress: one real object just got staged into
@@ -1149,7 +1378,10 @@ fn build_packs<W: std::io::Write>(
     }
 
     // Delta entries: sizes are known from the plan with no I/O, so batch
-    // lengths are computed directly off them; `drain` then moves each
+    // lengths are computed directly off them. The planner only chooses
+    // blob and manifest delta targets, so none of these entries needs a
+    // signature check.
+    // `drain` then moves each
     // batch's `PlannedDelta`s out of `deltas`, and each batch reads its
     // streams back from the push's delta spool.
     let delta_sizes: Vec<u64> = deltas
@@ -1169,14 +1401,18 @@ fn build_packs<W: std::io::Write>(
                 limits.max_pack_bytes,
                 usize::MAX,
             ) {
-                seal_one(std::mem::replace(&mut w, fresh()?), &mut ticketed)?;
+                seal_one(
+                    std::mem::replace(&mut w, fresh()?),
+                    &mut ticketed,
+                    &mut entries,
+                )?;
             }
             w.push_prepared_delta(entry)?;
             report_packed(kind, observer);
         }
     }
 
-    seal_one(w, &mut ticketed)
+    seal_one(w, &mut ticketed, &mut entries)
 }
 
 /// Honest progress: one real object just got staged into the outgoing
@@ -1270,8 +1506,16 @@ fn prepare_raw_batch(
     store: &ObjectStore,
     chunk: &[Hash],
     parallel: bool,
-) -> Result<Vec<PreparedRaw>, PushError> {
-    let prepare = |h: &Hash| Ok(PackWriter::prepare_raw(*h, store.read(h)?));
+) -> Result<Vec<(PreparedRaw, bool)>, PushError> {
+    let prepare = |h: &Hash| {
+        let bytes = store.read(h)?;
+        let signed = bytes.first().is_some_and(|tag| {
+            [ObjectType::Commit, ObjectType::Remix, ObjectType::Tag]
+                .iter()
+                .any(|ty| *ty as u8 == *tag)
+        });
+        Ok((PackWriter::prepare_raw(*h, bytes), signed))
+    };
     if parallel {
         chunk.par_iter().map(prepare).collect()
     } else {
@@ -1546,12 +1790,8 @@ mod tests {
     fn the_pack_estimate_splits_at_the_payload_and_serialized_limits() {
         let (_dir, store) = store();
         let hashes = blob_hashes(&store, 3);
-        let size = store.object_metadata(&hashes[0]).unwrap().len();
-        assert!(
-            hashes
-                .iter()
-                .all(|h| store.object_metadata(h).unwrap().len() == size)
-        );
+        let size = store.object_size(&hashes[0]).unwrap();
+        assert!(hashes.iter().all(|h| store.object_size(h).unwrap() == size));
         let plan = transfer::PackPlan {
             raw: hashes,
             deltas: Vec::new(),
@@ -1641,7 +1881,7 @@ mod tests {
         build_packs(
             SealKind::Count,
             || Ok(PackWriter::new()),
-            |w, _| {
+            |w, _, _| {
                 expected.push(w.finish()?);
                 Ok(false)
             },
@@ -1688,6 +1928,91 @@ mod tests {
         assert_eq!(sent, expected);
         let expected_keys: Vec<Hash> = expected.iter().map(|p| pack::pack_key(p)).collect();
         assert_eq!(keys, expected_keys);
+    }
+
+    #[test]
+    fn a_stored_pack_is_skipped_only_at_its_own_length_from_the_check_size_on_a_remote_with_no_tickets()
+     {
+        use kit_core::protocol::Transport as _;
+        let remote = kit_transport_memory::MemoryTransport::new();
+        let source = crate::source::TransportSource::new(&remote);
+        let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+        let key = PackKey::new([7; 32]);
+        let ticketed = UploadLimits {
+            data_packs_per_advance: Some(4),
+            ticket_threshold_bytes: Some(0),
+            ..UploadLimits::default()
+        };
+        let none = UploadLimits::default();
+        let check = |len, limits| already_stored(&tx, &key, len, "refs/heads/main", limits);
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+
+        // Not stored: every size uploads.
+        assert!(!check(min, none));
+        // A short pack under the key, whatever the local length, uploads.
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(b"pack"), &key, None)
+            .unwrap();
+        assert!(!check(min, none));
+        assert!(!check(min + 1, none));
+        // The whole pack is there: skipped, from the check size on.
+        let whole = vec![0u8; usize::try_from(min).unwrap()];
+        remote
+            .upload_pack(&kit_core::protocol::SliceBody(&whole), &key, None)
+            .unwrap();
+        assert!(check(min, none));
+        // A longer or shorter pack under the key is not the local pack.
+        assert!(!check(min + 1, none));
+        assert!(!check(min - 1, none));
+        // A ticketed remote is never asked.
+        assert!(!check(min, ticketed));
+    }
+
+    #[test]
+    fn a_stored_pack_of_unknown_length_or_a_failing_check_is_uploaded() {
+        struct Source {
+            answer: Result<Option<u64>, SourceError>,
+        }
+        impl RemoteSource for Source {
+            fn pack_len(&self, _: &PackKey, _: &str) -> Result<Option<u64>, SourceError> {
+                match &self.answer {
+                    Ok(len) => Ok(*len),
+                    Err(_) => Err(SourceError::ProtocolError),
+                }
+            }
+            fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn list_refs(&self, _: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+                unimplemented!()
+            }
+            fn read_ref(&self, _: &str) -> Result<Option<Hash>, SourceError> {
+                unimplemented!()
+            }
+            fn download_blob(&self, _: &PackKey, _: &str) -> Result<Vec<u8>, SourceError> {
+                unimplemented!()
+            }
+            fn download_pack(
+                &self,
+                _: &PackKey,
+                _: &str,
+                _: &mut dyn kit_core::protocol::PackSink,
+            ) -> Result<(), SourceError> {
+                unimplemented!()
+            }
+        }
+        let min = STORED_PACK_CHECK_MIN_BYTES;
+        let key = PackKey::new([7; 32]);
+        let stored = |answer| {
+            let source = Source { answer };
+            let tx = PushContext::unspooled(&source, &crate::observer::NoopObserver);
+            already_stored(&tx, &key, min, "refs/heads/main", UploadLimits::default())
+        };
+        assert!(stored(Ok(Some(min))));
+        // A transport that cannot give the length, a missing pack and a failed
+        // check all upload.
+        assert!(!stored(Ok(None)));
+        assert!(!stored(Err(SourceError::ProtocolError)));
     }
 
     #[test]
@@ -1961,7 +2286,10 @@ mod tests {
             let prepared =
                 super::prepare_raw_batch(&store, &hashes, parallel).expect("prepare raw batch");
             assert_eq!(
-                prepared.iter().map(PreparedRaw::hash).collect::<Vec<_>>(),
+                prepared
+                    .iter()
+                    .map(|(raw, _)| raw.hash())
+                    .collect::<Vec<_>>(),
                 hashes,
                 "prepare_raw_batch must preserve input order at n={n}"
             );
@@ -2127,11 +2455,13 @@ mod tests {
                 uses,
             ));
         }
-        // Only one of the two repeated 128-byte bases fits. The 1 KiB
-        // base exceeds the budget and the 64-byte base is used only once.
-        let cache = super::cache_delta_bases(&store, &candidates, 192).unwrap();
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        // One repeated base fits, including when it fills the entire budget.
+        // The 1 KiB base exceeds either budget and the 64-byte base is used once.
+        for byte_budget in [128, 192] {
+            let cache = super::cache_delta_bases(&store, &candidates, byte_budget).unwrap();
+            assert_eq!(cache.len(), 1);
+            assert_eq!(cache.values().map(Vec::len).sum::<usize>(), 128);
+        }
     }
 
     #[test]

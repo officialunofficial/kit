@@ -1,5 +1,5 @@
 //! Optional publication of locally authored, subject-bound envelopes.
-use super::{PushContext, PushOptions, PushReport};
+use super::{PushContext, PushError, PushOptions, PushReport};
 use crate::{
     SourceError,
     attestation_records::{self, NODE_BOUND, Record, RecordKind, WALK_LIMIT},
@@ -27,12 +27,12 @@ pub(super) fn run(
     tx: &PushContext<'_>,
     options: &PushOptions<'_>,
     report: &mut PushReport,
-) {
+) -> Result<(), PushError> {
     if !tx.supports_attestations() {
         report
             .attestation_warnings
             .push("remote does not support attestations; skipped".into());
-        return;
+        return Ok(());
     }
     let result = publish(layout, store, tx, options, report).and_then(|()| {
         let max = tx
@@ -43,10 +43,15 @@ pub(super) fn run(
         compact_log(tx, options, max, &mut report.attestation_warnings, &[])
     });
     if let Err(error) = result {
+        // An interrupt ends the push as one, not as a success with a warning.
+        if tx.observer.cancelled() {
+            return Err(crate::SyncError::Interrupted.into());
+        }
         report
             .attestation_warnings
             .push(format!("attestation push stopped: {error}"));
     }
+    Ok(())
 }
 
 fn persist(path: &std::path::Path, record: &Record) -> Result<(), Failure> {
@@ -168,7 +173,7 @@ fn publish(
         if !reachable.contains(&subject) {
             continue;
         }
-        let checked = (|| -> Result<(Hash, bool), Failure> {
+        let checked = (|| -> Result<(), Failure> {
             let bytes = kit_core::bounded_read::read_capped(
                 &path,
                 kit_attest::store::MAX_ENVELOPE_SIZE as u64,
@@ -189,24 +194,10 @@ fn publish(
             if kit_attest::verify::extract_primary_commit_hash(&env.payload)? != subject {
                 return Err("attestation subject differs from its directory".into());
             }
-            let statement: serde_json::Value = serde_json::from_slice(&env.payload)?;
-            let unsafe_mirror = statement
-                .get("predicateType")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|s| s.ends_with("/git-bridge/v1"))
-                && statement
-                    .pointer("/predicate/mirror")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|s| s.contains('@') || (s != "local" && !s.contains("://")));
-            Ok((id, unsafe_mirror))
+            Ok(())
         })();
         match checked {
-            Ok((id, unsafe_mirror)) => {
-                if unsafe_mirror {
-                    report.attestation_warnings.push("git-bridge envelope publishes a mirror containing user information or a local path".into());
-                }
-                pending.push((id, path));
-            }
+            Ok(()) => pending.push((expected, path)),
             Err(error) => report
                 .attestation_warnings
                 .push(format!("skipped invalid local attestation: {error}")),
@@ -228,7 +219,13 @@ fn publish(
         if hash::hash(&bytes) != *expected || fetched(layout, expected)? {
             return Err("candidate changed during push".into());
         }
-        batch.add(bytes, tx, &mut prepared)?;
+        batch.add(
+            bytes,
+            tx,
+            &mut prepared,
+            &mut report.attestation_warnings,
+            "",
+        )?;
     }
     batch.flush(tx, &mut prepared)?;
     let budget = tx
@@ -432,6 +429,81 @@ fn chain(tx: &PushContext<'_>, mut head: Option<Hash>) -> Result<(usize, Vec<Has
     Ok((seen.len(), packs))
 }
 
+fn git_locator_issue(
+    payload: &[u8],
+) -> Result<Option<(&'static str, &'static str)>, serde_json::Error> {
+    let statement: serde_json::Value = serde_json::from_slice(payload)?;
+    let (kind, field) = match statement
+        .get("predicateType")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(kind) if kind.ends_with("/git-bridge/v1") => ("git-bridge", "/predicate/mirror"),
+        Some(kind) if kind.ends_with("/git-import/v1") => ("git-import", "/predicate/remoteUrl"),
+        _ => return Ok(None),
+    };
+    Ok(statement
+        .pointer(field)
+        .and_then(serde_json::Value::as_str)
+        .and_then(locator_issue)
+        .map(|reason| (kind, reason)))
+}
+
+fn locator_issue(locator: &str) -> Option<&'static str> {
+    const LOCAL_PATH: &str = "contains a local path or ambiguous locator";
+    if locator == "local" {
+        return None;
+    }
+    let Some((scheme, rest)) = locator.split_once("://") else {
+        return Some(LOCAL_PATH);
+    };
+    let mut scheme_bytes = scheme.bytes();
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if scheme.len() == 1
+        || scheme.eq_ignore_ascii_case("file")
+        || !scheme_bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        || !scheme_bytes.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+        || authority.is_empty()
+        || path.starts_with(':')
+        || locator.contains('\\')
+    {
+        return Some(LOCAL_PATH);
+    }
+    // An unexpected delimiter anywhere in a legacy locator can be part of a
+    // malformed credential. Treat it as private even outside the authority.
+    if locator.contains('?') {
+        Some("contains a URL query")
+    } else if locator.contains('#') {
+        Some("contains a URL fragment")
+    } else if locator.contains('@') || authority.contains('%') || !network_authority(authority) {
+        Some("may contain URL userinfo")
+    } else {
+        None
+    }
+}
+
+// Older imports could strip part of a credential as a query or fragment,
+// leaving a non-port after the authority's colon.
+fn network_authority(authority: &str) -> bool {
+    let (host, port) = if let Some(address) = authority.strip_prefix('[') {
+        let Some((host, port)) = address.split_once(']') else {
+            return false;
+        };
+        if host.parse::<std::net::Ipv6Addr>().is_err() {
+            return false;
+        }
+        (host, port)
+    } else {
+        authority.split_at(authority.find(':').unwrap_or(authority.len()))
+    };
+    !host.is_empty()
+        && (port.is_empty()
+            || port.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
+            }))
+}
+
 struct Batch {
     bytes: Vec<Vec<u8>>,
     size: u64,
@@ -452,7 +524,21 @@ impl Batch {
         bytes: Vec<u8>,
         tx: &PushContext<'_>,
         keys: &mut Vec<Prepared>,
+        warnings: &mut Vec<String>,
+        warning_context: &str,
     ) -> Result<(), Failure> {
+        // Check the exact bytes used to build new and compacted packs.
+        let env = kit_attest::envelope::decode_expecting(
+            &bytes,
+            kit_attest::envelope::PAYLOAD_TYPE_IN_TOTO,
+        )?;
+        if let Some((kind, reason)) = git_locator_issue(&env.payload)? {
+            let id = hash::to_hex(&hash::hash(&bytes));
+            warnings.push(format!(
+                "skipped {kind} attestation {id}{warning_context}: locator {reason}"
+            ));
+            return Ok(());
+        }
         if self.size + bytes.len() as u64 + 15 > self.max
             || self.decoded + bytes.len() as u64 + 10 > kit_attest::pack::MAX_PACK_DECODED_BYTES
         {
@@ -565,7 +651,15 @@ fn compact_packs(
                 if seen.len() == attestation_records::PUSH_CACHE_IDS {
                     error = Some("attestation compaction envelope limit".into());
                 } else if seen.insert(id) {
-                    error = batch.add(bytes.to_vec(), tx, &mut keys).err();
+                    error = batch
+                        .add(
+                            bytes.to_vec(),
+                            tx,
+                            &mut keys,
+                            warnings,
+                            " during compaction",
+                        )
+                        .err();
                 }
             },
         )?;
@@ -649,7 +743,9 @@ mod tests {
         let bytes = include_bytes!("../../../../tests/golden/attest/envelope_basic.json");
         let mut batch = Batch::new(4096);
         let mut packs = Vec::new();
-        batch.add(bytes.to_vec(), &context, &mut packs).unwrap();
+        batch
+            .add(bytes.to_vec(), &context, &mut packs, &mut Vec::new(), "")
+            .unwrap();
         batch.flush(&context, &mut packs).unwrap();
         kit_core::pack::sweep_spool_dir(&store.spool_dir());
         packs[0].upload(&context).unwrap();

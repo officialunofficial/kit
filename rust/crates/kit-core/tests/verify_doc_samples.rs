@@ -40,8 +40,8 @@ fn prover_supplies_the_root(
     let mut r = Copying(proof_bytes);
     let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
     proof.verify_element_inclusion::<Blake3>(
-        &Digest(leaf),
         position,
+        &Digest(leaf),
         &Digest(prover_inner_root),
     )?;
     Ok(())
@@ -58,8 +58,8 @@ fn v2_step(step: &Step, trusted_tree_id: Hash, leaf: Hash) -> Outcome {
     let mut r = Copying(&proof_bytes[..]);
     let proof = UpstreamProof::<Digest>::read_cfg(&mut r, &1usize)?;
     proof.verify_element_inclusion::<Blake3>(
-        &Digest(leaf),
         step.position,
+        &Digest(leaf),
         &Digest(step.inner_root),
     )?;
     Ok(())

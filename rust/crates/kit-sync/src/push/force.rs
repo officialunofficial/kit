@@ -2,7 +2,10 @@
 //! on an atomic or a serialized advance.
 use super::{
     PreparedPlan, PushContext, PushError, RetryReason, build_and_upload_packs, dry_seal,
-    effective_payload_cap, estimate_pack_sizes, packmap::PACKMAP_CAS_ATTEMPTS,
+    effective_payload_cap, estimate_pack_sizes,
+    packmap::{
+        ChainSize, PACKMAP_CAS_ATTEMPTS, check_fetchable, plan_branch_node, tip_has_packmap,
+    },
     repository_operation_error,
 };
 use crate::SyncError;
@@ -12,7 +15,7 @@ use kit_core::{
     protocol::{AdvanceOutcome, CommitOutcome, PackKey, UploadLimits},
     refs::RefWriteCondition,
     store::ObjectStore,
-    transfer::packmap::{ChainState, PlanError, plan_advance},
+    transfer::packmap::{ChainState, PlanError},
 };
 
 #[derive(Clone, Copy)]
@@ -52,7 +55,7 @@ struct Uploaded {
     snapshot: Snapshot,
     keys: Vec<Hash>,
     dependent: bool,
-    cached: Option<(Option<Hash>, ChainState)>,
+    cached: Option<(Option<Hash>, (ChainState, ChainSize))>,
     read_current: bool,
 }
 
@@ -119,7 +122,9 @@ pub(super) fn push_step(
             replanned = true;
             continue;
         };
-        let head_condition = if staged.dependent {
+        // A serialized advance cannot recreate a head that was deleted
+        // after this plan read it, even when its packs are self-contained.
+        let head_condition = if staged.dependent || !tx.supports_atomic_advance() {
             staged
                 .snapshot
                 .head
@@ -141,7 +146,10 @@ pub(super) fn push_step(
             )
             .map_err(|error| repository_operation_error(tx, error))?;
         match outcome {
-            CommitOutcome::Advanced(AdvanceOutcome::Committed) => return Ok(()),
+            CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                tx.record_advance(staged.keys.iter().copied());
+                return Ok(());
+            }
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
                 let current = tx.read_ref(&push.packmap_name)?;
                 if chain_state(
@@ -158,7 +166,7 @@ pub(super) fn push_step(
                 }
             }
             CommitOutcome::Advanced(AdvanceOutcome::HeadConflict) => {
-                if tx.read_ref(&push.head_name)? == Some(tip) {
+                if tip_has_packmap(tx, &push.head_name, &push.packmap_name, &tip)? {
                     return Ok(());
                 }
                 uploaded = None;
@@ -168,7 +176,7 @@ pub(super) fn push_step(
             | CommitOutcome::PacklistNotInRepository
             | CommitOutcome::DeltaBaseUnavailable => {
                 if outcome != CommitOutcome::DeltaBaseUnavailable
-                    && tx.read_ref(&push.head_name)? == Some(tip)
+                    && tip_has_packmap(tx, &push.head_name, &push.packmap_name, &tip)?
                 {
                     return Ok(());
                 }
@@ -222,7 +230,7 @@ impl ForcePush<'_, '_> {
                 if recovery == Some(RetryReason::LostDeltaBase) {
                     None
                 } else {
-                    head
+                    packmap.and(head)
                 },
             )?;
             (Snapshot { packmap, head }, plan)
@@ -324,14 +332,16 @@ impl ForcePush<'_, '_> {
                     !staged.dependent,
                 )?,
             };
-            let Some(state) = state else {
+            let Some((state, chain)) = state else {
                 return Ok(None);
             };
-            let node = plan_advance(state, &staged.keys, None).map_err(|error| match error {
-                PlanError::Packlist(error) => PushError::from(error),
-                PlanError::NodeTooLarge => unreachable!("no node-size limit configured"),
-            })?;
+            let node = plan_branch_node(state, &staged.keys, prior, staged.snapshot.head.is_none())
+                .map_err(|error| match error {
+                    PlanError::Packlist(error) => PushError::from(error),
+                    PlanError::NodeTooLarge => unreachable!("no node-size limit configured"),
+                })?;
             if let Some(node) = node {
+                check_fetchable(self.branch, chain, &node)?;
                 self.tx
                     .upload_blob(&node.bytes, &PackKey::from_hash(node.key), &self.head_name)
                     .map_err(|error| repository_operation_error(self.tx, error))?;
@@ -350,16 +360,17 @@ impl ForcePush<'_, '_> {
 
 /// A valid replacement must retain the immutable node the plan captured.
 /// An intact but unrelated chain is insufficient for a dependent pack.
+/// Also returns the size of the chain a new node would link onto.
 fn chain_state(
     tx: &PushContext<'_>,
     branch: &str,
     prior: Option<Hash>,
     anchor: Option<Hash>,
     self_contained: bool,
-) -> Result<Option<ChainState>, PushError> {
+) -> Result<Option<(ChainState, ChainSize)>, PushError> {
     let Some(head) = prior else {
         return Ok(if anchor.is_none() {
-            Some(ChainState::Missing)
+            Some((ChainState::Missing, ChainSize::default()))
         } else {
             None
         });
@@ -367,15 +378,22 @@ fn chain_state(
     let nodes = match walk_pack_chain(tx.source, tx.observer, &branch_head_ref(branch), head) {
         Ok(nodes) => nodes,
         Err(SyncError::PackChainInvalid { .. }) if self_contained => {
-            return Ok(Some(ChainState::Reset { prior }));
+            return Ok(Some((ChainState::Reset { prior }, ChainSize::default())));
         }
         Err(error) => return Err(error.into()),
     };
     if anchor.is_some_and(|key| key != head && !nodes.iter().any(|node| node.prev == Some(key))) {
         return Ok(None);
     }
-    Ok(Some(ChainState::Append {
-        head,
-        packs: flatten_oldest_first(nodes).into_iter().collect(),
-    }))
+    let chain = ChainSize {
+        nodes: nodes.len(),
+        packs: nodes.iter().map(|node| node.packs.len()).sum(),
+    };
+    Ok(Some((
+        ChainState::Append {
+            head,
+            packs: flatten_oldest_first(nodes).into_iter().collect(),
+        },
+        chain,
+    )))
 }

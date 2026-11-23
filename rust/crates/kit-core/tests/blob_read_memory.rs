@@ -115,6 +115,41 @@ fn an_inline_blob_read_holds_the_payload_once() {
 }
 
 #[test]
+fn a_packed_blob_read_holds_the_payload_once() {
+    use std::fs;
+
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    ObjectStore::init(&layout).unwrap();
+
+    let pack = include_bytes!("../../../tests/golden/local_pack_mixed/mixed.pack");
+    let index = include_bytes!("../../../tests/golden/local_pack_mixed/mixed.idx");
+    let marker = include_bytes!("../../../tests/golden/local_pack_mixed/marker.bin");
+    let key = kit_core::to_hex(&kit_core::pack_key(pack));
+    let pack_dir = layout.objects_dir().join("pack");
+    fs::create_dir(&pack_dir).unwrap();
+    fs::write(pack_dir.join(format!("{key}.pack")), pack).unwrap();
+    fs::write(pack_dir.join(format!("{key}.idx")), index).unwrap();
+    fs::write(layout.format_file(), marker).unwrap();
+
+    let bytes = serialize(&Object::Blob(Blob {
+        data: vec![0xa5; 16 * KIB],
+    }))
+    .unwrap();
+    let id = kit_core::hash::hash(&bytes);
+    let store = ObjectStore::open(&layout).unwrap();
+    assert!(store.contains(&id)); // Warm the index before counting the read.
+    let (read, peak) = peak_of(|| store.read(&id).unwrap());
+    assert_eq!(read, bytes);
+    // Metadata fits below half a payload. A decoded copy exceeds this bound.
+    assert!(
+        peak <= bytes.len() + 8 * KIB,
+        "packed read held {peak} bytes"
+    );
+}
+
+#[test]
 fn chunked_reassembly_allocates_the_output_once() {
     let _guard = serial();
     let src = tempfile::tempdir().unwrap();

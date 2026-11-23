@@ -202,8 +202,7 @@ struct Weights {
 /// The serialized weight of one object: its raw size plus one pack frame.
 fn weight_of(store: &ObjectStore, hash: &Hash) -> Result<u64, StoreError> {
     Ok(store
-        .object_metadata(hash)?
-        .len()
+        .object_size(hash)?
         .saturating_add(pack::ENTRY_FRAME_LEN as u64))
 }
 
@@ -1046,7 +1045,7 @@ mod tests {
         let expected: u64 = reachable_objects(&store, &c[5])
             .unwrap()
             .difference(&held)
-            .map(|h| store.object_metadata(h).unwrap().len() + pack::ENTRY_FRAME_LEN as u64)
+            .map(|h| store.object_size(h).unwrap() + pack::ENTRY_FRAME_LEN as u64)
             .sum();
         assert_eq!(*weights.last().unwrap(), expected);
     }

@@ -607,7 +607,37 @@ pub trait PackSink: Send {
     /// before it retries, falls back or maps an error, and reports this
     /// error instead. It stays set: [`Self::begin`] never clears it.
     fn failed(&self) -> Option<std::io::ErrorKind>;
+
+    /// The bytes of the current body this sink holds and can continue from
+    /// after an interrupted attempt: zero unless the body began with a
+    /// declared length and no byte has failed. A transport may ask the
+    /// remote for the rest of the body only when this is not zero. The
+    /// default keeps nothing, so a transport reads the body again from its
+    /// start.
+    fn retained(&self) -> u64 {
+        0
+    }
+
+    /// Continue the body at `offset`, which is [`Self::retained`], of a
+    /// body whose full length is `total`. The bytes that follow are the
+    /// body from `offset` on. Unlike [`Self::begin`], nothing taken is
+    /// discarded.
+    ///
+    /// # Errors
+    /// [`TransportError::ProtocolError`] when this sink holds no such
+    /// prefix, or `total` is not the declared length.
+    fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+        let _ = (total, offset);
+        Err(TransportError::ProtocolError)
+    }
+
+    /// Learn how a transport answered the sink's request to continue a body.
+    /// Called at most once per attempt that held a prefix.
+    fn note_resume(&mut self, _outcome: ResumeOutcome) {}
 }
+
+pub mod resume;
+pub use resume::{RestartReason, ResumeOutcome, Validator};
 
 /// A sink that keeps a body of at most `limit` bytes in memory, for small
 /// transfers such as packlist nodes.
@@ -825,6 +855,20 @@ pub trait Transport: Send + Sync {
     /// transports. `ref_hint` as for [`Self::download_pack`].
     fn pack_exists(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<bool>;
 
+    /// The length in bytes of the pack stored under `key`, read without
+    /// fetching it, or `None` when it is not stored or this transport cannot
+    /// tell the length cheaply. A caller that wants to know a stored pack is
+    /// whole compares this with the length it expects, and treats `None` as
+    /// "not known to be whole". One attempt: no retry ladder. The default
+    /// is `None`.
+    ///
+    /// # Errors
+    /// The transport's error when the check itself fails.
+    fn pack_len(&self, key: &PackKey, ref_hint: Option<&str>) -> TransportResult<Option<u64>> {
+        let _ = (key, ref_hint);
+        Ok(None)
+    }
+
     /// Upload a content-addressed **auxiliary blob**: transfer metadata
     /// that is NOT a packfile, such as a packlist chain node. The key is
     /// BLAKE3 of `bytes`, exactly like a pack.
@@ -928,6 +972,16 @@ pub trait Transport: Send + Sync {
     /// have `prefix` stripped per SPEC-REFS §4. An empty prefix lists
     /// every ref.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>>;
+
+    /// Whether a push may send a replacement chunk manifest as a delta against
+    /// the manifest the remote holds (SPEC-PACKFILE §3.2). `false`, the
+    /// default, sends every manifest in full. Only a transport whose remote
+    /// kit controls and reads with this crate's pack reader says `true`: a
+    /// managed or hosted remote may admit only full manifests and refuse a
+    /// delta one, so it must never be asked for one.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
+    }
 
     /// How [`Self::list_refs`] answers: an ordered read that pages, by
     /// default. A transport whose listing comes in one bounded frame, or
@@ -1151,6 +1205,22 @@ mod tests {
     use std::io::Read as _;
 
     #[test]
+    fn a_sink_that_does_not_continue_holds_nothing_and_refuses_to_resume() {
+        let mut sink = MemorySink::new(64);
+        sink.begin(Some(8)).unwrap();
+        sink.write(b"abcd").unwrap();
+        assert_eq!(sink.retained(), 0);
+        assert!(matches!(
+            sink.resume(8, 4),
+            Err(TransportError::ProtocolError)
+        ));
+        sink.note_resume(ResumeOutcome::Resumed { bytes: 4 });
+        // Nothing about the body changed.
+        sink.write(b"efgh").unwrap();
+        assert_eq!(sink.into_bytes().unwrap(), b"abcdefgh");
+    }
+
+    #[test]
     fn a_repo_cursor_holds_its_bytes_within_the_bound_and_hides_them_in_debug() {
         for bytes in [&[][..], &[7; REPO_CURSOR_MAX_LEN + 1]] {
             assert!(matches!(
@@ -1279,6 +1349,11 @@ mod tests {
         ));
         assert!(transport.uploaded.lock().unwrap().is_none());
         assert!(transport.stored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_transport_sends_full_manifests_unless_it_opts_in() {
+        assert!(!RecordingTransport::default().accepts_manifest_deltas());
     }
 
     impl Transport for RecordingTransport {

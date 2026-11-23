@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use super::{RefError, RefResult};
 use crate::hash::{self, Hash};
 
-pub(crate) const DIRECTORY: &str = "history-v1";
+/// The directory under the repository directory that holds branch history.
+pub const DIRECTORY: &str = "history-v1";
 const MAX_TRANSACTION: u64 = 8192;
 
 /// First line of a pending history transaction file. It names the record

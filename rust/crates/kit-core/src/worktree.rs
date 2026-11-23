@@ -26,7 +26,7 @@ use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{ChunkOrigin, ObjectSink, ObjectStore};
+use crate::store::{ChunkOrigin, HashedChunk, ObjectSink, ObjectStore};
 
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
@@ -173,7 +173,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, None, dir, index, observations)
+    build_tree_snapshot(sink, None, dir, index, observations, false)
 }
 
 /// Build a snapshot with read access to newly written and indexed objects.
@@ -189,15 +189,18 @@ pub fn build_tree_filtered_observed_with_source<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, Some(source), dir, index, observations)
+    build_tree_snapshot(sink, Some(source), dir, index, observations, false)
 }
 
-fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
+// Status hides interrupted restore artifacts. Restore safety checks use
+// the complete snapshot so they can still protect a conflicting entry.
+pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
+    skip_restore_temps: bool,
 ) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
@@ -228,7 +231,17 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
     let mut misses = Vec::new();
-    let pending = build_tree_inner(sink, dir, "", &ignores, index, &by_path, false, &mut misses)?;
+    let pending = build_tree_inner(
+        sink,
+        dir,
+        "",
+        &ignores,
+        index,
+        &by_path,
+        false,
+        skip_restore_temps,
+        &mut misses,
+    )?;
     let mut hashed = vec![
         TreeEntry {
             name: Vec::new(),
@@ -291,6 +304,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     index: &Index,
     by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
     parent_ignored: bool,
+    skip_restore_temps: bool,
     misses: &mut Vec<PendingFileHash<'e>>,
 ) -> WorktreeResult<PendingTree> {
     let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
@@ -314,6 +328,15 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         } else {
             format!("{rel_dir}/{name_str}")
         };
+        // A historical entry, including a staged deletion, still has a path
+        // of its own. A scratch file cannot take the place of a tracked directory.
+        if skip_restore_temps
+            && !is_dir
+            && crate::ops::restore::is_restore_temp_name(&name_str)
+            && !by_path.contains_key(rel_path.as_str())
+        {
+            continue;
+        }
         // Exclude ignored content, but only when it is UNTRACKED — a tracked
         // path (or a dir holding tracked content) is always kept so status/
         // diff see it. An ignored dir with tracked content is descended into
@@ -382,6 +405,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                 index,
                 by_path,
                 entry_ignored,
+                skip_restore_temps,
                 misses,
             )?;
             children.push((entries.len(), h));
@@ -921,8 +945,9 @@ impl IndexDir {
         // tree's length, the rule a `WriteBatch` dedups by. Otherwise the
         // tree is checked and written, whatever `base` says.
         if base == Some(self.id)
-            && fs::metadata(store.path_for(&self.id))
-                .is_ok_and(|m| u64::try_from(self.bytes.len()) == Ok(m.len()))
+            && store
+                .cached_object_size(&self.id)
+                .is_ok_and(|size| u64::try_from(self.bytes.len()) == Ok(size))
         {
             self.in_base = true;
             return;
@@ -1381,12 +1406,13 @@ fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
 /// KiB `MAX_SIZE`) regardless of the file's total size — the same
 /// "independent of file size" bound that the streaming
 /// reader itself gives, just sized for a batch instead of one chunk.
-const STREAM_HASH_BATCH: usize = 64;
+pub const STREAM_HASH_BATCH: usize = 64;
 
 /// Number of chunks a large file stages before its sink makes them durable
 /// and visible with [`ObjectSink::checkpoint`]. A sink that stages a file per
 /// object then holds at most this many staged chunks of one file, whatever the
-/// file's size. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
+/// file's size. A chunk in an open local pack stays invisible until the pack
+/// seals or the batch commits. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
 const CHECKPOINT_CHUNKS: usize = 4096;
 
 /// Whether a file's chunk count passed a checkpoint boundary when it grew from
@@ -1406,6 +1432,31 @@ fn checkpoint_due(before: usize, after: usize, window: usize) -> bool {
 pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> WorktreeResult<Hash> {
     let prologue = serialize::blob_prologue(chunk.len())?;
     Ok(sink.put_parts(&[&prologue, chunk])?)
+}
+
+/// Hash one chunk into the token of [`ObjectSink::put_hashed_chunk`]. It is the
+/// per-chunk unit a caller fans out over, for a sink whose
+/// [`ObjectSink::orders_chunks`] is true.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn hash_chunk(chunk: &[u8]) -> WorktreeResult<HashedChunk<'_>> {
+    Ok(HashedChunk::new(chunk)?)
+}
+
+/// Hand hashed chunks to `sink` one by one, in order.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn put_hashed_chunks<S: ObjectSink + ?Sized>(
+    sink: &S,
+    chunks: &[HashedChunk<'_>],
+) -> WorktreeResult<Vec<Hash>> {
+    let mut ids = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        ids.push(sink.put_hashed_chunk(chunk)?);
+    }
+    Ok(ids)
 }
 
 /// Store a blob with its worktree location. An inline file is one blob at
@@ -1447,6 +1498,9 @@ fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
 ) -> WorktreeResult<Hash> {
     let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
+    // A sink that wants ordered chunks gets each one hashed once, as a token.
+    // Any other sink keeps its own hashing and sees no token.
+    let ordered = sink.orders_chunks();
     while let Some(chunk) = chunker.next_chunk_ref()? {
         let origin = ChunkOrigin {
             path,
@@ -1454,7 +1508,12 @@ fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
-        chunks.ids.push(store_chunk_blob_at(sink, chunk, origin)?);
+        let id = if ordered {
+            sink.put_hashed_chunk(&HashedChunk::new(chunk)?.at(origin))?
+        } else {
+            store_chunk_blob_at(sink, chunk, origin)?
+        };
+        chunks.ids.push(id);
         chunks.ends.push(total_size);
         if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
@@ -1678,18 +1737,36 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
+    // A sink that lends buffers gets the windows and chunks of a file back for
+    // the next one, so a sequence of large files holds one set. The reader is
+    // built here, not on the cutter's thread, so the windows are not allocated
+    // from the arena of a thread that ends with the file.
+    let buffers = sink.chunk_buffers();
+    let chunker = match buffers {
+        Some(buffers) => ChunkReader::with_buffers(FastCdc::v1(), reader, buffers),
+        None => ChunkReader::new(FastCdc::v1(), reader),
+    };
 
     let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(ChunkList, u64)> {
         scope.spawn(move || {
-            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut chunker = chunker;
             let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
             let mut running_total: u64 = 0;
             loop {
-                let chunk = match chunker.next_chunk() {
-                    Ok(Some(chunk)) => chunk,
+                let chunk = match chunker.next_chunk_ref() {
+                    Ok(Some(chunk)) => {
+                        let mut owned = buffers
+                            .map(crate::chunker::ChunkBuffers::chunk)
+                            .unwrap_or_default();
+                        owned.extend_from_slice(chunk);
+                        owned
+                    }
                     Ok(None) => {
                         if !batch.is_empty() {
                             let _ = tx.send(Ok(batch));
+                        }
+                        if let Some(buffers) = buffers {
+                            chunker.recycle(buffers);
                         }
                         return;
                     }
@@ -1741,6 +1818,9 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 Ok((hashes, batch)) => {
                     let before = chunks.len();
                     chunks.extend(hashes, &batch);
+                    if let Some(buffers) = buffers {
+                        buffers.give_chunks(batch);
+                    }
                     if checkpoint_due(before, chunks.len(), window)
                         && let Err(e) = sink.checkpoint()
                     {
@@ -2005,7 +2085,7 @@ pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
     use std::os::unix::fs::PermissionsExt;
 
     if meta.permissions().mode() & 0o111 != 0 {
@@ -2016,7 +2096,7 @@ fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
 }
 
 #[cfg(not(unix))]
-fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
     EntryMode::Blob
 }
 
@@ -2547,11 +2627,19 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpointed_chunk_is_visible_before_the_commit() {
+    fn a_checkpointed_chunk_is_visible_before_the_commit_in_a_loose_store() {
         let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
         let expected = chunked_blob_from_bytes(&data).unwrap();
         assert!(expected.chunks().len() > 8, "the file has several windows");
-        let (_dir, store) = fresh_store();
+        // A shared guard held elsewhere makes the one try at the packed marker
+        // miss, so this batch stays loose.
+        let (dir, _init) = fresh_store();
+        let layout = crate::layout::RepoLayout::single(dir.path());
+        fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+        let holder = ObjectStore::open(&layout).unwrap();
+        let _guard = holder.prune_guard().unwrap();
+        let store = ObjectStore::open(&layout).unwrap();
+        drop(holder);
         let batch = store.batch();
         let h = store_large_file_streaming_windowed(
             &batch,
@@ -2567,6 +2655,69 @@ mod tests {
         assert!(!store.contains(&h));
         batch.commit().unwrap();
         assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_checkpoint_keeps_the_chunks_of_an_open_pack_invisible_until_the_commit() {
+        let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
+        let expected = chunked_blob_from_bytes(&data).unwrap();
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let h = store_large_file_streaming_windowed(
+            &batch,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            4,
+        )
+        .unwrap();
+        // The chunks are in the open pack and the manifest is staged, so none
+        // is visible, and the manifest cannot be visible before its chunks.
+        assert!(!store.contains(&expected.chunks()[0]));
+        assert!(!store.contains(&h));
+        batch.commit().unwrap();
+        assert!(store.contains(&expected.chunks()[0]));
+        assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_batch_lends_its_buffers_to_each_large_file_and_the_ids_do_not_change() {
+        // The second file is shorter, so it starts in windows and chunk
+        // buffers that still hold the first file's bytes.
+        let first = pseudo_random(5 * 1024 * 1024, 0xB0F1);
+        let second = pseudo_random(3 * 1024 * 1024 + 17, 0xB0F2);
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        assert!(batch.chunk_buffers().is_some());
+        let ids: Vec<Hash> = [&first, &second, &first]
+            .into_iter()
+            .map(|data| {
+                store_large_file_streaming_with(
+                    &batch,
+                    io::Cursor::new(data.clone()),
+                    Path::new("lent.bin"),
+                    |sink, chunks| {
+                        chunks
+                            .iter()
+                            .map(|chunk| store_chunk_blob(sink, chunk))
+                            .collect()
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        // Both windows and the chunk buffers of the last batches came back.
+        let (windows, chunks) = batch.chunk_buffers().unwrap().spare_counts();
+        assert_eq!(windows, 2);
+        assert!(chunks > 0, "no chunk buffer came back");
+        batch.commit().unwrap();
+
+        let (_plain_dir, plain) = fresh_store();
+        assert!(plain.chunk_buffers().is_none());
+        assert_eq!(ids[0], store_file_object(&plain, &first).unwrap());
+        assert_eq!(ids[1], store_file_object(&plain, &second).unwrap());
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(read_blob(&store, &ids[0]).unwrap(), first);
+        assert_eq!(read_blob(&store, &ids[1]).unwrap(), second);
     }
 
     #[test]

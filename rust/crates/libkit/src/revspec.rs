@@ -294,10 +294,11 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
     if base.len() == HEX_LEN
         && let Ok(h) = hash::from_hex(base)
     {
-        if store.contains(&h) {
-            return Ok(h);
-        }
-        return Err(Error::Unknown(base.to_string()));
+        return match store.check_presence(&h) {
+            Ok(()) => Ok(h),
+            Err(StoreError::ObjectNotFound(_)) => Err(Error::Unknown(base.to_string())),
+            Err(e) => Err(Error::ReadObject(e)),
+        };
     }
 
     // 5. Short hex prefix.
@@ -313,34 +314,16 @@ fn resolve_base(store: &ObjectStore, layout: &RepoLayout, base: &str) -> Result<
 /// ([`Error::Ambiguous`]).
 fn resolve_short_hash(store: &ObjectStore, prefix: &str) -> Result<Hash, Error> {
     let lower = prefix.to_ascii_lowercase();
-    // Object layout: `objects/<2-hex>/<62-hex>`. The first two hex chars
-    // (when present) name the shard directory, so we only scan one
-    // shard. With a 1-char prefix (below MIN_SHORT_HASH, never reached)
-    // we would have to scan 16 shards; the >= MIN_SHORT_HASH gate makes
-    // the 2-char shard slice always available.
-    let (shard, file_prefix) = lower.split_at(2);
-    let shard_dir = store.objects_root().join(shard);
-    let iter = match std::fs::read_dir(&shard_dir) {
-        Ok(i) => i,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::Unknown(prefix.to_string()));
-        }
-        Err(e) => return Err(Error::ScanObjects(e)),
-    };
-
-    let mut found: Option<Hash> = None;
-    for entry in iter {
-        let entry = entry.map_err(Error::ScanObjects)?;
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        if name.len() != HEX_LEN - 2 || !name.starts_with(file_prefix) {
+    let shard = u8::from_str_radix(&lower[..2], 16).expect("validated hex prefix");
+    let hashes = store.list_shard(shard).map_err(|e| match e {
+        StoreError::Io(e) => Error::ScanObjects(e),
+        other => Error::ReadObject(other),
+    })?;
+    let mut found = None;
+    for h in hashes {
+        if !hash::to_hex(&h).starts_with(&lower) {
             continue;
         }
-        let full = format!("{shard}{name}");
-        let Ok(h) = hash::from_hex(&full) else {
-            continue;
-        };
         if found.is_some() {
             return Err(Error::Ambiguous(prefix.to_string()));
         }
@@ -472,6 +455,42 @@ mod tests {
         let hex = "ab".repeat(32);
         let err = resolve_revision(&store, &kit, &hex).unwrap_err();
         assert!(matches!(err, Error::Unknown(_)));
+    }
+
+    #[test]
+    fn resolves_a_packed_short_id_with_a_loose_duplicate() {
+        let (_dir, store, layout) = fresh_repo();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden/local_pack_mixed");
+        let expected = std::fs::read_to_string(fixture.join("objects.txt")).unwrap();
+        let mut rows = expected.lines();
+        let blob_hex = rows
+            .nth(3)
+            .unwrap()
+            .split_ascii_whitespace()
+            .next()
+            .unwrap();
+        let pack_key = rows.next().unwrap().strip_prefix("pack ").unwrap();
+        let pack_dir = store.objects_root().join("pack");
+        std::fs::create_dir(&pack_dir).unwrap();
+        std::fs::copy(
+            fixture.join("mixed.pack"),
+            pack_dir.join(format!("{pack_key}.pack")),
+        )
+        .unwrap();
+        std::fs::copy(
+            fixture.join("mixed.idx"),
+            pack_dir.join(format!("{pack_key}.idx")),
+        )
+        .unwrap();
+        std::fs::copy(fixture.join("marker.bin"), layout.format_file()).unwrap();
+
+        let blob = hash::from_hex(blob_hex).unwrap();
+        let short = &blob_hex[..12];
+        assert_eq!(resolve_revision(&store, &layout, short).unwrap(), blob);
+        let loose = std::fs::read(fixture.join("loose.bin")).unwrap();
+        assert_eq!(store.write(&loose).unwrap(), blob);
+        assert_eq!(resolve_revision(&store, &layout, short).unwrap(), blob);
     }
 
     #[test]

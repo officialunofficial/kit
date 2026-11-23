@@ -1146,7 +1146,15 @@ older than the grace window
 .Pq default 14 days .
 .Fl n
 .Pq Fl Fl dry-run
-previews without deleting.
+previews without deleting, and reports packed garbage.
+Local packs are handled too: gc retires packs that are wholly dead past the
+grace window, rewrites packs that hold a quarter or more garbage, merges small
+packs and retires duplicate packs, copying what must survive into new packs
+before it retires the old ones.
+A damaged pack or a failed copy is kept and
+reported as a warning on standard error, and so is a retirement that stopped
+because a fetch, push or add held the store lock; the exit code does not
+change.
 .Fl Fl grace-secs Ar 0
 prunes every unreachable object, but bypasses the grace window — that window is
 gc's concurrency-safety net (some root publishers such as
@@ -1454,6 +1462,12 @@ list is checked only when
 is passed, which enumerates every local object.
 .Fl Fl format Ns = Ns Cm json
 emits the closure report as JSON.
+.It Cm closure Cm repair-indexes
+Rebuild damaged local pack indexes beside verified packs.
+Run it from any
+worktree, even if no revision resolves.
+A pack that fails verification is kept; fetch again from the remote that
+supplied it.
 .It Cm attest Oo Fl Fl commit Ar hash Oc Op Fl Fl algorithm Ar alg Op Fl Fl signer Ar kind Op Fl Fl predicate-type Ar uri Op Fl Fl predicate-file Ar path
 Produce a signed DSSE attestation for the given commit (defaults to
 HEAD). Multiple
@@ -1561,8 +1575,18 @@ pair, sets it. On the show forms,
 emits JSON instead of the default plain output. Recognized keys include
 .Cm user.identity , Cm ssh.strict_host_key_checking ,
 .Cm ssh.user_known_hosts_file ,
+.Cm ssh.identity_file ,
 and
-.Cm ssh.identity_file .
+.Cm gc.auto .
+Setting
+.Cm gc.auto
+to
+.Cm false
+turns off the automatic local pack maintenance step that
+.Cm commit , fetch
+and
+.Cm pull
+run.
 .It Cm serve Oo Fl Fl idle-timeout-secs Ar secs Oc Oo Fl Fl max-session-secs Ar secs Oc Ar path
 Internal subcommand: act as the server end of an
 .Cm kit+ssh://
@@ -1847,7 +1871,7 @@ exit cleanly without a "Broken pipe" message.
 .Dv SIGINT
 and
 .Dv SIGTERM
-stop a local command at once.
+usually stop a local command at once.
 In
 .Cm push ,
 .Cm pull ,
@@ -1882,11 +1906,13 @@ and
 and waits for the editor to exit;
 .Dv SIGTERM
 still ends it.
+When
 .Cm checkout
-and
-.Cm reset --hard
-write the files first and then the branch, HEAD and the index, as git
-does, so a stopped one leaves them where they were.
+or
+.Cm switch
+starts restoring files for a branch or detached HEAD, the first signal
+lets it finish updating the worktree, HEAD, and index.
+A second signal stops it immediately.
 .Sh SEE ALSO
 .Xr git 1 ,
 .Xr ssh 1 ,

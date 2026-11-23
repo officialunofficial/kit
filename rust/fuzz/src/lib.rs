@@ -2055,6 +2055,16 @@ pub fn grant_field_parsers_one_iteration(input: &[u8]) {
     let _ = is_loopback_origin(text);
 }
 
+/// Check that an accepted automatic maintenance stamp has a canonical encoding.
+pub fn maintenance_stamp_one_iteration(input: &[u8]) {
+    kit_core::ops::gc::fuzz_maintenance_stamp(input);
+}
+
+/// Exercise index validation with a bounded input.
+pub fn local_pack_index_one_iteration(input: &[u8]) {
+    kit_core::store::fuzz_local_pack_index(&input[..input.len().min(MAX_INPUT)]);
+}
+
 /// Capped stream read (`read_to_end_capped`): the first four input bytes
 /// pick the size hint and the limit, and the rest is the stream. The read
 /// returns the stream exactly when it fits the limit. Otherwise it returns
@@ -3920,6 +3930,21 @@ mod tests {
         for case in [&b""[..], b"a", &large[..]] {
             run_one(case, chunked_blob_build_one_iteration).unwrap();
         }
+    }
+
+    #[test]
+    fn unit_maintenance_stamp() {
+        run_iterated_unit(maintenance_stamp_one_iteration).unwrap();
+        let mut bytes = [0; 17];
+        for outcome in [0, 1, 2, 3, 4, 5, 6, 7, u8::MAX] {
+            bytes[8] = outcome;
+            run_one(&bytes, maintenance_stamp_one_iteration).unwrap();
+        }
+    }
+
+    #[test]
+    fn unit_local_pack_index() {
+        run_iterated_unit(local_pack_index_one_iteration).unwrap();
     }
 
     #[test]

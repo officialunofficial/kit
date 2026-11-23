@@ -226,3 +226,85 @@ fn missing_attestation_warns_without_operation_instructions() {
     assert!(warning.contains("attested subject"), "{warning}");
     assert!(!warning.contains("finish or abort"), "{warning}");
 }
+
+/// Files past the first 64 of a large add are packed. After an amend that
+/// changes half of them and an expired recovery log, `kit gc` frees the dead
+/// blobs of the packs and leaves the live ones readable.
+#[test]
+fn gc_reclaims_the_small_files_of_a_large_add_after_an_amend() {
+    let td = init_repo();
+    let root = td.path();
+    let body = |n: usize, round: u8| format!("file {n} round {round} {}\n", "x".repeat(300));
+    for n in 0..300 {
+        fs::write(root.join(format!("f{n:03}.txt")), body(n, 0)).unwrap();
+    }
+    assert!(run_in(root, &["add", "."]).status.success(), "add");
+    assert!(
+        run_in(root, &["commit", "-m", "all"]).status.success(),
+        "commit"
+    );
+    let packs = |root: &Path| {
+        fs::read_dir(root.join(".kit/objects/pack")).map_or(0, |entries| {
+            entries
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext == "pack")
+                })
+                .count()
+        })
+    };
+    assert!(
+        packs(root) >= 1,
+        "the add packed the files past the first 64"
+    );
+
+    let id_of = |name: &str| {
+        let out = run_in(root, &["hash", name]);
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    // Which files stay loose depends on the order the workers reach them;
+    // both of these are rewritten below, so each is freed either way.
+    let (old_loose, old_packed) = (id_of("f000.txt"), id_of("f200.txt"));
+    for n in (0..300).step_by(2) {
+        fs::write(root.join(format!("f{n:03}.txt")), body(n, 1)).unwrap();
+    }
+    assert!(run_in(root, &["add", "."]).status.success(), "add again");
+    assert!(
+        run_in(root, &["commit", "--amend", "-m", "all again"])
+            .status
+            .success(),
+        "amend"
+    );
+    // The recovery log pins the amended-away commit until its entry expires.
+    fs::write(root.join(".kit/recovery-log"), b"").unwrap();
+
+    let out = run_in(root, &["gc", "--grace-secs", "0"]);
+    assert!(out.status.success(), "gc: {out:?}");
+    for old in [&old_loose, &old_packed] {
+        assert!(!object_exists(root, old), "gc must free the old blob {old}");
+    }
+    let status = run_in(root, &["status"]);
+    assert!(
+        String::from_utf8_lossy(&status.stderr).contains("nothing to commit"),
+        "the tree is still clean after gc: {status:?}"
+    );
+    // Every file reads back from the store, packed or not.
+    for n in 0..300 {
+        fs::remove_file(root.join(format!("f{n:03}.txt"))).unwrap();
+    }
+    assert!(
+        run_in(root, &["reset", "--hard", "-f", "HEAD"])
+            .status
+            .success()
+    );
+    for n in 0..300 {
+        let expected = body(n, u8::from(n % 2 == 0));
+        assert_eq!(
+            fs::read_to_string(root.join(format!("f{n:03}.txt"))).unwrap(),
+            expected
+        );
+    }
+}

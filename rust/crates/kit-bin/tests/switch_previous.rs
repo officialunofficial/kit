@@ -107,3 +107,38 @@ fn previous_branch_named_for_a_commit_resolves_the_branch_tip() {
     ok(p, &["switch", "-c", "from-previous", "-"]);
     assert_eq!(stdout(&ok(p, &["rev-parse", "HEAD"])).trim(), second.trim());
 }
+
+#[test]
+fn pruned_previous_head_is_reported_and_changes_nothing() {
+    let r = repo();
+    let p = r.path();
+    let first = stdout(&ok(p, &["rev-parse", "HEAD"]));
+    let first = first.trim();
+    fs::write(p.join("a.txt"), b"two\n").unwrap();
+    ok(p, &["add", "a.txt"]);
+    ok(p, &["commit", "-m", "second"]);
+    ok(p, &["checkout", "HEAD~1"]);
+    ok(p, &["switch", "main"]);
+    // An older kit's gc does not know PREVIOUS_HEAD and can prune its commit.
+    fs::remove_file(p.join(".kit/objects").join(&first[..2]).join(&first[2..])).unwrap();
+    let head_before = fs::read(p.join(".kit/HEAD")).unwrap();
+    let previous_before = fs::read(p.join(".kit/PREVIOUS_HEAD")).unwrap();
+
+    let out = run_in(p, &["switch", "-"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "previous HEAD {} was pruned; nothing to switch back to",
+            &first[..8]
+        )),
+        "{err}"
+    );
+    assert_eq!(fs::read(p.join(".kit/HEAD")).unwrap(), head_before);
+    assert_eq!(
+        fs::read(p.join(".kit/PREVIOUS_HEAD")).unwrap(),
+        previous_before
+    );
+    assert_eq!(fs::read(p.join("a.txt")).unwrap(), b"two\n");
+}

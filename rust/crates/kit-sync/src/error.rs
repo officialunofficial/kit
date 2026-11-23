@@ -15,6 +15,7 @@ use kit_core::transfer::PackListError;
 /// Display text is part of the contract the `kit` command line relies on:
 /// it prints these messages verbatim.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SyncError {
     /// The caller's [`Observer::cancelled`](crate::Observer::cancelled)
     /// returned `true` at a checkpoint. The transfer is half-finished, but no
@@ -116,11 +117,13 @@ pub enum SyncError {
 /// A local disk error while a pack is spooled, read back or unpacked is
 /// [`SyncError::Io`]: [`PackError::Io`], and a store write's
 /// [`StoreError::Io`] (out of space, say). Every other pack error is about
-/// the pack.
+/// the pack. Damage in a local pack is the local store's fault, not the
+/// pack's: [`SyncError::Store`].
 impl From<PackError> for SyncError {
     fn from(error: PackError) -> Self {
         match error {
             PackError::Io(error) | PackError::Store(StoreError::Io(error)) => Self::Io(error),
+            PackError::Store(error @ StoreError::LocalPackDamaged { .. }) => Self::Store(error),
             error => Self::Pack(error),
         }
     }
@@ -145,6 +148,18 @@ mod tests {
         assert!(matches!(
             SyncError::from(PackError::KeyMismatch),
             SyncError::Pack(PackError::KeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn damage_in_a_local_pack_is_a_store_error_not_a_pack_fault() {
+        let damaged = StoreError::LocalPackDamaged {
+            pack: "a.pack".into(),
+            reason: "bad trailer".into(),
+        };
+        assert!(matches!(
+            SyncError::from(PackError::Store(damaged)),
+            SyncError::Store(StoreError::LocalPackDamaged { .. })
         ));
     }
 }

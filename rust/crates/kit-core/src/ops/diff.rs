@@ -1594,12 +1594,13 @@ pub fn status_diff_observed(
     // Reads fall through to the store for committed objects.
     let snapshot = crate::store::EphemeralSink::new(store);
     let mut observations = Vec::new();
-    let work_tree_hash = worktree::build_tree_filtered_observed_with_source(
+    let work_tree_hash = worktree::build_tree_snapshot(
         &snapshot,
-        &snapshot,
+        Some(&snapshot),
         worktree_root,
         tracked,
         &mut observations,
+        true,
     )?;
 
     let Some(idx) = index else {
@@ -2239,6 +2240,35 @@ mod tests {
         assert_eq!(result[0].diff.path, "b.txt");
         assert_eq!(result[0].diff.kind, DiffKind::Added);
         assert_eq!(result[0].staging, StatusStaging::Unstaged);
+    }
+
+    #[test]
+    fn status_hides_untracked_restore_temps_but_keeps_tracked_paths() {
+        let (_sd, store) = fresh_store();
+        let work = fresh_workdir();
+        let tracked = ".kit-restore-tmp.1.1";
+        let scratch = "sub/.kit-restore-tmp.1.2";
+        let directory = ".kit-restore-tmp.1.3";
+        let child = ".kit-restore-tmp.1.3/keep.txt";
+
+        std::fs::write(work.path().join(tracked), b"old").unwrap();
+        let head = worktree::build_tree(&store, work.path()).unwrap();
+        std::fs::write(work.path().join(tracked), b"edit").unwrap();
+        std::fs::create_dir(work.path().join("sub")).unwrap();
+        std::fs::write(work.path().join(scratch), b"incomplete").unwrap();
+        std::fs::create_dir(work.path().join(directory)).unwrap();
+        std::fs::write(work.path().join(child), b"ordinary").unwrap();
+
+        let snapshot = worktree::build_tree(&store, work.path()).unwrap();
+        let changes = diff_trees(&store, Some(head), Some(snapshot)).unwrap();
+        assert!(changes.entries.iter().any(|entry| entry.path == scratch));
+
+        let status = status_diff(&store, Some(&head), work.path(), None).unwrap();
+        assert_eq!(status.len(), 2);
+        assert_eq!(status[0].diff.path, tracked);
+        assert_eq!(status[0].diff.kind, DiffKind::Modified);
+        assert_eq!(status[1].diff.path, child);
+        assert_eq!(status[1].diff.kind, DiffKind::Added);
     }
 
     #[test]

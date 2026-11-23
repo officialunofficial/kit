@@ -13,7 +13,7 @@ use kit_core::protocol::Transport as _;
 use kit_core::refs::RefWriteCondition;
 use kit_core::serialize;
 use kit_core::store::ObjectStore;
-use libkit::transfer::{Error, push_branch, push_branch_with_depth};
+use libkit::transfer::{Error, PushControl, push_branch, push_branch_steps};
 use libkit::transport::file::FileTransport;
 
 fn commit(store: &ObjectStore, parents: Vec<Hash>, message: &[u8]) -> Hash {
@@ -34,6 +34,29 @@ fn commit(store: &ObjectStore, parents: Vec<Hash>, message: &[u8]) -> Hash {
         .unwrap()
 }
 
+/// One advance with a chain depth in place of the default.
+fn push_branch_with_depth(
+    transport: &FileTransport,
+    store: &ObjectStore,
+    branch: &str,
+    tip: Hash,
+    condition: RefWriteCondition,
+    depth: usize,
+) -> Result<(), Error> {
+    push_branch_steps(
+        transport,
+        store,
+        branch,
+        tip,
+        condition,
+        depth,
+        kit_sync::push::DEFAULT_PACK_PAYLOAD_CAP,
+        &PushControl::default(),
+        &mut |_| Ok(()),
+    )
+    .map(drop)
+}
+
 fn store() -> (tempfile::TempDir, ObjectStore) {
     let dir = tempfile::tempdir().unwrap();
     let store = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
@@ -41,7 +64,7 @@ fn store() -> (tempfile::TempDir, ObjectStore) {
 }
 
 #[test]
-fn push_branch_with_depth_moves_the_branch_and_refuses_a_stale_condition() {
+fn push_branch_steps_with_a_depth_moves_the_branch_and_refuses_a_stale_condition() {
     let (_dir, store) = store();
     let first = commit(&store, vec![], b"first");
     let second = commit(&store, vec![first], b"second");

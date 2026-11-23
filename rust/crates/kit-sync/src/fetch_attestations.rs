@@ -1,6 +1,6 @@
 //! Bounded attestation reads, isolated from object application and its caches.
 use crate::{
-    FetchReport, Observer, RemoteSource, SyncEvent, SyncOptions,
+    FetchReport, Observer, RemoteSource, SyncError, SyncEvent, SyncOptions,
     attestation_records::{self, NODE_BOUND, Record, RecordKind, WALK_BYTES, WALK_LIMIT},
     lock::{LockWait, wait_for_lock, wait_for_worktree_lock},
 };
@@ -75,26 +75,28 @@ pub(crate) fn run(
     lock_wait: &LockWait,
     snapshot: Snapshot,
     report: &mut FetchReport,
-) -> bool {
+) -> Result<bool, SyncError> {
     if !options.attestations {
-        return true;
+        return Ok(true);
     }
     if matches!(snapshot, Snapshot::Unsupported) {
-        return true;
+        return Ok(true);
     }
     let Snapshot::Read(head) = snapshot else {
-        return false;
+        return Ok(false);
     };
     let result = process(
         store, layout, source, observer, remote, options, lock_wait, head, report,
     );
     match result {
-        Ok(()) => true,
+        Ok(()) => Ok(true),
+        // An interrupt ends the fetch as one, not as a success with a warning.
+        Err(_) if observer.cancelled() => Err(SyncError::Interrupted),
         Err(error) => {
             report
                 .attestation_warnings
                 .push(format!("attestation fetch stopped: {error}"));
-            false
+            Ok(false)
         }
     }
 }

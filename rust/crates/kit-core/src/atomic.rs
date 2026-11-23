@@ -46,6 +46,10 @@ fn temp_prefix() -> String {
     format!(".kit.tmp.{pid}.{seq}")
 }
 
+pub(crate) fn temp_file_in(parent: &Path) -> io::Result<NamedTempFile> {
+    NamedTempFile::with_prefix_in(temp_prefix(), parent)
+}
+
 /// Atomically write `bytes` to `final_path`, fsyncing the file CONTENTS
 /// before the rename but deferring the directory fsync to the caller.
 /// This is the durable-before-visible primitive for [`store::BulkWriter`]:
@@ -59,8 +63,7 @@ pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Resul
     let parent = final_path
         .parent()
         .expect("atomic::write_content_synced: path has parent");
-    let tmp_name = temp_prefix();
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;
@@ -79,9 +82,7 @@ pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) 
     if make_parents {
         fs::create_dir_all(parent)?;
     }
-    let tmp_name = temp_prefix();
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
     tmp.persist(final_path).map_err(|e| e.error)?;
@@ -115,9 +116,7 @@ pub(crate) fn write_create_new(
     // never a half-written `final_path` that later readers would see as
     // a corrupt ref. Writing straight into `final_path` with `O_EXCL`
     // (the previous approach) poisons the slot on partial-write failure.
-    let tmp_name = temp_prefix();
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_name, parent)?;
+    let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
     tmp.as_file_mut().sync_all()?;
 
@@ -208,6 +207,22 @@ mod tests {
             let (pid, seq) = rest.split_once('.').expect("pid and sequence");
             assert_eq!(pid, process::id().to_string());
             assert!(seq.bytes().all(|c| c.is_ascii_digit()) && !seq.is_empty());
+        }
+    }
+
+    #[test]
+    fn the_batch_syncer_flushes_directories_through_sync_dir() {
+        use crate::batch::{RealSyncer, Syncer};
+
+        let dir = tempfile::tempdir().unwrap();
+        testing::reset_dir_sync_calls();
+        RealSyncer.dir_sync(dir.path()).unwrap();
+        assert_eq!(testing::dir_sync_calls(), 1);
+        // Where the barrier is the directory fsync itself, it counts too.
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            RealSyncer.dir_barrier(dir.path()).unwrap();
+            assert_eq!(testing::dir_sync_calls(), 2);
         }
     }
 }

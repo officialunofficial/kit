@@ -23,6 +23,7 @@ use super::{
     UnpackReport, VERSION, VERSION_V2, ZSTD_LEN_PREFIX, decoded_bytes_cap, encoded_payload,
     replay_window, stage_raw_entries, zstd_entry_len,
 };
+use super::{DeltaBaseSource, ObjectSpool, UnpackSink};
 use crate::store::ObjectStore;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
@@ -376,6 +377,30 @@ impl PackReader {
             None,
         )
     }
+
+    /// Decode a verified wire pack into private staging. Earlier objects
+    /// in this pack and in the pending publication windows (the open one and any
+    /// still sealing) can be bases.
+    ///
+    /// # Errors
+    /// The same decode errors as `read_verified`, or a local spool failure.
+    #[doc(hidden)]
+    pub fn stage_verified(
+        pack: &VerifiedPack,
+        store: &ObjectStore,
+        pending: &[&ObjectSpool],
+        spool: &ObjectSpool,
+    ) -> Result<UnpackReport, PackError> {
+        decode_file(
+            pack,
+            store,
+            WindowShape::DEFAULT,
+            None,
+            Some((pending, spool)),
+            #[cfg(test)]
+            None,
+        )
+    }
 }
 
 pub(super) fn read_file(
@@ -383,6 +408,25 @@ pub(super) fn read_file(
     store: &ObjectStore,
     shape: WindowShape,
     owned_bytes: Option<&AtomicU64>,
+    #[cfg(test)] boundary: Option<BoundaryHook<'_>>,
+) -> Result<UnpackReport, PackError> {
+    decode_file(
+        pack,
+        store,
+        shape,
+        owned_bytes,
+        None,
+        #[cfg(test)]
+        boundary,
+    )
+}
+
+fn decode_file(
+    pack: &VerifiedPack,
+    store: &ObjectStore,
+    shape: WindowShape,
+    owned_bytes: Option<&AtomicU64>,
+    staging: Option<(&[&ObjectSpool], &ObjectSpool)>,
     #[cfg(test)] mut boundary: Option<BoundaryHook<'_>>,
 ) -> Result<UnpackReport, PackError> {
     let (version, count) = read_header(pack)?;
@@ -398,7 +442,7 @@ pub(super) fn read_file(
         .signed
         .try_reserve_exact(count as usize)
         .map_err(|_| PackError::PackfileTooLarge)?;
-    let mut bases = store;
+
     let mut first_position = 0usize;
     for span in windows {
         let window_len = span.end - span.start;
@@ -425,7 +469,16 @@ pub(super) fn read_file(
                 usage.last_position = first_position + offset;
             }
         }
-        let batch = store.batch();
+        let batch = staging.is_none().then(|| store.batch());
+        let sink: &dyn UnpackSink = match staging {
+            Some((_, spool)) => spool,
+            None => batch.as_ref().expect("direct write batch"),
+        };
+        let mut bases = FileBases {
+            store,
+            staging,
+            first_position,
+        };
         {
             // A base or target is kept only while a later entry of this
             // window names it: `uses` and `in_pack` are this window's.
@@ -437,7 +490,7 @@ pub(super) fn read_file(
                     Entry::Delta { .. } => None,
                 })
                 .collect();
-            let raw_results = stage_raw_entries(&batch, &raw_frames, &uses, &budget);
+            let raw_results = stage_raw_entries(sink, &raw_frames, &uses, &budget);
             let mut in_pack = HashMap::new();
             replay_window(
                 &frames,
@@ -448,7 +501,7 @@ pub(super) fn read_file(
                 &mut report,
                 &budget,
                 &mut bases,
-                &batch,
+                sink,
                 false,
             )?;
         }
@@ -456,8 +509,44 @@ pub(super) fn read_file(
         if let Some(hook) = boundary.as_mut() {
             hook(budget.used.load(std::sync::atomic::Ordering::Relaxed));
         }
-        batch.commit()?;
+        if let Some(batch) = batch {
+            batch.commit()?;
+        }
         first_position += span.entries as usize;
     }
     Ok(report)
+}
+
+/// Read a base from an earlier decode window, an earlier accepted wire pack
+/// in the publication window, or the durable store, in that order.
+struct FileBases<'a> {
+    store: &'a ObjectStore,
+    staging: Option<(&'a [&'a ObjectSpool], &'a ObjectSpool)>,
+    first_position: usize,
+}
+
+impl DeltaBaseSource for FileBases<'_> {
+    const VERIFIED: bool = true;
+
+    fn base(&mut self, id: &crate::hash::Hash) -> Result<Option<Vec<u8>>, PackError> {
+        self.base_with_retry_admission(id, |_| Ok(()))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &crate::hash::Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        if let Some((pending, spool)) = self.staging {
+            if let Some(bytes) = spool.read_before(id, self.first_position, &mut admit)? {
+                return Ok(Some(bytes));
+            }
+            for pending in pending {
+                if let Some(bytes) = pending.read_before(id, usize::MAX, &mut admit)? {
+                    return Ok(Some(bytes));
+                }
+            }
+        }
+        self.store.base_with_retry_admission(id, admit)
+    }
 }
