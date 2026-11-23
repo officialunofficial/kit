@@ -188,9 +188,18 @@ fn land_pull(
                 other => SyncError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, other)),
             })
         };
-        // The branch holds the remote tip already: equal, or ahead of it.
-        // Nothing moves, as in git.
-        if local_tip == remote_tip || ancestor(remote_tip, local_tip)? {
+        // A walk runs from the descendant down to the ancestor and ends only
+        // when it finds it or runs out of commits. The common pull is a
+        // fast-forward, so that walk goes first: it reads only the new commits.
+        let holds_remote_tip = if local_tip == remote_tip || ancestor(local_tip, remote_tip)? {
+            local_tip == remote_tip
+        } else if ancestor(remote_tip, local_tip)? {
+            // The branch is ahead of the remote. Nothing moves, as in git.
+            true
+        } else {
+            return Err(SyncError::NonFastForwardPull { branch });
+        };
+        if holds_remote_tip {
             return Ok(PullReport {
                 fetch,
                 maintenance: None,
@@ -204,9 +213,6 @@ fn land_pull(
                     PullOutcome::UpToDate { branch }
                 },
             });
-        }
-        if !ancestor(local_tip, remote_tip)? {
-            return Err(SyncError::NonFastForwardPull { branch });
         }
         refs::RefWriteCondition::Match(local_tip)
     } else {

@@ -271,3 +271,25 @@ fn serve_on_a_non_repository_names_the_path_on_stderr_only() {
         format!("kit serve: {}: not a kit repository", plain.display())
     );
 }
+
+/// The same in root mode: a `<NAMESPACE>/<NAME>` directory without `.kit`.
+#[test]
+fn serve_root_on_a_non_repository_names_the_path_on_stderr_only() {
+    let ns = "ed25519-abababababababababababababababababababababababababababababababab";
+    let td = tempfile::tempdir().unwrap();
+    fs::create_dir_all(td.path().join(ns).join("plain")).unwrap();
+    let path = format!("{ns}/plain");
+
+    let out = Command::new(kit_bin())
+        .args(["serve", "--root", td.path().to_str().unwrap(), &path])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(65), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap().trim_end(),
+        format!("kit serve: {path}: not a kit repository")
+    );
+}
