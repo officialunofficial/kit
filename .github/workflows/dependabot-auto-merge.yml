@@ -39,17 +39,28 @@ jobs:
         if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
         run: |
           # Poll the gate check of this head commit. The gate runs when the
-          # pull request opens or changes, so it can lag the first poll.
-          for _ in $(seq 1 360); do
+          # pull request opens or changes, so it can lag the first poll. A
+          # pull request with a merge conflict gets no gate run: give up on a
+          # missing gate after 10 minutes. Dependabot's rebase starts a new run.
+          missing=0
+          for _ in $(seq 1 330); do
             result=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=latest&per_page=100" \
               --jq '[.check_runs[] | select(.name == "Rust CI gate")] | if length == 0 then "missing" elif .[0].status != "completed" then "pending" else .[0].conclusion end')
             echo "Rust CI gate: $result"
             case "$result" in
               success)
-                gh pr merge --squash "$PR_URL"
+                gh pr merge --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
                 exit 0
                 ;;
-              missing | pending)
+              missing)
+                missing=$((missing + 1))
+                if [ "$missing" -ge 30 ]; then
+                  echo "::warning::Rust CI gate never started, so the pull request stays open."
+                  exit 0
+                fi
+                sleep 20
+                ;;
+              pending)
                 sleep 20
                 ;;
               *)
