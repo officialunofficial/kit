@@ -50,7 +50,7 @@ ed25519-dalek = { version = "3.0.0", default-features = false, features = ["allo
 # every Rust-side temporary holding a JS-passed seed. The seed can't be
 # scrubbed on the JS side (we can't reach into the ArrayBuffer), but
 # every Rust-side copy must zero on drop — see `attest_keypair`.
-zeroize = { version = "1.9.1", default-features = false }
+zeroize = { version = "1.9.2", default-features = false }
 
 # Activate the browser randomness backends for every getrandom in the
 # dep graph when compiling for `wasm32-unknown-unknown`. Two major

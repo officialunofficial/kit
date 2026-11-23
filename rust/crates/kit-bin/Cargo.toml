@@ -96,7 +96,7 @@ tokio = { version = "1.54.1", default-features = false, features = [
 # is `kit mcp --http <addr>` (SEP-2567 dropped sessions for 2026-07-28
 # traffic). Off by default so the default `kit-bin` build
 # compiles no MCP HTTP server. See `commands/mcp_v2.rs`.
-rmcp = { version = "3.10.0", default-features = false, features = [
+rmcp = { version = "3.11.0", default-features = false, features = [
     "server",
     "transport-io",
     "transport-streamable-http-server",
@@ -126,7 +126,7 @@ tower-service = { version = "0.3.3", optional = true }
 # Already resolved transitively (rmcp pulls both), not a new supply-chain
 # root.
 http-body-util = { version = "0.1.5", optional = true }
-bytes = { version = "1.12.1", optional = true }
+bytes = { version = "1.12.2", optional = true }
 kit-rpc = { version = "=0.10.0", path = "../kit-rpc" }
 buffa = "0.9.2"
 # `wrap_help` is intentionally disabled so help-text output stays
@@ -135,7 +135,7 @@ buffa = "0.9.2"
 # `#[derive(Parser)]`; the top-level `HELP_TEXT` constant remains
 # the source of truth for `kit --help` and is pinned by snapshot
 # tests in cli.rs + tests/help_snapshot.rs.
-clap = { version = "4.6.7", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
+clap = { version = "4.6.9", default-features = false, features = ["std", "help", "error-context", "usage", "derive", "string"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 # JSON-RPC parse/emit for the `kit mcp` stdio server. Zero new supply
@@ -168,7 +168,7 @@ tar = "0.4.46"
 getrandom = { version = "0.4.3", features = ["sys_rng"] }
 # Wraps the raw 32-byte secrets keygen pulls out of the RNG until they
 # land inside the algorithm signer (which has its own scrubbing).
-zeroize = "1.9.1"
+zeroize = "1.9.2"
 
 # POSIX uid + O_NOFOLLOW for keygen.rs's raw-32 load/save paths
 # (secp256k1, p256). The Ed25519 path uses kit_core::sign which has

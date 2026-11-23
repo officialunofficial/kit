@@ -32,7 +32,7 @@ blake3 = "1.8.7"
 bao = "0.13.1"
 # `bytes::{Buf, BufMut}` back the `commonware-codec` Read/Write buffer
 # traits used by the packlist node codec (transfer.rs). Pure, wasm-clean.
-bytes = "1.12.1"
+bytes = "1.12.2"
 # commonware-* (compatible requirements at workspace root).
 #
 # `commonware-codec` is NON-optional: the transfer packlist node
@@ -79,7 +79,7 @@ foldhash = "0.2.0"
 subtle = { version = "2.6.1", default-features = false }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-zeroize = { version = "1.9.1", features = ["derive"] }
+zeroize = { version = "1.9.2", features = ["derive"] }
 # Per-entry pack payload compression (SPEC-PACKFILE v2).
 # `zstd-sys` is a C lib that cannot target wasm32. This dependency is
 # `optional = true`, gated by the `pack-zstd` feature below, so a wasm32
