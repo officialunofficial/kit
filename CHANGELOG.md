@@ -7,6 +7,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
+
 ### Fixed
 
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
@@ -40,7 +44,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gc.auto` is listed by `kit config`, and `kit config gc.auto false` sets it.
 - The `collection` value of the maintenance JSON can be `progress`: the step retired or copied what its limits allowed and left planned work, and the next step is due in an hour.
 - The library default `kit_sync::SyncOptions::auto_maintenance` is `true`. An embedder that calls fetch, pull or clone through `kit-sync` or `libkit` gets the maintenance step unless it calls `with_auto_maintenance(false)`.
-- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt, within a day, runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
+- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
 - A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
 - `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
 - `kit gc` prints `warning: kept damaged local pack: …` for each local pack it found damaged and kept, and `warning: kept the local packs gc meant to rewrite or merge: …` when copying the packs it meant to rewrite or merge failed. The exit code does not change.
