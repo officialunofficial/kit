@@ -247,3 +247,27 @@ fn pull_warns_when_root_is_being_served() {
 
     drop(serve_lock);
 }
+
+/// `kit serve` on a directory that is not a repository says so on standard
+/// error, writes nothing to standard output (the wire) and keeps exit 65, so
+/// an ssh client reads the cause instead of a failed handshake.
+#[test]
+fn serve_on_a_non_repository_names_the_path_on_stderr_only() {
+    let td = tempfile::tempdir().unwrap();
+    let plain = td.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+
+    let out = Command::new(kit_bin())
+        .args(["serve", plain.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(65), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr.trim_end(),
+        format!("kit serve: {}: not a kit repository", plain.display())
+    );
+}

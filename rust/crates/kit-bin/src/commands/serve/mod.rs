@@ -150,7 +150,7 @@ fn resolve_root_repo(root: &Path, path: &str) -> Result<(PathBuf, WritePolicy), 
         return Err(exit::NOPERM);
     }
     if !resolved.is_dir() || !resolved.join(".kit").is_dir() {
-        return Err(exit::DATAERR);
+        return Err(not_a_repository(path));
     }
     if let Ok(pinned) = std::env::var("KIT_SERVE_ROOT") {
         let pinned = std::fs::canonicalize(&pinned).map_err(|_| exit::NOPERM)?;
@@ -263,14 +263,20 @@ pub fn run(args: &[String]) -> u8 {
     )
 }
 
+/// Say on standard error that `path` is not a kit repository, and return the
+/// exit code. Standard output carries the wire, so nothing goes there; an ssh
+/// client shows this line where it would otherwise see only a failed
+/// handshake.
+fn not_a_repository(path: &str) -> u8 {
+    eprintln!("kit serve: {path}: not a kit repository");
+    exit::DATAERR
+}
+
 /// Resolve and validate the on-disk path supplied to `kit serve`.
 pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
     let resolved = std::fs::canonicalize(path).map_err(|_| exit::NOINPUT)?;
-    if !resolved.is_dir() {
-        return Err(exit::DATAERR);
-    }
-    if !resolved.join(".kit").is_dir() {
-        return Err(exit::DATAERR);
+    if !resolved.is_dir() || !resolved.join(".kit").is_dir() {
+        return Err(not_a_repository(path));
     }
     if let Ok(root) = std::env::var("KIT_SERVE_ROOT") {
         let pinned = std::fs::canonicalize(&root).map_err(|_| exit::NOPERM)?;
