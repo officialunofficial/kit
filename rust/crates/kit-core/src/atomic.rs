@@ -65,7 +65,7 @@ pub(crate) fn write_content_synced(final_path: &Path, bytes: &[u8]) -> io::Resul
         .expect("atomic::write_content_synced: path has parent");
     let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    crate::flush::file(tmp.as_file())?;
     tmp.persist(final_path).map_err(|e| e.error)?;
     Ok(())
 }
@@ -84,7 +84,7 @@ pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8], make_parents: bool) 
     }
     let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    crate::flush::file(tmp.as_file())?;
     tmp.persist(final_path).map_err(|e| e.error)?;
 
     sync_parent_dir(parent)?;
@@ -118,7 +118,7 @@ pub(crate) fn write_create_new(
     // (the previous approach) poisons the slot on partial-write failure.
     let mut tmp = temp_file_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    crate::flush::file(tmp.as_file())?;
 
     // `persist_noclobber` uses `renameat2(RENAME_NOREPLACE)` on Linux
     // and `link(2) + unlink(2)` on other Unix; on Windows it uses
@@ -144,7 +144,7 @@ pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     #[cfg(test)]
     testing::record_dir_sync_call();
     match File::open(parent) {
-        Ok(dir) => dir.sync_all(),
+        Ok(dir) => crate::flush::file(&dir),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

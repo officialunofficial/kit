@@ -102,7 +102,7 @@ pub(super) fn activate(path: &Path) -> StoreResult<()> {
     if !parse(&read_marker(&file)?)? {
         crate::pack::write_at(&file, LEGACY.len() as u64, b"P")?;
     }
-    file.sync_all()?;
+    crate::flush::file(&file)?;
     Ok(())
 }
 
@@ -129,7 +129,7 @@ pub(super) fn require_packed(guard: &super::PruneGuard) -> StoreResult<()> {
 
 pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult<()> {
     require_packed(guard)?;
-    guard.format.sync_all()?;
+    crate::flush::file(&guard.format)?;
     crate::atomic::sync_dir(path.parent().expect("format marker has a parent"))?;
     Ok(())
 }

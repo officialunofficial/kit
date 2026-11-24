@@ -230,7 +230,7 @@ fn land_pull(
     }
     write_pull_head(layout, store, remote_tip)?;
     write_ref_recording_history(layout, &branch, ref_condition, &remote_tip)?;
-    if let Err(e) = refs::write_head_branch(layout, &branch) {
+    if let Err(e) = point_head_at_branch(layout, &branch) {
         rollback_pull_ref(layout, &branch, local_tip, remote_tip)?;
         clear_pull_head(layout)?;
         return Err(e.into());
@@ -491,6 +491,16 @@ fn write_pull_head(
         .encode(),
     )?;
     Ok(())
+}
+
+/// Make `HEAD` name `branch`. A `HEAD` that already does is left alone: the
+/// flush of the `PULL_HEAD` write just before made its directory entry
+/// durable, so a `HEAD` an earlier killed process left unflushed is covered.
+fn point_head_at_branch(layout: &RepoLayout, branch: &str) -> refs::RefResult<()> {
+    if matches!(refs::read_head(layout), Ok(refs::Head::Branch(held)) if held == branch) {
+        return Ok(());
+    }
+    refs::write_head_branch(layout, branch)
 }
 
 fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {

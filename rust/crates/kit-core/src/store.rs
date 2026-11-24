@@ -1498,7 +1498,7 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
         // accept a failed content flush or change object permissions.
         options.write(true);
     }
-    options.open(path)?.sync_all()
+    crate::flush::file(&options.open(path)?)
 }
 
 /// Fill the header buffer unless the reader reaches EOF.
