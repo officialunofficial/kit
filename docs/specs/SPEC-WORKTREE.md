@@ -70,6 +70,15 @@ an unborn branch absent on the remote. A later remote advance can then land
 through the ordinary fast-forward and restore checks. With no remote branches,
 a pending marker causes refusal instead of an up-to-date result.
 
+A marker that names HEAD marks a restore that may not have reached the index.
+While it does, a commit refuses if the index still holds the pre-pull entry at
+a path that the pull changed: the entry's object id equals the pre-pull tree's
+at a path that the target modified or removed, or the path is absent where the
+target added it. Staging other paths does not lift the refusal. An index that
+holds the target's entries, as after a finished restore or `reset --hard`, does
+not trigger it. `status` warns while it holds. The check reads the index and
+writes nothing.
+
 A fast-forward that finds no marker restores only the entries whose mode or
 object id differ from the tree of HEAD: its restore safety check has proved
 that the worktree and the index equal that tree. A restore that finishes a

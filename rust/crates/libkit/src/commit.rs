@@ -26,6 +26,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Identity, Object};
 use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
+use kit_core::ops::diff;
 use kit_core::ops::pull_state::PullState;
 use kit_core::ops::recovery::{self, RecoveryEntry};
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
@@ -139,7 +140,7 @@ pub enum Error {
     ReadPullState(std::io::Error),
     /// An interrupted pull has not finished restoring the index and files.
     #[error(
-        "an interrupted pull has not finished: HEAD is at {} but the index still holds the tree from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or `kit reset --hard -f` to restore the files of HEAD",
+        "an interrupted pull has not finished: HEAD is at {} but the index still holds files from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or, with no remote, `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes",
         hash::to_hex(.0)
     )]
     PullUnfinished(Hash),
@@ -200,28 +201,57 @@ pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pe
     })
 }
 
-/// Refuse while a pull that stopped partway has moved `HEAD` to its target
-/// and left the index at the tree from before the pull. A commit of that
-/// index undoes the pulled change.
-///
-/// An index that holds the target tree, or any other tree, is not the one the
-/// pull left, and the commit goes on. So does a pull that has not moved
-/// `HEAD`. A pull that changed no tree has nothing to finish.
+/// Refuse while a pull that stopped partway leaves the index behind `HEAD`.
 fn refuse_unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Error> {
+    match unfinished_pull(layout, store)? {
+        Some(target) => Err(Error::PullUnfinished(target)),
+        None => Ok(()),
+    }
+}
+
+/// The commit of a pull that stopped partway, when a commit would undo it.
+///
+/// A pull records its target, moves the branch and `HEAD`, restores the files
+/// and writes the index last. A pull stopped in the restore leaves `HEAD` at
+/// the target and the index at the tree from before the pull. A commit of
+/// that index undoes the pulled change, and `commit -a` records a mixture of
+/// both trees.
+///
+/// The pull is unfinished while its record names `HEAD` and the index still
+/// holds the pre-pull entry at a path that the pull changed. Staging other
+/// paths does not hide it. A restore that reached the index, `reset --hard`
+/// and a pull that has not moved `HEAD` leave no such path, and a commit goes
+/// on. The check reads the index and writes nothing.
+///
+/// # Errors
+/// [`Error::ReadPullState`] when the record or a tree cannot be read,
+/// [`Error::ReadIndex`] when the index cannot. A commit waits for a repair.
+pub fn unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<Option<Hash>, Error> {
     let Some(state) = PullState::at_head(layout).map_err(Error::ReadPullState)? else {
-        return Ok(());
+        return Ok(None);
     };
-    if commit_tree(store, &state.target) == Some(state.before_tree) {
-        return Ok(());
-    }
+    let Some(target_tree) = commit_tree(store, &state.target) else {
+        return Err(Error::ReadPullState(std::io::Error::other(
+            "the target of the pull is not a commit",
+        )));
+    };
+    let changed = diff::diff_trees(store, Some(state.before_tree), Some(target_tree))
+        .map_err(|e| Error::ReadPullState(std::io::Error::other(e)))?;
     let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
-    let tree =
-        worktree::build_tree_from_index_against(store, store, &idx, false, Some(state.before_tree))
-            .map_err(Error::BuildTree)?;
-    if tree == state.before_tree {
-        return Err(Error::PullUnfinished(state.target));
-    }
-    Ok(())
+    let behind = changed.entries.iter().any(|change| {
+        let staged = idx
+            .find_entry(&change.path)
+            .map(|i| &idx.entries[i])
+            .filter(|entry| entry.status != index::EntryStatus::Removed);
+        match change.kind {
+            diff::DiffKind::Added => staged.is_none(),
+            diff::DiffKind::Removed | diff::DiffKind::Modified => {
+                staged.is_some_and(|entry| Some(entry.object_hash) == change.old_hash)
+            }
+            diff::DiffKind::ModeChanged | diff::DiffKind::Renamed => false,
+        }
+    });
+    Ok(behind.then_some(state.target))
 }
 
 fn read_merge(layout: &RepoLayout) -> Result<Option<MergeState>, Error> {

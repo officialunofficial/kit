@@ -68,9 +68,9 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
-use kit_core::ops::pull_state::PullState;
 use kit_core::ops::{DiffKind, StatusEntry, StatusStaging};
 use kit_core::refs;
+use kit_core::store::ObjectStore;
 use libkit::status::{self, Detail, Record};
 
 use crate::clap_args;
@@ -149,7 +149,7 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return super::fail(e),
     };
 
-    warn_unfinished_pull(&layout, &report.entries);
+    warn_unfinished_pull(&layout);
 
     if porcelain {
         if opts.porcelain == Some(PorcelainVersion::V2) {
@@ -163,23 +163,24 @@ pub fn run(args: &[String]) -> u8 {
 }
 
 /// Warn on standard error while an interrupted pull has moved `HEAD` and
-/// left staged changes. Those changes are the old tree against the pulled
-/// one, and a commit of them would undo the pull.
-fn warn_unfinished_pull(layout: &RepoLayout, entries: &[StatusEntry]) {
-    if !entries.iter().any(|e| e.staging == StatusStaging::Staged) {
-        return;
-    }
+/// left the index behind it. A commit of that index would undo the pull.
+fn warn_unfinished_pull(layout: &RepoLayout) {
+    let unfinished = ObjectStore::open(layout)
+        .map_err(|e| format!("open store: {e}"))
+        .and_then(|store| {
+            libkit::commit::unfinished_pull(layout, &store).map_err(|e| e.to_string())
+        });
     let mut stderr = std::io::stderr().lock();
-    match PullState::at_head(layout) {
+    match unfinished {
         Ok(None) => {}
         Ok(Some(_)) => {
             let _ = writeln!(
                 stderr,
-                "warning: an interrupted pull has not finished restoring files; the staged changes may undo it. Run `kit pull` to finish it"
+                "warning: an interrupted pull has not finished restoring files; run `kit pull` to finish it before you commit"
             );
         }
         Err(e) => {
-            let _ = writeln!(stderr, "warning: read PULL_HEAD: {e}");
+            let _ = writeln!(stderr, "warning: unfinished pull check failed: {e}");
         }
     }
 }

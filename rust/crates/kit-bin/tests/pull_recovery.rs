@@ -196,6 +196,14 @@ fn a_commit_is_refused_while_a_pull_has_not_finished_restoring() {
         assert!(message.contains("kit pull"), "{message}");
         assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
     }
+    // Staging more files does not hide the unfinished pull.
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    let out = run(dir, &["commit", "-m", "would revert the pull"]);
+    assert!(!out.status.success());
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    // A hard reset restores HEAD, so the way out needs no remote.
+    ok(dir, &["reset", "--hard", "-f"]);
     ok(dir, &["pull"]);
     let status = run(dir, &["status"]);
     let quiet = String::from_utf8(status.stderr).unwrap();
