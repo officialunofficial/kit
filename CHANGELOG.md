@@ -14,7 +14,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- On a case-insensitive disk, two spellings of one branch (`main` and `Main`) now share one ref lock, and `kit switch`, `checkout`, `worktree add` and `branch -d`/`-m` treat them as one branch when a sibling tree has it checked out, so two trees can no longer commit to one branch file and lose commits. The lock file names of refs with upper-case letters change; they are transient.
+- On a case-insensitive disk, two spellings of one branch (`main` and `Main`) now share one ref lock, and `kit switch`, `checkout`, `worktree add` and `branch -d`/`-m` treat them as one branch when a sibling tree has it checked out, so two trees can no longer commit to one branch file and lose commits. The lock file names of refs with upper-case letters change, so an older and a newer kit running on one repository at once do not exclude each other for those refs.
 - `kit worktree remove` takes its locks before it checks the tree for local work, so a file staged while it waits is no longer deleted.
 - A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
 - A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.

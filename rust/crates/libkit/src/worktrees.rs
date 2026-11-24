@@ -107,8 +107,25 @@ fn same_branch(layout: &RepoLayout, a: &str, b: &str) -> bool {
         return false;
     }
     let heads = layout.common_dir().join(refs::HEADS_DIR);
-    match (heads.join(a).canonicalize(), heads.join(b).canonicalize()) {
-        (Ok(file_a), Ok(file_b)) => file_a == file_b,
+    same_file(&heads.join(a), &heads.join(b))
+}
+
+/// Do two paths name one file? File identity answers on every file system.
+/// A resolved path keeps the spelling that was typed on some case-insensitive
+/// disks.
+#[cfg(unix)]
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
