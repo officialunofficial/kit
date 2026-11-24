@@ -52,7 +52,7 @@ fn chain(root: &Path, levels: usize) -> String {
             }),
         );
     }
-    current.iter().map(|b| format!("{b:02x}")).collect()
+    kit_core::hash::to_hex(&current)
 }
 
 #[test]
