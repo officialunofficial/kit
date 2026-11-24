@@ -14,6 +14,11 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `kit gc` no longer stops on a recovery log whose last line was cut short by a crash or a full disk: readers ignore a last line without its newline, `record` cuts it off before it appends, and a tab in the branch field fails the parse, so a later entry is no longer glued to the torn bytes and left out of the gc roots.
+- `.kit/config` is written with an fsync of the file and of its directory, and `kit remote`, `kit config` and the upstream a push or `kit branch` records read and write it under one `config.lock`, so commands that run at once keep every change.
+- An unreadable `gc-auto` stamp is replaced by the stamp of a step that never ran, so the next automatic maintenance step is due again at the floor and not a week later.
+- `kit init` and `kit clone` into a `.kit` that a killed `init` left with no format marker and no objects now start over, and no longer report an existing repository.
+- A per-object write that creates a loose shard directory now flushes `objects/`, so the directory entry survives a power loss.
 - A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
 - A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".

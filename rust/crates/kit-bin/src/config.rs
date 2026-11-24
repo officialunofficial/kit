@@ -17,7 +17,7 @@ pub use libkit::config::{
     MAX_CONFIG_BYTES, REPO_FORBIDDEN_KEYS, RemoteEntry, ResolvedRemote, USER_CONFIG_SUBPATH,
     Upstream, apply_text, configured_remote_names, expand_user_identity, is_repo_forbidden_key,
     normalize_config_key, parse_pipe_list, resolve_remote, resolve_upstream, validate_key_path,
-    validate_value, write,
+    lock, validate_value, write,
 };
 
 use crate::environment;

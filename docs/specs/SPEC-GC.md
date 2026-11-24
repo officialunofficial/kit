@@ -186,7 +186,11 @@ stop pinning objects. A gc run expires first, then computes roots.
 
 `record` is durable &mdash; it `fsync`s the log file and its parent directory
 before returning &mdash; so a crash cannot leave a ref rewrite persisted while
-its recovery entry is lost. `record` and `expire` are **not** internally
+its recovery entry is lost. A last line without its newline is an append that a
+crash or a full disk cut short: readers ignore it, and `record` cuts the file
+back to its last newline before it appends. The caller moves the ref only after
+`record` returns, so a cut entry protects nothing that moved. A tab in the
+branch field is two entries glued together and fails the parse. `record` and `expire` are **not** internally
 synchronized: `ops::recovery`'s own concurrency note requires callers to
 hold "the repo lock" &mdash; in practice each producer's per-tree
 `worktree.lock` (see SPEC-CONCURRENCY §3.2). gc's "expire → collect
@@ -619,7 +623,9 @@ or invalidates fetch records. Collection stops on an
 integrity error without retiring a pair or repairing anything. A
 completed orphan sweep stands. An interruption during retirement can
 leave a lone index. The orphan rule removes it on a later sweep. A
-torn stamp can only cause a new attempt.
+torn stamp can only cause a new attempt: a step that finds a stamp it cannot
+read replaces it with the stamp of a step that never ran, which is due as soon
+as the store holds the floor.
 
 ### Integrity checks and repair
 

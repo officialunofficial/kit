@@ -473,9 +473,11 @@ impl ObjectStore {
 
     /// Initialise a fresh common dir for the repository described by
     /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
-    /// common dir already exists.
+    /// common dir already exists, unless a killed `init` made it: a common
+    /// dir with no format marker and no objects holds nothing and is
+    /// initialised again, as `git init` does.
     pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
-        if layout.common_dir().exists() {
+        if layout.common_dir().exists() && !is_unfinished_init(layout)? {
             return Err(StoreError::AlreadyInitialized);
         }
         let objects_root = layout.objects_dir();
@@ -664,8 +666,14 @@ impl ObjectStore {
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
+        // A shard that this write creates is an entry of `objects/`, which the
+        // shard flush in `write_atomic` does not cover.
+        let new_shard = !shard_dir.is_dir();
         fs::create_dir_all(shard_dir)?;
         write_atomic(&final_path, bytes, &**self.syncer())?;
+        if new_shard {
+            self.syncer().dir_sync(&self.objects_root)?;
+        }
         Ok(h)
     }
 
@@ -1566,6 +1574,22 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
     Ok(())
 }
 
+/// Whether `layout`'s common dir is what a killed `init` leaves: no format
+/// marker, because the marker is written last, and no object under
+/// `objects/`.
+fn is_unfinished_init(layout: &RepoLayout) -> io::Result<bool> {
+    match fs::symlink_metadata(layout.format_file()) {
+        Ok(_) => return Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    match fs::read_dir(layout.objects_dir()) {
+        Ok(mut entries) => Ok(entries.next().is_none()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// Atomically write `bytes` to `final_path` with per-object durability
 /// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
 /// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
@@ -1778,6 +1802,57 @@ mod tests {
         let _ = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         assert!(dir.path().join(KIT_DIR).is_dir());
         assert!(dir.path().join(KIT_DIR).join(OBJECTS_DIR).is_dir());
+    }
+
+    #[test]
+    fn init_again_after_a_killed_init_that_left_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        // `init` stopped after it made `objects/` and before it wrote the
+        // format marker.
+        fs::create_dir_all(layout.objects_dir()).unwrap();
+        ObjectStore::init(&layout).unwrap();
+        assert!(layout.format_file().is_file());
+        // A directory with nothing in it at all counts as new too.
+        let bare = TempDir::new().unwrap();
+        let bare_layout = RepoLayout::single(bare.path());
+        fs::create_dir_all(bare_layout.common_dir()).unwrap();
+        ObjectStore::init(&bare_layout).unwrap();
+        assert!(ObjectStore::open(&bare_layout).is_ok());
+    }
+
+    #[test]
+    fn a_write_that_creates_a_shard_syncs_the_objects_dir() {
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut store = ObjectStore::init(&layout).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+        let root = store.objects_root().to_path_buf();
+        let synced = |rec: &RecordingSyncer| {
+            rec.events()
+                .iter()
+                .filter(|ev| matches!(ev, Ev::DirSync(dir) if *dir == root))
+                .count()
+        };
+
+        let first = store.write(b"first object").unwrap();
+        assert_eq!(synced(&rec), 1, "a new shard is an entry of objects/");
+        // The same bytes again hit the dedup path and create no shard.
+        store.write(b"first object").unwrap();
+        assert_eq!(synced(&rec), 1);
+        let shard = store.path_for(&first).parent().unwrap().to_path_buf();
+        assert!(shard.is_dir());
+    }
+
+    #[test]
+    fn init_refuses_a_common_dir_with_objects_but_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.objects_dir().join("ab")).unwrap();
+        let err = ObjectStore::init(&layout).unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyInitialized));
     }
 
     #[test]

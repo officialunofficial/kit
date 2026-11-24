@@ -342,6 +342,7 @@ pub fn record_upstream(
     {
         return Ok(());
     }
+    let _lock = config::lock(layout).map_err(Error::RecordUpstream)?;
     let mut repo = config::read_layered(layout, environment, observer)
         .map_err(Error::RecordUpstream)?
         .repo;
