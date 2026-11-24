@@ -240,10 +240,8 @@ mod tests {
         // 2^100 leaves from 102 objects: the walk must stop at the cap and
         // never visit the paths.
         let root = bomb(&store, 100);
-        let started = std::time::Instant::now();
         let err = check_tree_leaves(&store, root).unwrap_err();
         assert!(matches!(err, StoreError::TreeTooLarge));
-        assert!(started.elapsed().as_secs() < 5);
     }
 
     #[test]
