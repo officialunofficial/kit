@@ -135,7 +135,9 @@ pub enum Error {
     #[error("clear merge state: {0}")]
     ClearMergeState(conflict_state::ConflictStateError),
     /// The record of an unfinished pull cannot be read.
-    #[error("read the unfinished pull: {0}; if no pull is running, check the files, then remove `.kit/PULL_HEAD`")]
+    #[error(
+        "read the unfinished pull: {0}; if no pull is running, check the files, then remove `.kit/PULL_HEAD`"
+    )]
     ReadPullState(std::io::Error),
     /// An interrupted pull has not finished restoring the index and files.
     #[error(
@@ -236,7 +238,8 @@ pub fn unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<Optio
         )));
     };
     let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
-    let behind = Behind { store, index: &idx }.walk(Some(state.before_tree), Some(target_tree), "", 0)?;
+    let behind =
+        Behind { store, index: &idx }.walk(Some(state.before_tree), Some(target_tree), "", 0)?;
     Ok(behind.then_some(state.target))
 }
 
