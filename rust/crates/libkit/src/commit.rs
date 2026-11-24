@@ -23,15 +23,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kit_core::hash::{self, Hash};
 use kit_core::index;
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Commit, Identity, Object};
+use kit_core::object::{Commit, EntryMode, Identity, Object, TreeEntry};
 use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
-use kit_core::ops::diff;
 use kit_core::ops::pull_state::PullState;
 use kit_core::ops::recovery::{self, RecoveryEntry};
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
 use kit_core::serialize;
-use kit_core::store::ObjectStore;
+use kit_core::store::{MAX_TREE_DEPTH, ObjectStore};
 use kit_core::worktree;
 use kit_sync::worktree::sync_index_to_tree;
 
@@ -136,7 +135,7 @@ pub enum Error {
     #[error("clear merge state: {0}")]
     ClearMergeState(conflict_state::ConflictStateError),
     /// The record of an unfinished pull cannot be read.
-    #[error("read PULL_HEAD: {0}")]
+    #[error("read the unfinished pull: {0}; if no pull is running, check the files, then remove `.kit/PULL_HEAD`")]
     ReadPullState(std::io::Error),
     /// An interrupted pull has not finished restoring the index and files.
     #[error(
@@ -218,8 +217,9 @@ fn refuse_unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<()
 /// both trees.
 ///
 /// The pull is unfinished while its record names `HEAD` and the index still
-/// holds the pre-pull entry at a path that the pull changed. Staging other
-/// paths does not hide it. A restore that reached the index, `reset --hard`
+/// holds the pre-pull entry, content and mode, at a path that the pull
+/// changed, or lacks a path that the pull added. Staging other paths does not
+/// hide it. A restore that reached the index, `reset --hard`
 /// and a pull that has not moved `HEAD` leave no such path, and a commit goes
 /// on. The check reads the index and writes nothing.
 ///
@@ -235,23 +235,126 @@ pub fn unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<Optio
             "the target of the pull is not a commit",
         )));
     };
-    let changed = diff::diff_trees(store, Some(state.before_tree), Some(target_tree))
-        .map_err(|e| Error::ReadPullState(std::io::Error::other(e)))?;
     let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
-    let behind = changed.entries.iter().any(|change| {
-        let staged = idx
-            .find_entry(&change.path)
-            .map(|i| &idx.entries[i])
-            .filter(|entry| entry.status != index::EntryStatus::Removed);
-        match change.kind {
-            diff::DiffKind::Added => staged.is_none(),
-            diff::DiffKind::Removed | diff::DiffKind::Modified => {
-                staged.is_some_and(|entry| Some(entry.object_hash) == change.old_hash)
-            }
-            diff::DiffKind::ModeChanged | diff::DiffKind::Renamed => false,
-        }
-    });
+    let behind = Behind { store, index: &idx }.walk(Some(state.before_tree), Some(target_tree), "", 0)?;
     Ok(behind.then_some(state.target))
+}
+
+/// A walk over the trees of a pull that finds a path where the index is still
+/// behind the pull.
+struct Behind<'a> {
+    store: &'a ObjectStore,
+    index: &'a index::Index,
+}
+
+impl Behind<'_> {
+    fn entries(&self, tree: Option<Hash>) -> Result<Vec<TreeEntry>, Error> {
+        let Some(hash) = tree else {
+            return Ok(Vec::new());
+        };
+        match self.store.read_object(&hash) {
+            Ok(Object::Tree(tree)) => Ok(tree.entries),
+            Ok(_) => Err(unreadable("a pull tree is not a tree")),
+            Err(e) => Err(unreadable(e)),
+        }
+    }
+
+    /// Whether some path under `before` and `target` is behind. The walk
+    /// skips a subtree that both sides share and stops at the first path.
+    fn walk(
+        &self,
+        before: Option<Hash>,
+        target: Option<Hash>,
+        prefix: &str,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        if before == target {
+            return Ok(false);
+        }
+        if depth > MAX_TREE_DEPTH {
+            return Err(unreadable("a pull tree is too deep"));
+        }
+        let old = self.entries(before)?;
+        let new = self.entries(target)?;
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < new.len() {
+            let order = match (old.get(i), new.get(j)) {
+                (Some(o), Some(n)) => o.name.cmp(&n.name),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Greater,
+            };
+            let (o, n) = match order {
+                std::cmp::Ordering::Less => (old.get(i), None),
+                std::cmp::Ordering::Greater => (None, new.get(j)),
+                std::cmp::Ordering::Equal => (old.get(i), new.get(j)),
+            };
+            if order != std::cmp::Ordering::Greater {
+                i += 1;
+            }
+            if order != std::cmp::Ordering::Less {
+                j += 1;
+            }
+            if self.entry_behind(o, n, prefix, depth)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn entry_behind(
+        &self,
+        old: Option<&TreeEntry>,
+        new: Option<&TreeEntry>,
+        prefix: &str,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        let Some(name) = old.or(new).map(|entry| &entry.name) else {
+            return Ok(false);
+        };
+        let path = if prefix.is_empty() {
+            String::from_utf8_lossy(name).into_owned()
+        } else {
+            format!("{prefix}/{}", String::from_utf8_lossy(name))
+        };
+        let tree_of = |entry: Option<&TreeEntry>| {
+            entry
+                .filter(|entry| entry.mode == EntryMode::Tree)
+                .map(|entry| entry.object_hash)
+        };
+        let (old_tree, new_tree) = (tree_of(old), tree_of(new));
+        if (old_tree.is_some() || new_tree.is_some())
+            && self.walk(old_tree, new_tree, &path, depth + 1)?
+        {
+            return Ok(true);
+        }
+        let leaf_of = |entry: Option<&TreeEntry>| entry.filter(|entry| entry.mode != EntryMode::Tree);
+        match (leaf_of(old), leaf_of(new)) {
+            (Some(o), Some(n)) if o.object_hash == n.object_hash && o.mode == n.mode => Ok(false),
+            (Some(o), _) => Ok(self.holds(&path, Some(o))),
+            (None, Some(_)) => Ok(self.holds(&path, None)),
+            (None, None) => Ok(false),
+        }
+    }
+
+    /// Whether the index holds `entry` at `path`, with the same content and
+    /// mode, or holds nothing there for `None`.
+    fn holds(&self, path: &str, entry: Option<&TreeEntry>) -> bool {
+        let staged = self
+            .index
+            .find_entry(path)
+            .map(|i| &self.index.entries[i])
+            .filter(|staged| staged.status != index::EntryStatus::Removed);
+        match entry {
+            Some(entry) => staged.is_some_and(|staged| {
+                staged.object_hash == entry.object_hash && staged.status as u8 == entry.mode as u8
+            }),
+            None => staged.is_none(),
+        }
+    }
+}
+
+fn unreadable(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
+    Error::ReadPullState(std::io::Error::other(reason))
 }
 
 fn read_merge(layout: &RepoLayout) -> Result<Option<MergeState>, Error> {

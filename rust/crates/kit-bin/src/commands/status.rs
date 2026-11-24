@@ -176,7 +176,7 @@ fn warn_unfinished_pull(layout: &RepoLayout) {
         Ok(Some(_)) => {
             let _ = writeln!(
                 stderr,
-                "warning: an interrupted pull has not finished restoring files; run `kit pull` to finish it before you commit"
+                "warning: an interrupted pull has not finished restoring files; run `kit pull` to finish it before you commit, or `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes"
             );
         }
         Err(e) => {

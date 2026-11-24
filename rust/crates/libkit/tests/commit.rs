@@ -528,3 +528,42 @@ fn a_malformed_pull_record_stops_a_commit() {
         Err(Error::ReadPullState(_))
     ));
 }
+
+#[test]
+fn a_pull_that_only_added_a_file_is_unfinished_while_the_index_lacks_it() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    let first = f.commit("first");
+    f.stage("dir/new.txt", "added\n");
+    let pulled = f.commit("pulled");
+    // The index of the stopped restore lacks the added file.
+    let mut staged = index::read_index(&f.layout).unwrap();
+    staged.remove_path("dir/new.txt").unwrap();
+    index::write_index(&f.layout, &staged).unwrap();
+    record_pull(&f, pulled.commit, first.tree);
+    assert!(matches!(f.begin(false), Err(Error::PullUnfinished(_))));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut f = Fixture::new();
+    f.stage("run.sh", "echo\n");
+    let first = f.commit("first");
+    let path = f.root.join("run.sh");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    f.stage("other.txt", "x\n");
+    let pulled = f.commit("pulled");
+    assert_ne!(pulled.tree, first.tree);
+    // The index of the stopped restore holds the file without its mode.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    f.stage("other.txt", "x\n");
+    record_pull(&f, pulled.commit, first.tree);
+    assert!(matches!(f.begin(false), Err(Error::PullUnfinished(_))));
+    // A finished restore holds the mode again.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    f.stage("other.txt", "x\n");
+    f.begin(false).unwrap();
+}
