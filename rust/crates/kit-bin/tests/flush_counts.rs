@@ -58,7 +58,7 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
 
     let consumer_xdg = tempfile::tempdir().unwrap();
     let consumer_dir = tempfile::tempdir().unwrap();
-    let out = kit_env(consumer_dir.path(), consumer_xdg.path(), &["clone", &url, "work"], &[]);
+    let out = kit_env(consumer_dir.path(), consumer_xdg.path(), &["clone", "-o", "origin", &url, "work"], &[]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let work = consumer_dir.path().join("work");
 
