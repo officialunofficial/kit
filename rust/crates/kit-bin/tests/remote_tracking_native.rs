@@ -202,7 +202,9 @@ fn plant_overlapping_remote(r: &Repo, name: &str, url: &str) {
     let layout = RepoLayout::single(r.path());
     let path = layout.config_file();
     let mut config = std::fs::read_to_string(&path).unwrap_or_default();
-    config.push_str(&format!("remote.{name}.url = {url}\nremote.{name}.type = file\n"));
+    config.push_str(&format!(
+        "remote.{name}.url = {url}\nremote.{name}.type = file\n"
+    ));
     std::fs::write(&path, config).unwrap();
 }
 
@@ -485,7 +487,12 @@ fn remote_add_and_rename_refuse_an_overlapping_name() {
     r.ok(&["remote", "add", "other", "kit+file:///tmp/nowhere-o"]);
     let before = r.ok(&["remote", "-v"]).stdout;
 
-    let out = r.run(&["remote", "add", "team/upstream", "kit+file:///tmp/nowhere-u"]);
+    let out = r.run(&[
+        "remote",
+        "add",
+        "team/upstream",
+        "kit+file:///tmp/nowhere-u",
+    ]);
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("overlaps remote 'team'"), "{stderr}");

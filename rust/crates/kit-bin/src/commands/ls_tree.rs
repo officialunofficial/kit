@@ -148,10 +148,7 @@ impl Listing<'_> {
                 .iter()
                 .any(|(s, _)| super::index_path_descends_from(s, &path));
             // `path` is named with a trailing slash → list its contents.
-            let list_contents = self
-                .pathspecs
-                .iter()
-                .any(|(s, slash)| *slash && &path == s);
+            let list_contents = self.pathspecs.iter().any(|(s, slash)| *slash && &path == s);
 
             if is_tree {
                 if ancestor || list_contents || (matched && self.recursive) {

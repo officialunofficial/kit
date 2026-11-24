@@ -216,7 +216,11 @@ pub(super) fn report(outcome: &Outcome, json: bool) -> u8 {
             let mut stderr = std::io::stderr().lock();
             // The git-shaped line for each path, then the hint.
             for rec in conflicts {
-                let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", super::display_path(&rec.path));
+                let _ = writeln!(
+                    stderr,
+                    "CONFLICT (content): Merge conflict in {}",
+                    super::display_path(&rec.path)
+                );
             }
             let _ = writeln!(
                 stderr,

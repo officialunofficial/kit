@@ -62,7 +62,11 @@ fn recursive_listing_stops_at_the_checkout_depth() {
 
     let at_limit = chain(dir.path(), MAX_TREE_DEPTH);
     let out = kit(dir.path(), &["ls-tree", "-r", &at_limit]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let listing = String::from_utf8(out.stdout).unwrap();
     assert!(listing.trim_end().ends_with("/f"), "{listing}");
 

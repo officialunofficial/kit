@@ -67,7 +67,10 @@ fn transport_error_display_is_escaped() {
     let error = client(port).list_refs("refs/heads/").unwrap_err();
     let text = error.to_string();
     assert!(matches!(error, TransportError::RemoteError(_)), "{text:?}");
-    assert!(!text.contains('\u{1b}'), "TransportError leaked ESC: {text:?}");
+    assert!(
+        !text.contains('\u{1b}'),
+        "TransportError leaked ESC: {text:?}"
+    );
 }
 
 /// The `RemoteSource` path (what `kit clone`/`fetch` and kit-sync embedders
@@ -91,5 +94,8 @@ fn source_error_from_hostile_connect_server_has_no_escape() {
 fn source_error_from_transport_error_has_no_escape() {
     let error = SourceError::from(TransportError::RemoteError("\u{1b}[2J".into()));
     let text = error.to_string();
-    assert!(!text.contains('\u{1b}'), "SourceError Display leaked ESC: {text:?}");
+    assert!(
+        !text.contains('\u{1b}'),
+        "SourceError Display leaked ESC: {text:?}"
+    );
 }

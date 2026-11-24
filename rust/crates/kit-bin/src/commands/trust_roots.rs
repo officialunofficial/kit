@@ -445,7 +445,10 @@ pub fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
 pub fn short_keyid(keyid: &str) -> String {
     match keyid.split_once(':') {
         Some((prefix, body)) if body.len() > 16 => {
-            let end = (0..=16).rev().find(|&i| body.is_char_boundary(i)).unwrap_or(0);
+            let end = (0..=16)
+                .rev()
+                .find(|&i| body.is_char_boundary(i))
+                .unwrap_or(0);
             format!("{prefix}:{}…", &body[..end])
         }
         _ => keyid.to_owned(),

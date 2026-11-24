@@ -34,7 +34,10 @@ fn assert_quoted(what: &str, out: &Output) {
         !text.contains('\u{1b}'),
         "{what} wrote a raw escape byte: {text:?}"
     );
-    assert!(text.contains(QUOTED), "{what} did not quote the name: {text:?}");
+    assert!(
+        text.contains(QUOTED),
+        "{what} did not quote the name: {text:?}"
+    );
 }
 
 #[test]

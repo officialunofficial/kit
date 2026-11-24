@@ -103,7 +103,10 @@ fn remote_display(remote: &RemoteFailure) -> String {
     match remote.code.as_str() {
         "not_found" => "pack not found on remote".to_owned(),
         "unauthenticated" | "permission_denied" => "access denied by remote".to_owned(),
-        _ => format!("remote error: {}", sanitize_remote_error_text(&remote.message)),
+        _ => format!(
+            "remote error: {}",
+            sanitize_remote_error_text(&remote.message)
+        ),
     }
 }
 
