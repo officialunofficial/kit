@@ -17,6 +17,7 @@
 mod common;
 
 use std::fs;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use common::{Repo, kit_env};
@@ -76,7 +77,11 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
     origin.ok(&["add", "dir/sub/edited.txt"]);
     origin.ok(&["commit", "-m", "round 2"]);
     origin.ok(&["push", "origin", "main"]);
+    let head = work.join(".kit/HEAD");
+    let head_before = (fs::read(&head).unwrap(), fs::metadata(&head).unwrap().ino());
     let pull = flushes(&work, consumer_xdg.path(), &log, &["pull", "origin"]);
+    let head_after = (fs::read(&head).unwrap(), fs::metadata(&head).unwrap().ino());
+    assert_eq!(head_after, head_before, "a pull that keeps the branch leaves HEAD alone");
 
     eprintln!(
         "flushes: add {add}, add unchanged {unchanged}, commit {commit}, push {push}, fetch {fetch}, pull {pull}"
