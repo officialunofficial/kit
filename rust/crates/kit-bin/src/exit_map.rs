@@ -503,7 +503,8 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::AmendDuringMerge
         | commit::Error::NothingToAmend
         | commit::Error::NothingStaged
-        | commit::Error::MergeDiscarded => exit::USAGE,
+        | commit::Error::MergeDiscarded
+        | commit::Error::MergeStateIncomplete => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged

@@ -52,7 +52,7 @@ serde_json = { version = "1.0.154", optional = true }
 getrandom = "0.4.3"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-zeroize = "1.9.1"
+zeroize = "1.9.2"
 
 # The grant store opens a file without following a symlink.
 [target.'cfg(unix)'.dependencies]

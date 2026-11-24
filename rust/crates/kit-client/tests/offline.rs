@@ -266,6 +266,56 @@ fn a_402_without_a_connect_body_still_parses_from_headers() {
     assert_eq!(required.admission_required, ["abc"]);
 }
 
+/// An intermediary's error page is not Connect JSON: 5xx and 429 carry their
+/// status, every other status stays a malformed remote.
+#[test]
+fn a_non_connect_error_body_is_transient_only_for_5xx_and_429() {
+    for (status, content_type, body) in [
+        (503, "text/html", "<html>bad gateway</html>"),
+        (502, "text/html", "<html>bad gateway</html>"),
+        (500, "application/json", "not json"),
+        (429, "text/plain", "slow down"),
+    ] {
+        let script = Script::new(move |_| {
+            Ok(Response::builder()
+                .status(status)
+                .header("content-type", content_type)
+                .body(body.as_bytes().to_vec())
+                .unwrap())
+        });
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(
+            matches!(error, Error::ServerStatus { status: seen } if seen == status),
+            "{status}: {error:?}"
+        );
+        assert_eq!(script.seen.borrow().len(), 1, "no client retry");
+    }
+    for status in [400, 403, 404, 409, 413, 418, 499] {
+        let script = Script::new(move |_| {
+            Ok(Response::builder()
+                .status(status)
+                .header("content-type", "text/html")
+                .body(b"<html>nope</html>".to_vec())
+                .unwrap())
+        });
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(matches!(error, Error::Invalid(_)), "{status}: {error:?}");
+    }
+}
+
+/// A Connect JSON body keeps its Connect code whatever the status.
+#[test]
+fn a_connect_error_body_keeps_its_code_on_a_5xx_and_a_429() {
+    for status in [500, 503, 429] {
+        let script = Script::new(move |_| json(status, &[], r#"{"code":"unavailable"}"#));
+        let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
+        assert!(
+            matches!(&error, Error::Remote(remote) if remote.code == "unavailable" && remote.status == status),
+            "{status}: {error:?}"
+        );
+    }
+}
+
 #[test]
 fn malformed_or_duplicated_challenge_details_are_invalid() {
     let bad_scheme = encode_admission_challenge(&[("Bad Scheme", "v")], "");

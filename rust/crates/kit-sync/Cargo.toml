@@ -48,7 +48,7 @@ http-body-util = { version = "0.1.5", optional = true }
 # Counts connection establishments so a stale pooled connection is told apart
 # from a fresh one.
 tower-service = { version = "0.3.3", optional = true }
-bytes = { version = "1.12.1", optional = true }
+bytes = { version = "1.12.2", optional = true }
 # gzip, pure-Rust backend. The only content coding the channel speaks.
 flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"], optional = true }
 getrandom = { version = "0.4.3", optional = true }

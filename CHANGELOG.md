@@ -7,6 +7,23 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
+- Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
+
+### Fixed
+
+- On a case-insensitive disk, two spellings of one branch (`main` and `Main`) now share one ref lock, and `kit switch`, `checkout`, `worktree add` and `branch -d`/`-m` treat them as one branch when a sibling tree has it checked out, so two trees can no longer commit to one branch file and lose commits. The lock file names of refs with upper-case letters change, so an older and a newer kit running on one repository at once do not exclude each other for those refs.
+- `kit worktree remove` takes its locks before it checks the tree for local work, so a file staged while it waits is no longer deleted.
+- A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
+- A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
+- `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
+- `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.
+- `kit reset --hard` now ends a merge, cherry-pick or revert in progress, as git does, so the next commit no longer records the discarded merge as a second parent. `kit status` names an operation in progress.
+- The state of a merge, cherry-pick or revert is now written with temp, sync and rename, and its head marker last, so a failed write (a full disk, for example) leaves no operation in progress. `kit commit` refuses a merge that has no conflict list. For library users, `kit_core::ops::conflict_state::clear_operation_state` clears the three.
+- `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` now treat an operation result tree that the store cannot read as absent, instead of failing with `check operation changes`.
+
 ## [0.10.0] - 2026-11-22
 
 ### Upgrading from 0.9
@@ -35,7 +52,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gc.auto` is listed by `kit config`, and `kit config gc.auto false` sets it.
 - The `collection` value of the maintenance JSON can be `progress`: the step retired or copied what its limits allowed and left planned work, and the next step is due in an hour.
 - The library default `kit_sync::SyncOptions::auto_maintenance` is `true`. An embedder that calls fetch, pull or clone through `kit-sync` or `libkit` gets the maintenance step unless it calls `with_auto_maintenance(false)`.
-- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt, within a day, runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
+- A maintenance step that ran out of its budget and retired nothing is due again in an hour, and waits 30 days only when the next attempt runs out of budget too. A step whose budget ends inside the last wholly dead pack keeps the packs it verified, and the later copy waits for the next step.
 - A batch counts a small file toward opening a pack only when its blob is new, so an add of 65 files with one new blob stays loose.
 - `kit gc` prints one line to standard error when retirement stopped because a fetch, push or add held the store lock. The exit code does not change.
 - `kit gc` prints `warning: kept damaged local pack: …` for each local pack it found damaged and kept, and `warning: kept the local packs gc meant to rewrite or merge: …` when copying the packs it meant to rewrite or merge failed. The exit code does not change.
@@ -45,7 +62,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the chunks of a large file into local packs in a repository that declares capability `P`, so adding a large file no longer leaves one loose file per chunk.
 - `kit add` seals a full local pack on a background thread while it hashes and writes the next one, so adding many large files is faster.
 - The seal of a local pack digests the pack file on a pool of up to 8 threads, so adding or fetching many large files spends less wall time in the seal.
-- Fetch and clone seal each local pack on a worker thread while they receive the next window, so up to two windows are staged at once. On Linux a fetch of 1 GiB in four large files takes as long as 0.9 (3.2 s against 3.3 s), and a fetch of 1 GiB in files of 300 kB to 1 MB takes about 1.35 times as long (3.9 s against 2.9 s). The peak memory of a clone of 1 GiB of large files was about 29 MiB higher than 0.9 on macOS (median of six runs, 241 to 257 MiB against 216 to 220 MiB), and lower than 0.9 on Linux (97.5 against 106.7 MiB in the fetch of 1 GiB in four large files).
+- Fetch and clone seal each local pack on a worker thread while they receive the next window, so up to two windows are staged at once. On Linux a fetch of 1 GiB in four large files takes as long as 0.9 (3.2 s against 3.3 s), and a fetch of 1 GiB in files of 300 kB to 1 MB takes about as long as 0.9 (0.96 of its time on a quiet host). On macOS (Apple silicon) that fetch takes 2.1 s against 8.1 s, and a clone 3.1 s against 9.3 s. The peak memory of a clone of 1 GiB of large files was about 29 MiB higher than 0.9 on macOS (median of six runs, 241 to 257 MiB against 216 to 220 MiB), and lower than 0.9 on Linux (97.5 against 106.7 MiB in the fetch of 1 GiB in four large files).
 - `kit add`, `kit add -u`, `kit commit -a` and `kit stash` write the small files of a large batch (past the first 64, up to 16,384 serialized bytes each) into local packs in a repository that declares capability `P`, so adding 100,000 small files makes a few packs and about 150 syncs where it made one loose file and one sync each. Smaller batches and larger files keep the loose path.
 - Fetch continues an interrupted S3 or hosted pack download with a `Range` request when the server's first answer had a strong `ETag`, and reads the pack again from its start on any other answer. The whole pack is still verified against its key.
 - Fetch keeps a verified pack whose apply failed, so a retry reads it from disk instead of downloading it again. The cache holds at most four packs for seven days, and does not keep a pack longer than 1 GiB.

@@ -63,7 +63,7 @@ base64 = "0.23.1"
 thiserror = "2.0.21"
 # Used by the secp256k1/p256 signers to scrub raw 32-byte secrets
 # from stack memory before they leave the constructor frame.
-zeroize = { version = "1.9.1", features = ["derive"] }
+zeroize = { version = "1.9.2", features = ["derive"] }
 # `serde` + `serde_json` are used ONLY on the parsing side (envelope decode +
 # external-signer response). The canonical JCS encoder is hand-rolled per
 # RFC 8785 — `serde_json::to_string` does NOT satisfy JCS sort/escape rules.
