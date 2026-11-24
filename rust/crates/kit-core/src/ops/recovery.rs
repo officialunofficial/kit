@@ -399,4 +399,35 @@ mod tests {
         assert_eq!(pruned, 0);
         assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(1), h(2)]));
     }
+
+    #[test]
+    fn a_record_after_a_torn_tail_is_not_glued_to_it() {
+        let (_d, md) = md();
+        record(&md, &entry(100, 1)).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(md.recovery_log_file())
+            .unwrap();
+        f.write_all(b"1700000000\tamend\t").unwrap();
+        drop(f);
+        record(&md, &entry(200, 2)).unwrap();
+        let roots = roots(&md).expect("a torn tail must not make the log unreadable");
+        assert!(
+            roots.contains(&h(2)),
+            "a record appended after a torn tail must be a root"
+        );
+    }
+
+    #[test]
+    fn an_entry_cut_before_its_newline_does_not_swallow_the_next_record() {
+        let (_d, md) = md();
+        let line = format!("100\tamend\t{}\tmain", hash::to_hex(&h(1)));
+        fs::write(md.recovery_log_file(), line).unwrap();
+        record(&md, &entry(200, 2)).unwrap();
+        let roots = roots(&md).unwrap();
+        assert!(
+            roots.contains(&h(2)),
+            "the record after an entry missing its newline must be a root"
+        );
+    }
 }
