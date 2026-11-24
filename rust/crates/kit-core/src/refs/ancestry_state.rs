@@ -121,7 +121,7 @@ pub(crate) fn invalidate(common: &Path, full_ref: &str) -> RefResult<()> {
 
 pub(crate) fn remove_synced(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => crate::atomic::sync_dir(path.parent().expect("metadata has parent")),
+        Ok(()) => crate::durable::flush_dir(path.parent().expect("metadata has parent")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

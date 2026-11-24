@@ -173,11 +173,11 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
     assert_eq!(blocked.leftovers_removed, 0);
     assert!(old.exists());
     drop(guard);
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let report = repo.run();
     assert_eq!(report.leftovers_removed, 2);
     assert_eq!(report.bytes_reclaimed, 12);
-    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+    assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
     assert!(!old.exists());
     assert!(!old_index.exists());
     assert!(young.exists());

@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::durable::Parents;
 use crate::hash::Hash;
 use crate::ignore::{self, IgnoreList};
 use crate::layout::RepoLayout;
@@ -356,7 +357,7 @@ pub fn write_sparse_checkout(layout: &RepoLayout, lines: &[&str]) -> RestoreResu
         buf.push('\n');
     }
     let path = layout.sparse_checkout_file();
-    crate::atomic::write_atomic(&path, buf.as_bytes(), true)?;
+    crate::durable::write_pointer(&path, buf.as_bytes(), Parents::Create)?;
     Ok(())
 }
 

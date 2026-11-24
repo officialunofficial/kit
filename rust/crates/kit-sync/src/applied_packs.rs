@@ -70,15 +70,13 @@
 use kit_core::layout::RepoLayout;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
-#[cfg(unix)]
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use kit_core::durable::Parents;
 use kit_core::hash::{HEX_LEN, Hash, to_hex};
 use kit_core::protocol::PackKey;
 use kit_core::repo_lock::{RepoLock, acquire_default};
-use tempfile::NamedTempFile;
 
 use crate::error::SyncError;
 use crate::observer::{Observer, SyncEvent};
@@ -471,66 +469,7 @@ fn write_recent(
         body.push_str(&to_hex(digest));
         body.push('\n');
     }
-    write_cache_record(path, body.as_bytes())
-}
-
-/// Write a record that only saves work, with a temporary file and a rename and
-/// no device flush. A power loss can leave the old bytes, no file, or a
-/// shorter file. Every reader of a cache record checks its content and
-/// ignores a record that does not parse, so a lost record costs the next
-/// fetch more work and nothing else. A pointer that something else orders
-/// against uses [`write_atomic`].
-pub(crate) fn write_cache_record(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let (_, mut tmp) = create_temp(final_path)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    tmp.persist(final_path).map_err(|e| e.error)?;
-    Ok(())
-}
-
-/// Atomic temp+fsync+rename write, matching `kit_core::atomic::write_atomic`
-/// (kept as a local copy here rather than reaching into kit-core's
-/// crate-private helper — see that module's docs for why each durable
-/// subsystem owns its own copy of this primitive).
-pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let (parent, mut tmp) = create_temp(final_path)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    kit_core::flush::file(tmp.as_file())?;
-    tmp.persist(final_path).map_err(|e| e.error)?;
-
-    sync_parent_dir(parent)?;
-    Ok(())
-}
-
-/// The directory of `final_path`, created, and a temporary file in it.
-fn create_temp(final_path: &Path) -> io::Result<(&Path, NamedTempFile)> {
-    let parent = final_path
-        .parent()
-        .expect("applied_packs::create_temp: path has parent");
-    fs::create_dir_all(parent)?;
-    let file_name = final_path
-        .file_name()
-        .expect("applied_packs::create_temp: path has file name")
-        .to_string_lossy();
-    // `with_prefix_in` already appends a random unique suffix, so this
-    // prefix only needs to be stable and recognisable — no pid/sequence
-    // needed for uniqueness.
-    let tmp = NamedTempFile::with_prefix_in(format!(".{file_name}.tmp"), parent)?;
-    Ok((parent, tmp))
-}
-
-#[cfg(unix)]
-pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    match File::open(parent) {
-        Ok(dir) => kit_core::flush::file(&dir),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
+    kit_core::durable::write_cache(path, body.as_bytes(), Parents::Create)
 }
 
 #[cfg(test)]
@@ -778,14 +717,16 @@ mod tests {
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
         applied.record_applied(&pk("pack-1")).unwrap();
         applied.persist().unwrap();
-        write_cache_record(&dir.path().join("record"), b"bytes").unwrap();
+        kit_core::durable::write_cache(&dir.path().join("record"), b"bytes", Parents::Existing)
+            .unwrap();
         let tip = h("tip");
         crate::anchor::persist(&dir.path().join("verified"), &tip).unwrap();
         assert_eq!(kit_core::fault::flushes(), before);
         assert_eq!(crate::anchor::load(&dir.path().join("verified")), Some(tip));
 
         // A durable pointer flushes the file and its directory.
-        write_atomic(&dir.path().join("pointer"), b"bytes").unwrap();
+        kit_core::durable::write_pointer(&dir.path().join("pointer"), b"bytes", Parents::Existing)
+            .unwrap();
         // Windows has no directory flush, so there it is the file alone.
         let pointer = if cfg!(unix) { 2 } else { 1 };
         assert_eq!(kit_core::fault::flushes(), before + pointer);

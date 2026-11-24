@@ -315,7 +315,7 @@ impl BulkWriter<'_> {
         // Content fsync happens BEFORE the rename, so the object is
         // durable the instant it becomes visible. Only the rename's
         // durability (the shard dir fsync) is deferred to commit.
-        crate::atomic::write_content_synced(&final_path, bytes)?;
+        crate::durable::write_content_synced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
         self.refreshed.insert(h);
         Ok(h)
@@ -373,7 +373,7 @@ impl BulkWriter<'_> {
             sync_reused_file(file)?;
         }
         for dir in &self.dirs {
-            crate::atomic::sync_dir(dir)?;
+            crate::durable::flush_dir(dir)?;
         }
         Ok(())
     }
@@ -487,7 +487,11 @@ impl ObjectStore {
         // synced before `init` returns, so a crash leaves no marker or the
         // whole one.
         let marker = format::init_marker(&layout.format_file());
-        crate::atomic::write_atomic(&layout.format_file(), marker, false)?;
+        crate::durable::write_pointer(
+            &layout.format_file(),
+            marker,
+            crate::durable::Parents::Existing,
+        )?;
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(marker == format::PACKED)),
@@ -667,12 +671,20 @@ impl ObjectStore {
             .parent()
             .expect("object path always has a 2-hex parent");
         // A shard that this call creates is an entry of `objects/`, which the
-        // shard flush in `write_atomic` does not cover.
+        // shard flush of the pointer write does not cover.
         let new_shard = fs::create_dir(shard_dir).is_ok();
         // A no-op when the shard exists; otherwise it makes `objects/` or names
         // why the shard cannot be made.
         fs::create_dir_all(shard_dir)?;
-        write_atomic(&final_path, bytes, &**self.syncer())?;
+        #[cfg(feature = "fault-injection")]
+        crate::fault::check(crate::fault::Site::Store)?;
+        // Per-object schedule: the pointer write on the store's own seam.
+        crate::durable::pointer_via(
+            &**self.syncer(),
+            &final_path,
+            crate::durable::Parents::Existing,
+            |file| file.write_all(bytes),
+        )?;
         if new_shard {
             self.syncer().dir_sync(&self.objects_root)?;
         }
@@ -1508,7 +1520,7 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
         // accept a failed content flush or change object permissions.
         options.write(true);
     }
-    crate::flush::file(&options.open(path)?)
+    crate::durable::flush_file(&options.open(path)?, path)
 }
 
 /// Fill the header buffer unless the reader reaches EOF.
@@ -1587,37 +1599,6 @@ fn is_unfinished_init(layout: &RepoLayout) -> io::Result<bool> {
         return Ok(true);
     }
     Ok(fs::read_dir(layout.objects_dir())?.next().is_none())
-}
-
-/// Atomically write `bytes` to `final_path` with per-object durability
-/// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
-/// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
-/// to concurrent readers and replaces the destination. On Windows,
-/// [`tempfile::NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
-/// semantics so the replace-existing path works there too.
-///
-/// After a successful rename we flush the parent directory on Unix to
-/// commit the dirent update — without this, the rename can survive a
-/// power loss only in the page cache and the file appears missing on
-/// reboot.
-///
-/// All flush/rename primitives go through `syncer` so unit tests can
-/// assert ordering; [`RealSyncer`] preserves the historical behaviour
-/// exactly.
-fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
-    let parent = final_path.parent().expect("write_atomic: path has parent");
-    let mut tmp = crate::atomic::temp_file_in(parent)?;
-    #[cfg(feature = "fault-injection")]
-    crate::fault::check(crate::fault::Site::Store)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    syncer.full(tmp.as_file(), tmp.path())?;
-
-    // NamedTempFile::persist uses a cross-platform atomic replace:
-    // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
-    syncer.rename(tmp.into_temp_path(), final_path)?;
-
-    syncer.dir_sync(parent)?;
-    Ok(())
 }
 
 /// Write target shared by [`ObjectStore`] (per-object durability) and

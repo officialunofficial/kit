@@ -40,6 +40,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::durable::Parents;
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
 use crate::layout::RepoLayout;
@@ -243,7 +244,7 @@ fn write_hex_file(state_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult
 /// Write one state file with temp, sync and rename, so a failed or stopped
 /// write leaves the old file or none, never a short one.
 fn write_state_file(path: &Path, bytes: &[u8]) -> ConflictStateResult<()> {
-    crate::atomic::write_atomic(path, bytes, false)?;
+    crate::durable::write_pointer(path, bytes, Parents::Existing)?;
     Ok(())
 }
 

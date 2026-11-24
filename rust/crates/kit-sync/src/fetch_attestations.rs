@@ -336,7 +336,11 @@ fn persist(path: &Path, record: &Record) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::applied_packs::write_atomic(path, &record.encode(RecordKind::Fetch))
+    kit_core::durable::write_pointer(
+        path,
+        &record.encode(RecordKind::Fetch),
+        kit_core::durable::Parents::Create,
+    )
 }
 
 struct Reader<'a> {
@@ -505,7 +509,7 @@ impl SavedUsage {
                     Err(_) => return None,
                 }
             }
-            crate::applied_packs::sync_parent_dir(path.parent()?).ok()?;
+            kit_core::durable::flush_dir(path.parent()?).ok()?;
         }
         Some(usage)
     }
@@ -513,7 +517,7 @@ impl SavedUsage {
     fn persist(&self, path: &Path, reservations: &[Reservation]) -> io::Result<()> {
         let mut raw = serde_json::to_vec(&([self.count, self.bytes], reservations))?;
         raw.extend(kit_core::hash::hash(&raw));
-        crate::applied_packs::write_atomic(path, &raw)
+        kit_core::durable::write_pointer(path, &raw, kit_core::durable::Parents::Create)
     }
 
     fn fits(&self, bytes: u64) -> bool {
@@ -669,8 +673,8 @@ fn persist_provenance(layout: &RepoLayout, prepared: &BTreeSet<Hash>) -> io::Res
     }
     // Every marker and its ancestor directory is durable before any envelope
     // becomes visible. Directory syncs are shared by this pack's markers.
-    crate::applied_packs::sync_parent_dir(&layout.attestations_dir().join(".fetched"))?;
-    crate::applied_packs::sync_parent_dir(&layout.attestations_dir())?;
-    crate::applied_packs::sync_parent_dir(layout.common_dir())?;
+    kit_core::durable::flush_dir(&layout.attestations_dir().join(".fetched"))?;
+    kit_core::durable::flush_dir(&layout.attestations_dir())?;
+    kit_core::durable::flush_dir(layout.common_dir())?;
     Ok(())
 }

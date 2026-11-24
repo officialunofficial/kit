@@ -15,18 +15,12 @@
 //! the filename a stable, content-addressed function of the envelope —
 //! re-writing identical bytes is a no-op (idempotent via stat).
 //!
-//! Durability mirrors `kit-core::store`:
-//! `tempfile::NamedTempFile::persist` (atomic rename) plus an
-//! Unix-only `fsync` of the containing commit directory afterwards so
-//! the dirent update survives a power loss.
+//! Durability is `kit_core::durable::write_pointer`: the bytes are flushed,
+//! the file is renamed into place, and the containing commit directory is
+//! flushed afterwards so the dirent update survives a power loss.
 
 use std::fs;
-#[cfg(unix)]
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-
-use tempfile::NamedTempFile;
 
 use crate::Error;
 use crate::envelope as env_mod;
@@ -86,7 +80,8 @@ pub fn save(layout: &RepoLayout, commit: &Hash, bytes: &[u8]) -> Result<(Hash, P
     let parent = final_path.parent().expect("envelope_path has parent");
     fs::create_dir_all(parent).map_err(|e| Error::Io(format!("mkdir: {e}")))?;
 
-    write_atomic(&final_path, bytes)?;
+    kit_core::durable::write_pointer(&final_path, bytes, kit_core::durable::Parents::Existing)
+        .map_err(|e| Error::Io(format!("write: {e}")))?;
     Ok((att_id, final_path))
 }
 
@@ -188,56 +183,10 @@ fn parse_att_filename(name: &str) -> Option<Hash> {
     hash_mod::from_hex(stem).ok()
 }
 
-fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let parent = final_path.parent().expect("final_path has parent");
-    let mut tmp = NamedTempFile::with_prefix_in(".kit.tmp.", parent)
-        .map_err(|e| Error::Io(format!("tmpfile: {e}")))?;
-    tmp.as_file_mut()
-        .write_all(bytes)
-        .map_err(|e| Error::Io(format!("write tmp: {e}")))?;
-    tmp.as_file_mut()
-        .sync_all()
-        .map_err(|e| Error::Io(format!("fsync tmp: {e}")))?;
-    tmp.persist(final_path)
-        .map_err(|e| Error::Io(format!("persist: {}", e.error)))?;
-    sync_parent_dir(parent)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_parent_dir(parent: &Path) -> Result<(), Error> {
-    match File::open(parent) {
-        Ok(dir) => dir
-            .sync_all()
-            .map_err(|e| Error::Io(format!("fsync dir: {e}"))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(Error::Io(format!("open dir: {e}"))),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // Mirrors the unix signature.
-fn sync_parent_dir(_parent: &Path) -> Result<(), Error> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::envelope::{Envelope, Sig};
-
-    #[cfg(unix)]
-    #[test]
-    fn parent_sync_tolerates_missing_directories_and_rejects_invalid_paths() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("missing");
-        assert!(sync_parent_dir(&missing).is_ok());
-        std::fs::write(&missing, b"file").unwrap();
-        assert!(matches!(
-            sync_parent_dir(&missing.join("child")),
-            Err(Error::Io(_))
-        ));
-    }
 
     fn fake_hash(seed: u8) -> Hash {
         let mut h = [0u8; 32];
@@ -274,18 +223,6 @@ mod tests {
 
         let env = load(&path).unwrap();
         assert_eq!(env.payload, b"{\"k\":1}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_write_does_not_embed_the_destination_name_in_its_temp_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a".repeat(255));
-
-        write_atomic(&path, b"envelope").unwrap();
-
-        assert_eq!(fs::read(&path).unwrap(), b"envelope");
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

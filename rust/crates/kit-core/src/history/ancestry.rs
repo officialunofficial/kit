@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::{CommitHistory, HistoryError, InclusionProof, Position, verify_inclusion};
+use crate::durable::Parents;
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
 use crate::object::Object;
@@ -473,8 +474,8 @@ fn repository_id(common: &Path) -> Result<Hash, HistoryError> {
     }
     let path = common.join(ancestry_state::DIRECTORY).join("repository-id");
     let id = fresh_id()?;
-    crate::atomic::write_create_new(&path, &refs::encode_ref_wire(&id), true)?;
-    crate::atomic::sync_dir(common)?;
+    crate::durable::write_pointer_new(&path, &refs::encode_ref_wire(&id), Parents::Create)?;
+    crate::durable::flush_dir(common)?;
     read_repository_id(common)?
         .ok_or_else(|| HistoryError::Corrupted("history repository identity disappeared".into()))
 }
@@ -792,7 +793,7 @@ fn read_scrub_state(dir: &Path) -> Option<ScrubState> {
 }
 
 fn write_scrub_state(dir: &Path, state: ScrubState) -> Result<(), HistoryError> {
-    crate::atomic::write_atomic(&scrub_path(dir), &state.encode(), false)?;
+    crate::durable::write_pointer(&scrub_path(dir), &state.encode(), Parents::Existing)?;
     Ok(())
 }
 
@@ -987,7 +988,7 @@ fn finish(
         )?,
     };
     let encoded = snapshot.encode()?;
-    crate::atomic::write_atomic(&dir.join("pending-snapshot"), &encoded, true)?;
+    crate::durable::write_pointer(&dir.join("pending-snapshot"), &encoded, Parents::Create)?;
     checkpoint(2)?;
     mutation
         .write_preserving_history(&refs::encode_ref_wire(&tx.target), RefWriteCondition::Any)?;
@@ -995,13 +996,13 @@ fn finish(
     let dest = snapshot_path(dir, tx.generation);
     fs::create_dir_all(dest.parent().expect("snapshot parent"))?;
     fs::rename(dir.join("pending-snapshot"), &dest)?;
-    crate::atomic::sync_dir(dest.parent().expect("snapshot parent"))?;
-    crate::atomic::sync_dir(dir)?;
+    crate::durable::flush_dir(dest.parent().expect("snapshot parent"))?;
+    crate::durable::flush_dir(dir)?;
     checkpoint(4)?;
-    crate::atomic::write_atomic(
+    crate::durable::write_pointer(
         &dir.join("current"),
         &refs::encode_ref_wire(&tx.generation),
-        true,
+        Parents::Create,
     )?;
     checkpoint(5)?;
     ancestry_state::remove_synced(&dir.join("transaction"))?;
@@ -1085,7 +1086,7 @@ pub(crate) fn advance(
     // for the exact same chain. Readers withhold proofs for the entire
     // intent window. GC pins previous+target from the metadata.
     let snapshot = AncestrySnapshot::build(repository, tx.full_ref.clone(), generation, chain)?;
-    crate::atomic::write_atomic(&dir.join("transaction"), &tx.encode(), true)?;
+    crate::durable::write_pointer(&dir.join("transaction"), &tx.encode(), Parents::Create)?;
     // Newly created directory entries must themselves be durable.
     for parent in [
         dir.parent(),
@@ -1095,7 +1096,7 @@ pub(crate) fn advance(
     .into_iter()
     .flatten()
     {
-        crate::atomic::sync_dir(parent)?;
+        crate::durable::flush_dir(parent)?;
     }
     checkpoint(1)?;
     finish(layout, &dir, &tx, mutation, store, Some(snapshot))?;
@@ -1508,7 +1509,7 @@ mod tests {
     fn a_write_scrub_state_failure_does_not_fail_the_publish() {
         let (_dir, layout, store) = repo();
         let dir = ancestry_state::branch_dir(layout.common_dir(), "refs/heads/main");
-        // Force `write_atomic`'s rename onto "scrub" to fail: a directory
+        // Force `write_pointer`'s rename onto "scrub" to fail: a directory
         // occupies the path the scrub *file* needs to land on.
         fs::create_dir_all(dir.join("scrub")).unwrap();
 
@@ -2147,7 +2148,7 @@ mod tests {
     /// scrub window's O(N)-vs-bounded read-count difference would show up
     /// over that noise), and reaching an N where it would is impractical
     /// to benchmark end-to-end. Both variants go through the identical
-    /// durable-publish pipeline (same fsync/`sync_dir` calls either way),
+    /// durable-publish pipeline (same fsync/`flush_dir` calls either way),
     /// so the fsync cost is a roughly constant additive term common to
     /// both — the wall-clock delta between them isolates
     /// `decide_chain`'s store-read savings even without eliminating fsync

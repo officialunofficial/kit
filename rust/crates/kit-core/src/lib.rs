@@ -70,8 +70,9 @@ pub mod write_auth;
 pub mod layout;
 
 // Refs, index, worktree, ignore, and repo_lock.
-pub(crate) mod atomic;
 pub mod bounded_read;
+#[doc(hidden)]
+pub mod durable;
 pub mod ignore;
 pub mod index;
 pub mod ref_listing;
@@ -87,8 +88,6 @@ pub mod protocol;
 
 #[cfg(feature = "fault-injection")]
 pub mod fault;
-#[doc(hidden)]
-pub mod flush;
 
 // Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the

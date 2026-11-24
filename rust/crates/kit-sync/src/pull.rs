@@ -482,13 +482,14 @@ fn write_pull_head(
     let before_tree =
         kit_core::worktree::build_tree_from_index_against(store, store, &index, false, base)
             .map_err(|e| SyncError::RestoreSafety(e.to_string()))?;
-    crate::applied_packs::write_atomic(
+    kit_core::durable::write_pointer(
         &layout.pull_head_file(),
         &PullState {
             target,
             before_tree,
         }
         .encode(),
+        kit_core::durable::Parents::Create,
     )?;
     Ok(())
 }
@@ -505,7 +506,7 @@ fn point_head_at_branch(layout: &RepoLayout, branch: &str) -> refs::RefResult<()
 
 fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
     fs::remove_file(layout.pull_head_file())?;
-    crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
+    kit_core::durable::flush_dir(layout.worktree_state_dir())?;
     Ok(())
 }
 

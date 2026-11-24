@@ -4,7 +4,7 @@
 //! count of each command of the edit loop is pinned: `add`, `commit`, `push`,
 //! `fetch` and `pull`. The commands run as the real binary against a
 //! `kit+file://` remote. The binary of this test build appends a line to the
-//! file named by `KIT_FLUSH_LOG` for each full flush (see `kit_core::flush`),
+//! file named by `KIT_FLUSH_LOG` for each full flush (see `kit_core::durable::flush_file`),
 //! and the test counts the lines.
 //!
 //! The pinned counts are for Apple file systems, where a per-file writeout is

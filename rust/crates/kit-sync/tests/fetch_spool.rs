@@ -394,6 +394,7 @@ fn a_replayed_window_after_a_crash_reuses_the_published_pack() {
                     }
                     // Every loose shard is durable; only the record is missing.
                     SyncStep::DeviceFlush(at) => crash_at_device_flush && *at == objects,
+                    SyncStep::Writeout(_) | SyncStep::Flush(_) => false,
                 };
                 if crash {
                     *fired.lock().unwrap_or_else(PoisonError::into_inner) = true;
