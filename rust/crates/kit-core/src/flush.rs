@@ -24,16 +24,31 @@ pub fn file(file: &File) -> io::Result<()> {
     {
         crate::fault::count_flush();
         if let Some(path) = std::env::var_os("KIT_FLUSH_LOG") {
-            append_line(std::path::Path::new(&path));
+            append_line(std::path::Path::new(&path), &callers());
         }
     }
     file.sync_all()
 }
 
-/// Append the line of one flush to the log at `path`; a log that cannot be
-/// written is skipped, since it only serves tests.
+/// The repository functions on the stack, innermost first, so a test that
+/// counts a command's flushes can say which calls made them.
 #[cfg(feature = "fault-injection")]
-fn append_line(path: &std::path::Path) {
+fn callers() -> String {
+    std::backtrace::Backtrace::force_capture()
+        .to_string()
+        .lines()
+        .filter_map(|line| line.split_once(": ").map(|(_, name)| name.trim()))
+        .filter(|name| name.starts_with("kit") || name.starts_with("libkit"))
+        .filter(|name| !name.starts_with("kit_core::flush"))
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" < ")
+}
+
+/// Append the line of one flush, with its `callers`, to the log at `path`; a
+/// log that cannot be written is skipped, since it only serves tests.
+#[cfg(feature = "fault-injection")]
+fn append_line(path: &std::path::Path, callers: &str) {
     use std::io::Write as _;
 
     if let Ok(mut log) = std::fs::OpenOptions::new()
@@ -42,7 +57,7 @@ fn append_line(path: &std::path::Path) {
         .open(path)
     {
         // One write, so processes that share the log do not interleave lines.
-        let _ = log.write_all(b"full\n");
+        let _ = log.write_all(format!("full {callers}\n").as_bytes());
     }
 }
 
@@ -66,8 +81,10 @@ mod tests {
     fn each_flush_appends_one_line_to_the_log() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("flushes");
-        append_line(&log);
-        append_line(&log);
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "full\nfull\n");
+        append_line(&log, "a < b");
+        append_line(&log, &callers());
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.lines().all(|line| line.starts_with("full ")));
     }
 }

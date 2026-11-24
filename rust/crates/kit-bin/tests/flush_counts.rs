@@ -31,7 +31,10 @@ fn flushes(cwd: &Path, xdg: &Path, log: &Path, args: &[&str]) -> usize {
         "kit {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    fs::read_to_string(log).map_or(0, |lines| lines.lines().count())
+    let text = fs::read_to_string(log).unwrap_or_default();
+    // Shown when the counts differ: which calls flushed.
+    eprintln!("kit {args:?}: {} flushes\n{text}", text.lines().count());
+    text.lines().count()
 }
 
 /// Edit one small file of `repo`, so the commit has a few trees to build.
