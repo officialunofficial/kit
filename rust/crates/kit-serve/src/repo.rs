@@ -19,6 +19,15 @@ use kit_transport_file::{FileTransport, RefFileError, SERVER_META_MARKER};
 use crate::packs::{self, PackReader, PackWriter};
 use crate::refs::{MAX_REF_NAME_BYTES, SERVED_REFS_PREFIX, is_served_ref_name, list_scan_prefix};
 
+/// One page of a listing of refs, from [`Repo::list_refs_page`].
+#[derive(Debug, Default)]
+pub(crate) struct RefPage {
+    /// The refs of the page, in name order.
+    pub(crate) refs: Vec<(String, Hash)>,
+    /// The name of the last ref of the page, when more files follow it.
+    pub(crate) next_after: Option<String>,
+}
+
 /// Who may write to a repository. Reads are always allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WritePolicy {
@@ -174,25 +183,42 @@ impl Repo {
         self.tx.read_ref_strict(name)
     }
 
-    /// Every ref under `prefix` at a path-component boundary, with the
-    /// prefix and its `/` removed from each name (SPEC-REFS §4), sorted by
-    /// name. A file that is no ref, and a ref file with a name over the
-    /// limit, are skipped.
-    pub(crate) fn list_refs(&self, prefix: &str) -> Result<Vec<(String, Hash)>, RefFileError> {
+    /// The refs under `prefix` at a path-component boundary, with the prefix
+    /// and its `/` removed from each name (SPEC-REFS §4), in name order: at
+    /// most `limit` of those that sort after `after`. A file that is no ref,
+    /// and a ref file with a name over the limit, are skipped. The names are
+    /// listed whole, but only the files of the page are read, so a listing
+    /// of many pages reads each ref file once. The page has a next name
+    /// when more files follow it.
+    pub(crate) fn list_refs_page(
+        &self,
+        prefix: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<RefPage, RefFileError> {
         if prefix.trim_end_matches('/').len() > MAX_REF_NAME_BYTES || !validate_ref_prefix(prefix) {
             return Err(RefFileError::InvalidName(prefix.to_owned()));
         }
         let scan = list_scan_prefix(prefix);
-        let mut out = Vec::new();
-        for (name, id) in self.tx.list_ref_files(SERVED_REFS_PREFIX)? {
-            let (Some(id), Some(short)) = (id, name.strip_prefix(scan.as_str())) else {
-                continue;
-            };
-            if name.len() <= MAX_REF_NAME_BYTES && is_served_ref_name(&name) {
-                out.push((short.to_owned(), id));
+        let mut names = self.tx.list_ref_file_names(SERVED_REFS_PREFIX)?;
+        names.retain(|name| {
+            name.starts_with(scan.as_str())
+                && name.len() <= MAX_REF_NAME_BYTES
+                && is_served_ref_name(name)
+        });
+        let short = |name: &String| name[scan.len()..].to_owned();
+        let start = names.partition_point(|name| &name[scan.len()..] <= after);
+        let mut page = RefPage::default();
+        for (i, name) in names.iter().enumerate().skip(start) {
+            if let Some(id) = self.tx.read_listed_ref_file(name)? {
+                page.refs.push((short(name), id));
+            }
+            if page.refs.len() == limit {
+                page.next_after = (i + 1 < names.len()).then(|| short(name));
+                break;
             }
         }
-        Ok(out)
+        Ok(page)
     }
 
     /// Delete the ref `name` if it holds `expected`. The check and the
@@ -400,8 +426,9 @@ mod tests {
             r.update_ref(name, RefWriteCondition::Any, &id).unwrap();
         }
         let names = |prefix: &str| -> Vec<String> {
-            r.list_refs(prefix)
+            r.list_refs_page(prefix, "", usize::MAX)
                 .unwrap()
+                .refs
                 .into_iter()
                 .map(|(n, _)| n)
                 .collect()
@@ -414,8 +441,44 @@ mod tests {
         assert!(names("heads/").is_empty());
         assert_eq!(names("refs//").len(), 4);
         assert_eq!(names("").len(), 4);
-        assert!(r.list_refs("/bad").is_err());
-        assert!(r.list_refs(&"a/".repeat(MAX_REF_NAME_BYTES)).is_err());
+        assert!(r.list_refs_page("/bad", "", 1).is_err());
+        assert!(
+            r.list_refs_page(&"a/".repeat(MAX_REF_NAME_BYTES), "", 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pages_resume_after_a_name_and_end_without_a_token() {
+        let td = tempfile::tempdir().unwrap();
+        let r = repo(&td);
+        for (i, name) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
+            r.update_ref(
+                &format!("refs/heads/{name}"),
+                RefWriteCondition::Any,
+                &[u8::try_from(i).unwrap(); 32],
+            )
+            .unwrap();
+        }
+        let page = |after: &str, limit: usize| {
+            let page = r.list_refs_page("refs/heads/", after, limit).unwrap();
+            let names: Vec<String> = page.refs.into_iter().map(|(n, _)| n).collect();
+            (names, page.next_after)
+        };
+        assert_eq!(
+            page("", 2),
+            (vec!["a".into(), "b".into()], Some("b".into()))
+        );
+        assert_eq!(
+            page("b", 2),
+            (vec!["c".into(), "d".into()], Some("d".into()))
+        );
+        assert_eq!(page("d", 2), (vec!["e".into()], None));
+        // A token that names no ref still resumes after its place in the order.
+        assert_eq!(page("bb", 1), (vec!["c".into()], Some("c".into())));
+        // A page that ends on the last ref has no token.
+        assert_eq!(page("c", 2), (vec!["d".into(), "e".into()], None));
+        assert_eq!(page("e", 2), (Vec::new(), None));
     }
 
     #[test]
@@ -427,9 +490,14 @@ mod tests {
         std::fs::write(td.path().join("refs/heads/README"), b"not a ref\n").unwrap();
         // A file outside `refs/` is never listed, whatever the prefix.
         std::fs::write(td.path().join("loose"), format!("{}\n", "a".repeat(64))).unwrap();
-        let listed = r.list_refs("").unwrap();
+        let listed = r.list_refs_page("", "", usize::MAX).unwrap().refs;
         assert_eq!(listed, [("refs/heads/main".to_owned(), [1; 32])]);
-        assert!(r.list_refs("loose").unwrap().is_empty());
+        assert!(
+            r.list_refs_page("loose", "", usize::MAX)
+                .unwrap()
+                .refs
+                .is_empty()
+        );
     }
 
     #[test]
@@ -445,7 +513,9 @@ mod tests {
         r.update_ref(MAIN, RefWriteCondition::Any, &[1; 32])
             .unwrap();
         assert_eq!(
-            r.list_refs("refs/heads/").unwrap(),
+            r.list_refs_page("refs/heads/", "", usize::MAX)
+                .unwrap()
+                .refs,
             [("main".to_owned(), [1; 32])]
         );
         assert!(r.read_ref(&long).is_err());

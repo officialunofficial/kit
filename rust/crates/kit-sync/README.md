@@ -193,8 +193,7 @@ sends each object at most once per base. A remote tag with another value is
 refused unless `force`, which conditions on the value it read and keeps that
 value in the new tag map. Before reading the remote, a push refuses a tag whose
 tag map name is not a valid ref, an annotated tag named for another tag, and an
-unsigned annotated tag. On a remote that lists in one frame, a create past
-`MAX_TAG_LISTING_BYTES` is refused. A refused tag does not stop the others.
+unsigned annotated tag. A refused tag does not stop the others.
 
 ### Incremental fetch checkpoints
 

@@ -34,6 +34,7 @@ use kit_core::ops::rebase::{
     read_state, rebase_dir_path, write_state,
 };
 use kit_core::ops::recovery::{self, RecoveryEntry, RecoveryError};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
@@ -154,7 +155,10 @@ pub enum Error {
     #[error("nothing to skip; no commit is paused")]
     NothingToSkip,
     /// A conflicting file still holds markers.
-    #[error("unresolved conflict markers remain in '{0}'; resolve and `kit add` it")]
+    #[error(
+        "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+        escape_terminal_text(.0, false)
+    )]
     UnresolvedMarkers(String),
     /// The state names records and no paused commit.
     #[error("rebase state is inconsistent: no paused commit")]

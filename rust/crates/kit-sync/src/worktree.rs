@@ -16,6 +16,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, Object};
 use kit_core::ops::diff::{DiffEntry, DiffKind, diff_trees};
 use kit_core::ops::restore::{RestoreOptions, matches_sparse, nested_repository};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -256,7 +257,7 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
     {
         return Err(format!(
             "restore would lose '{}': its object {} is not found in the store",
-            entry.path,
+            escape_terminal_text(&entry.path, false),
             kit_core::hash::to_hex(&h)
         ));
     }
@@ -265,7 +266,7 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
     {
         return Err(format!(
             "restore cannot write '{}': its object {} is not found in the store",
-            entry.path,
+            escape_terminal_text(&entry.path, false),
             kit_core::hash::to_hex(&h)
         ));
     }
@@ -274,19 +275,31 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
 
 /// The refusal for a tracked path that differs from the index.
 fn local_changes_message(path: &str) -> String {
-    format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
+    format!(
+        "restore would overwrite local changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn staged_changes_message(path: &str) -> String {
-    format!("restore would overwrite staged changes; commit, stash, or reset '{path}' first")
+    format!(
+        "restore would overwrite staged changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn overwrite_untracked_message(path: &str) -> String {
-    format!("restore would overwrite untracked path '{path}'; move or remove it first")
+    format!(
+        "restore would overwrite untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn remove_untracked_message(path: &str) -> String {
-    format!("restore would remove untracked path '{path}'; move or remove it first")
+    format!(
+        "restore would remove untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
 }
 
 /// The texts one caller of [`check_restore_safe`] refuses with, each given
@@ -1237,6 +1250,24 @@ mod path_walk_tests {
             )
             .unwrap();
             assert_eq!(listed, again, "targets {targets:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::local_changes_message("a\u{1b}b"),
+            super::staged_changes_message("a\u{1b}b"),
+            super::overwrite_untracked_message("a\u{1b}b"),
+            super::remove_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
         }
     }
 }

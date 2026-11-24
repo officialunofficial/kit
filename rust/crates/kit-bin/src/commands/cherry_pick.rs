@@ -215,7 +215,11 @@ fn start(
         // git-shaped per-path conflict lines (additive), then kit's
         // resumable-flow hint.
         for rec in &records {
-            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+            let _ = writeln!(
+                stderr,
+                "CONFLICT (content): Merge conflict in {}",
+                super::display_path(&rec.path)
+            );
         }
         let _ = writeln!(
             stderr,
@@ -354,7 +358,8 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
-                    "unresolved conflict markers remain in '{path}'; resolve and `kit add` it"
+                    "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+                    super::display_path(&path)
                 ),
                 exit::GENERAL_ERROR,
             );

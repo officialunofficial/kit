@@ -16,7 +16,10 @@ use kit_core::protocol::{PackKey, Transport as _};
 use kit_core::refs::RefWriteCondition;
 use kit_rpc::kit::common::v1::RefExpectation;
 use kit_rpc::kit::rpc::v1::ssh::SshFrame;
-use kit_serve::{ReadFrames, SessionConfig, SessionEnd, WriteFrames, WritePolicy, serve_session};
+use kit_serve::{
+    MAX_REF_NAME_BYTES, ReadFrames, SessionConfig, SessionEnd, WriteFrames, WritePolicy,
+    serve_session,
+};
 use kit_transport_file::FileTransport;
 
 const SESSION_1_IN: &[u8] = include_bytes!("../../../tests/golden/ssh-serve/session-1.in.bin");
@@ -194,7 +197,7 @@ fn session_1_matches_the_capture() {
 }
 
 /// The script of session 2: `ListRefs` prefixes at and off path-component
-/// boundaries (SPEC-REFS §4), then a download of a pack over one 800 KiB
+/// boundaries (SPEC-REFS §4), pages of a listing (SPEC-TRANSPORT §4.2), then a download of a pack over one 800 KiB
 /// chunk. The state: the refs `main`, `feat/x`, `featx` and `tags/v1`, one
 /// pack, and a stray file `refs/heads/README` that every listing skips.
 ///
@@ -221,6 +224,17 @@ fn session_2_matches_the_capture() {
     ];
     let mut bodies = vec![hello()];
     bodies.extend(prefixes.map(list_refs));
+    // Pages of two and of one, a token that names a ref, a listing with no
+    // page size and a token over the name limit.
+    let heads = Some("refs/heads/");
+    let long = "a".repeat(MAX_REF_NAME_BYTES + 1);
+    bodies.extend([
+        list_refs_page(heads, Some(2), None),
+        list_refs_page(heads, Some(2), Some("featx")),
+        list_refs_page(heads, Some(1), Some("feat/x")),
+        list_refs_page(heads, None, None),
+        list_refs_page(heads, Some(2), Some(&long)),
+    ]);
     bodies.extend([download(Some(&big_id)), exists(&big_id), close()]);
     let input = encode(bodies);
     assert_eq!(

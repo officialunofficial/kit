@@ -262,7 +262,7 @@ branch or another tag.
   holds it, with no second download.
 - **Failure scope.** A refusal names the tag and its reason. The fetch reports
   it and goes on. A failed tag listing stops the tag phase with "tag listing
-  failed (possibly too many tags): `<error>`", and the branches stay
+  failed: `<error>`", and the branches stay
   published. An interrupt, a transport failure other than a bad reply to a
   node or pack download, or a local I/O error, including one while a tag's
   pack is written, fails the fetch, as for a branch. The tags proved before
@@ -722,7 +722,7 @@ refs (§1.2). It treats the reply strictly:
   does its full work. Any other `Error` is an error.
 
 **Older peers.** A client that predates the request never sends it, so a new
-server serves it as before, and the golden sessions 1 to 3 are unchanged. A
+server serves it as before. A
 server that predates the request answers the unknown body with `Error {
 ERROR_CODE_INVALID_REQUEST }` and keeps the session open, so the client
 offers no cursor and its fetch works as it did. The failed request costs one
@@ -732,6 +732,50 @@ frame of the budget. Neither side needs a version or a capability field.
 listing. A server that holds back a changed cursor can equally hold back a
 changed ref. The fetch verifies every object and signature it applies, so a
 stale cursor can only leave the client at a state the server once offered.
+
+#### 4.2.3 `ListRefs` paging
+
+`ListRefs` lists one page of the refs under a prefix, in name order
+(SPEC-REFS §4.1). It carries the fields that Connect's `ListRefs` carries
+(SPEC-TRANSPORT-CONNECT §7.9), with the same field numbers:
+
+| Field | Message | Meaning |
+|---|---|---|
+| `page_size = 2` | `ListRefs` | The most refs the reply may hold. Required: an absent or zero value is refused. |
+| `page_token = 3` | `ListRefs` | The `next_page_token` of the page before. Empty starts the listing. |
+| `next_page_token = 2` | `ListRefsResponse` | Empty ends the listing. Any other value is the `page_token` of the next request. |
+
+The server answers with the refs after `page_token`, at most `page_size`
+and at most 1,000 (`MAX_LIST_PAGE_REFS`). Its `next_page_token` is the last
+name of the page, and it is set only when more refs follow. A page of 1,000
+names of the longest length (512 bytes) is about 560,000 bytes, so a page
+always fits one frame (SPEC-RPC §1). The token names no state of the session:
+it is a name, and the next page holds the refs that sort after it, whether
+the ref of that name still exists or not. So a listing carries on across a
+reconnect, and a ref that is created or deleted while the listing runs is
+shown or not, as in any listing that pages (§1.2). A token over 512 bytes is
+`Error { ERROR_CODE_INVALID_REQUEST, "invalid page token" }`.
+
+The client requests 1,000 refs a page and takes pages until one has no
+`next_page_token`. It checks each page as the Connect client does
+(SPEC-TRANSPORT-CONNECT §7.9): the names are in strict order, within a page
+and across pages, a token never repeats, and the listing is bounded in pages
+and in bytes. A listing that breaks a rule is an `InvalidResponse`. Each page
+is a request frame and a response frame of the per-connection budget (§4.4).
+
+**Older peers.** A server that predates paging ignores the two new request
+fields and sends the listing in one frame with no `next_page_token`, which
+the client takes as a listing of one page. It still fails, as before, when
+the listing does not fit one frame. A client that predates paging sends no
+`page_size`. A new server refuses it with `Error { ERROR_CODE_INVALID_REQUEST,
+"list refs needs a page_size; upgrade the client" }` and keeps the session
+open. It does not answer with a first page, because that client would take
+the page for the whole listing and could prune against it. Every listing of
+such a client fails, so the client has to be upgraded: kit keeps no fallback
+for it. A client of this version that pushes tags to a server that predates
+paging no longer bounds the remote's tag listing to one frame, so a listing
+that grows past one frame fails for every client of that server until the
+server is upgraded.
 
 ### 4.3 Trust model
 
@@ -775,13 +819,15 @@ names it: `per-connection frame budget exceeded: at most 10000 frames per
 session (SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
-frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+frame cap. A fetch costs the `ListRefs` frames of the branch listing (one per
+1,000 branches, §4.2.3), then per branch a `ReadRef` of
 the packmap and a `DownloadPack` of each node of its packmap chain, even when no
 branch changed: the SSH transport names no repository, so a fetch keeps no
 per-branch checkpoint for it and walks each packmap chain again. The tag phase
 (§1.4) adds one `ListRefs` of `refs/tags/`, and one of `refs/kit/tagmap/` only
 when some tag is not yet proved from local objects. With one node per packmap
-chain and no new tag, 4,999 branches use all 10,000 frames. Additional
+chain and no new tag, 4,997 branches use all 10,000 frames: five listing pages,
+two frames per branch and the tag listing. Additional
 requests require a fresh session. A clone of many individually pushed
 annotated tags can also take multiple sessions as it downloads their nodes
 and packs. Tags pushed together share a node and pack.
@@ -792,7 +838,9 @@ uses a server that predates the request can use the full session budget.
 A push walks the branch's packmap chain. Re-baselining (§7.2) keeps the
 chain short while one node can list its packs. A push that walks a longer
 chain or an attestation transfer that walks a long log can need more than
-one session. Each ref listing uses one request frame and one response frame.
+one session. Each page of a ref listing is one request, so a listing of
+100,000 refs is 100 frames of the budget, and paging itself leaves the budget
+to the per-branch requests.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
@@ -1323,10 +1371,7 @@ under `Missing`. A tag read back at the pushed value with no tag map is a
 conflict, so the next decision repairs it. A push
 refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
 would not be a valid ref name, an annotated tag whose object names
-another tag, and an unsigned annotated tag. On a remote whose tag listing
-comes in one `kit serve` frame (`kit+ssh`, `kit+file`), a push refuses a
-create that would take the listing of `refs/tags/` or `refs/kit/tagmap/`
-past 960 KiB, counting each name without its prefix plus 48 bytes. A
+another tag, and an unsigned annotated tag. A
 conflict reads that tag again and decides again, at most eight times.
 
 ### 7.3 Deleting a head and its chain ref

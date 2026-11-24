@@ -26,6 +26,7 @@ use kit_core::ops::conflict_state::{
 };
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
@@ -91,7 +92,10 @@ pub enum Error {
     #[error("read conflicts: {0}")]
     ReadConflicts(ConflictStateError),
     /// A conflicting file still holds markers.
-    #[error("unresolved conflict markers remain in '{0}'; resolve and `kit add` it")]
+    #[error(
+        "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+        escape_terminal_text(.0, false)
+    )]
     UnresolvedMarkers(String),
     /// The tree of the resolved index cannot be built.
     #[error("build tree from index: {0}")]

@@ -317,37 +317,6 @@ fn fetch_no_tags_then_fetch_takes_the_tags() {
     assert_eq!(fx.local_tag("v1"), Some(v1));
 }
 
-/// A tag listing larger than one `kit serve` frame fails. The fetch stops the
-/// tag phase with the stated message and exits 1, and the branch is still
-/// published.
-#[test]
-fn an_over_size_tag_listing_stops_only_the_tag_phase() {
-    let fx = Fixture::new();
-    ok(&fx.clone(), "clone");
-    fx.commit_and_push("two");
-    let head = fx.tx().read_ref("refs/heads/main").unwrap();
-    // About 25,000 tags at the head, written as the ref files a file root
-    // holds. One frame carries about 17,000 short names.
-    let remote = fx.remote();
-    let wire = fs::read(remote.join("refs/heads/main")).unwrap();
-    let dir = remote.join("refs/tags");
-    fs::create_dir_all(&dir).unwrap();
-    for i in 0..25_000 {
-        fs::write(dir.join(format!("bulk-{i:05}")), &wire).unwrap();
-    }
-
-    let out = fx.over_ssh(&fx.clone_dir(), &["fetch", "origin"]);
-
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    let err = stderr(&out);
-    assert!(
-        err.contains("error: tag listing failed (possibly too many tags): "),
-        "{err}"
-    );
-    assert_eq!(fx.tracking_main(), head);
-    assert_eq!(fx.local_tag("bulk-00000"), None);
-}
-
 /// A refused tag fails the clone with exit 1, and the branch is still
 /// checked out.
 #[test]
