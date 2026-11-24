@@ -157,7 +157,7 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
     f.write_all(line.as_bytes())?;
     // fsync the data, then the directory entry (cheap — records happen
     // only on history rewrites, and durability is the whole point).
-    f.sync_all()?;
+    crate::flush::file(&f)?;
     sync_parent_dir(layout.common_dir())?;
     Ok(())
 }

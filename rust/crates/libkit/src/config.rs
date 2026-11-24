@@ -1252,10 +1252,10 @@ fn write_atomic_config(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
     )))?;
     let mut tmp = NamedTempFile::new_in(parent)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    kit_core::flush::file(tmp.as_file())?;
     tmp.persist(path).map_err(|e| ConfigError::Io(e.error))?;
     #[cfg(unix)]
-    fs::File::open(parent)?.sync_all()?;
+    kit_core::flush::file(&fs::File::open(parent)?)?;
     Ok(())
 }
 
