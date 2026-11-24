@@ -2,6 +2,7 @@
   "name": "kit-brand-og",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.5",
   "scripts": {
     "dev": "wrangler dev --local --port 8791",
     "build": "wrangler deploy --dry-run --outdir dist",

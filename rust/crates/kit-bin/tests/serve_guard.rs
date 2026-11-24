@@ -247,3 +247,91 @@ fn pull_warns_when_root_is_being_served() {
 
     drop(serve_lock);
 }
+
+/// `kit serve` on a directory that is not a repository says so on standard
+/// error, writes nothing to standard output (the wire) and keeps exit 65, so
+/// an ssh client reads the cause instead of a failed handshake.
+#[test]
+fn serve_on_a_non_repository_names_the_path_on_stderr_only() {
+    let td = tempfile::tempdir().unwrap();
+    let plain = td.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+
+    let out = Command::new(kit_bin())
+        .args(["serve", plain.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(65), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr.trim_end(),
+        format!("kit serve: {}: not a kit repository", plain.display())
+    );
+}
+
+/// The same in root mode: a `<NAMESPACE>/<NAME>` directory without `.kit`.
+#[test]
+fn serve_root_on_a_non_repository_names_the_path_on_stderr_only() {
+    let ns = "ed25519-abababababababababababababababababababababababababababababababab";
+    let td = tempfile::tempdir().unwrap();
+    fs::create_dir_all(td.path().join(ns).join("plain")).unwrap();
+    let path = format!("{ns}/plain");
+
+    let out = Command::new(kit_bin())
+        .args(["serve", "--root", td.path().to_str().unwrap(), &path])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(65), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap().trim_end(),
+        format!("kit serve: {path}: not a kit repository")
+    );
+}
+
+/// A path that does not exist gets the same line, with exit 66 and an empty
+/// standard output.
+#[test]
+fn serve_on_a_missing_path_names_the_path_on_stderr_only() {
+    let td = tempfile::tempdir().unwrap();
+    let missing = td.path().join("missing");
+
+    let out = Command::new(kit_bin())
+        .args(["serve", missing.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(66), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap().trim_end(),
+        format!("kit serve: {}: not a kit repository", missing.display())
+    );
+}
+
+/// The same in root mode, for a `<NAMESPACE>/<NAME>` that is not on disk.
+#[test]
+fn serve_root_on_a_missing_repository_names_the_path_on_stderr_only() {
+    let ns = "ed25519-abababababababababababababababababababababababababababababababab";
+    let td = tempfile::tempdir().unwrap();
+    let path = format!("{ns}/gone");
+
+    let out = Command::new(kit_bin())
+        .args(["serve", "--root", td.path().to_str().unwrap(), &path])
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn kit serve");
+
+    assert_eq!(out.status.code(), Some(66), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap().trim_end(),
+        format!("kit serve: {path}: not a kit repository")
+    );
+}

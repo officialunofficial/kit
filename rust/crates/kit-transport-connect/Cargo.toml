@@ -67,11 +67,11 @@ tokio = { version = "1.54.1", default-features = false, features = [
 hyper = { version = "1.12.0", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "http2", "tokio"] }
 hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "http2", "tls12", "ring"] }
-pin-project-lite = "0.2.17"
+pin-project-lite = "0.2.18"
 tower-service = "0.3.3"
 http = "1.5.0"
 http-body-util = "0.1.5"
-bytes = "1.12.1"
+bytes = "1.12.2"
 futures = "0.3.34"
 url = "2.5.9"
 
