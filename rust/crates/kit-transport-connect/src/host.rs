@@ -898,7 +898,9 @@ mod tests {
     fn a_non_connect_server_status_stays_a_server_error() {
         for status in [429, 500, 503] {
             let mapped = map_client(kit_client::Error::ServerStatus { status }, false);
-            assert!(matches!(mapped, TransportError::ServerError { status: seen } if seen == status));
+            assert!(
+                matches!(mapped, TransportError::ServerError { status: seen } if seen == status)
+            );
         }
         let mapped = map_client(kit_client::Error::Invalid("Connect error JSON"), false);
         assert!(matches!(mapped, TransportError::InvalidResponse));
