@@ -1214,10 +1214,7 @@ fn a_failed_tag_listing_stops_only_the_tag_phase() {
     let report = clone_with(&failing, &target, &SyncOptions::default());
 
     let failure = report.tag_listing_failed.as_deref().unwrap();
-    assert!(
-        failure.starts_with("tag listing failed (possibly too many tags): "),
-        "{failure}"
-    );
+    assert!(failure.starts_with("tag listing failed: "), "{failure}");
     assert_eq!(
         refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
         Some(c1)

@@ -1208,12 +1208,25 @@ pub struct ListRefs {
     ///
     /// Field 1: `prefix`
     pub prefix: ::core::option::Option<::buffa::alloc::string::String>,
+    /// The most refs the reply may hold. The server caps it, and an absent or
+    /// zero value is refused. Same field numbers as the Connect ListRefsRequest.
+    ///
+    /// Field 2: `page_size`
+    pub page_size: ::core::option::Option<u32>,
+    /// The `next_page_token` of the previous page; empty starts the listing.
+    ///
+    /// Field 3: `page_token`
+    pub page_token: ::core::option::Option<::buffa::alloc::string::String>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for ListRefs {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("ListRefs").field("prefix", &self.prefix).finish()
+        f.debug_struct("ListRefs")
+            .field("prefix", &self.prefix)
+            .field("page_size", &self.page_size)
+            .field("page_token", &self.page_token)
+            .finish()
     }
 }
 impl ListRefs {
@@ -1232,6 +1245,23 @@ impl ListRefs {
         value: impl Into<::buffa::alloc::string::String>,
     ) -> Self {
         self.prefix = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::page_size`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_page_size(mut self, value: u32) -> Self {
+        self.page_size = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::page_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_page_token(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.page_token = Some(value.into());
         self
     }
 }
@@ -1258,6 +1288,12 @@ impl ::buffa::Message for ListRefs {
         if let Some(ref v) = self.prefix {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        if let Some(v) = self.page_size {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.page_token {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1270,6 +1306,12 @@ impl ::buffa::Message for ListRefs {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.prefix {
             ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(v) = self.page_size {
+            ::buffa::types::put_uint32_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.page_token {
+            ::buffa::types::put_string_field(3u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1294,6 +1336,27 @@ impl ::buffa::Message for ListRefs {
                     buf,
                 )?;
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.page_size = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .page_token
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1303,6 +1366,8 @@ impl ::buffa::Message for ListRefs {
     }
     fn clear(&mut self) {
         self.prefix = ::core::option::Option::None;
+        self.page_size = ::core::option::Option::None;
+        self.page_token = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -1320,12 +1385,20 @@ impl ::buffa::ExtensionSet for ListRefs {
 pub struct ListRefsResponse {
     /// Field 1: `refs`
     pub refs: ::buffa::alloc::vec::Vec<super::super::super::common::v1::RefEntry>,
+    /// Empty ends the listing. Any other value is passed back as `page_token`
+    /// to read the page after this one.
+    ///
+    /// Field 2: `next_page_token`
+    pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for ListRefsResponse {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("ListRefsResponse").field("refs", &self.refs).finish()
+        f.debug_struct("ListRefsResponse")
+            .field("refs", &self.refs)
+            .field("next_page_token", &self.next_page_token)
+            .finish()
     }
 }
 impl ListRefsResponse {
@@ -1334,6 +1407,18 @@ impl ListRefsResponse {
     ///
     /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
     pub const TYPE_URL: &'static str = "type.googleapis.com/kit.rpc.v1.ssh.ListRefsResponse";
+}
+impl ListRefsResponse {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::next_page_token`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_next_page_token(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.next_page_token = Some(value.into());
+        self
+    }
 }
 ::buffa::impl_default_instance!(ListRefsResponse);
 impl ::buffa::MessageName for ListRefsResponse {
@@ -1363,6 +1448,9 @@ impl ::buffa::Message for ListRefsResponse {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if let Some(ref v) = self.next_page_token {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -1380,6 +1468,9 @@ impl ::buffa::Message for ListRefsResponse {
                 buf,
             );
             v.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.next_page_token {
+            ::buffa::types::put_string_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -1406,6 +1497,18 @@ impl ::buffa::Message for ListRefsResponse {
                 ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
                 self.refs.push(elem);
             }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .next_page_token
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -1415,6 +1518,7 @@ impl ::buffa::Message for ListRefsResponse {
     }
     fn clear(&mut self) {
         self.refs.clear();
+        self.next_page_token = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }

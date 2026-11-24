@@ -932,10 +932,7 @@ impl TagPhase<'_> {
     }
 
     fn listing_failed(&mut self, failed: &ListingFailed) {
-        self.report.tag_listing_failed = Some(format!(
-            "tag listing failed (possibly too many tags): {}",
-            failed.0
-        ));
+        self.report.tag_listing_failed = Some(format!("tag listing failed: {}", failed.0));
     }
 
     /// Publish every proved tag under one hold of the worktree lock, each as

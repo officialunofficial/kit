@@ -36,8 +36,8 @@
 //
 //   then any sequence of:
 //
-//   client -> server:    ListRefs{ prefix }
-//   server -> client:    ListRefsResponse{ refs[] }    OR Error
+//   client -> server:    ListRefs{ prefix, page_size, page_token }
+//   server -> client:    ListRefsResponse{ refs[], next_page_token }    OR Error
 //
 //   client -> server:    ReadRef{ name }
 //   server -> client:    ReadRefResponse{ object_id }   OR Error
@@ -134,10 +134,18 @@ message ListRefs {
   // Prefix filter, e.g. "refs/heads/". Empty means "all refs". Length
   // capped at MAX_REF_NAME (512 bytes, SPEC-REFS §3).
   string prefix = 1;
+  // The most refs the reply may hold. The server caps it, and an absent or
+  // zero value is refused. Same field numbers as the Connect ListRefsRequest.
+  uint32 page_size = 2;
+  // The `next_page_token` of the previous page; empty starts the listing.
+  string page_token = 3;
 }
 
 message ListRefsResponse {
   repeated kit.common.v1.RefEntry refs = 1;
+  // Empty ends the listing. Any other value is passed back as `page_token`
+  // to read the page after this one.
+  string next_page_token = 2;
 }
 
 message ReadRef {
