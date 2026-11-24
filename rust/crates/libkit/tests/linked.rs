@@ -301,7 +301,11 @@ fn remove_checks_for_local_work_after_it_takes_the_locks() {
     std::thread::scope(|scope| {
         let remove = scope.spawn(|| f.remove("t1", false));
         std::thread::sleep(std::time::Duration::from_millis(500));
-        fs::write(f.base.join("t1").join("late"), b"staged after the wait began").unwrap();
+        fs::write(
+            f.base.join("t1").join("late"),
+            b"staged after the wait began",
+        )
+        .unwrap();
         drop(held);
         let err = remove.join().unwrap().unwrap_err();
         assert!(
