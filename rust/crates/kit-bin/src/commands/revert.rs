@@ -175,12 +175,13 @@ fn start(
         {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
-        if let Err(e) = conflict_state::write_revert_state(layout, &state, &records) {
+        if let Err(e) = conflict_state::begin_revert_state(layout, &state) {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
-        // The state is on disk before the material. A stop in between leaves
-        // an operation that `--abort` can undo, and never markers with no
-        // operation behind them.
+        // The operation is recorded before the material, and its conflict
+        // list after. A stop in between leaves an operation that `--abort`
+        // can undo, never markers with no operation behind them, and one
+        // that `--continue` and a commit refuse, because they need the list.
         if let Err(e) = libkit::conflict::materialize(
             layout,
             store,
@@ -189,6 +190,9 @@ fn start(
             &super::conflict::Notes,
         ) {
             return super::fail(e);
+        }
+        if let Err(e) = conflict_state::write_conflicts(layout.worktree_state_dir(), &records) {
+            return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(

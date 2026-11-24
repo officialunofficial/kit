@@ -571,7 +571,7 @@ impl Observer<conflict::Event> for StateWhenWritten<'_> {
 }
 
 #[test]
-fn the_state_of_a_paused_merge_is_on_disk_before_its_markers() {
+fn a_paused_merge_is_recorded_before_its_markers_and_its_list_comes_last() {
     let f = init();
     diverged(&f);
     let observer = StateWhenWritten {
@@ -587,8 +587,25 @@ fn the_state_of_a_paused_merge_is_on_disk_before_its_markers() {
     )
     .unwrap();
     // A stop after the markers and before the state would leave markers and
-    // no merge to abort.
-    assert_eq!(observer.seen.into_inner(), [(true, true)]);
+    // no merge to abort. The list comes after the material, so a stop before
+    // it leaves a merge that a continue refuses.
+    assert_eq!(observer.seen.into_inner(), [(true, false)]);
+    assert!(f.layout.conflicts_file().is_file());
+}
+
+#[test]
+fn a_merge_without_its_list_is_aborted_not_continued() {
+    let f = init();
+    let (ours, _) = diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    // The stop came after the merge was recorded and before its list was.
+    std::fs::remove_file(f.layout.conflicts_file()).unwrap();
+
+    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
+    assert!(is_merge_in_progress(&f.layout));
+    assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
+    assert!(!is_merge_in_progress(&f.layout));
 }
 
 #[test]
@@ -672,6 +689,29 @@ fn abort_keeps_a_file_that_the_user_untracked() {
     assert_eq!(f.read("a.txt"), "ours\n");
     assert_eq!(f.read("kept.txt"), "mine\n");
     assert!(!is_merge_in_progress(&f.layout));
+}
+
+#[test]
+fn abort_removes_an_added_file_that_the_user_untracked_without_a_change() {
+    let f = init();
+    let base = f.commit(&[("a.txt", "one\n")], &[], "base", 1);
+    let ours = f.commit(&[("a.txt", "ours\n")], &[base], "ours", 2);
+    let theirs = f.commit(
+        &[("a.txt", "theirs\n"), ("t.txt", "added\n")],
+        &[base],
+        "theirs",
+        3,
+    );
+    refs::write_ref(&f.layout, "topic", &theirs).unwrap();
+    f.checkout("main", ours);
+    start(&f, &merge_request("topic")).unwrap();
+    // A stop in the restore leaves a file of the merge with no index entry.
+    let mut idx = index::read_index(&f.layout).unwrap();
+    idx.remove_path("t.txt");
+    index::write_index(&f.layout, &idx).unwrap();
+
+    merge::abort(&f.layout, &f.store).unwrap();
+    assert!(!f.path("t.txt").exists());
 }
 
 #[test]

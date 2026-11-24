@@ -144,8 +144,9 @@ pub enum Error {
     /// The index cannot follow the new tree.
     #[error("{0}")]
     SyncIndex(String),
-    /// The merge state cannot be cleared.
-    #[error("clear merge state: {0}")]
+    /// The state of the merge, cherry-pick or revert that the commit
+    /// concluded cannot be cleared.
+    #[error("clear operation state: {0}")]
     ClearMergeState(conflict_state::ConflictStateError),
     /// The record of an unfinished pull cannot be read.
     #[error(
@@ -601,6 +602,11 @@ pub fn create(
     // sync below leaves the index holding the committed tree already.
     if pending.merge.is_some() {
         conflict_state::clear_merge_state(layout).map_err(Error::ClearMergeState)?;
+    } else if picking {
+        // A cherry-pick or a revert that the commit concludes is over, as in
+        // git. Left behind, a later `--abort` would move the branch back over
+        // this commit.
+        conflict_state::clear_operation_state(layout).map_err(Error::ClearMergeState)?;
     }
     // A plain commit leaves the index as it was: the tree came from these
     // entries, so rebuilding them from the tree would read every tree object

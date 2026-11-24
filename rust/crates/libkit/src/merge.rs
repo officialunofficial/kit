@@ -279,15 +279,20 @@ pub fn start(
         ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
         let records: Vec<ConflictRecord> =
             result.conflicts.iter().map(ConflictRecord::from).collect();
-        // The state goes before the material. A stop in between leaves a
-        // merge that `--abort` can undo, and never markers with no merge
-        // behind them. The result tree lets an abort treat the clean hunks of
-        // the merge, and not only the conflict paths, as material to discard.
-        // It goes before the state, whose head marker is written last.
+        // The merge is recorded before the material, and its conflict list
+        // after. A stop in between leaves a merge that `--abort` can undo,
+        // never markers with no merge behind them. It also leaves a merge
+        // that `--continue` and a commit refuse, because they need the list:
+        // the files may still hold our side only, and no marker to say so.
+        // The result tree lets an abort treat the clean hunks of the merge,
+        // and not only the conflict paths, as material to discard. It goes
+        // before the state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
             .map_err(Error::WriteState)?;
-        conflict_state::write_merge_state(layout, &state, &records).map_err(Error::WriteState)?;
+        conflict_state::begin_merge_state(layout, &state).map_err(Error::WriteState)?;
         conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
+        conflict_state::write_conflicts(layout.worktree_state_dir(), &records)
+            .map_err(Error::WriteState)?;
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 

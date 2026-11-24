@@ -270,7 +270,23 @@ fn the_state_of_an_operation_is_on_disk_before_its_material_is() {
             root.join(".kit").join(marker).exists(),
             "{op}: the state is missing, so nothing can abort the half written conflict"
         );
-        assert!(root.join(".kit/kit-conflicts").is_file(), "{op}");
+        // The list is not written, so nothing finishes the operation.
+        assert!(!root.join(".kit/kit-conflicts").exists(), "{op}");
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = head(root);
+        for args in [
+            [op, "--continue"].as_slice(),
+            ["commit", "-m", "x"].as_slice(),
+        ] {
+            let out = run_in(root, args);
+            assert!(!out.status.success(), "{op} {args:?}: {out:?}");
+            assert_eq!(head(root), before, "{op} {args:?}");
+        }
+        // The operation can be undone.
+        ok(root, &[op, "--abort"]);
+        assert!(!root.join(".kit").join(marker).exists(), "{op}");
+        assert_eq!(head(root), before, "{op}");
+        assert!(!status_text(root).contains("in progress"), "{op}");
     }
 }
 
@@ -313,5 +329,11 @@ fn a_commit_during_a_cherry_pick_or_revert_goes_through_once_resolved() {
         ok(root, &["add", "a.txt"]);
         ok(root, &["commit", "-m", "resolved"]);
         assert_ne!(head(root), before, "{op}");
+        // The commit ends the operation, so no abort can undo it.
+        let after = head(root);
+        assert!(!status_text(root).contains("in progress"), "{op}");
+        let out = run_in(root, &[op, "--abort"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert_eq!(head(root), after, "{op}");
     }
 }
