@@ -319,6 +319,67 @@ fn directory_ignores<'a>(
     }
 }
 
+/// The `lstat` of `path`, which is `rel_path` from the root: the stat pass's if
+/// it took one, else a fresh one, which does not follow symlinks. A path the
+/// pass could not stat is stat'ed here, so its error surfaces where the walk
+/// reaches it.
+fn stat_of<'a>(
+    stats: &'a TrackedStats,
+    rel_path: &str,
+    path: &Path,
+) -> io::Result<std::borrow::Cow<'a, fs::Metadata>> {
+    match stats.get(rel_path) {
+        Some(meta) => Ok(std::borrow::Cow::Borrowed(meta)),
+        None => path.symlink_metadata().map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Add the regular file `name`, whose stat is `meta`, to the tree being built.
+///
+/// Stat cache: when the staging index proves this file's content via
+/// mtime+size+ino+ctime (+exec class), reuse the staged hash without opening
+/// the file — O(stat) instead of O(content) for unchanged files. The object was
+/// stored at `add` time, so the tree reference stays resolvable. Any other
+/// file is a miss, to be hashed once the walk is done.
+#[allow(clippy::too_many_arguments)]
+fn push_file<'e>(
+    entries: &mut Vec<TreeEntry>,
+    files: &mut Vec<(usize, usize)>,
+    misses: &mut Vec<PendingFileHash<'e>>,
+    indexed: Option<&'e crate::index::IndexEntry>,
+    meta: &fs::Metadata,
+    name: String,
+    abs_path: PathBuf,
+    rel_path: String,
+) {
+    if let Some(e) = indexed.filter(|e| stat_matches(e, meta)) {
+        entries.push(TreeEntry {
+            name: name.into_bytes(),
+            mode: entry_mode_from_file_metadata(meta),
+            object_hash: e.object_hash,
+        });
+        return;
+    }
+    // Placeholder, overwritten by `hash_pending_files` below once every miss
+    // in this directory has been hashed — its slot is this entry's fixed
+    // position in `entries`.
+    let slot = entries.len();
+    entries.push(TreeEntry {
+        name: name.into_bytes(),
+        mode: EntryMode::Blob,
+        object_hash: crate::hash::ZERO,
+    });
+    files.push((slot, misses.len()));
+    misses.push(PendingFileHash {
+        slot: misses.len(),
+        abs_path,
+        rel_path,
+        indexed,
+        #[cfg(not(target_arch = "wasm32"))]
+        size: meta.len(),
+    });
+}
+
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
 /// root), so ignore patterns can be matched against full repo-relative paths
 /// rather than bare basenames. `parent_ignored` carries down whether an
@@ -357,16 +418,8 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         } else {
             format!("{rel_dir}/{name_str}")
         };
-        // `symlink_metadata` does not follow symlinks. A tracked file's stat
-        // may already be there from the stat pass; any other path, or one the
-        // pass could not stat, is stat'ed here, so its error surfaces here.
-        let fresh;
-        let meta = if let Some(meta) = stats.get(&rel_path) {
-            meta
-        } else {
-            fresh = entry.path().symlink_metadata()?;
-            &fresh
-        };
+        let stat = stat_of(stats, &rel_path, &entry.path())?;
+        let meta: &fs::Metadata = &stat;
         let is_dir = meta.is_dir();
         if let Some(listing) = &mut listing {
             listing.push((name_str.clone(), is_dir));
@@ -398,39 +451,16 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         }
 
         if meta.file_type().is_file() {
-            // Stat cache: when the staging index proves this file's
-            // content via mtime+size+ino+ctime (+exec class), reuse the
-            // staged hash without opening the file — O(stat) instead of
-            // O(content) for unchanged files. The object was stored at
-            // `add` time, so the tree reference stays resolvable.
-            let indexed = by_path.get(rel_path.as_str()).copied();
-            let cached = indexed.filter(|e| stat_matches(e, meta));
-            if let Some(e) = cached {
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(meta),
-                    object_hash: e.object_hash,
-                });
-            } else {
-                // Placeholder, overwritten by `hash_pending_files` below
-                // once every miss in this directory has been hashed —
-                // its slot is this entry's fixed position in `entries`.
-                let slot = entries.len();
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: EntryMode::Blob,
-                    object_hash: crate::hash::ZERO,
-                });
-                files.push((slot, misses.len()));
-                misses.push(PendingFileHash {
-                    slot: misses.len(),
-                    abs_path: entry.path(),
-                    rel_path,
-                    indexed,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    size: meta.len(),
-                });
-            }
+            push_file(
+                &mut entries,
+                &mut files,
+                misses,
+                by_path.get(rel_path.as_str()).copied(),
+                meta,
+                name_str,
+                entry.path(),
+                rel_path,
+            );
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
