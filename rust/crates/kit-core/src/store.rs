@@ -669,10 +669,9 @@ impl ObjectStore {
         // A shard that this call creates is an entry of `objects/`, which the
         // shard flush in `write_atomic` does not cover.
         let new_shard = fs::create_dir(shard_dir).is_ok();
-        if !new_shard {
-            // The shard exists, or `create_dir_all` names why it cannot.
-            fs::create_dir_all(shard_dir)?;
-        }
+        // A no-op when the shard exists; otherwise it makes `objects/` or names
+        // why the shard cannot be made.
+        fs::create_dir_all(shard_dir)?;
         write_atomic(&final_path, bytes, &**self.syncer())?;
         if new_shard {
             self.syncer().dir_sync(&self.objects_root)?;

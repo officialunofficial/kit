@@ -167,8 +167,7 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
 /// caller holds the recovery-log lock, so no append lands between the scan and
 /// the cut.
 fn cut_unterminated_tail(file: &mut File) -> io::Result<()> {
-    let first_end = file.seek(SeekFrom::End(0))?;
-    let mut end = first_end;
+    let mut end = file.seek(SeekFrom::End(0))?;
     let keep = loop {
         if end == 0 {
             break 0;
@@ -182,9 +181,8 @@ fn cut_unterminated_tail(file: &mut File) -> io::Result<()> {
         }
         end = start;
     };
-    if keep < first_end {
-        file.set_len(keep)?;
-    }
+    // `keep` is the end of the file when it already ends in a newline.
+    file.set_len(keep)?;
     Ok(())
 }
 
