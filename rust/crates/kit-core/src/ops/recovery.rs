@@ -491,7 +491,10 @@ mod tests {
         f.write_all(&[0; 40]).unwrap();
         drop(f);
         assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(1)]));
-        assert_eq!(would_expire(&md, 10_000, &RetentionPolicy::default()).unwrap(), 0);
+        assert_eq!(
+            would_expire(&md, 10_000, &RetentionPolicy::default()).unwrap(),
+            0
+        );
     }
 
     #[test]

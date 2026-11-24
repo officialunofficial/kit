@@ -20,7 +20,11 @@ fn run_in(cwd: &Path, xdg: &Path, args: &[&str]) -> Output {
 fn parallel_remote_adds_keep_every_remote() {
     const COUNT: usize = 24;
     let (repo, xdg) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    assert!(run_in(repo.path(), xdg.path(), &["init", "-q"]).status.success());
+    assert!(
+        run_in(repo.path(), xdg.path(), &["init", "-q"])
+            .status
+            .success()
+    );
 
     std::thread::scope(|scope| {
         for n in 0..COUNT {
