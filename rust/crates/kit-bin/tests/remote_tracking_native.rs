@@ -206,7 +206,11 @@ fn plant_overlapping_remote(r: &Repo, name: &str, url: &str) {
         .create(true)
         .open(layout.config_file())
         .unwrap();
-    write!(file, "remote.{name}.url = {url}\nremote.{name}.type = file\n").unwrap();
+    write!(
+        file,
+        "remote.{name}.url = {url}\nremote.{name}.type = file\n"
+    )
+    .unwrap();
 }
 
 /// Plant a marker file under `.kit/git/<name>/` to stand in for
