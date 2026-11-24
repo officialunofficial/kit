@@ -1,6 +1,7 @@
 //! One line diff or text merge of a file up to 1 MiB stays under a fixed memory
 //! ceiling however many of its lines changed. Blame compares a rewritten file
 //! at its line limit within the same ceiling. Its other buffers grow with file size.
+//! A blob of newlines past the line cap builds no line table at all.
 //!
 //! These tests watch the bytes that a call holds at once. The allocator refuses
 //! to pass a hard ceiling, so a search that grows with the input aborts here
@@ -149,6 +150,26 @@ fn short_lines_stay_under_the_ceiling() {
 }
 
 #[test]
+fn a_blob_of_newlines_past_the_line_cap_builds_no_line_table() {
+    let _guard = serial();
+    // 4 MiB of `\n` is 4,194,304 lines, past the cap. A table would cost 24
+    // bytes a line on each side.
+    for bytes in [4 * MIB, 8 * MIB] {
+        let old = vec![b'\n'; bytes];
+        let mut new = old.clone();
+        new[0] = b'x';
+
+        let (hunks, peak) = peak_of(|| unified_hunks(&old, &new));
+        assert_eq!(hunks, None);
+        assert_within_ceiling("unified_hunks", peak);
+
+        let (counts, peak) = peak_of(|| diff_line_counts(&old, &new));
+        assert_eq!(counts, None);
+        assert!(peak < MIB, "diff_line_counts held {peak} bytes");
+    }
+}
+
+#[test]
 fn a_search_near_the_limit_stays_under_the_ceiling() {
     let _guard = serial();
     // Each side changes 2,047 lines of its own half, so each search nearly
@@ -183,10 +204,8 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             .write(&serialize::serialize(&object).unwrap())
             .unwrap()
     };
-    let commit = |tag, lines, parents: Vec<Hash>| {
-        let blob = put(Object::Blob(Blob {
-            data: short_lines(tag, 2 * lines),
-        }));
+    let commit = |data: Vec<u8>, parents: Vec<Hash>| {
+        let blob = put(Object::Blob(Blob { data }));
         let tree = put(Object::Tree(Tree {
             entries: vec![TreeEntry {
                 name: b"f".to_vec(),
@@ -204,8 +223,8 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             [0; 64],
         )))
     };
-    let parent = commit(b'a', BLAME_MAX_LINES, vec![]);
-    let head = commit(b'b', BLAME_MAX_LINES, vec![parent]);
+    let parent = commit(short_lines(b'a', 2 * BLAME_MAX_LINES), vec![]);
+    let head = commit(short_lines(b'b', 2 * BLAME_MAX_LINES), vec![parent]);
     let (result, peak) = peak_of(|| blame_file(&store, head, "f"));
     let result = result.unwrap();
     assert_eq!(result.lines.len(), BLAME_MAX_LINES);
@@ -214,11 +233,20 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
     assert_within_ceiling("blame_file", peak);
     drop(result);
 
-    // Reassembly and splitting still grow with input size. The root line
-    // check prevents attribution buffers for a file above the line limit.
-    let root = commit(b'a', MIB / 2, vec![]);
+    // Reassembly still grows with input size. The line count runs before the
+    // split, and the root line check prevents attribution buffers for a file
+    // above the line limit.
+    let root = commit(short_lines(b'a', MIB), vec![]);
     let (result, peak) = peak_of(|| blame_file(&store, root, "f"));
     assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == MIB / 2));
     eprintln!("one MiB root blame peak: {peak} bytes");
     assert_within_ceiling("root blame_file", peak);
+
+    // A blob of newlines is refused by its newline count, before the split
+    // builds a `Vec` for each of its 8 Mi lines.
+    let bomb = commit(vec![b'\n'; 8 * MIB], vec![]);
+    let (result, peak) = peak_of(|| blame_file(&store, bomb, "f"));
+    assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == 8 * MIB));
+    eprintln!("newline blob blame peak: {peak} bytes");
+    assert_within_ceiling("newline blame_file", peak);
 }

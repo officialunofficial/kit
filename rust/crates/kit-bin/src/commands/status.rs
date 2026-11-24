@@ -200,7 +200,7 @@ fn warn_unfinished_pull(layout: &RepoLayout) {
 /// and paths are emitted **raw** (unquoted) — the round-trip-safe form
 /// for paths that contain newlines or other special bytes.
 fn render_porcelain(entries: &[StatusEntry], z: bool) -> u8 {
-    let disp = |p: &str| super::c_quote_path(p).unwrap_or_else(|| p.to_string());
+    let disp = super::display_path;
     let mut stdout = std::io::stdout().lock();
     for Record { xy, path, old_path } in status::records(entries) {
         // `xy` is two ASCII status columns by construction.
@@ -287,8 +287,8 @@ fn emit_v2_rename_record(out: &mut impl Write, prefix: &str, new: &str, old: &st
     if z {
         let _ = write!(out, "{prefix}{new}\0{old}\0");
     } else {
-        let nq = super::c_quote_path(new).unwrap_or_else(|| new.to_string());
-        let oq = super::c_quote_path(old).unwrap_or_else(|| old.to_string());
+        let nq = super::display_path(new);
+        let oq = super::display_path(old);
         let _ = writeln!(out, "{prefix}{nq}\t{oq}");
     }
 }
@@ -397,7 +397,7 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
             "  (use \"kit add <file>...\" to include in what will be committed)"
         );
         for e in &untracked {
-            let _ = writeln!(stderr, "\t{}", e.diff.path);
+            let _ = writeln!(stderr, "\t{}", super::display_path(&e.diff.path));
         }
     }
 
@@ -434,7 +434,11 @@ fn human_label(kind: DiffKind) -> &'static str {
 /// (git's form); every other kind is just its path.
 fn human_path(e: &StatusEntry) -> String {
     match (e.diff.kind, &e.diff.old_path) {
-        (DiffKind::Renamed, Some(old)) => format!("{old} -> {}", e.diff.path),
-        _ => e.diff.path.clone(),
+        (DiffKind::Renamed, Some(old)) => format!(
+            "{} -> {}",
+            super::display_path(old),
+            super::display_path(&e.diff.path)
+        ),
+        _ => super::display_path(&e.diff.path),
     }
 }
