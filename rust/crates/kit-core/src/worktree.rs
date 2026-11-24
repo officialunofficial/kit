@@ -552,6 +552,13 @@ pub struct TrackedStats {
     stats: std::collections::HashMap<String, fs::Metadata>,
 }
 
+/// Whether the stat pass is worth its fork: more than one thread to run it
+/// on, and at least [`STAT_PASS_MIN_ENTRIES`] tracked entries to stat.
+#[cfg(not(target_arch = "wasm32"))]
+fn stat_pass_runs(threads: usize, entries: usize) -> bool {
+    threads > 1 && entries >= STAT_PASS_MIN_ENTRIES
+}
+
 impl TrackedStats {
     /// Stat every entry of `index` that is not a deletion, under `root`.
     /// Below 512 entries, on one thread, and on wasm,
@@ -559,7 +566,7 @@ impl TrackedStats {
     #[must_use]
     pub fn collect(root: &Path, index: &Index) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
-        if available_threads() > 1 && index.entries.len() >= STAT_PASS_MIN_ENTRIES {
+        if stat_pass_runs(available_threads(), index.entries.len()) {
             use rayon::prelude::*;
             let stats = index
                 .entries
@@ -4838,6 +4845,17 @@ mod tests {
 
     /// The pass takes the `lstat` of each tracked file that is there, none for
     /// a deletion or a file that is gone, and none below its size.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_stat_pass_runs_only_with_threads_to_spare_and_enough_entries() {
+        assert!(!stat_pass_runs(1, STAT_PASS_MIN_ENTRIES));
+        assert!(!stat_pass_runs(1, 100_000));
+        assert!(!stat_pass_runs(8, STAT_PASS_MIN_ENTRIES - 1));
+        assert!(!stat_pass_runs(8, 0));
+        assert!(stat_pass_runs(2, STAT_PASS_MIN_ENTRIES));
+        assert!(stat_pass_runs(8, STAT_PASS_MIN_ENTRIES + 1));
+    }
+
     #[test]
     fn the_stat_pass_stats_each_tracked_file_that_is_there() {
         let work = TempDir::new().unwrap();
