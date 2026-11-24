@@ -168,10 +168,7 @@ fn clone_of_a_tree_bomb_fails_fast_and_leaves_no_worktree() {
     let refs = up.path().join(".kit/refs/heads");
     fs::create_dir_all(&refs).unwrap();
     fs::write(refs.join("main"), format!("{commit}\n")).unwrap();
-    let push = run_in(
-        up.path(),
-        &["push", "--no-verify-signatures", "origin", "main"],
-    );
+    let push = run_in(up.path(), &["push", "origin", "main"]);
     assert!(push.status.success(), "{}", stderr_str(&push));
 
     let parent = tempfile::tempdir().unwrap();

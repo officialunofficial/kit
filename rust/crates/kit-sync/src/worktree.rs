@@ -363,6 +363,32 @@ pub fn ensure_restore_safe_from(
     )
 }
 
+/// [`ensure_restore_safe_from`] for the first checkout of a repository that
+/// has no index file, as a clone with no checkout leaves it (git's initial
+/// checkout). Nothing is tracked yet, so no path is local work; an untracked
+/// path the restore would write over still refuses it.
+pub fn ensure_initial_checkout_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+) -> Result<(), String> {
+    check_restore_safe(
+        layout,
+        store,
+        &Index::new(),
+        target_tree,
+        options,
+        &Expected {
+            trees: &[None],
+            unchanged_base: None,
+            restore_temp_files: false,
+            refuse_untracked_dirs: false,
+            refusals: &RESTORE_REFUSALS,
+        },
+    )
+}
+
 /// The one restore-safety check: refuse a restore of `target_tree` with
 /// `options` that would destroy work, which is anything in the index or the
 /// worktree that is not as one of `expected.trees` has it, an untracked path

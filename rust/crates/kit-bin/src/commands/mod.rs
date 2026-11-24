@@ -105,9 +105,9 @@ pub(crate) use kit_sync::worktree::{
     index_tracks_path_or_descendant, restore_affects_path,
 };
 pub use kit_sync::worktree::{
-    ensure_restore_safe, ensure_restore_safe_from, ensure_restore_safe_with_options,
-    read_or_seed_index_from_head, restore_worktree_and_index, sync_index_to_tree,
-    sync_index_to_tree_observed, write_ref_recording_history,
+    ensure_initial_checkout_safe, ensure_restore_safe, ensure_restore_safe_from,
+    ensure_restore_safe_with_options, read_or_seed_index_from_head, restore_worktree_and_index,
+    sync_index_to_tree, sync_index_to_tree_observed, write_ref_recording_history,
 };
 
 /// Stream the content of the blob `h` to `out`, one chunk at a time. A write
