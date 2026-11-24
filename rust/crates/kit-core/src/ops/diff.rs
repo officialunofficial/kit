@@ -246,7 +246,7 @@ struct DiffBudget {
 impl DiffBudget {
     fn new() -> Self {
         Self {
-            pairs: WalkBudget::new(),
+            pairs: WalkBudget::for_pairs(),
             removed: WalkBudget::new(),
             added: WalkBudget::new(),
         }
@@ -387,12 +387,13 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     depth: usize,
     budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
+    let path_len = prefix.len() + 1 + entry.name.len();
     if entry.mode == EntryMode::Tree {
-        budget.removed.take_subtree(
-            store,
-            entry.object_hash,
-            prefix.len() + 1 + entry.name.len(),
-        )?;
+        budget
+            .removed
+            .take_subtree(store, entry.object_hash, path_len)?;
+    } else {
+        budget.removed.visit(path_len)?;
     }
     walk_removed_entries(store, entry, prefix, out, depth)
 }
@@ -435,12 +436,13 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     depth: usize,
     budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
+    let path_len = prefix.len() + 1 + entry.name.len();
     if entry.mode == EntryMode::Tree {
-        budget.added.take_subtree(
-            store,
-            entry.object_hash,
-            prefix.len() + 1 + entry.name.len(),
-        )?;
+        budget
+            .added
+            .take_subtree(store, entry.object_hash, path_len)?;
+    } else {
+        budget.added.visit(path_len)?;
     }
     walk_added_entries(store, entry, prefix, out, depth)
 }
@@ -3469,6 +3471,48 @@ mod tests {
         };
         assert_eq!(added(10, 100_000).unwrap(), 10 * 4096);
         assert!(matches!(added(100, 100_000), Err(StoreError::TreeTooLarge)));
+    }
+
+    /// `levels` doubling trees whose bottom tree holds `bottom`.
+    fn doubling_over(store: &ObjectStore, levels: usize, bottom: Vec<TreeEntry>) -> Hash {
+        let mut cur = put_tree(store, bottom);
+        for _ in 0..levels {
+            cur = put_tree(
+                store,
+                vec![
+                    entry(b"a", EntryMode::Tree, cur),
+                    entry(b"b", EntryMode::Tree, cur),
+                ],
+            );
+        }
+        cur
+    }
+
+    #[test]
+    fn files_only_one_side_has_are_charged_each_time_their_directory_is_reached() {
+        let (_dir, store) = fresh_store();
+        // The bottom directory is compared 2^8 times. The new side has extra
+        // files there, and those land in the tail loop of each comparison.
+        let first = |data: &[u8]| entry(b"a", EntryMode::Blob, put_blob(&store, data));
+        let shared = put_blob(&store, b"extra");
+        let new_side = |n: usize| {
+            let mut bottom = vec![first(b"new")];
+            bottom.extend(
+                (0..n).map(|i| entry(format!("b{i:03}").as_bytes(), EntryMode::Blob, shared)),
+            );
+            load_entries(&store, Some(doubling_over(&store, 8, bottom))).unwrap()
+        };
+        let old =
+            load_entries(&store, Some(doubling_over(&store, 8, vec![first(b"old")]))).unwrap();
+        let walk = |n| {
+            let new = new_side(n);
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(5000);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(5).unwrap(), 256 * 6);
+        assert!(matches!(walk(100), Err(StoreError::TreeTooLarge)));
     }
 
     #[test]

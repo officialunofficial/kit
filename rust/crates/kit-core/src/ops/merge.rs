@@ -115,7 +115,7 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
         &mut merged,
         &mut conflicts,
         0,
-        &mut WalkBudget::new(),
+        &mut WalkBudget::for_pairs(),
     )?;
 
     let tree_hash = put_tree(store, merged)?;
