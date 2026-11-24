@@ -129,9 +129,8 @@ impl Pair {
 
     /// The shards whose ids this pair can hold, for an index that is cut or
     /// padded: its fanout is read once it agrees with the pack's count, and
-    /// its length is the only thing wrong. `None` for any other failure, such
-    /// as ids that leave their bucket or an index of another pair, where the
-    /// fanout cannot be trusted and the pair may hold any shard.
+    /// its length is what is wrong. Any other failure, such as ids that leave
+    /// their bucket, leaves the fanout untrusted.
     pub(super) fn shards(&self) -> Option<Box<[bool; 256]>> {
         let mut head = [0; FANOUT_END];
         let mut index = open_regular(&self.index).ok()?;

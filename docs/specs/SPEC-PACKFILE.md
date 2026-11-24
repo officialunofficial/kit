@@ -147,7 +147,7 @@ rebuildable locator. All integer fields are unsigned little-endian.
 | Field | Size | Meaning |
 |---|---|---|
 | Magic | 4 bytes | ASCII `KITX` |
-| Index version | 4 bytes | `1`, independent of the pack header version |
+| Index version | 4 bytes | `1`, the same version as the pack header |
 | Count | 4 bytes | Number of frames, `N` |
 | Fanout | 256 × 4 bytes | Bucket `i` counts ids with first byte ≤ `i` |
 | Object ids | `N` × 32 bytes | Binary ids in strictly increasing byte order |

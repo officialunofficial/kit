@@ -1571,8 +1571,8 @@ attestation support warn once per command and skip the log.
   (`DATAERR`).
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
-- `kit closure repair-indexes` &mdash; rebuild damaged local pack indexes
-  from verified packs. Run it from any worktree, even if no revision resolves.
+- `kit closure repair-indexes` &mdash; rebuild damaged or missing local pack
+  indexes from verified packs. Run it from any worktree, even if no revision resolves.
   If a pack fails verification, fetch again from the remote that supplied it.
 - `kit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`

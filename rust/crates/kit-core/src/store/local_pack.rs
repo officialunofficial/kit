@@ -985,6 +985,22 @@ impl ObjectStore {
         }
         let dir = self.pack_dir();
         let mut rebuilt = 0;
+        let mut first_error = None;
+        if repair {
+            // A pack that lost its index is invisible. Verify it whole, then
+            // give it back its index. This goes first, so that one damaged
+            // pair does not leave the others without theirs.
+            for pair in list_pairs(&dir)? {
+                if lacks_index(&pair)? {
+                    match self.rebuild_index(&dir, &pair, true) {
+                        Ok(done) => rebuilt += usize::from(done),
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+        }
         visit_pairs(&dir, |pair| {
             pair.check_versions()?;
             let rows = scan_pair(&pair)?;
@@ -999,23 +1015,8 @@ impl ObjectStore {
             rebuilt += usize::from(self.rebuild_index(&dir, &pair, false)?);
             Ok(())
         })?;
-        if repair {
-            // A pack that lost its index is invisible. Verify it whole, then
-            // give it back its index.
-            let mut first_error = None;
-            for pair in list_pairs(&dir)? {
-                if lacks_index(&pair)? {
-                    match self.rebuild_index(&dir, &pair, true) {
-                        Ok(done) => rebuilt += usize::from(done),
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                        }
-                    }
-                }
-            }
-            if let Some(error) = first_error {
-                return Err(error);
-            }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(rebuilt)
     }

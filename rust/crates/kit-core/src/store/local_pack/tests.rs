@@ -3838,3 +3838,18 @@ fn an_index_borrowed_from_another_pair_does_not_hide_the_pair_it_replaced() {
         ));
     }
 }
+
+#[test]
+fn repair_gives_a_lone_pack_its_index_although_another_pair_cannot_be_repaired() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3], vec![4, 5, 6]]);
+    let mut bytes = fs::read(&pairs[0].pack).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 1;
+    fs::write(&pairs[0].pack, bytes).unwrap();
+    fs::remove_file(&pairs[1].index).unwrap();
+
+    let store = ObjectStore::open(&layout).unwrap();
+    assert!(store.check_local_packs(true).is_err());
+    assert!(pairs[1].index.exists());
+    assert_eq!(store.read(&packed_blob(4).0).unwrap(), packed_blob(4).1);
+}
