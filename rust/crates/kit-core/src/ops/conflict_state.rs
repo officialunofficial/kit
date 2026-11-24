@@ -555,6 +555,10 @@ pub fn ensure_conflict_list(layout: &RepoLayout) -> ConflictStateResult<()> {
 /// # Errors
 /// [`ConflictStateError::Io`] on filesystem failures other than absence.
 pub fn clear_operation_state(layout: &RepoLayout) -> ConflictStateResult<()> {
+    // The three markers first: the files that they share go after them.
+    remove_if_present(&layout.merge_head_file())?;
+    remove_if_present(&layout.cherry_pick_head_file())?;
+    remove_if_present(&layout.revert_head_file())?;
     clear_merge_state(layout)?;
     clear_cherry_pick_state(layout)?;
     clear_revert_state(layout)
@@ -860,5 +864,25 @@ mod tests {
         assert_eq!(read_result_tree(kit.worktree_state_dir()).unwrap(), None);
         // Nothing to clear is no error.
         clear_operation_state(&kit).unwrap();
+
+        let pick = CherryPickState {
+            cherry_pick_head: h("picked"),
+            orig_head: h("orig"),
+            message: b"p".to_vec(),
+        };
+        write_cherry_pick_state(&kit, &pick, &[]).unwrap();
+        clear_operation_state(&kit).unwrap();
+        assert!(!is_cherry_pick_in_progress(&kit));
+        assert!(!kit.orig_head_file().exists());
+
+        let revert = RevertState {
+            revert_head: h("reverted"),
+            orig_head: h("orig"),
+            message: b"r".to_vec(),
+        };
+        write_revert_state(&kit, &revert, &[]).unwrap();
+        clear_operation_state(&kit).unwrap();
+        assert!(!is_revert_in_progress(&kit));
+        assert!(!kit.conflicts_file().exists());
     }
 }

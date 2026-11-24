@@ -254,7 +254,7 @@ pub fn run(args: &[String]) -> u8 {
                 .map_err(|e| (e, exit::CANTCREAT))?;
         }
         // The operation is over, as in git. It goes last: a stop before it
-        // leaves the state, and the same reset run again clears it.
+        // leaves the state, and a hard reset run again clears it.
         if opts.hard {
             conflict_state::clear_operation_state(&layout)
                 .map_err(|e| (format!("clear operation state: {e}"), exit::CANTCREAT))?;
