@@ -981,7 +981,12 @@ const MAX_DIFF_LINES: usize = 1_000_000;
 /// Whether `bytes` is shown as binary: git's NUL heuristic, or more lines than
 /// [`MAX_DIFF_LINES`]. The line count runs before any line table exists.
 fn shown_as_binary(bytes: &[u8]) -> bool {
-    is_binary(bytes) || bytes.iter().filter(|&&b| b == b'\n').count() > MAX_DIFF_LINES
+    is_binary(bytes) || newline_count(bytes) > MAX_DIFF_LINES
+}
+
+/// The number of `\n` bytes in `bytes`, counted with no allocation.
+pub(crate) fn newline_count(bytes: &[u8]) -> usize {
+    bytes.iter().fold(0, |n, &b| n + usize::from(b == b'\n'))
 }
 
 /// A single line (raw bytes) plus whether the source had a trailing newline

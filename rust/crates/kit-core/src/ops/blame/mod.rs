@@ -735,7 +735,7 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         _ => return Err(BlameError::NotABlob),
     };
     // Count the lines before the split allocates a `Vec` per line.
-    check_line_count(data.iter().filter(|&&b| b == b'\n').count())?;
+    check_line_count(crate::ops::diff::newline_count(&data))?;
     let lines = split_lines(&data);
     check_line_count(lines.len())?;
     Ok(lines)
