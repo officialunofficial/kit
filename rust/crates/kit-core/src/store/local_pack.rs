@@ -50,9 +50,19 @@ pub const PACK_SEAL_ENTRIES: usize = 1 << 16;
 /// loads its rows.
 const LAZY_PROBE_BUDGET: usize = 2048;
 
+/// A pair that failed to open, and the shards its ids can be in.
+#[derive(Debug)]
+struct PairError {
+    error: StoreError,
+    /// Read from the pair's fanout. `None` when the fanout cannot be trusted:
+    /// the pair may then hold any shard.
+    shards: Option<Box<[bool; 256]>>,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Catalog {
-    error: Option<Arc<StoreError>>,
+    /// Every pair that failed to open, in pair order.
+    errors: Vec<PairError>,
     packs: Vec<Arc<Locator>>,
     routes: Vec<Route>,
     on_disk: Vec<usize>,
@@ -61,17 +71,30 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    fn from_packs(packs: Vec<Arc<Locator>>, error: Option<StoreError>, lazy: bool) -> Self {
+    fn from_packs(packs: Vec<Arc<Locator>>, errors: Vec<PairError>, lazy: bool) -> Self {
         let on_disk = (0..packs.len())
             .filter(|&number| packs[number].route_count() == 0)
             .collect();
         Self {
-            error: error.map(Arc::new),
+            errors,
             routes: sorted_routes(&packs),
             packs,
             on_disk,
             lazy,
         }
+    }
+
+    /// The error of a pair that failed to open and may hold `shard`.
+    fn error_for(&self, shard: u8) -> Option<StoreError> {
+        self.errors
+            .iter()
+            .find(|failed| {
+                failed
+                    .shards
+                    .as_ref()
+                    .is_none_or(|shards| shards[usize::from(shard)])
+            })
+            .map(|failed| replay(&failed.error))
     }
 
     pub(crate) fn may_contain(&self, id: &Hash) -> bool {
@@ -269,7 +292,7 @@ impl LocalPacks {
             route_budget -= locator.route_charge();
         }
         let mut packs = Vec::with_capacity(pairs.len());
-        let mut error = None;
+        let mut errors = Vec::new();
         for pair in pairs {
             let retained = old.get(&pair.key);
             let locator = if let Some(locator) = retained.filter(|p| p.check_current().is_ok()) {
@@ -290,7 +313,10 @@ impl LocalPacks {
                     Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
                     Err(e) if is_disappeared(&e) => continue,
                     Err(e) => {
-                        error.get_or_insert(e);
+                        errors.push(PairError {
+                            shards: pair.shards(),
+                            error: e,
+                        });
                         continue;
                     }
                 }
@@ -304,8 +330,8 @@ impl LocalPacks {
                 .iter()
                 .zip(&discovery.catalog.packs)
                 .all(|(new, old)| Arc::ptr_eq(new, old))
-            && error.is_none()
-            && discovery.catalog.error.is_none()
+            && errors.is_empty()
+            && discovery.catalog.errors.is_empty()
         {
             return Ok(Arc::clone(&discovery.catalog));
         }
@@ -315,7 +341,7 @@ impl LocalPacks {
                 .is_ok_and(|i| Arc::ptr_eq(&packs[i], locator))
         });
         discovery.latest = None;
-        discovery.catalog = Arc::new(Catalog::from_packs(packs, error, lazy));
+        discovery.catalog = Arc::new(Catalog::from_packs(packs, errors, lazy));
         Ok(Arc::clone(&discovery.catalog))
     }
 
@@ -390,8 +416,8 @@ impl LocalPacks {
             return Ok(());
         }
         let catalog = self.discover(&store.pack_dir(), true)?;
-        if let Some(error) = catalog.error.as_deref() {
-            return Err(replay(error));
+        if let Some(error) = catalog.error_for(shard) {
+            return Err(error);
         }
         for locator in &catalog.packs {
             locator.shard_ids(&self.handles, shard, out)?;
@@ -444,7 +470,7 @@ impl LocalPacks {
         let mut pair_error = None;
         if refresh && self.refresh_enabled(store)? {
             let fresh = self.discover(&store.pack_dir(), errors.stale)?;
-            pair_error = fresh.error.as_deref().map(replay);
+            pair_error = fresh.error_for(id[0]);
             if !Arc::ptr_eq(&known, &fresh)
                 && let Some(value) = self.try_catalog(
                     &fresh,
@@ -560,7 +586,7 @@ impl LookupErrors {
     }
 }
 
-// A catalog keeps the first error it met. Give each lookup its own copy.
+// A catalog keeps the errors it met. Give each lookup its own copy.
 fn replay(error: &StoreError) -> StoreError {
     match error {
         StoreError::LocalPackDamaged { pack, reason } => StoreError::LocalPackDamaged {
@@ -741,6 +767,15 @@ fn list_pairs(dir: &Path) -> StoreResult<Vec<Pair>> {
 
 fn pair_is_live(pair: &Pair) -> io::Result<bool> {
     Ok(regular(&pair.pack)? && regular(&pair.index)?)
+}
+
+/// A regular pack file whose index name is absent.
+fn lacks_index(pair: &Pair) -> io::Result<bool> {
+    Ok(regular(&pair.pack)?
+        && matches!(
+            fs::symlink_metadata(&pair.index),
+            Err(e) if e.kind() == io::ErrorKind::NotFound
+        ))
 }
 
 fn read_pack_dir(dir: &Path) -> StoreResult<Option<fs::ReadDir>> {
@@ -961,29 +996,49 @@ impl ObjectStore {
             }
 
             drop(rows);
-            let lock = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(self.format_path())?;
-            lock.try_lock().map_err(io::Error::from)?;
-            // Reopen under the lock so a retired pack cannot be resurrected.
-            if !pair_is_live(&pair)? {
-                return Ok(());
-            }
-            pair.check_versions()?;
-            let rows = scan_pair(&pair)?;
-            if matching_index(&pair, &rows)? {
-                return Ok(());
-            }
-            let tmp = stage_index(&dir, &pair, &pair.pack, &rows)?;
-            super::sync_reused_file(&pair.pack)?;
-            crate::atomic::sync_dir(&dir)?;
-            tmp.persist(&pair.index).map_err(|e| e.error)?;
-            crate::atomic::sync_dir(&dir)?;
-            self.packs.forget(&pair.key);
-            rebuilt += 1;
+            rebuilt += usize::from(self.rebuild_index(&dir, &pair, false)?);
             Ok(())
         })?;
+        if repair {
+            // A pack that lost its index is invisible. Verify it whole, then
+            // give it back its index.
+            for pair in list_pairs(&dir)? {
+                if lacks_index(&pair)? {
+                    rebuilt += usize::from(self.rebuild_index(&dir, &pair, true)?);
+                }
+            }
+        }
         Ok(rebuilt)
+    }
+
+    /// Write the index of `pair` from its verified pack. `lone` says the pack
+    /// has no index yet. Under the exclusive `format` lock, the pair is looked
+    /// at again, so a retired or republished pair is not resurrected.
+    fn rebuild_index(&self, dir: &Path, pair: &Pair, lone: bool) -> StoreResult<bool> {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.format_path())?;
+        lock.try_lock().map_err(io::Error::from)?;
+        let present = if lone {
+            lacks_index(pair)?
+        } else {
+            pair_is_live(pair)?
+        };
+        if !present {
+            return Ok(false);
+        }
+        pair.check_versions()?;
+        let rows = scan_pair(pair)?;
+        if matching_index(pair, &rows)? {
+            return Ok(false);
+        }
+        let tmp = stage_index(dir, pair, &pair.pack, &rows)?;
+        super::sync_reused_file(&pair.pack)?;
+        crate::atomic::sync_dir(dir)?;
+        tmp.persist(&pair.index).map_err(|e| e.error)?;
+        crate::atomic::sync_dir(dir)?;
+        self.packs.forget(&pair.key);
+        Ok(true)
     }
 }

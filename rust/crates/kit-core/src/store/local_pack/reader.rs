@@ -316,7 +316,8 @@ impl Locator {
         let (mut pack, pack_metadata) = open_member(&pair.pack)?;
         let (mut index, metadata) = open_member(&pair.index)?;
         let pack_stamp = Stamp::get(&pack_metadata)?;
-        let (count, trailer, _) = read_header_sized(&mut pack, pack_metadata.len())?;
+        let (count, trailer, _) =
+            read_header_sized(&mut pack, pack_metadata.len()).map_err(|e| pair.context(e))?;
         let index_stamp = Stamp::get(&metadata)?;
         let row_bytes = INDEX_ROW_LEN * count;
         let size = INDEX_BASE_LEN + row_bytes;
@@ -360,7 +361,12 @@ impl Locator {
             return Err(invalid("index key differs from filename"));
         }
         let mut prefixes = Vec::new();
-        if !rows_fit && route_bytes <= route_budget {
+        if rows_fit {
+            check_buckets(
+                &fanout[12..],
+                rows.chunks_exact(32).take(count).map(|id| id[0]),
+            )?;
+        } else if route_bytes <= route_budget {
             prefixes.reserve_exact(count);
             let mut buffer = [0; 32 * 256];
             let mut remaining = count;
@@ -371,6 +377,10 @@ impl Locator {
                 prefixes.extend(bytes.chunks_exact(32).map(prefix));
                 remaining -= entries;
             }
+            check_buckets(
+                &fanout[12..],
+                prefixes.iter().map(|prefix| prefix.to_le_bytes()[0]),
+            )?;
         }
         Ok(Self {
             pair: pair.clone(),
@@ -467,11 +477,18 @@ impl Locator {
         start as usize..le_u32(&self.fanout[at..at + 4]) as usize
     }
 
-    fn find_row(&self, file: &File, id: &Hash) -> io::Result<Option<usize>> {
+    fn find_row(&self, file: &File, id: &Hash) -> StoreResult<Option<usize>> {
         let mut range = self.bucket(id[0]);
         while range.start < range.end {
             let mid = range.start + (range.end - range.start) / 2;
-            let candidate: Hash = self.read_column(Some(file), mid * 32)?;
+            let candidate: Hash = self
+                .read_column(Some(file), mid * 32)
+                .map_err(|e| self.pair.context(e))?;
+            if candidate[0] != id[0] {
+                return Err(self
+                    .pair
+                    .index_error("index id is outside its fanout bucket"));
+            }
             match candidate.cmp(id) {
                 std::cmp::Ordering::Less => range.start = mid + 1,
                 std::cmp::Ordering::Equal => return Ok(Some(mid)),
@@ -507,7 +524,7 @@ impl Locator {
             row
         } else {
             let file = file.as_deref().expect("unrouted rows are on disk");
-            let Some(row) = self.find_row(file, id).map_err(|e| self.pair.context(e))? else {
+            let Some(row) = self.find_row(file, id)? else {
                 return Ok(None);
             };
             row
@@ -558,6 +575,11 @@ impl Locator {
                 .map_err(|e| self.pair.context(e))?;
         } else {
             ids.copy_from_slice(&self.rows[range.start * 32..range.end * 32]);
+        }
+        if ids.chunks_exact(32).any(|id| id[0] != shard) {
+            return Err(self
+                .pair
+                .index_error("index id is outside its fanout bucket"));
         }
         out.extend(
             ids.chunks_exact(32)
@@ -693,6 +715,22 @@ pub(super) struct Route {
     pub(super) prefix: u32,
     pub(super) pack: u32,
     pub(super) row: u32,
+}
+
+/// Check that each row's first id byte is the shard whose fanout bucket holds
+/// that row. `fanout` is the 256 bucket ends, already checked to be in order
+/// and within the row count.
+fn check_buckets(fanout: &[u8], first_bytes: impl Iterator<Item = u8>) -> StoreResult<()> {
+    let mut shard = 0;
+    for (row, first) in first_bytes.enumerate() {
+        while shard < 256 && le_u32(&fanout[shard * 4..shard * 4 + 4]) as usize <= row {
+            shard += 1;
+        }
+        if first as usize != shard {
+            return Err(invalid("index id is outside its fanout bucket"));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn prefix(id: &[u8]) -> u32 {

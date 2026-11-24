@@ -164,10 +164,12 @@ and `bmt-v2\nP`. The zero-tail form represents a lost activation and
 selects loose storage. See
 [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
 
-On a live pair, an unknown pack header version or index version MUST
-raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
-check the version before using its declared layout. Repair MUST preserve
-a pair with an unknown version.
+On a live pair whose pack header version and index version are the same
+unknown version, readers MUST raise `IncompatibleRepoFormat` and tell the
+user to update kit. Readers check the version before using its declared
+layout. Repair MUST preserve such a pair. A pair in which only one file has
+an unknown version, or in which the two versions differ, is damage to that
+pair, reported as such (SPEC-OBJECTS, "Object lookup").
 
 The exact version-1 index size is `1,100 + 44 × N` bytes. Before
 allocating or following an offset, check the magic, version, key, count,

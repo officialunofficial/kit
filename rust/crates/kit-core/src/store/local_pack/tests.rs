@@ -94,8 +94,10 @@ fn an_orphan_plan_keeps_a_pack_whose_index_is_published_before_the_lock() {
 
     let index = fs::read(&pair.index).unwrap();
     fs::remove_file(&pair.index).unwrap();
-    let (plan, pairs) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
+    let (mut plan, pairs) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
     assert_eq!(pairs, 0);
+    assert!(plan.is_empty(), "the sweep alone leaves a lone pack");
+    store.plan_lone_packs(&mut plan, u64::MAX, 0).unwrap();
     assert!(!plan.is_empty());
     fs::write(&pair.index, index).unwrap();
     drop(guard);
@@ -415,60 +417,122 @@ fn a_cached_location_refuses_a_pack_with_a_changed_count() {
     );
 }
 
+fn set_version(path: &std::path::Path, version: u32) {
+    let mut bytes = fs::read(path).unwrap();
+    bytes[4..8].copy_from_slice(&version.to_le_bytes());
+    let replacement = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+    fs::write(replacement.path(), &bytes).unwrap();
+    replacement.persist(path).unwrap();
+}
+
 #[test]
-fn unknown_live_pack_versions_refuse_lookup_and_repair() {
-    fn incompatible(error: &StoreError, member: &str) {
+fn a_pair_written_at_a_newer_version_refuses_lookup_and_repair() {
+    fn incompatible(error: &StoreError) {
         assert!(matches!(error, StoreError::IncompatibleRepoFormat { .. }));
         let text = error.to_string();
         assert!(text.contains("Update kit"), "{text}");
-        assert!(text.contains(member), "{text}");
+        assert!(text.contains("version 2"), "{text}");
     }
 
-    for unknown_index in [false, true] {
-        let (_dir, layout, store) = fresh();
-        let bytes = blob(b"object with a newer pack format");
-        let mut writer = writer(&store);
-        let id = writer.write(&bytes).unwrap();
-        let (staged, guard) = writer.stage().unwrap();
-        let pair = staged.pair.clone();
-        staged.publish(&store).unwrap();
-        drop(guard);
-        let still_open = ObjectStore::open(&layout).unwrap();
-        assert_eq!(store.read(&id).unwrap(), bytes);
-        let batch = store.batch();
-        batch.write_fetched(&bytes).unwrap();
-        batch.commit().unwrap();
+    let (_dir, layout, store) = fresh();
+    let bytes = blob(b"object with a newer pack format");
+    let mut writer = writer(&store);
+    let id = writer.write(&bytes).unwrap();
+    let (staged, guard) = writer.stage().unwrap();
+    let pair = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    drop(guard);
+    let still_open = ObjectStore::open(&layout).unwrap();
+    assert_eq!(store.read(&id).unwrap(), bytes);
+    let batch = store.batch();
+    batch.write_fetched(&bytes).unwrap();
+    batch.commit().unwrap();
 
-        let (path, kind) = if unknown_index {
-            (&pair.index, "local index version 2")
+    set_version(&pair.pack, 2);
+    set_version(&pair.index, 2);
+    let newer = fs::read(&pair.pack).unwrap();
+
+    let reopened = ObjectStore::open(&layout).unwrap();
+    incompatible(&reopened.read(&[0; 32]).unwrap_err());
+    incompatible(&store.read(&id).unwrap_err());
+    incompatible(&still_open.read(&[0; 32]).unwrap_err());
+    incompatible(&still_open.iter_object_hashes().unwrap_err());
+    incompatible(&still_open.check_local_packs(true).unwrap_err());
+    let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
+    retry.write(&bytes).unwrap();
+    incompatible(&retry.finish().unwrap_err());
+    assert_eq!(fs::read(&pair.pack).unwrap(), newer);
+}
+
+#[test]
+fn a_wrong_version_in_one_file_is_damage_to_that_pair_and_repair_rebuilds_the_index() {
+    for index_is_wrong in [true, false] {
+        let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3], vec![4]]);
+        let wrong = if index_is_wrong {
+            &pairs[0].index
         } else {
-            (&pair.pack, "local pack version 2")
+            &pairs[0].pack
         };
-        let mut newer = fs::read(path).unwrap();
-        newer[4..8].copy_from_slice(&2_u32.to_le_bytes());
-        let replacement = tempfile::NamedTempFile::new_in(store.pack_dir()).unwrap();
-        fs::write(replacement.path(), &newer).unwrap();
-        replacement.persist(path).unwrap();
+        set_version(wrong, 2);
 
-        let reopened = ObjectStore::open(&layout).unwrap();
-        incompatible(&reopened.read(&[0; 32]).unwrap_err(), kind);
-        incompatible(&store.read(&id).unwrap_err(), kind);
-        incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
-        incompatible(&still_open.iter_object_hashes().unwrap_err(), kind);
-        incompatible(&still_open.check_local_packs(true).unwrap_err(), kind);
-        let mut retry = PackFixture::new(&store, MAX_ENTRIES, MAX_TOTAL_PAYLOAD).unwrap();
-        retry.write(&bytes).unwrap();
-        incompatible(&retry.finish().unwrap_err(), kind);
-        assert_eq!(fs::read(path).unwrap(), newer);
+        let reader = ObjectStore::open(&layout).unwrap();
+        let error = reader.read(&packed_blob(1).0).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "{text}"
+        );
+        assert!(
+            text.contains(&pairs[0].pack.display().to_string()),
+            "{text}"
+        );
+        assert!(text.contains("version 2"), "{text}");
+        assert!(!text.contains("Update kit"), "{text}");
+        assert_eq!(
+            text.contains("repair-indexes"),
+            index_is_wrong,
+            "the hint names the damaged file: {text}"
+        );
+        assert_eq!(reader.read(&packed_blob(4).0).unwrap(), packed_blob(4).1);
 
-        let counterpart = if unknown_index {
-            &pair.pack
+        if index_is_wrong {
+            assert_eq!(reader.check_local_packs(true).unwrap(), 1);
+            assert_eq!(reader.read(&packed_blob(1).0).unwrap(), packed_blob(1).1);
         } else {
-            &pair.index
-        };
-        fs::write(counterpart, b"damaged").unwrap();
-        incompatible(&still_open.read(&[0; 32]).unwrap_err(), kind);
+            let error = reader.check_local_packs(true).unwrap_err();
+            assert!(
+                matches!(error, StoreError::LocalPackDamaged { .. }),
+                "{error}"
+            );
+        }
     }
+}
+
+#[test]
+fn a_pair_with_an_unknown_index_version_does_not_hide_the_other_pairs() {
+    let (_dir, layout, store) = fresh();
+    let mut first = writer(&store);
+    first.write(&blob(b"object in the newer pair")).unwrap();
+    let (staged, guard) = first.stage().unwrap();
+    let newer = staged.pair.clone();
+    staged.publish(&store).unwrap();
+    drop(guard);
+
+    let kept = blob(b"object in the readable pair");
+    let mut second = writer(&store);
+    let id = second.write(&kept).unwrap();
+    second.finish().unwrap();
+
+    let mut index = fs::read(&newer.index).unwrap();
+    index[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    fs::write(&newer.index, index).unwrap();
+
+    let reopened = ObjectStore::open(&layout).unwrap();
+    let read = reopened.read(&id);
+    assert!(
+        read.as_ref().is_ok_and(|bytes| *bytes == kept),
+        "an unknown index version stops lookup on that pair only, got {read:?}"
+    );
 }
 
 #[test]
@@ -788,7 +852,7 @@ fn a_read_that_ends_early_is_damage_and_other_read_errors_are_not() {
 }
 
 #[test]
-fn rebuild_only_a_published_index_from_a_verified_pack() {
+fn rebuild_an_index_from_a_verified_pack() {
     let (_dir, layout, store) = fresh();
     let mut writer = writer(&store);
     let bytes = blob(b"index repair");
@@ -815,9 +879,27 @@ fn rebuild_only_a_published_index_from_a_verified_pack() {
     assert_eq!(reopened.check_local_packs(true).unwrap(), 1);
     assert_eq!(fs::read(&pair.index).unwrap(), idx);
     assert_eq!(reopened.read(&id).unwrap(), bytes);
+    // A pack that lost its index is verified whole and gets its index back.
     fs::remove_file(&pair.index).unwrap();
-    assert_eq!(reopened.check_local_packs(true).unwrap(), 0);
+    assert_eq!(reopened.check_local_packs(false).unwrap(), 0);
     assert!(!pair.index.exists());
+    assert_eq!(reopened.check_local_packs(true).unwrap(), 1);
+    assert_eq!(fs::read(&pair.index).unwrap(), idx);
+    assert_eq!(reopened.read(&id).unwrap(), bytes);
+}
+
+#[test]
+fn a_lone_pack_that_fails_verification_is_not_given_an_index() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
+    fs::remove_file(&pairs[0].index).unwrap();
+    let mut bytes = fs::read(&pairs[0].pack).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 1;
+    fs::write(&pairs[0].pack, bytes).unwrap();
+
+    let store = ObjectStore::open(&layout).unwrap();
+    assert!(store.check_local_packs(true).is_err());
+    assert!(!pairs[0].index.exists());
 }
 
 #[test]
@@ -1253,7 +1335,7 @@ fn gc_sweeps_only_aged_recognized_pack_leftovers() {
     #[cfg(unix)]
     set_pack_age(&directory, 1);
     assert!(!ObjectStore::open(&layout).unwrap().contains(&ids[0]));
-    assert_eq!(store.check_local_packs(true).unwrap(), 0);
+    assert_eq!(store.check_local_packs(false).unwrap(), 0);
 
     let expected_bytes: u64 = [&retired.index, &unpublished.pack, &staging]
         .iter()
@@ -1728,6 +1810,99 @@ fn gc_keeps_a_loose_duplicate_when_any_member_changes_before_the_try_lock() {
     }
 }
 
+/// A pair that packs five live objects whose loose copies are duplicates.
+fn five_loose_duplicates() -> (
+    tempfile::TempDir,
+    RepoLayout,
+    ObjectStore,
+    Vec<(Hash, Vec<u8>)>,
+) {
+    let (dir, layout, store) = fresh();
+    let objects: Vec<_> = (0..5)
+        .map(|n| {
+            let bytes = blob(format!("loose duplicate {n}").as_bytes());
+            let id = store.write(&bytes).unwrap();
+            crate::refs::write_ref(&layout, &format!("live{n}"), &id).unwrap();
+            set_pack_age(&store.path_for(&id), 8);
+            (id, bytes)
+        })
+        .collect();
+    let bytes: Vec<&[u8]> = objects.iter().map(|(_, bytes)| bytes.as_slice()).collect();
+    let (pair, _) = publish_objects(&store, &bytes);
+    set_pack_age(&pair.pack, 9);
+    set_pack_age(&pair.index, 1);
+    (dir, layout, store, objects)
+}
+
+#[test]
+fn dropping_loose_duplicates_takes_the_lock_in_batches_and_counts_the_holds() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store, objects) = five_loose_duplicates();
+    let _batch = set_retire_batch(2);
+    let loose = |objects: &[(Hash, Vec<u8>)]| {
+        objects
+            .iter()
+            .filter(|(id, _)| store.path_for(id).exists())
+            .count()
+    };
+    let lock_path = store.format_path();
+    let objects_for_hook = objects.clone();
+    let root = store.objects_root().to_path_buf();
+    set_after_retire_batch(move |done| {
+        // The exclusive lock is free between batches, and each batch dropped
+        // at most two copies.
+        let file = fs::File::open(&lock_path).unwrap();
+        assert!(file.try_lock().is_ok(), "batch {done} kept the lock");
+        let left = objects_for_hook
+            .iter()
+            .filter(|(id, _)| {
+                let hex = crate::hash::to_hex(id);
+                root.join(&hex[..2]).join(&hex[2..]).exists()
+            })
+            .count();
+        assert_eq!(left, 5_usize.saturating_sub(2 * done), "batch {done}");
+        Ok(())
+    });
+
+    let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.loose_duplicates_pruned, 5);
+    assert_eq!(report.retire_batches, 3, "two, two and one");
+    assert_eq!(loose(&objects), 0);
+    for (id, bytes) in &objects {
+        assert_eq!(&store.read(id).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn a_crash_between_loose_duplicate_batches_loses_nothing() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store, objects) = five_loose_duplicates();
+    let batch = set_retire_batch(2);
+    set_after_retire_batch(|done| {
+        if done == 1 {
+            Err(std::io::Error::other("crash after the first batch").into())
+        } else {
+            Ok(())
+        }
+    });
+
+    assert!(run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).is_err());
+    let left = objects
+        .iter()
+        .filter(|(id, _)| store.path_for(id).exists())
+        .count();
+    assert_eq!(left, 3, "only the first batch dropped its copies");
+    for (id, bytes) in &objects {
+        assert_eq!(&store.read(id).unwrap(), bytes);
+    }
+    // The next run drops the rest.
+    drop(batch);
+    let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.loose_duplicates_pruned, 3);
+}
+
 #[test]
 fn a_pack_scan_io_error_aborts_gc_without_removing_other_garbage() {
     use crate::ops::gc::{GcRootsError, run_gc};
@@ -1916,7 +2091,8 @@ fn an_index_outside_the_row_budget_routes_without_reopening_on_misses() {
 
     let locator = std::sync::Arc::new(Locator::open(&pair, 0, 64).unwrap());
     assert_eq!(locator.row_charge(), 0);
-    let catalog = super::Catalog::from_packs(vec![std::sync::Arc::clone(&locator)], None, false);
+    let catalog =
+        super::Catalog::from_packs(vec![std::sync::Arc::clone(&locator)], Vec::new(), false);
     let routes: Vec<_> = catalog.candidates(&id).collect();
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].1, Some(0));
@@ -1997,7 +2173,7 @@ fn budget_boundaries_preserve_lookup_in_all_three_index_storage_modes() {
             locator.route_charge(),
             expected_routes * (size_of::<Route>() + size_of::<u32>())
         );
-        let catalog = super::Catalog::from_packs(vec![Arc::clone(&locator)], None, false);
+        let catalog = super::Catalog::from_packs(vec![Arc::clone(&locator)], Vec::new(), false);
         let handles = Handles::default();
         for id in &ids {
             let frames: Vec<_> = catalog
@@ -2203,7 +2379,7 @@ fn a_verified_collection_location_rechecks_the_index_version() {
     set_pack_age(&pair.index, 1);
     assert!(matches!(
         location.open(),
-        Err(StoreError::IncompatibleRepoFormat { .. })
+        Err(StoreError::LocalPackDamaged { .. })
     ));
 }
 
@@ -2266,7 +2442,7 @@ fn forced_discovery_rechecks_an_index_even_with_the_same_directory_stamp() {
     ));
     let second = store.packs.discover(&dir, true).unwrap();
     assert!(second.packs.is_empty());
-    assert!(second.error.is_some());
+    assert!(!second.errors.is_empty());
 }
 
 #[cfg(unix)]
@@ -3200,7 +3376,7 @@ fn a_symlinked_or_irregular_member_hides_its_pair_without_damage() {
             healthy.pack
         );
         let discovery = reader.packs.discovery.lock().unwrap();
-        assert!(discovery.catalog.error.is_none());
+        assert!(discovery.catalog.errors.is_empty());
         assert_eq!(discovery.catalog.packs.len(), 1);
     }
 }
@@ -3530,4 +3706,115 @@ fn a_vectored_read_fills_every_buffer_across_short_and_interrupted_reads() {
     };
     let error = fill(&mut broken).0.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+/// Every way a catalog can hold a pair: probing index files, rows in memory,
+/// ids routed from the file, and nothing cached.
+const CATALOG_MODES: [(bool, Option<(usize, usize)>); 4] = [
+    (false, None),
+    (true, None),
+    (true, Some((0, usize::MAX))),
+    (true, Some((0, 0))),
+];
+
+fn reopen(layout: &RepoLayout, full: bool, budgets: Option<(usize, usize)>) -> ObjectStore {
+    let reader = ObjectStore::open(layout).unwrap();
+    {
+        let mut discovery = reader.packs.discovery.lock().unwrap();
+        discovery.full = full;
+        discovery.budgets = budgets;
+    }
+    reader
+}
+
+#[test]
+fn an_id_column_that_leaves_its_fanout_bucket_is_damage_naming_the_pair() {
+    let (_dir, layout, pairs) = packed_store(&[(1..=30).collect(), vec![100]]);
+    let (held, held_bytes) = (1..=30)
+        .map(packed_blob)
+        .find(|(id, _)| id[0] != 0)
+        .unwrap();
+    let mut bytes = fs::read(&pairs[0].index).unwrap();
+    bytes[index::FANOUT_END..index::FANOUT_END + 32 * 30].fill(0);
+    fs::write(&pairs[0].index, &bytes).unwrap();
+
+    for (full, budgets) in CATALOG_MODES {
+        let reader = reopen(&layout, full, budgets);
+        let error = reader.read(&held).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "full {full}, budgets {budgets:?}: {text}"
+        );
+        assert!(
+            text.contains(&pairs[0].pack.display().to_string()),
+            "{text}"
+        );
+        assert!(text.contains("repair-indexes"), "{text}");
+        assert!(matches!(
+            reader.list_shard(held[0]),
+            Err(StoreError::LocalPackDamaged { .. })
+        ));
+    }
+    let reader = ObjectStore::open(&layout).unwrap();
+    assert_eq!(reader.check_local_packs(true).unwrap(), 1);
+    assert_eq!(reader.read(&held).unwrap(), held_bytes);
+}
+
+#[test]
+fn a_damaged_pair_fails_only_the_shards_it_can_hold() {
+    let (_dir, layout, pairs) = packed_store(&[(1..=30).collect(), vec![100]]);
+    let held: Vec<u8> = (1..=30).map(|n| packed_blob(n).0[0]).collect();
+    let bytes = fs::read(&pairs[0].index).unwrap();
+    fs::write(&pairs[0].index, &bytes[..bytes.len() / 2]).unwrap();
+    let (elsewhere, elsewhere_bytes) = (101..=255)
+        .map(packed_blob)
+        .find(|(id, _)| !held.contains(&id[0]))
+        .unwrap();
+
+    for (full, budgets) in CATALOG_MODES {
+        let reader = reopen(&layout, full, budgets);
+        let id = reader.write(&elsewhere_bytes).unwrap();
+        assert_eq!(id, elsewhere);
+        assert_eq!(reader.list_shard(elsewhere[0]).unwrap(), [elsewhere]);
+        assert!(matches!(
+            reader.read(&[elsewhere[0]; 32]),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        for shard in held.iter().copied() {
+            let error = reader.list_shard(shard).unwrap_err();
+            let text = error.to_string();
+            assert!(
+                matches!(error, StoreError::LocalPackDamaged { .. }),
+                "{text}"
+            );
+            assert!(
+                text.contains(&pairs[0].pack.display().to_string()),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn damage_to_the_pack_is_not_blamed_on_the_index() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
+    let mut bytes = fs::read(&pairs[0].pack).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&pairs[0].pack, &bytes).unwrap();
+    let pack = pairs[0].pack.display().to_string();
+
+    let reader = ObjectStore::open(&layout).unwrap();
+    for error in [
+        reader.read(&packed_blob(1).0).unwrap_err(),
+        reader.list_shard(packed_blob(1).0[0]).unwrap_err(),
+    ] {
+        let text = error.to_string();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "{text}"
+        );
+        assert!(text.contains(&pack), "{text}");
+        assert!(!text.contains("repair-indexes"), "{text}");
+    }
 }

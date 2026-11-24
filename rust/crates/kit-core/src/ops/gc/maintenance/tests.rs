@@ -1601,3 +1601,50 @@ fn a_complete_step_that_merged_nothing_waits_for_32_more_pairs() {
     repo.pack(&[b"later last"]);
     assert_eq!(repo.run().collection, Collection::Complete);
 }
+
+#[test]
+fn an_old_lone_pack_that_a_live_object_needs_survives_the_step_and_is_repaired() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, ids) = repo.old_pack(&[b"only copy"]);
+    repo.pin("only", &ids[0]);
+    let index = pack.with_extension("idx");
+    fs::remove_file(&index).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Failed);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(
+        pack.exists(),
+        "the step must not delete a pack it cannot read"
+    );
+
+    assert_eq!(repo.store.check_local_packs(true).unwrap(), 1);
+    assert!(index.exists());
+    assert!(repo.store.read(&ids[0]).is_ok());
+}
+
+#[test]
+fn an_old_lone_pack_nothing_live_needs_is_swept_by_a_step_that_marked() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, _) = repo.old_pack(&[b"abandoned"]);
+    fs::remove_file(pack.with_extension("idx")).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.leftovers_removed, 1);
+    assert!(!pack.exists());
+}
+
+#[test]
+fn an_old_lone_pack_stays_while_the_step_does_not_mark() {
+    let repo = Repo::new();
+    let (pack, _) = repo.old_pack(&[b"abandoned"]);
+    fs::remove_file(pack.with_extension("idx")).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::NotDue);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(pack.exists());
+}

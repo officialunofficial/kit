@@ -588,6 +588,9 @@ fn collect(
         // The budget ended before one pack was verified: no progress.
         return Ok(Outcome::same(Collection::OverBudget));
     }
+    // The mark above read every live object, so an old pack that lost its
+    // index and holds no object that a live one needs may go.
+    store.plan_lone_packs(&mut retire, now, DEFAULT_GRACE_SECS)?;
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
     // wholly dead retirement planned above still runs, as it does today.
