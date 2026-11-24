@@ -202,9 +202,11 @@ pub fn restore_worktree_and_index_from(
 /// [`restore_worktree_and_index_from`] for a pull, which reports its progress
 /// to `observer` when the observer can take it from other threads.
 ///
-/// The caller has run the pull's safety check over the whole worktree, which
-/// refuses every untracked path outside the ignore rules, so the restore does
-/// not walk the directories it leaves alone to look for one again.
+/// A restore with a `base_tree` is one the pull's safety check over the whole
+/// worktree has cleared, which refuses every untracked path outside the ignore
+/// rules, so the restore does not walk the directories it leaves alone to look
+/// for one again. A restore with no `base_tree`, as when a pull resumes after a
+/// stop, rewrites every entry and never walked them.
 pub(crate) fn restore_worktree_and_index_progress(
     layout: &RepoLayout,
     store: &ObjectStore,

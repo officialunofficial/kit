@@ -1189,7 +1189,10 @@ fn add_tree(
             .join("/");
         // A tracked file may have its stat from the pass already; any other
         // path, or one the pass could not stat, is stat'ed here.
-        let meta = match stats.get(&rel_path) {
+        // A name that is not UTF-8 has only a lossy spelling here, which could
+        // match another tracked path, so it is never looked up.
+        let tracked_stat = native_relative.to_str().and_then(|_| stats.get(&rel_path));
+        let meta = match tracked_stat {
             Some(meta) => meta.clone(),
             None => p.symlink_metadata().map_err(|source| Error::Metadata {
                 path: p.clone(),

@@ -524,7 +524,7 @@ pub struct TrackedStats {
 
 impl TrackedStats {
     /// Stat every entry of `index` that is not a deletion, under `root`.
-    /// Below [`STAT_PASS_MIN_ENTRIES`] entries, on one thread, and on wasm,
+    /// Below 512 entries, on one thread, and on wasm,
     /// it takes none and leaves every stat to the walk.
     #[must_use]
     pub fn collect(root: &Path, index: &Index) -> Self {
