@@ -83,8 +83,20 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
     let head_after = (fs::read(&head).unwrap(), fs::metadata(&head).unwrap().ino());
     assert_eq!(head_after, head_before, "a pull that keeps the branch leaves HEAD alone");
 
-    eprintln!(
-        "flushes: add {add}, add unchanged {unchanged}, commit {commit}, push {push}, fetch {fetch}, pull {pull}"
+    // add: an object and the objects directory, the index and its directory.
+    // commit: an object and the objects directory, the branch ref and its
+    // directory; the index stays as it is.
+    // push: the remote's pack, node and two refs, each with a directory flush,
+    // and the tracking ref with its directory.
+    // fetch: the format marker and its directory, the objects directory, the
+    // pack and its index with their directories, and the tracking ref with its
+    // directory.
+    // pull: the fetch, then the pull record, the branch ref and the index, each
+    // with a directory flush, and the flush that clears the pull record. HEAD
+    // is not written.
+    assert_eq!(
+        [add, unchanged, commit, push, fetch, pull],
+        [4, 0, 4, 10, 9, 16],
+        "full flushes of add, an unchanged add, commit, push, fetch and pull"
     );
-    assert_eq!(unchanged, 0, "an add that stages nothing flushes nothing");
 }

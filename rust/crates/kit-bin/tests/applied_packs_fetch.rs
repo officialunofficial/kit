@@ -234,7 +234,12 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
     // The removals are durable before the command returns: the repair flushes
     // the directory of the verified-tip records and the records directory.
     let flushed = fs::read_to_string(&flush_log).map_or(0, |log| log.lines().count());
-    eprintln!("repair flushes: {flushed}");
+    // The fetch cursors' directory, the verified-tip records' directory and
+    // the records directory.
+    #[cfg(target_os = "macos")]
+    assert_eq!(flushed, 3);
+    #[cfg(not(target_os = "macos"))]
+    assert!(flushed >= 3, "{flushed}");
     assert!(!applied.exists());
     assert!(!heads.exists());
     assert_eq!(fs::read_dir(&anchors).unwrap().count(), 0);
