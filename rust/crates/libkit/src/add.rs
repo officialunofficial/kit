@@ -622,7 +622,16 @@ fn prepare(
         if target == "." {
             let mut seen = HashSet::new();
             let stats = TrackedStats::collect(root, idx);
-            add_tree(root, root, false, idx, &stats, &ignores, &mut seen, &mut pending)?;
+            add_tree(
+                root,
+                root,
+                false,
+                idx,
+                &stats,
+                &ignores,
+                &mut seen,
+                &mut pending,
+            )?;
             mark_missing_paths_removed(root, idx, &seen);
         } else {
             ensure_within_repo(root, &abs)?;

@@ -1601,6 +1601,7 @@ pub fn status_diff_observed(
         tracked,
         &mut observations,
         true,
+        None,
     )?;
 
     let Some(idx) = index else {
