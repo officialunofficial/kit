@@ -23,20 +23,23 @@ pub fn file(file: &File) -> io::Result<()> {
     #[cfg(feature = "fault-injection")]
     {
         crate::fault::count_flush();
-        log();
+        if let Some(path) = std::env::var_os("KIT_FLUSH_LOG") {
+            append_line(std::path::Path::new(&path));
+        }
     }
     file.sync_all()
 }
 
+/// Append the line of one flush to the log at `path`; a log that cannot be
+/// written is skipped, since it only serves tests.
 #[cfg(feature = "fault-injection")]
-fn log() {
+fn append_line(path: &std::path::Path) {
     use std::io::Write as _;
 
-    if let Some(path) = std::env::var_os("KIT_FLUSH_LOG")
-        && let Ok(mut log) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(path)
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
     {
         // One write, so processes that share the log do not interleave lines.
         let _ = log.write_all(b"full\n");
@@ -57,5 +60,14 @@ mod tests {
         assert_eq!(flushes(), before + 1);
         file(&handle).unwrap();
         assert_eq!(flushes(), before + 2);
+    }
+
+    #[test]
+    fn each_flush_appends_one_line_to_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("flushes");
+        append_line(&log);
+        append_line(&log);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "full\nfull\n");
     }
 }
