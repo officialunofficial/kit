@@ -291,6 +291,31 @@ fn remove_keeps_a_tree_with_local_work_unless_forced() {
 }
 
 #[test]
+fn remove_checks_for_local_work_after_it_takes_the_locks() {
+    let f = fixture();
+    f.add("t1", None).unwrap();
+    let tree = layout::discover(&f.base.join("t1")).unwrap();
+    // Another command holds the lock of the tree, as `add` does while it
+    // stages a file. The remove waits for it.
+    let held = libkit::lock::acquire_worktree(&tree, &NoopObserver).unwrap();
+    std::thread::scope(|scope| {
+        let remove = scope.spawn(|| f.remove("t1", false));
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        fs::write(f.base.join("t1").join("late"), b"staged after the wait began").unwrap();
+        drop(held);
+        let err = remove.join().unwrap().unwrap_err();
+        assert!(
+            matches!(err, Error::Dirty(ref w) if w == "untracked file 'late'"),
+            "{err:?}"
+        );
+    });
+    assert_eq!(
+        fs::read(f.base.join("t1").join("late")).unwrap(),
+        b"staged after the wait began"
+    );
+}
+
+#[test]
 fn remove_refuses_the_main_tree_the_current_tree_and_a_stranger() {
     let f = fixture();
     f.add("t1", None).unwrap();

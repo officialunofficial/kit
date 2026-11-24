@@ -63,6 +63,10 @@ pub fn all_layouts(layout: &RepoLayout) -> Result<Vec<(PathBuf, RepoLayout)>, Er
 /// sibling tree. A caller holds the registry lock from [`crate::lock`] across
 /// this check and the change that depends on it.
 ///
+/// On a case-insensitive file system `Main` and `main` name one branch file,
+/// so a sibling on one spelling holds the other. The two names count as one
+/// branch when they differ only in ASCII case and resolve to the same ref file.
+///
 /// # Errors
 /// [`Error::Registry`] or [`Error::ReadHead`]. The function fails closed on
 /// both.
@@ -80,7 +84,9 @@ pub fn checked_out_elsewhere(layout: &RepoLayout, branch: &str) -> Result<Option
             continue; // the tree of the caller
         }
         match refs::read_head(&candidate) {
-            Ok(Head::Branch(name)) if name == branch => return Ok(Some(tree_root)),
+            Ok(Head::Branch(name)) if same_branch(layout, &name, branch) => {
+                return Ok(Some(tree_root));
+            }
             // A sibling with no HEAD yet, in the middle of `worktree add`,
             // holds no branch.
             Ok(_) | Err(RefError::NoHead) => {}
@@ -88,6 +94,23 @@ pub fn checked_out_elsewhere(layout: &RepoLayout, branch: &str) -> Result<Option
         }
     }
     Ok(None)
+}
+
+/// Do `a` and `b` name one branch? Equal names do. Names that differ only in
+/// ASCII case do when the file system resolves both to one ref file, as on a
+/// case-insensitive disk. On a case-sensitive disk they are two branches.
+fn same_branch(layout: &RepoLayout, a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if !a.eq_ignore_ascii_case(b) {
+        return false;
+    }
+    let heads = layout.common_dir().join(refs::HEADS_DIR);
+    match (heads.join(a).canonicalize(), heads.join(b).canonicalize()) {
+        (Ok(file_a), Ok(file_b)) => file_a == file_b,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +184,34 @@ mod tests {
             real(checked_out_elsewhere(&linked, "main").unwrap()),
             Some(tmp.path().join("main").canonicalize().unwrap())
         );
+    }
+
+    /// Is the file system under `dir` case-insensitive?
+    fn is_case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("CaseProbe");
+        fs::write(&probe, b"").unwrap();
+        let folded = dir.join("caseprobe").exists();
+        fs::remove_file(&probe).unwrap();
+        folded
+    }
+
+    #[test]
+    fn a_case_only_spelling_of_a_sibling_branch_is_elsewhere_where_the_disk_folds_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_layout, linked) = scaffold(tmp.path());
+        let heads = main_layout.common_dir().join(refs::HEADS_DIR);
+        fs::create_dir_all(&heads).unwrap();
+        fs::write(heads.join("main"), b"").unwrap();
+        fs::write(heads.join("other"), b"").unwrap();
+        let sibling_holds = |name| checked_out_elsewhere(&linked, name).unwrap().is_some();
+        assert!(sibling_holds("main"));
+        assert_eq!(
+            sibling_holds("Main"),
+            is_case_insensitive(tmp.path()),
+            "one branch file under two spellings is one branch; two files are two branches"
+        );
+        assert!(!sibling_holds("other"));
+        assert!(!sibling_holds("Other"));
     }
 
     #[test]
