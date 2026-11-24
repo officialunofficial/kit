@@ -220,7 +220,7 @@ pub(crate) fn restore_worktree_and_index_progress(
     let progress = observer
         .concurrent()
         .is_some()
-        .then(|| &mut report as &mut dyn FnMut(usize, usize));
+        .then_some(&mut report as &mut dyn FnMut(usize, usize));
     kit_core::ops::restore::restore_tree_to_worktree_gated(
         store,
         &tree_hash,
@@ -828,13 +828,13 @@ fn collect_restore_paths(
         .transpose()
         .map_err(std::io::Error::other)?;
     let read;
-    let listing: &[(String, bool)] = match listings.and_then(|listings| listings.get(prefix)) {
-        Some(listing) => listing,
-        None => {
+    let listing: &[(String, bool)] =
+        if let Some(listing) = listings.and_then(|listings| listings.get(prefix)) {
+            listing
+        } else {
             read = read_listing(dir)?;
             &read
-        }
-    };
+        };
     for (name, is_dir) in listing {
         if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             continue;
