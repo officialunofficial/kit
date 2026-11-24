@@ -4843,8 +4843,7 @@ mod tests {
         assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
     }
 
-    /// The pass takes the `lstat` of each tracked file that is there, none for
-    /// a deletion or a file that is gone, and none below its size.
+    /// The pass runs only with a second thread and at least the minimum of entries.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_stat_pass_runs_only_with_threads_to_spare_and_enough_entries() {
@@ -4856,6 +4855,8 @@ mod tests {
         assert!(stat_pass_runs(8, STAT_PASS_MIN_ENTRIES + 1));
     }
 
+    /// The pass takes the `lstat` of each tracked file that is there, none for
+    /// a deletion or a file that is gone, and none below its size.
     #[test]
     fn the_stat_pass_stats_each_tracked_file_that_is_there() {
         let work = TempDir::new().unwrap();
