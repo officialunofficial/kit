@@ -590,8 +590,9 @@ pub fn create(
     }
     // A plain commit leaves the index as it was: the tree came from these
     // entries, so rebuilding them from the tree would read every tree object
-    // and write the same index again. Staged removals are not in the tree, a
-    // merge or an amend may differ from the index, so those rebuild it.
+    // and write the same index again. A staged removal is not in the tree, so
+    // it rebuilds the index. So does a merge or an amend, which keep their
+    // own rebuild.
     if pending.merge.is_some() || pending.amend.is_some() || !index_is_the_tree(&idx) {
         sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
     }

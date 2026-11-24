@@ -771,6 +771,25 @@ mod tests {
     }
 
     #[test]
+    fn cache_records_are_written_with_no_full_flush() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let before = kit_core::fault::flushes();
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        applied.record_applied(&pk("pack-1")).unwrap();
+        applied.persist().unwrap();
+        write_cache_record(&dir.path().join("record"), b"bytes").unwrap();
+        let tip = h("tip");
+        crate::anchor::persist(&dir.path().join("verified"), &tip).unwrap();
+        assert_eq!(kit_core::fault::flushes(), before);
+        assert_eq!(crate::anchor::load(&dir.path().join("verified")), Some(tip));
+
+        // A durable pointer flushes the file and its directory.
+        write_atomic(&dir.path().join("pointer"), b"bytes").unwrap();
+        assert_eq!(kit_core::fault::flushes(), before + 2);
+    }
+
+    #[test]
     fn persist_is_noop_when_not_dirty() {
         let (_dir, kit_dir) = fresh_kit_dir();
         let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
