@@ -175,14 +175,15 @@ fn start(
             orig_head: ours,
             message: result.message.clone(),
         };
-        if let Err(e) = conflict_state::write_revert_state(layout, &state, &records) {
-            return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
-        }
         // Record the result tree so `--abort` treats the operation's clean
-        // hunks (not just conflict paths) as discardable.
+        // hunks (not just conflict paths) as discardable. It goes before the
+        // state, whose head marker is written last.
         if let Err(e) =
             conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
         {
+            return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
+        }
+        if let Err(e) = conflict_state::write_revert_state(layout, &state, &records) {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
@@ -314,6 +315,9 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(None) => return emit_err("no revert in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read revert state: {e}"), exit::GENERAL_ERROR),
     };
+    if let Err(e) = conflict_state::ensure_conflict_list(layout) {
+        return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR);
+    }
     let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),
