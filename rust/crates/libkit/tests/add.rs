@@ -713,7 +713,11 @@ fn an_add_that_changes_nothing_leaves_the_index_file_alone() {
     let settled = index_file(&f.layout);
 
     f.paths(&["a.txt"]).unwrap();
-    assert_eq!(index_file(&f.layout), settled, "an add of an unchanged file");
+    assert_eq!(
+        index_file(&f.layout),
+        settled,
+        "an add of an unchanged file"
+    );
     f.run(&Request { all: true, ..BULK }).unwrap();
     assert_eq!(index_file(&f.layout), settled, "add -A on a clean tree");
     f.run(&Request {
@@ -738,7 +742,11 @@ fn an_add_that_stages_something_writes_the_index() {
     assert_eq!(f.staged("a.txt").as_deref(), Some("changed\n"));
 
     fs::remove_file(f.root.join("a.txt")).unwrap();
-    f.run(&Request { update: true, ..BULK }).unwrap();
+    f.run(&Request {
+        update: true,
+        ..BULK
+    })
+    .unwrap();
     assert_eq!(f.staged("a.txt"), None, "a deletion is recorded");
 }
 
@@ -749,11 +757,9 @@ fn an_add_writes_an_index_it_seeded_from_head_even_when_nothing_changed() {
     // finds the seeded entries.
     let f = Fixture::new(&[], &[("a.txt", "one\n")]);
     f.paths(&["a.txt"]).unwrap();
-    let tree = kit_core::worktree::build_tree_from_index(
-        &f.store,
-        &index::read_index(&f.layout).unwrap(),
-    )
-    .unwrap();
+    let tree =
+        kit_core::worktree::build_tree_from_index(&f.store, &index::read_index(&f.layout).unwrap())
+            .unwrap();
     let commit = Object::Commit(kit_core::object::Commit::new_unannotated(
         tree,
         Vec::new(),

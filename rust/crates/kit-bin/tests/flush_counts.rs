@@ -45,7 +45,10 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
     let origin = Repo::new();
     for dir in ["a", "b", "dir/sub"] {
         for file in 0..4 {
-            origin.write(&format!("{dir}/f{file}.txt"), format!("{dir} {file}\n").as_bytes());
+            origin.write(
+                &format!("{dir}/f{file}.txt"),
+                format!("{dir} {file}\n").as_bytes(),
+            );
         }
     }
     origin.ok(&["add", "."]);
@@ -58,8 +61,17 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
 
     let consumer_xdg = tempfile::tempdir().unwrap();
     let consumer_dir = tempfile::tempdir().unwrap();
-    let out = kit_env(consumer_dir.path(), consumer_xdg.path(), &["clone", "-o", "origin", &url, "work"], &[]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = kit_env(
+        consumer_dir.path(),
+        consumer_xdg.path(),
+        &["clone", "-o", "origin", &url, "work"],
+        &[],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let work = consumer_dir.path().join("work");
 
     let logs = tempfile::tempdir().unwrap();
@@ -81,7 +93,10 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
     let head_before = (fs::read(&head).unwrap(), fs::metadata(&head).unwrap().ino());
     let pull = flushes(&work, consumer_xdg.path(), &log, &["pull", "origin"]);
     let head_after = (fs::read(&head).unwrap(), fs::metadata(&head).unwrap().ino());
-    assert_eq!(head_after, head_before, "a pull that keeps the branch leaves HEAD alone");
+    assert_eq!(
+        head_after, head_before,
+        "a pull that keeps the branch leaves HEAD alone"
+    );
 
     // add: an object and the objects directory, the index and its directory.
     // commit: an object and the objects directory, the branch ref and its

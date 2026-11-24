@@ -618,9 +618,12 @@ pub fn create(
 /// it holds. A removal is dropped from the tree, and a tree entry is not
 /// staged.
 fn index_is_the_tree(idx: &index::Index) -> bool {
-    !idx.entries
-        .iter()
-        .any(|entry| matches!(entry.status, index::EntryStatus::Removed | index::EntryStatus::Tree))
+    !idx.entries.iter().any(|entry| {
+        matches!(
+            entry.status,
+            index::EntryStatus::Removed | index::EntryStatus::Tree
+        )
+    })
 }
 
 /// Refuse a commit that records a merge that was discarded. A `reset` between

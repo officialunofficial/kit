@@ -338,7 +338,11 @@ fn an_amend_rebuilds_the_index_from_its_tree() {
 
     let pending = f.begin(true).unwrap();
     f.make("amended", false, &pending).unwrap();
-    assert_ne!(index_file(&f).1, staged.1, "an amend writes the index again");
+    assert_ne!(
+        index_file(&f).1,
+        staged.1,
+        "an amend writes the index again"
+    );
 }
 
 fn start_merge(f: &Fixture, other: Hash) -> MergeState {
