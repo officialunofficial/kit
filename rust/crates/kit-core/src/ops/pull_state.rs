@@ -92,4 +92,26 @@ mod tests {
         std::fs::write(layout.pull_head_file(), encode_ref_wire(&state.target)).unwrap();
         assert!(PullState::read(&layout).is_err());
     }
+
+    #[test]
+    fn the_record_is_unfinished_only_while_head_names_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        crate::refs::init(&layout).unwrap();
+        crate::refs::write_head_branch(&layout, "main").unwrap();
+        let target = crate::hash::hash(b"pull-target");
+        let state = PullState {
+            target,
+            before_tree: crate::hash::hash(b"pull-before-tree"),
+        };
+        assert_eq!(PullState::at_head(&layout).unwrap(), None);
+        std::fs::create_dir(layout.worktree_state_dir()).unwrap();
+        std::fs::write(layout.pull_head_file(), state.encode()).unwrap();
+        // HEAD names an unborn branch, then another commit.
+        assert_eq!(PullState::at_head(&layout).unwrap(), None);
+        crate::refs::write_ref(&layout, "main", &crate::hash::hash(b"other")).unwrap();
+        assert_eq!(PullState::at_head(&layout).unwrap(), None);
+        crate::refs::write_ref(&layout, "main", &target).unwrap();
+        assert_eq!(PullState::at_head(&layout).unwrap(), Some(state));
+    }
 }
