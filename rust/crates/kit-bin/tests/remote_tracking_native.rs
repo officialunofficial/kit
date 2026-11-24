@@ -982,21 +982,10 @@ fn selective_move_restore_recurses_into_retained_ancestors() {
     assert!(!stray_temp, "no temp dir should remain after a failed move");
 }
 
-/// Documents and pins
-/// the destination-side nesting boundary that `move_state_dir`'s
-/// `protected` set does not cover — a configured sibling nesting under
-/// the DESTINATION of a rename, rather than under `old`'s own directory
-/// prefix. Remotes `a` and `a/x` (sibling nested under `a`); `rename a
-/// a/b` succeeds first (`a` is `old`, so `a/x` is correctly protected
-/// and left in place, landing the result at `a/b` with the sibling still
-/// at `a/x`). The round trip `rename a/b a` computes `protected` from
-/// `a/b` (`old`), which has no nested siblings of its own — `a/x` nests
-/// under `a` (`new`), invisible to that computation — so the move takes
-/// the ordinary fast path and lands on the now-occupied `a/` directory
-/// (still holding `x/`), failing closed via the same restore contract
-/// rather than merging into the sibling or dragging it along. This is
-/// the documented boundary of what nesting handles (see
-/// `move_state_dir`'s doc).
+/// A configured sibling nesting under the DESTINATION of a rename. Remotes `a`
+/// and `a/x` (planted in the config); `rename a a/b` succeeds first (`a` is
+/// `old`, so `a/x` is protected and stays in place). The round trip `rename
+/// a/b a` is refused, because `a` is a path prefix of `a/x`, and moves nothing.
 #[test]
 fn rename_round_trip_into_sibling_fails_closed() {
     let r = Repo::new();
@@ -1027,44 +1016,19 @@ fn rename_round_trip_into_sibling_fails_closed() {
         "sibling a/x must survive the first rename"
     );
 
-    // Second leg (the round trip): `a/b` -> `a`. `a/x` nests under `a`
-    // (the DESTINATION), not under `a/b` (`old`), so it is invisible to
-    // `nested_sibling_names(remotes, "a/b")` and the move takes the
-    // ordinary fast path — landing on the now-occupied `a/` directory
-    // (still holding `x/`) and failing closed.
-    let out = r.ok(&["remote", "rename", "a/b", "a"]);
+    // Second leg (the round trip): `a/b` -> `a`. `a` is a path prefix of the
+    // configured `a/x`, so the rename is refused and nothing moves.
+    let out = r.run(&["remote", "rename", "a/b", "a"]);
+    assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("could not move tracking refs"),
-        "expected the fail-closed warning: {stderr}"
-    );
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "warn-only contract: exit stays 0 even though the round trip degrades: {out:?}"
-    );
-
-    // Fail-closed = nothing moved, nothing lost: a/b's refs remain
-    // resolvable at their pre-round-trip path.
+    assert!(stderr.contains("overlaps remote 'a/x'"), "{stderr}");
     assert_eq!(
         refs::read_remote_ref(&layout, "a/b", "main").unwrap(),
-        Some(tip),
-        "a/b's tracking ref must remain resolvable at a/b after the failed round trip"
+        Some(tip)
     );
-    // The sibling a/x is untouched throughout.
     assert_eq!(
         refs::read_remote_ref(&layout, "a/x", "main").unwrap(),
-        Some(tip),
-        "sibling a/x must be untouched by the failed round trip"
-    );
-    // No temp debris left behind.
-    let stray_temp = std::fs::read_dir(layout.remotes_dir())
-        .unwrap()
-        .filter_map(std::result::Result::ok)
-        .any(|e| e.file_name().to_string_lossy().starts_with(".rename.tmp."));
-    assert!(
-        !stray_temp,
-        "no temp dir should remain after the failed round trip"
+        Some(tip)
     );
 }
 
