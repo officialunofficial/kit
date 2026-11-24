@@ -16,7 +16,11 @@
 //! per line — `<unix_ts>\t<op>\t<64-hex superseded>\t<branch>`. The
 //! branch is last because ref names cannot contain tabs or spaces; `op`
 //! is a short internal token. Parsing is **strict** (fail closed) so a
-//! corrupt log makes gc abort rather than under-count roots.
+//! corrupt log makes gc abort rather than under-count roots. The one
+//! exception is a last line without its newline: a write that a crash or a
+//! full disk cut short. [`record`] syncs the line before the caller moves
+//! the ref, so a cut entry protects nothing that moved. Readers ignore it
+//! and [`record`] cuts it off before it appends.
 //!
 //! NOTE: the *producers* (recording at the amend/reset/rebase rewrite
 //! sites) live elsewhere — this module is the format, store, retention
@@ -24,7 +28,9 @@
 //!
 //! ## Concurrency
 //!
-//! [`record`] and [`expire`] are **not** internally synchronized.
+//! [`record`] takes the leaf `recovery-log.lock`, so two linked trees that
+//! append at once cannot cut each other's line off with the torn-tail repair.
+//! [`expire`] is **not** internally synchronized.
 //! [`expire`] reads-filters-rewrites the log, so an [`record`] append
 //! that interleaves between its read and its atomic replace would be
 //! clobbered — and the superseded commit would silently drop out of
@@ -36,13 +42,14 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write as _};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 
 use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::bounded_read;
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
+use crate::repo_lock;
 
 /// File name under `.kit/` for the append-only recovery log.
 pub const RECOVERY_LOG: &str = "recovery-log";
@@ -131,6 +138,8 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(layout.common_dir())?;
+    let _lock = repo_lock::acquire_default(layout.common_dir(), repo_lock::RECOVERY_LOG_LOCK)
+        .map_err(|e| RecoveryError::Io(io::Error::other(e)))?;
     let line = format!(
         "{}\t{}\t{}\t{}\n",
         entry.timestamp,
@@ -139,7 +148,12 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
         entry.branch,
     );
     let path = layout.recovery_log_file();
-    let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut f = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)?;
+    cut_unterminated_tail(&mut f)?;
     f.write_all(line.as_bytes())?;
     // fsync the data, then the directory entry (cheap — records happen
     // only on history rewrites, and durability is the whole point).
@@ -148,17 +162,53 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
     Ok(())
 }
 
-/// Read every recovery-log entry, oldest first. Absent log ⇒ empty.
+/// Cut a last line that has no newline off `file`: the torn end of an earlier
+/// append. Appending to it would glue the new line to the torn bytes. The
+/// caller holds the recovery-log lock, so no append lands between the scan and
+/// the cut.
+fn cut_unterminated_tail(file: &mut File) -> io::Result<()> {
+    let mut end = file.seek(SeekFrom::End(0))?;
+    let keep = loop {
+        if end == 0 {
+            break 0;
+        }
+        let start = end.saturating_sub(4096);
+        let mut chunk = vec![0; usize::try_from(end - start).unwrap_or(4096)];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk)?;
+        if let Some(at) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            break start + at as u64 + 1;
+        }
+        end = start;
+    };
+    // `keep` is the end of the file when it already ends in a newline.
+    file.set_len(keep)?;
+    Ok(())
+}
+
+/// Read every recovery-log entry, oldest first. Absent log ⇒ empty. A last
+/// line without its newline is a cut append and is ignored.
 ///
 /// # Errors
-/// Strict: any unparseable line or bad hash errors (fail closed for gc).
+/// Strict: any other unparseable line or bad hash errors (fail closed for
+/// gc).
 pub fn read_all(layout: &RepoLayout) -> Result<Vec<RecoveryEntry>> {
-    let raw = match bounded_read::read_capped_string(&layout.recovery_log_file(), LOG_MAX_BYTES) {
-        Ok(s) => s,
+    let raw = match bounded_read::read_capped(&layout.recovery_log_file(), LOG_MAX_BYTES) {
+        Ok(raw) => raw,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
-    raw.lines()
+    let complete = raw
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&raw[..0], |at| &raw[..=at]);
+    let text = std::str::from_utf8(complete).map_err(|_| {
+        RecoveryError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "state file is not UTF-8",
+        ))
+    })?;
+    text.lines()
         .filter(|l| !l.is_empty())
         .map(parse_line)
         .collect()
@@ -256,6 +306,10 @@ fn parse_line(line: &str) -> Result<RecoveryEntry> {
     let op = it.next().ok_or_else(|| malformed(line))?;
     let hex = it.next().ok_or_else(|| malformed(line))?;
     let branch = it.next().ok_or_else(|| malformed(line))?;
+    // A tab in the branch is two entries glued together.
+    if branch.contains('\t') {
+        return Err(malformed(line));
+    }
     let timestamp = ts.parse::<u64>().map_err(|_| malformed(line))?;
     let superseded = hash::from_hex(hex)?;
     Ok(RecoveryEntry {
@@ -398,5 +452,105 @@ mod tests {
         .unwrap();
         assert_eq!(pruned, 0);
         assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(1), h(2)]));
+    }
+
+    #[test]
+    fn a_record_after_a_torn_tail_is_not_glued_to_it() {
+        let (_d, md) = md();
+        record(&md, &entry(100, 1)).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(md.recovery_log_file())
+            .unwrap();
+        f.write_all(b"1700000000\tamend\t").unwrap();
+        drop(f);
+        record(&md, &entry(200, 2)).unwrap();
+        let roots = roots(&md).expect("a torn tail must not make the log unreadable");
+        assert!(
+            roots.contains(&h(2)),
+            "a record appended after a torn tail must be a root"
+        );
+    }
+
+    #[test]
+    fn an_entry_cut_before_its_newline_does_not_swallow_the_next_record() {
+        let (_d, md) = md();
+        let line = format!("100\tamend\t{}\tmain", hash::to_hex(&h(1)));
+        fs::write(md.recovery_log_file(), line).unwrap();
+        record(&md, &entry(200, 2)).unwrap();
+        let roots = roots(&md).unwrap();
+        assert!(
+            roots.contains(&h(2)),
+            "the record after an entry missing its newline must be a root"
+        );
+    }
+
+    #[test]
+    fn a_log_with_an_unterminated_last_line_still_reads() {
+        let (_d, md) = md();
+        record(&md, &entry(100, 1)).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(md.recovery_log_file())
+            .unwrap();
+        f.write_all(&[0; 40]).unwrap();
+        drop(f);
+        assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(1)]));
+        assert_eq!(
+            would_expire(&md, 10_000, &RetentionPolicy::default()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_record_after_a_torn_tail_keeps_the_complete_lines() {
+        let (_d, md) = md();
+        record(&md, &entry(100, 1)).unwrap();
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(md.recovery_log_file())
+            .unwrap();
+        f.write_all(&[0; 5000]).unwrap();
+        drop(f);
+        record(&md, &entry(200, 2)).unwrap();
+        assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(1), h(2)]));
+        let raw = fs::read_to_string(md.recovery_log_file()).unwrap();
+        assert!(raw.ends_with('\n') && !raw.contains('\0'));
+    }
+
+    #[test]
+    fn a_log_that_is_only_a_torn_line_is_emptied_by_the_next_record() {
+        let (_d, md) = md();
+        fs::write(md.recovery_log_file(), b"1700000000\tam").unwrap();
+        assert!(roots(&md).unwrap().is_empty());
+        record(&md, &entry(200, 2)).unwrap();
+        assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(2)]));
+    }
+
+    #[test]
+    fn records_from_parallel_writers_are_all_kept() {
+        let (_d, md) = md();
+        std::thread::scope(|scope| {
+            for writer in 0..8_u8 {
+                let md = &md;
+                scope.spawn(move || {
+                    for n in 0..20_u8 {
+                        let id = writer * 20 + n + 1;
+                        record(md, &entry(u64::from(id), id)).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(roots(&md).unwrap().len(), 160);
+    }
+
+    #[test]
+    fn two_entries_glued_into_one_line_fail_closed() {
+        let (_d, md) = md();
+        let a = hash::to_hex(&h(1));
+        let b = hash::to_hex(&h(2));
+        let glued = format!("100\tamend\t{a}\tmain200\tamend\t{b}\tmain\n");
+        fs::write(md.recovery_log_file(), glued).unwrap();
+        assert!(read_all(&md).is_err());
     }
 }

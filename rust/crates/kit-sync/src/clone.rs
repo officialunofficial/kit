@@ -83,6 +83,19 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
         source,
     })?;
     let layout = kit_core::layout::discover(dir)?;
+    // `ObjectStore::init` starts over in the `.kit` of a killed `init`. A
+    // clone does so only in a directory that holds nothing else, as a clone
+    // never mixes with files that were there.
+    if dir.join(kit_core::store::KIT_DIR).exists()
+        && std::fs::read_dir(dir)
+            .map_err(|source| CloneInitError::CreateDir {
+                path: dir.display().to_string(),
+                source,
+            })?
+            .any(|entry| entry.is_ok_and(|e| e.file_name() != kit_core::store::KIT_DIR))
+    {
+        return Err(CloneInitError::AlreadyInitialized);
+    }
     match ObjectStore::init(&layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => return Err(CloneInitError::AlreadyInitialized),
