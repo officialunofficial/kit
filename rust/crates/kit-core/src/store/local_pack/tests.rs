@@ -889,6 +889,39 @@ fn rebuild_an_index_from_a_verified_pack() {
 }
 
 #[test]
+fn the_sweep_plan_counts_whole_pairs_and_plans_only_a_lone_index() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3], vec![4, 5, 6]]);
+    let store = ObjectStore::open(&layout).unwrap();
+    let (sweep, count) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
+    assert_eq!(count, 2);
+    assert!(sweep.is_empty());
+
+    // Losing the pack leaves a lone index, which the sweep plans to remove.
+    fs::remove_file(&pairs[1].pack).unwrap();
+    let (sweep, count) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
+    assert_eq!(count, 1);
+    assert!(!sweep.is_empty());
+}
+
+#[test]
+fn repair_leaves_healthy_pairs_alone_and_takes_no_lock_for_them() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3], vec![4, 5, 6]]);
+    let store = ObjectStore::open(&layout).unwrap();
+    let before: Vec<_> = pairs
+        .iter()
+        .map(|pair| fs::read(&pair.index).unwrap())
+        .collect();
+    // A busy fetch holds the shared guard: repair would fail if it tried to
+    // rebuild anything, so it must repair nothing here.
+    let guard = store.prune_guard().unwrap();
+    assert_eq!(store.check_local_packs(true).unwrap(), 0);
+    drop(guard);
+    for (pair, idx) in pairs.iter().zip(&before) {
+        assert_eq!(&fs::read(&pair.index).unwrap(), idx);
+    }
+}
+
+#[test]
 fn a_lone_pack_that_fails_verification_is_not_given_an_index() {
     let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
     fs::remove_file(&pairs[0].index).unwrap();

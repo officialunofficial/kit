@@ -280,14 +280,14 @@ impl ObjectStore {
             for (key, present) in members {
                 match present {
                     3 => pairs += 1,
-                    // A pack that lost its index is invisible, so nothing here
-                    // knows what it holds. Only a mark that found every live
-                    // object without it may remove it: see `plan_lone_packs`.
-                    1 => {}
-                    _ => {
+                    2 => {
                         let pair = super::Pair::new(&dir, key);
                         plan.add_old_leftover(pair.index, now, grace);
                     }
+                    // A pack that lost its index is invisible, so nothing here
+                    // knows what it holds. Only a mark that found every live
+                    // object without it may remove it: see `plan_lone_packs`.
+                    _ => {}
                 }
             }
         }

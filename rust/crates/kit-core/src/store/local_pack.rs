@@ -988,8 +988,9 @@ impl ObjectStore {
         let mut first_error = None;
         if repair {
             // A pack that lost its index is invisible. Verify it whole, then
-            // give it back its index. This goes first, so that one damaged
-            // pair does not leave the others without theirs.
+            // give it back its index. This goes first, so that a damaged live
+            // pair does not leave a lone pack without its index; a failed lone
+            // pack does not stop the other lone packs either.
             for pair in list_pairs(&dir)? {
                 if lacks_index(&pair)? {
                     match self.rebuild_index(&dir, &pair, true) {
