@@ -1,6 +1,6 @@
 {
   "last_commonware_release": null,
-  "last_findings": "2026-11-23 (Mon): main workflows green; Dependabot PRs already merged (287, 288), none open. PRs 262 and 220 had stale bases, so I called update_pull_request_branch on both to rerun CI; 262 earlier failed msrv only on a protoc download 500 (flake). 242 and 233 fail kit-ci-pr (opaque); 233 also mutants and semver; 195 semver only; 152 mutants only; 93 old draft. Audit, outdated and Commonware steps not run this session. Next run: check 262 and 220 results and merge if green.",
+  "last_findings": "2026-11-24 (Tue): main green (new runs in progress). 262 and 220 failed only the fmt job (dependency-version check vs Cargo.lock) on a stale base; called update_pull_request_branch on both. 233, 195 and 152 unchanged (semver/mutants/opaque kit-ci-pr). Drafts 296-302 are a person's, skipped. Next run: check 262 and 220 and merge if green.",
   "lessons": [
     "The state branch did not exist on first run; create it from main.",
     "Force-push to a PR branch is denied in this environment; use update_pull_request_branch, or open a replacement PR from a new branch.",
@@ -17,6 +17,7 @@
     "kit-ci-pr (Cloud Build) logs are not readable through the GitHub tools; compare its conclusion on a recently merged PR to tell a repo-wide failure from a PR-specific one before spending effort.",
     "list_workflow_runs with a branch filter returns every workflow in one page; read the top 20 runs by workflow name instead of paging.",
     "gh pr view fails with a GraphQL 403 here; use gh api repos/OWNER/REPO/pulls/N and commits/SHA/check-runs for mergeable state and failed checks.",
-    "An open PR with a stale base shows mergeable unknown and old failures; call update_pull_request_branch first and judge the rerun, since CI takes over 10 minutes and cannot be polled in-session."
+    "An open PR with a stale base shows mergeable unknown and old failures; call update_pull_request_branch first and judge the rerun, since CI takes over 10 minutes and cannot be polled in-session.",
+    "The fmt job also runs check-dependency-versions.py; a stale PR base fails it with Cargo.lock mismatches, and cargo fmt shows no diff. Update the branch, do not reformat."
   ]
 }
