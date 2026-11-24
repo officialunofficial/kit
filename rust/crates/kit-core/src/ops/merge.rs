@@ -564,7 +564,7 @@ fn recurse_subtree_merge<S: ObjectSource + ObjectSink + ?Sized>(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
     base_entries: &[TreeEntry],

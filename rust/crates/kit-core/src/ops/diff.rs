@@ -16,9 +16,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{
-    MAX_TREE_DEPTH, MAX_TREE_LEAVES, ObjectSource, ObjectStore, StoreError, WalkBudget,
-};
+use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError, WalkBudget};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
