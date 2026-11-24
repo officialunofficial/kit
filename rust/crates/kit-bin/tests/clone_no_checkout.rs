@@ -204,7 +204,7 @@ fn clone_of_a_tree_bomb_fails_fast_and_leaves_no_worktree() {
     );
     assert!(!out.status.success());
     assert!(
-        stderr_str(&out).contains("expands to more than"),
+        stderr_str(&out).contains("expands to more files"),
         "{}",
         stderr_str(&out)
     );

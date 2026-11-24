@@ -21,7 +21,7 @@ use super::{MAX_TREE_DEPTH, ObjectSource, StoreError, StoreResult};
 /// entry count [`crate::index::MAX_INDEX_BYTES`] is sized for.
 pub const MAX_TREE_LEAVES: u64 = 2_000_000;
 
-/// Bytes of an index file before its entries (SPEC-INDEX §5).
+/// Bytes of an index file besides its entries: header and checksum (SPEC-INDEX §5).
 const INDEX_HEADER_BYTES: u64 = 41;
 /// Bytes of an index entry besides its path (SPEC-INDEX §5).
 const INDEX_ENTRY_FIXED_BYTES: u64 = 67;
@@ -235,9 +235,9 @@ mod tests {
         let idx = crate::index::from_tree(&store, root).unwrap();
         assert_eq!(size.leaves, 1);
         assert_eq!(
-            INDEX_HEADER_BYTES + size.index_bytes + 32,
+            INDEX_HEADER_BYTES + size.index_bytes,
             idx.serialize().len() as u64,
-            "header + entries + checksum"
+            "header and checksum + entries"
         );
         assert!(check_within(&store, root, 1, INDEX_ENTRY_FIXED_BYTES + 9).is_ok());
         assert!(check_within(&store, root, 1, INDEX_ENTRY_FIXED_BYTES + 8).is_err());
