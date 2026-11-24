@@ -705,10 +705,16 @@ struct Prepared {
 impl Prepared {
     fn upload(&self, tx: &PushContext<'_>) -> Result<(), Failure> {
         let key = PackKey::new(self.id);
-        // Skipped only when the remote holds the pack at its own length, as
-        // for a data pack; any other answer, an error and an unknown length
-        // included, uploads over it.
-        let whole = tx.pack_len(&key, ATTESTMAP_REF).ok().flatten() == Some(self.pack.len());
+        // One existence check, as before. A pack that is there and whose
+        // length the remote reports is skipped only at its own length, as for
+        // a data pack; a remote that reports none (ssh, connect) keeps the
+        // name-only skip and is asked nothing more.
+        let whole = tx.pack_exists(&key, ATTESTMAP_REF)?
+            && match tx.pack_len(&key, ATTESTMAP_REF) {
+                Ok(Some(len)) => len == self.pack.len(),
+                Ok(None) => true,
+                Err(_) => false,
+            };
         if !whole {
             tx.upload_pack(self, &key, ATTESTMAP_REF)?;
         }
@@ -759,12 +765,25 @@ mod tests {
                 .unwrap()
         );
     }
-    /// A source over a memory remote that counts the packs it is asked to
-    /// upload and can report no pack length, as an ssh or connect remote does.
+    /// A source over a memory remote that counts what a push asks of it and
+    /// can report no pack length, as an ssh or connect remote does.
     struct Counting<'a> {
         inner: crate::TransportSource<'a>,
         uploads: std::cell::Cell<usize>,
+        exists: std::cell::Cell<usize>,
+        lengths: std::cell::Cell<usize>,
         knows_length: bool,
+    }
+    impl<'a> Counting<'a> {
+        fn new(transport: &'a kit_transport_memory::MemoryTransport, knows_length: bool) -> Self {
+            Self {
+                inner: crate::TransportSource::new(transport),
+                uploads: std::cell::Cell::new(0),
+                exists: std::cell::Cell::new(0),
+                lengths: std::cell::Cell::new(0),
+                knows_length,
+            }
+        }
     }
     impl RemoteSource for Counting<'_> {
         fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
@@ -787,7 +806,12 @@ mod tests {
         ) -> Result<(), SourceError> {
             self.inner.download_pack(key, hint, sink)
         }
+        fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+            self.exists.set(self.exists.get() + 1);
+            self.inner.pack_exists(key, hint)
+        }
         fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+            self.lengths.set(self.lengths.get() + 1);
             if self.knows_length {
                 self.inner.pack_len(key, hint)
             } else {
@@ -819,25 +843,22 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_attestation_pack_is_skipped_only_at_its_own_length() {
+    fn a_stored_attestation_pack_is_skipped_only_at_its_own_length_where_the_length_is_known() {
         use kit_core::protocol::Transport as _;
         let temp = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(temp.path());
         let store = ObjectStore::init(&layout).unwrap();
         let transport = kit_transport_memory::MemoryTransport::new();
-        let source = Counting {
-            inner: crate::TransportSource::new(&transport),
-            uploads: std::cell::Cell::new(0),
-            knows_length: true,
-        };
+        let source = Counting::new(&transport, true);
         let pack = prepared(&store, &source);
         let context = PushContext::new(&source, &crate::NoopObserver, &store);
         let key = PackKey::new(pack.id);
         let stored = || transport.pack_len(&key, None).unwrap();
 
-        // Not stored: uploaded.
+        // Not stored: one existence check, no length check, uploaded.
         pack.upload(&context).unwrap();
         assert_eq!(source.uploads.get(), 1);
+        assert_eq!((source.exists.get(), source.lengths.get()), (1, 0));
         assert_eq!(stored(), Some(pack.pack.len()));
         // Whole: skipped.
         pack.upload(&context).unwrap();
@@ -849,24 +870,30 @@ mod tests {
         pack.upload(&context).unwrap();
         assert_eq!(source.uploads.get(), 2);
         assert_eq!(stored(), Some(pack.pack.len()));
+        // Longer than the local pack: uploaded again.
+        let long = vec![0u8; usize::try_from(pack.pack.len()).unwrap() + 1];
+        transport
+            .upload_pack(&kit_core::protocol::SliceBody(&long), &key, None)
+            .unwrap();
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 3);
+        assert_eq!(stored(), Some(pack.pack.len()));
     }
 
     #[test]
-    fn an_attestation_pack_on_a_remote_that_cannot_give_the_length_is_uploaded() {
+    fn a_stored_attestation_pack_on_a_remote_with_no_length_keeps_the_name_only_skip() {
         let temp = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(temp.path());
         let store = ObjectStore::init(&layout).unwrap();
         let transport = kit_transport_memory::MemoryTransport::new();
-        let source = Counting {
-            inner: crate::TransportSource::new(&transport),
-            uploads: std::cell::Cell::new(0),
-            knows_length: false,
-        };
+        let source = Counting::new(&transport, false);
         let pack = prepared(&store, &source);
         let context = PushContext::new(&source, &crate::NoopObserver, &store);
+        // Not stored: uploaded; stored: skipped, as before.
         pack.upload(&context).unwrap();
         pack.upload(&context).unwrap();
-        assert_eq!(source.uploads.get(), 2);
+        assert_eq!(source.uploads.get(), 1);
+        assert_eq!(source.exists.get(), 2);
     }
 
     #[test]

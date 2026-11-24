@@ -13,7 +13,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- A push now skips uploading an attestation pack only when the remote holds it at the pack's own length, so a pack left truncated or damaged on a file or S3 remote is repaired by the next push; ssh and connect remotes upload it, as for data packs.
+- A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
 - `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.
 
