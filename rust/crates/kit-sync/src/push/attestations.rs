@@ -731,7 +731,7 @@ impl PackBody for Prepared {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::RemoteSource as _;
+    use crate::RemoteSource;
     #[test]
     fn another_push_sweeping_spools_preserves_prepared_attestation_packs() {
         let temp = tempfile::tempdir().unwrap();
