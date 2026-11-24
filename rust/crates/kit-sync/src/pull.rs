@@ -9,6 +9,7 @@ use kit_core::object::Object;
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::is_ancestor_strict;
 use kit_core::ops::pull_state::PullState;
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
@@ -454,14 +455,16 @@ fn ensure_pull_restore_safe(
 /// The refusal for a path the unfinished pull would overwrite.
 fn pull_recovery_changes_message(path: &str) -> String {
     format!(
-        "pull recovery would overwrite local changes at '{path}'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+        "pull recovery would overwrite local changes at '{}'; copy it elsewhere or run `kit restore -f <path>`, then pull again",
+        escape_terminal_text(path, false)
     )
 }
 
 /// The refusal for an untracked path the unfinished pull would remove.
 fn pull_recovery_untracked_message(path: &str) -> String {
     format!(
-        "pull recovery would remove untracked path '{path}'; move or remove it, then pull again"
+        "pull recovery would remove untracked path '{}'; move or remove it, then pull again",
+        escape_terminal_text(path, false)
     )
 }
 
@@ -504,6 +507,19 @@ mod recovery_message_tests {
             super::pull_recovery_changes_message("a b"),
             "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
         );
+    }
+
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::pull_recovery_changes_message("a\u{1b}b"),
+            super::pull_recovery_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
+        }
     }
 }
 
