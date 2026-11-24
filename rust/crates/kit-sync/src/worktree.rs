@@ -1245,7 +1245,13 @@ mod nonclean_walk_tests {
     fn nonclean_walk_does_not_parse_untracked_directory_ignore_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("untracked/.gitignore")).unwrap();
-        let (_, paths) = super::restore_paths(dir.path(), &["new".to_owned()], false).unwrap();
+        let (_, paths) = super::restore_paths(
+            dir.path(),
+            &["new".to_owned()],
+            false,
+            &kit_core::worktree::DirListings::default(),
+        )
+        .unwrap();
         assert!(paths.contains(&"untracked/.gitignore".to_owned()));
     }
 }
