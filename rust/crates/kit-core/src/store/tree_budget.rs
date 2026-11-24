@@ -73,6 +73,7 @@ pub(crate) struct WalkBudget {
     used: u64,
     limit: u64,
     bytes: u64,
+    byte_limit: u64,
     seen: HashMap<Hash, Size>,
 }
 
@@ -81,17 +82,28 @@ impl WalkBudget {
         Self::with_limit(MAX_TREE_LEAVES)
     }
 
+    /// A budget for the entry pairs of a walk. A walk through every file of
+    /// a tree at the cap also compares each directory, so twice the files and
+    /// twice an index file's bytes are allowed; a bomb's expansion still ends
+    /// at that constant.
+    pub(crate) fn for_pairs() -> Self {
+        let mut budget = Self::with_limit(2 * MAX_TREE_LEAVES);
+        budget.byte_limit *= 2;
+        budget
+    }
+
     pub(crate) fn with_limit(limit: u64) -> Self {
         Self {
             used: 0,
             limit,
             bytes: 0,
+            byte_limit: MAX_INDEX_BYTES - INDEX_HEADER_BYTES,
             seen: HashMap::new(),
         }
     }
 
     fn check(&self) -> StoreResult<()> {
-        if self.used > self.limit || self.bytes > MAX_INDEX_BYTES - INDEX_HEADER_BYTES {
+        if self.used > self.limit || self.bytes > self.byte_limit {
             return Err(StoreError::TreeTooLarge);
         }
         Ok(())
@@ -114,7 +126,7 @@ impl WalkBudget {
     ) -> StoreResult<()> {
         let caps = (
             self.limit.saturating_sub(self.used),
-            (MAX_INDEX_BYTES - INDEX_HEADER_BYTES).saturating_sub(self.bytes),
+            self.byte_limit.saturating_sub(self.bytes),
         );
         let size = measure(store, tree, caps, &mut self.seen, 0)?;
         self.used += size.leaves;
