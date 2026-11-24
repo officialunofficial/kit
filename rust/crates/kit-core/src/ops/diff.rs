@@ -288,10 +288,10 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     let mut j = 0usize;
 
     while i < old_entries.len() && j < new_entries.len() {
-        let name = o.name.len().max(n.name.len());
-        budget.pairs.visit(prefix.len() + 1 + name)?;
         let o = &old_entries[i];
         let n = &new_entries[j];
+        let name = o.name.len().max(n.name.len());
+        budget.pairs.visit(prefix.len() + 1 + name)?;
         match o.name.as_slice().cmp(n.name.as_slice()) {
             std::cmp::Ordering::Less => {
                 add_removed_entries(store, o, prefix, out, depth, budget)?;
