@@ -668,15 +668,11 @@ impl ObjectStore {
             .expect("object path always has a 2-hex parent");
         // A shard that this call creates is an entry of `objects/`, which the
         // shard flush in `write_atomic` does not cover.
-        let new_shard = match fs::create_dir(shard_dir) {
-            Ok(()) => true,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir_all(shard_dir)?;
-                true
-            }
-            Err(e) => return Err(e.into()),
-        };
+        let new_shard = fs::create_dir(shard_dir).is_ok();
+        if !new_shard {
+            // The shard exists, or `create_dir_all` names why it cannot.
+            fs::create_dir_all(shard_dir)?;
+        }
         write_atomic(&final_path, bytes, &**self.syncer())?;
         if new_shard {
             self.syncer().dir_sync(&self.objects_root)?;
@@ -1585,16 +1581,13 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
 /// marker, because the marker is written last, and no object under
 /// `objects/`.
 fn is_unfinished_init(layout: &RepoLayout) -> io::Result<bool> {
-    match fs::symlink_metadata(layout.format_file()) {
-        Ok(_) => return Ok(false),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
+    if layout.format_file().try_exists()? {
+        return Ok(false);
     }
-    match fs::read_dir(layout.objects_dir()) {
-        Ok(mut entries) => Ok(entries.next().is_none()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(e),
+    if !layout.objects_dir().try_exists()? {
+        return Ok(true);
     }
+    Ok(fs::read_dir(layout.objects_dir())?.next().is_none())
 }
 
 /// Atomically write `bytes` to `final_path` with per-object durability
@@ -1844,13 +1837,21 @@ mod tests {
                 .count()
         };
 
-        let first = store.write(b"first object").unwrap();
-        assert_eq!(synced(&rec), 1, "a new shard is an entry of objects/");
+        // Each object that opens a new shard flushes `objects/` once. One that
+        // lands in a shard that already exists does not.
+        let mut shards = std::collections::BTreeSet::new();
+        let mut repeated = false;
+        for n in 0..300_u32 {
+            let id = store.write(format!("object {n}").as_bytes()).unwrap();
+            let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+            repeated |= !shards.insert(shard);
+            assert_eq!(synced(&rec), shards.len(), "after object {n}");
+        }
+        assert!(repeated, "300 objects must reuse a shard of 256");
         // The same bytes again hit the dedup path and create no shard.
-        store.write(b"first object").unwrap();
-        assert_eq!(synced(&rec), 1);
-        let shard = store.path_for(&first).parent().unwrap().to_path_buf();
-        assert!(shard.is_dir());
+        let before = synced(&rec);
+        store.write(b"object 0").unwrap();
+        assert_eq!(synced(&rec), before);
     }
 
     #[test]
