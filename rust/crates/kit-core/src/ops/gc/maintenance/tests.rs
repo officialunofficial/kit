@@ -595,6 +595,25 @@ fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
     assert!(!old.exists());
 }
 
+/// A stamp that cannot be read must cost one more attempt, not a week of
+/// waiting: a torn stamp can only cause a new attempt.
+#[test]
+fn an_unreadable_stamp_does_not_postpone_the_next_collection() {
+    let repo = Repo::new();
+    for n in 0..MIN_PAIRS {
+        repo.pack(&[format!("young {n}").as_bytes()]);
+    }
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    fs::write(&stamp, [7; 5]).unwrap();
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_ne!(
+        repo.run().collection,
+        Collection::NotDue,
+        "a store at the floor is due again after a torn stamp is replaced"
+    );
+}
+
 /// A step that has never run is due as soon as the store holds the floor, so
 /// a repository that never fetches does not wait a week for its first step.
 #[test]

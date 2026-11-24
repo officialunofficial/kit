@@ -561,6 +561,11 @@ impl<'s> WriteBatch<'s> {
                 syncer.full(tmp.as_file(), tmp.path())?;
                 syncer.rename(tmp.into_temp_path(), &final_path)?;
                 syncer.dir_sync(&shard_dir)?;
+                // A shard made by this batch is an entry of `objects/`, as in
+                // `ObjectStore::write`.
+                if need_mkdir {
+                    syncer.dir_sync(self.store.objects_root())?;
+                }
                 let mut st = self.inner.lock().expect("batch state mutex poisoned");
                 st.created_shards.insert(shard_dir);
             }
