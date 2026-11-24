@@ -390,13 +390,10 @@ fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
     conflict_state::write_merge_state(&f.layout, &state, &conflicts).unwrap();
     fs::remove_file(f.layout.conflicts_file()).unwrap();
     f.stage("b.txt", "merged\n");
+    let before = f.head();
 
     let pending = f.begin(false).unwrap();
     let error = f.make("Merge branch 'other'", false, &pending).unwrap_err();
     assert!(matches!(error, Error::MergeStateIncomplete), "{error:?}");
-    assert_eq!(
-        f.head(),
-        Some(pending.head.unwrap()),
-        "the branch is untouched"
-    );
+    assert_eq!(f.head(), before, "the branch is untouched");
 }

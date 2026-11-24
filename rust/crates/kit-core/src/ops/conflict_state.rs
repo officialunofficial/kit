@@ -813,7 +813,10 @@ mod tests {
         };
         write_merge_state(&kit, &state, &[]).unwrap();
         assert_eq!(read_merge_state(&kit).unwrap(), Some(state));
-        assert!(kit.conflicts_file().is_file(), "a clean merge has an empty list");
+        assert!(
+            kit.conflicts_file().is_file(),
+            "a clean merge has an empty list"
+        );
         let leftovers: Vec<_> = fs::read_dir(kit.worktree_state_dir())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

@@ -92,7 +92,11 @@ fn a_hard_reset_ends_a_merge_so_the_next_commit_has_one_parent() {
 
     write(root, "u.txt", "unrelated\n");
     commit_all(root, "unrelated");
-    assert_eq!(parents_of_head(root), 1, "the discarded merge is not recorded");
+    assert_eq!(
+        parents_of_head(root),
+        1,
+        "the discarded merge is not recorded"
+    );
     assert!(!root.join("t.txt").exists());
 }
 
@@ -125,7 +129,11 @@ fn a_merge_is_aborted_when_its_result_tree_is_missing() {
     let root = td.path();
     assert!(!run_in(root, &["merge", "side"]).status.success());
     // A tree that the store does not hold.
-    fs::write(root.join(".kit/KIT_OP_RESULT"), format!("{}\n", "ab".repeat(32))).unwrap();
+    fs::write(
+        root.join(".kit/KIT_OP_RESULT"),
+        format!("{}\n", "ab".repeat(32)),
+    )
+    .unwrap();
 
     let out = run_in(root, &["merge", "--abort"]);
     assert!(out.status.success(), "{out:?}");
