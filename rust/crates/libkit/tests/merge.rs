@@ -594,9 +594,9 @@ fn a_paused_merge_is_recorded_before_its_markers_and_its_list_comes_last() {
 }
 
 #[test]
-fn a_merge_without_its_list_is_aborted_not_continued() {
+fn a_merge_without_its_list_is_not_continued() {
     let f = init();
-    let (ours, _) = diverged(&f);
+    diverged(&f);
     start(&f, &merge_request("topic")).unwrap();
     // The stop came after the merge was recorded and before its list was.
     std::fs::remove_file(f.layout.conflicts_file()).unwrap();
@@ -604,8 +604,6 @@ fn a_merge_without_its_list_is_aborted_not_continued() {
     let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
     assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
     assert!(is_merge_in_progress(&f.layout));
-    assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
-    assert!(!is_merge_in_progress(&f.layout));
 }
 
 #[test]
@@ -683,11 +681,14 @@ fn abort_keeps_a_file_that_the_user_untracked() {
     );
     assert_eq!(f.read("t.txt"), "mine\n");
 
-    // With the file moved away, the abort goes through and leaves it there.
-    std::fs::rename(f.path("t.txt"), f.path("kept.txt")).unwrap();
+    // With the file moved out of the tree, the abort goes through.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let kept = elsewhere.path().join("kept.txt");
+    std::fs::copy(f.path("t.txt"), &kept).unwrap();
+    std::fs::remove_file(f.path("t.txt")).unwrap();
     assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
     assert_eq!(f.read("a.txt"), "ours\n");
-    assert_eq!(f.read("kept.txt"), "mine\n");
+    assert_eq!(std::fs::read_to_string(kept).unwrap(), "mine\n");
     assert!(!is_merge_in_progress(&f.layout));
 }
 

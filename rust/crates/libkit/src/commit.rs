@@ -495,26 +495,7 @@ pub fn create(
         add::stage_tracked(layout, store).map_err(Error::StageTracked)?;
     }
 
-    // A merge needs every conflict resolved and staged, as `merge --continue`
-    // does. A clean merge has no record, so both checks pass. A cherry-pick
-    // and a revert need the same before a commit goes over their markers.
-    let picking = pending.merge.is_none()
-        && (conflict_state::is_cherry_pick_in_progress(layout)
-            || conflict_state::is_revert_in_progress(layout));
-    if pending.merge.is_some() || picking {
-        // An operation always has a conflict list, empty for a clean one.
-        // Without the file the state is torn, and a commit would record
-        // "ours" with the other side as a parent, or commit its markers.
-        if !layout.conflicts_file().is_file() {
-            return Err(match conflict_state::in_progress_op_name(layout) {
-                Some(op) if picking => Error::OperationStateIncomplete(op),
-                _ => Error::MergeStateIncomplete,
-            });
-        }
-        let records = conflict_state::read_conflicts(layout.worktree_state_dir())
-            .map_err(Error::ReadConflicts)?;
-        gate(&records).map_err(Error::Unresolved)?;
-    }
+    let picking = gate_operation(layout, pending, gate)?;
 
     // An absent index and an empty one are the same error. An index with only
     // removed entries is a real change, a commit of deletions with an empty
@@ -633,6 +614,37 @@ pub fn create(
         branch,
         base_tree,
     })
+}
+
+/// Check the conflicts of the operation that the commit concludes, and say
+/// whether it is a cherry-pick or a revert.
+///
+/// A merge needs every conflict resolved and staged, as `merge --continue`
+/// does. A clean merge has no record, so both checks pass. A cherry-pick and a
+/// revert need the same before a commit goes over their markers.
+fn gate_operation(
+    layout: &RepoLayout,
+    pending: &Pending,
+    gate: &dyn Fn(&[ConflictRecord]) -> Result<(), String>,
+) -> Result<bool, Error> {
+    let picking = pending.merge.is_none()
+        && (conflict_state::is_cherry_pick_in_progress(layout)
+            || conflict_state::is_revert_in_progress(layout));
+    if pending.merge.is_some() || picking {
+        // An operation always has a conflict list, empty for a clean one.
+        // Without the file the state is torn, and a commit would record
+        // "ours" with the other side as a parent, or commit its markers.
+        if !layout.conflicts_file().is_file() {
+            return Err(match conflict_state::in_progress_op_name(layout) {
+                Some(op) if picking => Error::OperationStateIncomplete(op),
+                _ => Error::MergeStateIncomplete,
+            });
+        }
+        let records = conflict_state::read_conflicts(layout.worktree_state_dir())
+            .map_err(Error::ReadConflicts)?;
+        gate(&records).map_err(Error::Unresolved)?;
+    }
+    Ok(picking)
 }
 
 /// Whether every entry of `idx` is a file or a link that the tree built from
