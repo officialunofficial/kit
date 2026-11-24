@@ -68,9 +68,9 @@ pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{
     ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
 };
-pub use tree_budget::{MAX_TREE_LEAVES, check_tree_leaves};
 #[cfg(test)]
 pub(crate) use tree_budget::check_tree_leaves_within;
+pub use tree_budget::{MAX_TREE_LEAVES, check_tree_leaves};
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.

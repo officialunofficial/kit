@@ -64,14 +64,21 @@ fn no_checkout_writes_no_files_and_no_index_and_checkout_fills_the_worktree() {
     fs::write(up.path().join("b.txt"), "b").unwrap();
     assert!(run_in(up.path(), &["add", "."]).status.success());
     assert!(run_in(up.path(), &["commit", "-m", "one"]).status.success());
-    assert!(run_in(up.path(), &["push", "origin", "main"]).status.success());
+    assert!(
+        run_in(up.path(), &["push", "origin", "main"])
+            .status
+            .success()
+    );
     let tip = read_ref(up.path(), "refs/heads/main").unwrap();
 
     let parent = tempfile::tempdir().unwrap();
     let out = run_in(parent.path(), &["clone", "--no-checkout", &url, "copy"]);
     assert!(out.status.success(), "{}", stderr_str(&out));
     let copy = parent.path().join("copy");
-    assert_eq!(read_ref(&copy, "refs/heads/main").as_deref(), Some(tip.as_str()));
+    assert_eq!(
+        read_ref(&copy, "refs/heads/main").as_deref(),
+        Some(tip.as_str())
+    );
     assert_eq!(
         fs::read_to_string(copy.join(".kit/HEAD")).unwrap().trim(),
         "ref: refs/heads/main"
@@ -94,7 +101,14 @@ fn no_checkout_conflicts_with_sparse() {
     let parent = tempfile::tempdir().unwrap();
     let out = run_in(
         parent.path(),
-        &["clone", "--no-checkout", "--sparse", "src", "kit+file:///none", "x"],
+        &[
+            "clone",
+            "--no-checkout",
+            "--sparse",
+            "src",
+            "kit+file:///none",
+            "x",
+        ],
     );
     assert!(!out.status.success());
     assert!(!parent.path().join("x").exists());
@@ -109,7 +123,9 @@ fn bomb_commit(repo: &Path, levels: usize) -> String {
         mode,
         object_hash,
     };
-    let blob = put(&Object::Blob(Blob { data: b"x\n".to_vec() }));
+    let blob = put(&Object::Blob(Blob {
+        data: b"x\n".to_vec(),
+    }));
     let mut cur = put(&Object::Tree(Tree {
         entries: vec![entry(b"f", EntryMode::Blob, blob)],
     }));
@@ -152,7 +168,10 @@ fn clone_of_a_tree_bomb_fails_fast_and_leaves_no_worktree() {
     let refs = up.path().join(".kit/refs/heads");
     fs::create_dir_all(&refs).unwrap();
     fs::write(refs.join("main"), format!("{commit}\n")).unwrap();
-    let push = run_in(up.path(), &["push", "--no-verify-signatures", "origin", "main"]);
+    let push = run_in(
+        up.path(),
+        &["push", "--no-verify-signatures", "origin", "main"],
+    );
     assert!(push.status.success(), "{}", stderr_str(&push));
 
     let parent = tempfile::tempdir().unwrap();
@@ -168,5 +187,8 @@ fn clone_of_a_tree_bomb_fails_fast_and_leaves_no_worktree() {
         stderr_str(&out)
     );
     assert!(started.elapsed() < Duration::from_secs(30));
-    assert_eq!(worktree_entries(&parent.path().join("copy")), Vec::<String>::new());
+    assert_eq!(
+        worktree_entries(&parent.path().join("copy")),
+        Vec::<String>::new()
+    );
 }

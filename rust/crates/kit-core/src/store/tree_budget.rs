@@ -94,7 +94,12 @@ mod tests {
 
     /// `levels` trees that each name the level below twice, over one file.
     fn bomb(store: &ObjectStore, levels: usize) -> Hash {
-        let blob = put(store, &Object::Blob(Blob { data: b"x".to_vec() }));
+        let blob = put(
+            store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
         let mut cur = put(
             store,
             &Object::Tree(Tree {
@@ -146,7 +151,12 @@ mod tests {
     #[test]
     fn a_wide_tree_counts_each_entry() {
         let (_dir, store) = open();
-        let blob = put(&store, &Object::Blob(Blob { data: b"x".to_vec() }));
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
         let entries = (0..1000)
             .map(|i| entry(format!("f{i:04}").as_bytes(), EntryMode::Blob, blob))
             .collect();
@@ -158,7 +168,12 @@ mod tests {
     #[test]
     fn a_blob_root_passes_for_the_walker_to_report() {
         let (_dir, store) = open();
-        let blob = put(&store, &Object::Blob(Blob { data: b"x".to_vec() }));
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
         check_tree_leaves(&store, blob).unwrap();
     }
 }

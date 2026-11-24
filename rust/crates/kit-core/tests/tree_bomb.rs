@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 
 use kit_core::index::{self, IndexError};
 use kit_core::layout::RepoLayout;
-use kit_core::ops::restore::{
-    self, RestoreError, RestoreOptions, restore_tree_to_worktree,
-};
+use kit_core::ops::restore::{self, RestoreError, RestoreOptions, restore_tree_to_worktree};
 use kit_core::{
     Blob, EntryMode, MAX_TREE_LEAVES, Object, ObjectStore, StoreError, Tree, TreeEntry, diff_trees,
     serialize,
@@ -124,7 +122,10 @@ fn a_tree_that_shares_subtrees_but_stays_under_the_cap_still_walks() {
     let root = tree_bomb(&store, 6);
 
     assert_eq!(index::from_tree(&store, root).unwrap().entries.len(), 64);
-    assert_eq!(diff_trees(&store, None, Some(root)).unwrap().entries.len(), 64);
+    assert_eq!(
+        diff_trees(&store, None, Some(root)).unwrap().entries.len(),
+        64
+    );
     let worktree = TempDir::new().unwrap();
     let report =
         restore_tree_to_worktree(&store, &root, worktree.path(), &RestoreOptions::default())
