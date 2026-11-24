@@ -324,7 +324,7 @@ pub fn materialize(
 
     for c in conflicts {
         let class = classify(store, c)?;
-        let abs = layout.worktree_root().join(&c.path);
+        let abs = writable_path(layout.worktree_root(), &c.path)?;
         match class {
             ConflictClass::TextMarkers => {
                 let ours = c
@@ -433,6 +433,25 @@ fn materialize_side(store: &ObjectStore, abs: &Path, c: &Conflict) -> Result<(),
         Some(EntryMode::Symlink) => write_symlink(store, abs, h),
         Some(EntryMode::Executable) => write_blob(store, abs, h, true),
         _ => write_blob(store, abs, h, false),
+    }
+}
+
+/// The path to write for the repo-relative `rel` under `root`: refused when
+/// an existing ancestor is a symlink or not a directory, or when a component
+/// is the repository directory under another spelling, since the write would
+/// resolve into another path.
+fn writable_path(root: &Path, rel: &str) -> Result<PathBuf, Error> {
+    let path = root.join(rel);
+    match worktree::path_for_write(root, rel) {
+        Ok(Some(abs)) => Ok(abs),
+        Ok(None) => Err(Error::WriteFile {
+            path,
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path is below a symlink or names the repository directory",
+            ),
+        }),
+        Err(source) => Err(Error::WriteFile { path, source }),
     }
 }
 
@@ -781,6 +800,8 @@ pub fn reset_paths(
                     ancestor,
                 });
             }
+            // Refuse a path that cannot be written before any is changed.
+            writable_path(root, path)?;
             continue;
         }
         if is_directory_in(&target_map, path) {
@@ -796,8 +817,8 @@ pub fn reset_paths(
     let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Worktree)?;
 
     for path in &paths {
-        let abs = root.join(path);
         if let Some(target_entry) = target_map.get(path.as_str()) {
+            let abs = writable_path(root, path)?;
             match target_entry.status {
                 EntryStatus::Symlink => write_symlink(store, &abs, target_entry.object_hash)?,
                 EntryStatus::Executable => write_blob(store, &abs, target_entry.object_hash, true)?,
@@ -814,6 +835,21 @@ pub fn reset_paths(
             idx.remove_path(path);
             continue;
         }
+        // A path below a symlink, or one that names the repository
+        // directory, is left alone.
+        let abs = match worktree::path_under_real_dirs(root, path) {
+            Ok(Some(abs)) => abs,
+            Ok(None) => {
+                idx.remove_path(path);
+                continue;
+            }
+            Err(source) => {
+                return Err(Error::Remove {
+                    path: root.join(path),
+                    source,
+                });
+            }
+        };
         // A clean hunk of the operation whose index entry is gone: the user
         // stopped tracking the file. When they also changed it, it is theirs
         // now, as in git, and stays. A file that still holds what the

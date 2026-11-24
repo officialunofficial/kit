@@ -608,31 +608,12 @@ fn remove_dropped(
         {
             continue;
         }
-        if let Err(e) = super::remove_dropped_path(&file) {
+        if let Err(e) = super::remove_dropped_path(cwd, path) {
             return Err(output_failure(&format!("restore: remove {path}: {e}")));
         }
-        prune_empty_parents(cwd, path);
+        super::prune_empty_parents(cwd, path);
     }
     Ok(())
-}
-
-/// After deleting the dropped tracked file at repo-relative `rel_path`,
-/// remove its parent directories bottom-up while they are empty.
-/// `fs::remove_dir` refuses non-empty directories, so a parent still
-/// holding untracked (or ignored) files is left untouched, and the walk
-/// stops at the first survivor. Errors are deliberately swallowed — a
-/// leftover empty directory is cosmetic, never data loss.
-fn prune_empty_parents(root: &std::path::Path, rel_path: &str) {
-    let mut dir = std::path::Path::new(rel_path).parent();
-    while let Some(d) = dir {
-        if d.as_os_str().is_empty() {
-            break;
-        }
-        if std::fs::remove_dir(root.join(d)).is_err() {
-            break;
-        }
-        dir = d.parent();
-    }
 }
 
 /// Authenticate and cache the top-level tree witness for literal prefixes.

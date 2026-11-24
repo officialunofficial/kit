@@ -1361,6 +1361,9 @@ fn check_name_collisions(entries: &[TreeEntry], dir: &Path, prefix: &str) -> Res
         .find(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "restore parent does not exist"))?;
     let probe = tempfile::tempdir_in(parent)?;
+    // A name the filesystem folds to `.kit` is the repository directory at
+    // any depth. `validate_name` folds ASCII only, so such a name decodes.
+    fs::create_dir(probe.path().join(".kit"))?;
     for entry in entries {
         if !TreeEntry::validate_name(&entry.name) {
             continue;
@@ -1369,10 +1372,18 @@ fn check_name_collisions(entries: &[TreeEntry], dir: &Path, prefix: &str) -> Res
         match fs::create_dir(probe.path().join(name)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let what = if crate::worktree::names_repository_dir(
+                    probe.path(),
+                    &probe.path().join(name),
+                ) {
+                    "the repository directory"
+                } else {
+                    "another tree entry"
+                };
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "restore path '{}' aliases another tree entry on this filesystem",
+                        "restore path '{}' aliases {what} on this filesystem",
                         name_path(prefix, name)
                     ),
                 )

@@ -419,19 +419,10 @@ fn path_blocked(root: &std::path::Path, rel: &str) -> bool {
 /// is a symlink or not a directory is left alone, and a symlink is removed,
 /// never followed.
 fn remove_snapshot_path(root: &std::path::Path, rel: &str) -> io::Result<()> {
-    let mut dir = root.to_path_buf();
-    let parts: Vec<&str> = rel.split('/').collect();
-    let Some((last, parents)) = parts.split_last() else {
+    let Some(file) = crate::worktree::path_under_real_dirs(root, rel)? else {
         return Ok(());
     };
-    for part in parents {
-        dir.push(part);
-        match std::fs::symlink_metadata(&dir) {
-            Ok(m) if m.is_dir() => {}
-            _ => return Ok(()),
-        }
-    }
-    let file = dir.join(last);
+    let dir = file.parent().unwrap_or(root).to_path_buf();
     match std::fs::symlink_metadata(&file) {
         Ok(m) if !m.is_dir() => std::fs::remove_file(&file)?,
         Ok(_) => return Ok(()),

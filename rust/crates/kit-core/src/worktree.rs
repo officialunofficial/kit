@@ -2263,6 +2263,106 @@ pub(crate) fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
     EntryMode::Blob
 }
 
+/// How a repo-relative path stands under the worktree root.
+enum PathWalk {
+    /// Every ancestor is a real directory (or the path has no ancestor).
+    Real(PathBuf),
+    /// An ancestor does not exist yet.
+    Missing(PathBuf),
+    /// An ancestor is a symlink or not a directory, or a component is the
+    /// `.kit` entry under another spelling.
+    Unsafe,
+}
+
+fn walk_path(root: &Path, rel: &str) -> io::Result<PathWalk> {
+    let mut cur = root.to_path_buf();
+    let mut missing = false;
+    let mut parts = rel.split('/').peekable();
+    while let Some(part) = parts.next() {
+        // A part that is empty, `.` or `..` would leave `root` or name it.
+        if matches!(part, "" | "." | "..") {
+            return Ok(PathWalk::Unsafe);
+        }
+        let parent = cur.clone();
+        cur.push(part);
+        // The Kelvin sign lowercases to `k`, so that spelling is refused
+        // whether or not a `.kit` exists beside it yet. Any other fold the
+        // filesystem applies shows as the same entry as the `.kit` beside it.
+        if !part.is_ascii()
+            && (part.to_lowercase() == ".kit" || names_repository_dir(&parent, &cur))
+        {
+            return Ok(PathWalk::Unsafe);
+        }
+        if missing || parts.peek().is_none() {
+            continue;
+        }
+        match fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(PathWalk::Unsafe),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing = true,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(if missing {
+        PathWalk::Missing(cur)
+    } else {
+        PathWalk::Real(cur)
+    })
+}
+
+/// The absolute path of the repo-relative `rel` under `root` for a removal,
+/// when every ancestor of it is a real directory and no component names the
+/// repository directory under another spelling. `None` when an ancestor is
+/// missing, is a symlink or is not a directory: a removal must then leave
+/// the path alone, since a restore that came first may have put a symlink in
+/// place of a tracked directory and the path would resolve through it.
+/// `None` too for a component that is the same entry as the `.kit` beside
+/// it, which a filesystem that folds Unicode (APFS: the Kelvin sign for `K`)
+/// lets a tree or an index name without the ASCII spelling that is refused.
+/// A caller that removes a worktree path calls this first.
+///
+/// # Errors
+/// An I/O error other than a missing ancestor.
+pub fn path_under_real_dirs(root: &Path, rel: &str) -> io::Result<Option<PathBuf>> {
+    Ok(match walk_path(root, rel)? {
+        PathWalk::Real(path) => Some(path),
+        PathWalk::Missing(_) | PathWalk::Unsafe => None,
+    })
+}
+
+/// The absolute path of the repo-relative `rel` under `root` for a write.
+/// As [`path_under_real_dirs`], except that an ancestor that does not exist
+/// yet is fine: the caller creates it. `None` when an existing ancestor is a
+/// symlink or not a directory, or a component names the repository directory
+/// under another spelling.
+///
+/// # Errors
+/// An I/O error other than a missing ancestor.
+pub fn path_for_write(root: &Path, rel: &str) -> io::Result<Option<PathBuf>> {
+    Ok(match walk_path(root, rel)? {
+        PathWalk::Real(path) | PathWalk::Missing(path) => Some(path),
+        PathWalk::Unsafe => None,
+    })
+}
+
+/// Whether `entry` is the same filesystem entry as the `.kit` in `parent`.
+#[cfg(unix)]
+pub(crate) fn names_repository_dir(parent: &Path, entry: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let identity = |path: &Path| {
+        fs::symlink_metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()))
+    };
+    identity(entry).is_some() && identity(entry) == identity(&parent.join(".kit"))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn names_repository_dir(_: &Path, _: &Path) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -477,3 +477,202 @@ fn reset_refuses_a_case_alias_before_changing_conflict_material() {
         before
     );
 }
+
+/// The Kelvin sign spelling of `.kit`: the same directory as `.kit` on a
+/// filesystem that folds Unicode (APFS), another name elsewhere.
+const KELVIN_KIT: &str = ".\u{212A}it";
+
+/// A commit whose root holds `keep.txt` and, when `dir_file` is set, the
+/// directory `dir` with one file in it.
+fn commit_with_dir(
+    f: &common::Fixture,
+    dir: &str,
+    dir_file: Option<(&str, &str)>,
+    parents: &[Hash],
+    time: u64,
+) -> Hash {
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::serialize;
+    let put = |object: Object| {
+        f.store
+            .write(&serialize::serialize(&object).unwrap())
+            .unwrap()
+    };
+    let blob = |text: &str| {
+        put(Object::Blob(Blob {
+            data: text.as_bytes().to_vec(),
+        }))
+    };
+    // Entries sort by name: `d` and `.` come before `keep.txt`.
+    let mut entries = Vec::new();
+    if let Some((name, text)) = dir_file {
+        let inner = put(Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: name.as_bytes().to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob(text),
+            }],
+        }));
+        entries.push(TreeEntry {
+            name: dir.as_bytes().to_vec(),
+            mode: EntryMode::Tree,
+            object_hash: inner,
+        });
+    }
+    entries.push(TreeEntry {
+        name: b"keep.txt".to_vec(),
+        mode: EntryMode::Blob,
+        object_hash: blob("keep\n"),
+    });
+    let tree = put(Object::Tree(Tree { entries }));
+    put(Object::Commit(Commit::new_unannotated(
+        tree,
+        parents.to_vec(),
+        Identity::ed25519([9; 32]),
+        [9; 32],
+        b"c".to_vec(),
+        time,
+        [0; 64],
+    )))
+}
+
+/// Pause a merge whose only conflict is `dir/HEAD`: ours deleted it and
+/// theirs changed it.
+fn pause_on_dir_file(dir: &str) -> Paused {
+    let f = init();
+    let base = commit_with_dir(&f, dir, Some(("HEAD", "base\n")), &[], 1);
+    let ours = commit_with_dir(&f, dir, None, &[base], 2);
+    let theirs = commit_with_dir(&f, dir, Some(("HEAD", "theirs\n")), &[base], 3);
+    f.checkout("main", ours);
+    let tree = |h| f.commit_object(h).tree_hash;
+    let result = merge_trees(
+        &f.store,
+        Some(tree(base)),
+        Some(tree(ours)),
+        Some(tree(theirs)),
+    )
+    .unwrap();
+    Paused {
+        ours_tree: tree(ours),
+        f,
+        result,
+    }
+}
+
+#[test]
+fn materialize_never_writes_to_the_repository_directory_under_another_spelling() {
+    let p = pause_on_dir_file(KELVIN_KIT);
+    assert_eq!(p.result.conflicts.len(), 1, "{:?}", p.result.conflicts);
+    let head = p.f.read(".kit/HEAD");
+
+    let result = conflict::materialize(
+        &p.f.layout,
+        &p.f.store,
+        p.result.tree_hash,
+        &p.result.conflicts,
+        &NoopObserver,
+    );
+
+    assert_eq!(p.f.read(".kit/HEAD"), head, "{result:?}");
+    // On a filesystem that folds the spelling the operation is refused; on
+    // one that does not, the name is an ordinary directory.
+    if std::fs::symlink_metadata(p.f.path(KELVIN_KIT)).is_ok_and(|m| m.is_dir()) {
+        assert!(result.is_err());
+    }
+}
+
+/// A repository that is at a commit whose tree holds the symlink `d -> .kit`,
+/// and a delete/modify conflict at `d/HEAD`, as a merge that kept that link
+/// would report it.
+#[cfg(unix)]
+fn paused_below_a_tracked_symlink() -> (Paused, kit_core::ops::merge::Conflict) {
+    use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+    use kit_core::serialize;
+    let f = init();
+    let put = |object: Object| {
+        f.store
+            .write(&serialize::serialize(&object).unwrap())
+            .unwrap()
+    };
+    let blob = |text: &str| {
+        put(Object::Blob(Blob {
+            data: text.as_bytes().to_vec(),
+        }))
+    };
+    let tree = put(Object::Tree(Tree {
+        entries: vec![
+            TreeEntry {
+                name: b"d".to_vec(),
+                mode: EntryMode::Symlink,
+                object_hash: blob(".kit"),
+            },
+            TreeEntry {
+                name: b"keep.txt".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob("keep\n"),
+            },
+        ],
+    }));
+    let commit = put(Object::Commit(Commit::new_unannotated(
+        tree,
+        vec![],
+        Identity::ed25519([9; 32]),
+        [9; 32],
+        b"c".to_vec(),
+        1,
+        [0; 64],
+    )));
+    f.checkout("main", commit);
+    assert!(std::fs::symlink_metadata(f.path("d")).unwrap().is_symlink());
+    let conflict = kit_core::ops::merge::Conflict {
+        path: "d/HEAD".to_owned(),
+        kind: kit_core::ops::merge::ConflictKind::DeleteModify,
+        base_hash: None,
+        ours_hash: None,
+        theirs_hash: Some(blob("theirs\n")),
+        ours_mode: None,
+        theirs_mode: Some(EntryMode::Blob),
+    };
+    let paused = Paused {
+        f,
+        ours_tree: tree,
+        result: MergeResult {
+            tree_hash: tree,
+            conflicts: vec![],
+        },
+    };
+    (paused, conflict)
+}
+
+#[cfg(unix)]
+#[test]
+fn materialize_never_writes_through_a_symlinked_directory() {
+    let (p, conflict) = paused_below_a_tracked_symlink();
+    let head = p.f.read(".kit/HEAD");
+
+    let result = conflict::materialize(
+        &p.f.layout,
+        &p.f.store,
+        p.ours_tree,
+        std::slice::from_ref(&conflict),
+        &NoopObserver,
+    );
+
+    assert_eq!(p.f.read(".kit/HEAD"), head, "{result:?}");
+    assert!(matches!(result, Err(Error::WriteFile { .. })), "{result:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn reset_paths_never_removes_through_a_symlinked_directory() {
+    let (p, conflict) = paused_below_a_tracked_symlink();
+    let head = p.f.read(".kit/HEAD");
+    let records = [ConflictRecord::from(&conflict)];
+    // The target tree holds no `d/HEAD`, so the reset removes it.
+    let target = p.ours_tree;
+
+    let result = conflict::reset_paths(&p.f.layout, &p.f.store, &records, target, None);
+
+    assert_eq!(p.f.read(".kit/HEAD"), head, "{result:?}");
+    assert!(result.is_ok(), "{result:?}");
+}
