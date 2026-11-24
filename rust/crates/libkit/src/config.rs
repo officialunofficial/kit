@@ -1041,10 +1041,10 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
 
 /// Take the lock that serialises read-modify-write of the repo config.
 ///
-/// [`write`] replaces the file atomically, so a reader never sees a torn
+/// [`write()`] replaces the file atomically, so a reader never sees a torn
 /// config, but two writers that each read the file, change it and write it
 /// back lose one change. A caller that reads the repo layer, changes it and
-/// calls [`write`] holds this lock from before the read until after the write.
+/// calls [`write()`] holds this lock from before the read until after the write.
 /// The holder takes no other lock, so it may take this one under any other.
 ///
 /// # Errors
