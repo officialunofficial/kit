@@ -31,7 +31,7 @@ pub fn check_tree_leaves<S: ObjectSource + ?Sized>(store: &S, root: Hash) -> Sto
     check_tree_leaves_within(store, root, MAX_TREE_LEAVES)
 }
 
-pub(crate) fn check_tree_leaves_within<S: ObjectSource + ?Sized>(
+fn check_tree_leaves_within<S: ObjectSource + ?Sized>(
     store: &S,
     root: Hash,
     limit: u64,
