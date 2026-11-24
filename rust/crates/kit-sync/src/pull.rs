@@ -508,6 +508,16 @@ mod recovery_message_tests {
             "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
         );
     }
+
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::pull_recovery_changes_message("a\u{1b}b"),
+            super::pull_recovery_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(text.contains("a\\u{1b}b") && !text.contains('\u{1b}'), "{text:?}");
+        }
+    }
 }
 
 #[cfg(test)]

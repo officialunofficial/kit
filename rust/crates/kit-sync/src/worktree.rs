@@ -1111,6 +1111,21 @@ mod path_walk_tests {
 }
 
 #[cfg(test)]
+mod refusal_message_tests {
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::local_changes_message("a\u{1b}b"),
+            super::staged_changes_message("a\u{1b}b"),
+            super::overwrite_untracked_message("a\u{1b}b"),
+            super::remove_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(text.contains("a\\u{1b}b") && !text.contains('\u{1b}'), "{text:?}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod nonclean_walk_tests {
     #[test]
     fn nonclean_walk_does_not_parse_untracked_directory_ignore_files() {
