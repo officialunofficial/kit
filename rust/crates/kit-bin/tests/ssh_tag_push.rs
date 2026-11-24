@@ -289,34 +289,33 @@ fn a_failed_tag_push_reports_the_tag_that_landed() {
     );
 }
 
-/// A tag push over ssh refuses a new tag that would take the remote's tag
-/// listing past one frame, before it writes anything, and exits 1.
+/// A tag push over ssh reads a remote tag listing that is past one frame, in
+/// pages, and pushes the new tag.
 #[test]
-fn a_tag_past_the_ssh_listing_bound_is_refused() {
+fn a_tag_push_reads_a_remote_tag_listing_past_one_frame() {
     let fx = Fixture::new();
     ok(&fx.push(&["origin"]), "push main");
     // Tags of 200-byte names at the head, written as the ref files a file
-    // root holds, filling the listing to just past the bound.
+    // root holds: 4,000 of them take about 1 MiB to list.
     let remote = fx.remote();
     let wire = fs::read(remote.join("refs/heads/main")).unwrap();
     let dir = remote.join("refs/tags");
     fs::create_dir_all(&dir).unwrap();
-    let count = kit_sync::push::MAX_TAG_LISTING_BYTES / (200 + 48) + 1;
-    for i in 0..count {
+    for i in 0..4000 {
         fs::write(dir.join(format!("{i:0200}")), &wire).unwrap();
     }
     ok(&fx.kit(&fx.source(), &["tag", "v1"]), "tag v1");
 
     let out = fx.push(&["origin", "v1"]);
 
-    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    let err = stderr(&out);
+    ok(&out, "push v1");
     assert!(
-        err.contains(" ! [rejected]        v1 -> v1 (the remote holds too many tags to list)"),
-        "{err}"
+        stderr(&out).contains(" * [new tag]         v1 -> v1"),
+        "{}",
+        stderr(&out)
     );
-    assert_eq!(fx.tx().read_ref("refs/tags/v1").unwrap(), None);
-    assert_eq!(fx.tx().read_ref("refs/kit/tagmap/v1").unwrap(), None);
+    assert!(fx.tx().read_ref("refs/tags/v1").unwrap().is_some());
+    assert!(fx.tx().read_ref("refs/kit/tagmap/v1").unwrap().is_some());
 }
 
 /// `kit push <remote> <tag>` pushes that tag alone, by its bare name or its

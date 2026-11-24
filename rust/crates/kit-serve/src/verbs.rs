@@ -13,7 +13,9 @@
 //! | `UpdateRef` | a CAS conflict, a delete's included | [`cas_conflict_body`] |
 //! | `UpdateRef` | the write policy refuses the session | `INVALID_REQUEST "write not permitted"` |
 //! | `UpdateRef` | any other | `INVALID_REQUEST "update ref failed"` |
-//! | `ListRefs` | any | `INTERNAL "list refs failed"` |
+//! | `ListRefs` | no `page_size`, or a `page_size` of 0 | `INVALID_REQUEST`, [`LIST_NEEDS_PAGE_SIZE`] |
+//! | `ListRefs` | a `page_token` over 512 bytes | `INVALID_REQUEST "invalid page token"` |
+//! | `ListRefs` | any other | `INTERNAL "list refs failed"` |
 //! | `ReadRepoCursor` | any | a reply with no cursor |
 //! | `DownloadPack` | any, before the header | `KEY_NOT_FOUND "pack not found"` |
 //! | `DownloadPack` | a read, after the header | `INTERNAL "pack read failed"` |
@@ -30,7 +32,7 @@ use kit_core::protocol::PackKey;
 use kit_core::refs::{RefWriteCondition, validate_ref_name};
 use kit_rpc::kit::common::v1::RefEntry;
 use kit_rpc::kit::rpc::v1::ssh::{
-    DownloadPack, DownloadPackHeader, ListRefsResponse, PackChunk, PackExistsResponse,
+    DownloadPack, DownloadPackHeader, ListRefs, ListRefsResponse, PackChunk, PackExistsResponse,
     ReadRefResponse, ReadRepoCursorResponse, UpdateRef, UploadPack, UploadPackResponse, ssh_frame,
 };
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode};
@@ -60,6 +62,23 @@ const MAX_LISTING_BYTES: usize = kit_rpc::MAX_FRAME_BYTES as usize - 1024;
 /// The most bytes that an entry adds to a listing beyond its name: the id,
 /// the tags and the lengths.
 const LISTING_ENTRY_OVERHEAD: usize = 48;
+
+/// The most refs in one `ListRefs` reply. A request for more gets this many.
+/// Even 1,000 names of the longest length fit one frame, as the check below
+/// proves, so a page never needs a byte count.
+pub const MAX_LIST_PAGE_REFS: usize = 1000;
+
+const _: () = assert!(
+    MAX_LIST_PAGE_REFS * (MAX_REF_NAME_BYTES + LISTING_ENTRY_OVERHEAD) <= MAX_LISTING_BYTES
+);
+
+/// The reply to a `ListRefs` that names no page size. A client from before
+/// listings paged sends none: it is refused, not given a first page that it
+/// would take for the whole listing and prune against.
+pub const LIST_NEEDS_PAGE_SIZE: &str = "list refs needs a page_size; upgrade the client";
+
+/// The reply to a `ListRefs` page token that no listing could have returned.
+const INVALID_PAGE_TOKEN: &str = "invalid page token";
 
 /// A request digest as a pack key.
 fn pack_key(id: Option<&[u8]>) -> Result<PackKey, VerbError> {
@@ -134,18 +153,6 @@ fn check_name(name: &str) -> Result<(), VerbError> {
     }
 }
 
-/// Whether a listing of `refs` fits one reply frame.
-fn listing_fits(refs: &[(String, Hash)]) -> bool {
-    let mut total = 0usize;
-    for (name, _) in refs {
-        total = total.saturating_add(name.len() + LISTING_ENTRY_OVERHEAD);
-        if total > MAX_LISTING_BYTES {
-            return false;
-        }
-    }
-    true
-}
-
 /// The verbs of one session: its repository and the key that the transport
 /// asserted for it.
 pub(crate) struct Verbs<'r> {
@@ -204,7 +211,7 @@ impl<'r> Verbs<'r> {
             }),
             Body::ReadRef(req) => self.read_ref(req.name.as_deref().unwrap_or_default()),
             Body::UpdateRef(req) => self.update_ref(req),
-            Body::ListRefs(req) => self.list_refs(req.prefix.as_deref().unwrap_or_default()),
+            Body::ListRefs(req) => self.list_refs(req),
             Body::ReadRepoCursor(_) => Ok(self.read_repo_cursor()),
             _ => return None,
         })
@@ -270,14 +277,27 @@ impl<'r> Verbs<'r> {
         }
     }
 
-    fn list_refs(&self, prefix: &str) -> Result<Body, VerbError> {
+    /// `ListRefs` (SPEC-TRANSPORT §4.2): one page of the listing, in name
+    /// order. The page token is the last name of the page before, so the
+    /// listing carries on across a reconnect. A name that was listed and has
+    /// since gone is as good a token as one that is still there.
+    fn list_refs(&self, req: &ListRefs) -> Result<Body, VerbError> {
         let failed = (ErrorCode::Internal, "list refs failed");
-        let listed = self.repo.list_refs(prefix).map_err(|_| failed)?;
-        if !listing_fits(&listed) {
-            return Err(failed);
+        let page_size = match req.page_size {
+            Some(size) if size > 0 => (size as usize).min(MAX_LIST_PAGE_REFS),
+            _ => return Err((ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE)),
+        };
+        let token = req.page_token.as_deref().unwrap_or_default();
+        if token.len() > MAX_REF_NAME_BYTES {
+            return Err((ErrorCode::InvalidRequest, INVALID_PAGE_TOKEN));
         }
+        let page = self
+            .repo
+            .list_refs_page(req.prefix.as_deref().unwrap_or_default(), token, page_size)
+            .map_err(|_| failed)?;
         Ok(Body::ListRefsResponse(Box::new(ListRefsResponse {
-            refs: listed
+            refs: page
+                .refs
                 .into_iter()
                 .map(|(name, id)| RefEntry {
                     name: Some(name),
@@ -285,6 +305,7 @@ impl<'r> Verbs<'r> {
                     ..Default::default()
                 })
                 .collect(),
+            next_page_token: page.next_after,
             ..Default::default()
         })))
     }
@@ -459,21 +480,5 @@ mod tests {
             cond(RefExpectation::Match),
             RefWriteCondition::Match([2; 32])
         );
-    }
-
-    #[test]
-    fn a_listing_that_overflows_a_frame_is_refused() {
-        let entry = |n: usize| ("a".repeat(n), [0u8; 32]);
-        assert!(listing_fits(&[]));
-        assert!(listing_fits(&vec![entry(100); 1000]));
-        let per_entry = 100 + LISTING_ENTRY_OVERHEAD;
-        assert!(listing_fits(&vec![
-            entry(100);
-            MAX_LISTING_BYTES / per_entry
-        ]));
-        assert!(!listing_fits(&vec![
-            entry(100);
-            MAX_LISTING_BYTES / per_entry + 1
-        ]));
     }
 }
