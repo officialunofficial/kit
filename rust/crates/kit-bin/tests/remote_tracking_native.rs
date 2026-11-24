@@ -195,6 +195,17 @@ fn remote_rename_moves_and_remove_deletes_tracking_refs() {
     );
 }
 
+/// Add a remote whose name overlaps another remote's by writing the config
+/// entry, as a hand-edited config would hold it. `kit remote add` refuses the
+/// name.
+fn plant_overlapping_remote(r: &Repo, name: &str, url: &str) {
+    let layout = RepoLayout::single(r.path());
+    let path = layout.config_file();
+    let mut config = std::fs::read_to_string(&path).unwrap_or_default();
+    config.push_str(&format!("remote.{name}.url = {url}\nremote.{name}.type = file\n"));
+    std::fs::write(&path, config).unwrap();
+}
+
 /// Plant a marker file under `.kit/git/<name>/` to stand in for
 /// bridge state (leases/maps/staging mirror) without needing a real
 /// git-bridge remote wired up.
@@ -465,6 +476,28 @@ fn failed_rename_restores_source_state() {
     assert!(!stray_temp, "no temp dir should remain after a failed move");
 }
 
+/// `kit remote add` and `kit remote rename` refuse a name that is a path prefix
+/// of another remote's name, or the reverse, and change nothing.
+#[test]
+fn remote_add_and_rename_refuse_an_overlapping_name() {
+    let r = Repo::new();
+    r.ok(&["remote", "add", "team", "kit+file:///tmp/nowhere"]);
+    r.ok(&["remote", "add", "other", "kit+file:///tmp/nowhere-o"]);
+    let before = r.ok(&["remote", "-v"]).stdout;
+
+    let out = r.run(&["remote", "add", "team/upstream", "kit+file:///tmp/nowhere-u"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("overlaps remote 'team'"), "{stderr}");
+
+    let out = r.run(&["remote", "rename", "other", "team/upstream"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("overlaps remote 'team'"), "{stderr}");
+
+    assert_eq!(r.ok(&["remote", "-v"]).stdout, before);
+}
+
 /// Plants a `.rename.tmp.<pid>.0`-shaped orphan directly under
 /// `refs/remotes/` — exactly the crash debris `rename_state_dir` can
 /// leave behind between its two renames — and confirms both native ref
@@ -523,7 +556,7 @@ fn prefix_nested_remotes_coexist() {
     r.commit_file("a.txt", b"a\n", "base");
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
+    plant_overlapping_remote(&r, "a/b", "kit+file:///tmp/nowhere-b");
 
     let out = r.ok(&["remote"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -562,7 +595,7 @@ fn remove_prefix_remote_preserves_nested_sibling() {
     refs::write_remote_ref(&layout, "a/b", "main", &tip).unwrap();
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
+    plant_overlapping_remote(&r, "a/b", "kit+file:///tmp/nowhere-b");
 
     let out = r.ok(&["remote", "remove", "a"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -614,7 +647,7 @@ fn rename_prefix_remote_preserves_nested_sibling() {
     plant_bridge_state(&layout, "a/b");
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b", "kit+file:///tmp/nowhere-b"]);
+    plant_overlapping_remote(&r, "a/b", "kit+file:///tmp/nowhere-b");
 
     let out = r.ok(&["remote", "rename", "a", "x"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -678,7 +711,7 @@ fn deeply_nested_sibling_survives() {
     refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
+    plant_overlapping_remote(&r, "a/b/c", "kit+file:///tmp/nowhere-c");
 
     r.ok(&["remote", "remove", "a"]);
 
@@ -725,7 +758,7 @@ fn rename_into_own_subtree_with_sibling_present() {
     plant_bridge_state(&layout, "a/x");
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
+    plant_overlapping_remote(&r, "a/x", "kit+file:///tmp/nowhere-x");
 
     let out = r.ok(&["remote", "rename", "a", "a/b"]);
     assert_eq!(
@@ -776,7 +809,7 @@ fn selective_move_restores_on_occupied_destination() {
     plant_bridge_state(&layout, "a/x");
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
+    plant_overlapping_remote(&r, "a/x", "kit+file:///tmp/nowhere-x");
 
     // A non-empty orphan directory already sitting at the destination —
     // no config entry, just like the bridge-state orphans
@@ -838,7 +871,7 @@ fn deeply_nested_sibling_survives_rename() {
     plant_bridge_state(&layout, "a/b/c");
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
+    plant_overlapping_remote(&r, "a/b/c", "kit+file:///tmp/nowhere-c");
 
     let out = r.ok(&["remote", "rename", "a", "x"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -904,7 +937,7 @@ fn selective_move_restore_recurses_into_retained_ancestors() {
     refs::write_remote_ref(&layout, "a/b/c", "main", &tip).unwrap();
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/b/c", "kit+file:///tmp/nowhere-c"]);
+    plant_overlapping_remote(&r, "a/b/c", "kit+file:///tmp/nowhere-c");
 
     // Occupied, non-empty destination forces the final rename (step 4)
     // to fail, driving the restore path.
@@ -974,7 +1007,7 @@ fn rename_round_trip_into_sibling_fails_closed() {
     refs::write_remote_ref(&layout, "a/x", "main", &tip).unwrap();
 
     r.ok(&["remote", "add", "a", "kit+file:///tmp/nowhere"]);
-    r.ok(&["remote", "add", "a/x", "kit+file:///tmp/nowhere-x"]);
+    plant_overlapping_remote(&r, "a/x", "kit+file:///tmp/nowhere-x");
 
     // First leg: `a` -> `a/b`. `a/x` is a sibling of `old` ("a"), so it
     // is protected and this succeeds cleanly.

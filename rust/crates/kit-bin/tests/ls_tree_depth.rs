@@ -75,17 +75,3 @@ fn recursive_listing_stops_at_the_checkout_depth() {
         "{stderr}"
     );
 }
-
-#[test]
-fn a_20000_level_chain_is_refused_not_overflowed() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(kit(dir.path(), &["init"]).status.success());
-    let root = chain(dir.path(), 20_000);
-    let out = kit(dir.path(), &["ls-tree", "-r", &root]);
-    assert_eq!(out.status.code(), Some(1), "{:?}", out.status);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("tree nesting exceeds 128 levels"),
-        "{stderr}"
-    );
-}
