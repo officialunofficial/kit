@@ -1,8 +1,8 @@
 //! The full flush of a file or directory: the call that makes its bytes or
 //! its entries durable on the device.
 //!
-//! Every full flush of the repository code goes through [`file`], so a test
-//! can count what a command flushes. With the `fault-injection` feature,
+//! The full flushes of the objects, refs, index and fetch records go through
+//! [`file`], so a test can count what the commands of the edit loop flush. With the `fault-injection` feature,
 //! `fault::flushes` counts the flushes of a thread, and a process whose
 //! environment sets `KIT_FLUSH_LOG` to a path appends one line to that file
 //! for each full flush of any thread, so a test that runs the binary counts

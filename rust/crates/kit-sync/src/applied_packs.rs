@@ -786,7 +786,9 @@ mod tests {
 
         // A durable pointer flushes the file and its directory.
         write_atomic(&dir.path().join("pointer"), b"bytes").unwrap();
-        assert_eq!(kit_core::fault::flushes(), before + 2);
+        // Windows has no directory flush, so there it is the file alone.
+        let pointer = if cfg!(unix) { 2 } else { 1 };
+        assert_eq!(kit_core::fault::flushes(), before + pointer);
     }
 
     #[test]
