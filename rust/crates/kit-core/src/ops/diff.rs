@@ -3447,8 +3447,8 @@ mod tests {
     #[test]
     fn many_names_over_one_shared_subtree_share_one_budget() {
         let (_dir, store) = fresh_store();
-        // Each name holds 2^12 leaves, which is under any one subtree's cap.
-        let shared = doubling(&store, 12, b"x");
+        // Each name holds 2^10 leaves, which is under any one subtree's cap.
+        let shared = doubling(&store, 10, b"x");
         let wide = |names: usize| {
             (0..names)
                 .map(|i| entry(format!("d{i:04}").as_bytes(), EntryMode::Tree, shared))
@@ -3469,7 +3469,7 @@ mod tests {
             )
             .map(|()| out.len())
         };
-        assert_eq!(added(10, 100_000).unwrap(), 10 * 4096);
+        assert_eq!(added(10, 100_000).unwrap(), 10 * 1024);
         assert!(matches!(added(100, 100_000), Err(StoreError::TreeTooLarge)));
     }
 
