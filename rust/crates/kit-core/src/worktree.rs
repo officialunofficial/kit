@@ -4875,6 +4875,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_symlinked_directory_is_not_entered_after_the_stat_pass() {
+        use crate::store::ObjectSource as _;
         let (_sd, store) = fresh_store();
         let snapshot = crate::store::EphemeralSink::new(&store);
         let work = TempDir::new().unwrap();
@@ -4886,7 +4887,6 @@ mod tests {
             build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
                 .unwrap();
         assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
-        use crate::store::ObjectSource as _;
         let Object::Tree(root) = snapshot.read_object(&with_index).unwrap() else {
             panic!("expected tree");
         };
