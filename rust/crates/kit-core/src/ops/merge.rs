@@ -115,7 +115,7 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
         &mut merged,
         &mut conflicts,
         0,
-        &mut WalkBudget::for_pairs(),
+        &mut WalkBudget::new(),
     )?;
 
     let tree_hash = put_tree(store, merged)?;
@@ -591,7 +591,11 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
         let Some(min_name) = min_of_three(b_name, o_name, t_name) else {
             break;
         };
-        budget.visit(prefix.len() + 1 + min_name.len())?;
+        budget.visit(if prefix.is_empty() {
+            min_name.len()
+        } else {
+            prefix.len() + 1 + min_name.len()
+        })?;
 
         let has_base = b_name.is_some_and(|n| n == min_name);
         let has_ours = o_name.is_some_and(|n| n == min_name);

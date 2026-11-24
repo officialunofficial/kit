@@ -233,6 +233,15 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     Ok(DiffResult { entries: out })
 }
 
+/// The length of the path of an entry named by `name_len` bytes under `prefix`.
+fn entry_path_len(prefix: &str, name_len: usize) -> usize {
+    if prefix.is_empty() {
+        name_len
+    } else {
+        prefix.len() + 1 + name_len
+    }
+}
+
 /// The budgets of one diff: the entry pairs compared, and the leaves of the
 /// subtrees only the old side or only the new side has. A renamed directory
 /// is removed on one side and added on the other, so each side has its own
@@ -246,7 +255,7 @@ struct DiffBudget {
 impl DiffBudget {
     fn new() -> Self {
         Self {
-            pairs: WalkBudget::for_pairs(),
+            pairs: WalkBudget::new(),
             removed: WalkBudget::new(),
             added: WalkBudget::new(),
         }
@@ -291,7 +300,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
         let o = &old_entries[i];
         let n = &new_entries[j];
         let name = o.name.len().max(n.name.len());
-        budget.pairs.visit(prefix.len() + 1 + name)?;
+        budget.pairs.visit(entry_path_len(prefix, name))?;
         match o.name.as_slice().cmp(n.name.as_slice()) {
             std::cmp::Ordering::Less => {
                 add_removed_entries(store, o, prefix, out, depth, budget)?;
@@ -387,7 +396,7 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     depth: usize,
     budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
-    let path_len = prefix.len() + 1 + entry.name.len();
+    let path_len = entry_path_len(prefix, entry.name.len());
     if entry.mode == EntryMode::Tree {
         budget
             .removed
@@ -436,7 +445,7 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     depth: usize,
     budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
-    let path_len = prefix.len() + 1 + entry.name.len();
+    let path_len = entry_path_len(prefix, entry.name.len());
     if entry.mode == EntryMode::Tree {
         budget
             .added
@@ -3518,8 +3527,8 @@ mod tests {
     #[test]
     fn a_renamed_directory_is_charged_once_on_each_side() {
         let (_dir, store) = fresh_store();
-        // 2^11 leaves removed and the same added: each is under the cap of 3000
-        // and the two together are over it.
+        // 2^11 files removed and the same added, 6143 entries each with their
+        // directories: each is under the cap of 7000, the two together are not.
         let big = doubling(&store, 11, b"x");
         let old = vec![entry(b"src", EntryMode::Tree, big)];
         let new = vec![entry(b"lib", EntryMode::Tree, big)];
@@ -3529,8 +3538,8 @@ mod tests {
             diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
                 .map(|()| out.len())
         };
-        assert_eq!(walk(3000).unwrap(), 2 * 2048);
-        assert!(matches!(walk(2000), Err(StoreError::TreeTooLarge)));
+        assert_eq!(walk(7000).unwrap(), 2 * 2048);
+        assert!(matches!(walk(5000), Err(StoreError::TreeTooLarge)));
     }
 
     #[test]
@@ -3543,11 +3552,11 @@ mod tests {
         let long = 100 * 1024;
         assert!(budget.take_subtree(&store, tree, 10).is_ok());
         assert!(matches!(
-            WalkBudget::new().take_subtree(&store, tree, long * 3),
+            WalkBudget::new().take_subtree(&store, tree, long * 6),
             Err(StoreError::TreeTooLarge)
         ));
         assert!(matches!(
-            (0..3000).try_for_each(|_| WalkBudget::visit(&mut budget, long)),
+            (0..6000).try_for_each(|_| WalkBudget::visit(&mut budget, long)),
             Err(StoreError::TreeTooLarge)
         ));
     }

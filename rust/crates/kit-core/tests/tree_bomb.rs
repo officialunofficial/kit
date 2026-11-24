@@ -131,3 +131,40 @@ fn a_tree_that_shares_subtrees_but_stays_under_the_cap_still_walks() {
             .unwrap();
     assert_eq!(report.files_written, 64);
 }
+
+#[test]
+fn a_tree_of_empty_directories_is_refused_too() {
+    // 2^40 directories and not one file: a count of files alone sees nothing.
+    let (_dir, store) = open();
+    let mut cur = put(&store, &Object::Tree(Tree { entries: vec![] }));
+    for _ in 0..40 {
+        cur = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![
+                    tree_entry(b"a", EntryMode::Tree, cur),
+                    tree_entry(b"b", EntryMode::Tree, cur),
+                ],
+            }),
+        );
+    }
+    let worktree = TempDir::new().unwrap();
+
+    let started = Instant::now();
+    let from_tree = index::from_tree(&store, cur).unwrap_err();
+    let diff = diff_trees(&store, None, Some(cur)).unwrap_err();
+    let restore =
+        restore_tree_to_worktree(&store, &cur, worktree.path(), &RestoreOptions::default())
+            .unwrap_err();
+    assert!(
+        matches!(&from_tree, IndexError::Store(e) if is_too_large(e)),
+        "{from_tree:?}"
+    );
+    assert!(is_too_large(&diff), "{diff:?}");
+    assert!(
+        matches!(&restore, RestoreError::Store(e) if is_too_large(e)),
+        "{restore:?}"
+    );
+    assert!(started.elapsed() < FAST);
+    assert_eq!(std::fs::read_dir(worktree.path()).unwrap().count(), 0);
+}
