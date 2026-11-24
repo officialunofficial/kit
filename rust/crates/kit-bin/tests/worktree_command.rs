@@ -164,6 +164,34 @@ fn branch_checked_out_elsewhere_is_refused_everywhere() {
 }
 
 #[test]
+fn a_case_only_spelling_of_a_branch_checked_out_elsewhere_is_refused() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "seed");
+    repo.ok(&["branch", "feature"]);
+    let (_host, tree, out) = wt_add(&repo, &["feature"], "wt1");
+    assert!(out.status.success());
+
+    // The main tree has `main` checked out. Another spelling of it must not
+    // put the same branch file on two trees, where the disk folds case.
+    let probe = repo.path().join("CaseProbe");
+    std::fs::write(&probe, b"").unwrap();
+    let folds_case = repo.path().join("caseprobe").exists();
+    std::fs::remove_file(&probe).unwrap();
+
+    let out = kit(&tree, repo.xdg(), &["switch", "Main"]);
+    assert!(!out.status.success(), "switch Main must not succeed");
+    if folds_case {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("already checked out at"), "{stderr}");
+    }
+    let head = kit(&tree, repo.xdg(), &["symbolic-ref", "HEAD"]);
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "refs/heads/feature"
+    );
+}
+
+#[test]
 fn add_refusals_nested_nonempty_existing_branch_no_commits() {
     let repo = Repo::new();
 
