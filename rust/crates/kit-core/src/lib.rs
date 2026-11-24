@@ -20,10 +20,9 @@
 //! no `anyhow`, no panics on unchecked input.
 
 // `deny(unsafe_code)` rather than `forbid` so a small, justified set of
-// `#[allow(unsafe_code)]` callsites can call into libc. There are three
+// `#[allow(unsafe_code)]` callsites can call into libc. There are two
 // today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
-// `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
-// on macOS/iOS, and `batch::soft_open_file_limit` uses
+// and `batch::soft_open_file_limit` uses
 // `libc::getrlimit(RLIMIT_NOFILE, ..)` on Unix. Every other module
 // remains under the same prohibition; a code-review gate (CONTRIBUTING)
 // requires SAFETY notes on any new `unsafe` block.
@@ -88,6 +87,8 @@ pub mod protocol;
 
 #[cfg(feature = "fault-injection")]
 pub mod fault;
+#[doc(hidden)]
+pub mod flush;
 
 // Append-only MMB (Merkle Mountain Belt) over the commit
 // chain for O(log n) inclusion proofs. Feature-gated so the

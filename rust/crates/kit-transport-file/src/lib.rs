@@ -270,7 +270,7 @@ fn write_temp_from(
             file.write_all(&buf[..n]).map_err(StreamError::Dest)?;
             left -= n as u64;
         }
-        file.sync_all().map_err(StreamError::Dest)
+        kit_core::flush::file(&file).map_err(StreamError::Dest)
     };
     if let Err(e) = copy() {
         drop(file);
@@ -386,7 +386,7 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
 #[cfg(unix)]
 fn sync_parent(dir: &Path) -> io::Result<()> {
     match fs::File::open(dir) {
-        Ok(d) => d.sync_all(),
+        Ok(d) => kit_core::flush::file(&d),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

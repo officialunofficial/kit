@@ -15,8 +15,9 @@
 //! process is harmless. A fetch appends one line per pack as it applies the
 //! pack ([`AppliedPacks::record_applied`]), with no fsync. At the write limit,
 //! compaction keeps the newest digests in file order and leaves room for
-//! further appends. Persist flushes the appended data. Compaction, a clear,
-//! and retries of failed appends rewrite the record atomically. A shared
+//! further appends. Persist makes no device flush: a lost line costs one
+//! download. Compaction, a clear, and retries of failed appends rewrite the
+//! record with a temporary file and a rename, with no flush. A shared
 //! repository lock protects the writable record across replacements.
 //!
 //! `<record>` is the remote *name* with any `/` percent-encoded to `%2F`
@@ -225,7 +226,7 @@ impl AppliedPacks {
     /// lost line is ignored on load and costs one download. The digest is
     /// recorded in memory even when the append fails. At the write limit,
     /// the newest digests replace the file atomically. [`Self::persist`]
-    /// flushes the appended data and retries failed appends. If a clear is
+    /// retries failed appends, and flushes nothing. If a clear is
     /// pending, it publishes the digests recorded since the clear.
     ///
     /// # Errors
@@ -292,14 +293,15 @@ impl AppliedPacks {
         file.write_all(line.as_bytes())
     }
 
-    /// Flush appended data, retry missing writes, or publish a pending clear.
-    /// A successful persist clears the dirty flag.
+    /// Retry missing writes, or publish a pending clear. Appended lines are
+    /// already in the record and need no flush. A successful persist clears
+    /// the dirty flag.
     pub fn persist(&mut self) -> Result<(), SyncError> {
         if !self.dirty {
             return Ok(());
         }
-        let _lock = self.lock()?;
         if self.clear_pending || self.hints.pending != 0 {
+            let _lock = self.lock()?;
             let bytes = if self.clear_pending {
                 Vec::new()
             } else {
@@ -313,17 +315,6 @@ impl AppliedPacks {
             )?;
             self.hints.mark_written();
             self.clear_pending = false;
-        } else {
-            match fs::OpenOptions::new().write(true).open(&self.path) {
-                Ok(file) => {
-                    file.sync_all()?;
-                    if let Some(dir) = self.path.parent() {
-                        sync_parent_dir(dir)?;
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
         }
         self.dirty = false;
         Ok(())
@@ -480,7 +471,20 @@ fn write_recent(
         body.push_str(&to_hex(digest));
         body.push('\n');
     }
-    write_atomic(path, body.as_bytes())
+    write_cache_record(path, body.as_bytes())
+}
+
+/// Write a record that only saves work, with a temporary file and a rename and
+/// no device flush. A power loss can leave the old bytes, no file, or a
+/// shorter file. Every reader of a cache record checks its content and
+/// ignores a record that does not parse, so a lost record costs the next
+/// fetch more work and nothing else. A pointer that something else orders
+/// against uses [`write_atomic`].
+pub(crate) fn write_cache_record(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let (_, mut tmp) = create_temp(final_path)?;
+    tmp.as_file_mut().write_all(bytes)?;
+    tmp.persist(final_path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// Atomic temp+fsync+rename write, matching `kit_core::atomic::write_atomic`
@@ -488,32 +492,36 @@ fn write_recent(
 /// crate-private helper — see that module's docs for why each durable
 /// subsystem owns its own copy of this primitive).
 pub(crate) fn write_atomic(final_path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = final_path
-        .parent()
-        .expect("applied_packs::write_atomic: path has parent");
-    fs::create_dir_all(parent)?;
-    let file_name = final_path
-        .file_name()
-        .expect("applied_packs::write_atomic: path has file name")
-        .to_string_lossy();
-    // `with_prefix_in` already appends a random unique suffix, so this
-    // prefix only needs to be stable and recognisable — no pid/sequence
-    // needed for uniqueness.
-    let tmp_prefix = format!(".{file_name}.tmp");
-
-    let mut tmp = NamedTempFile::with_prefix_in(tmp_prefix, parent)?;
+    let (parent, mut tmp) = create_temp(final_path)?;
     tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
+    kit_core::flush::file(tmp.as_file())?;
     tmp.persist(final_path).map_err(|e| e.error)?;
 
     sync_parent_dir(parent)?;
     Ok(())
 }
 
+/// The directory of `final_path`, created, and a temporary file in it.
+fn create_temp(final_path: &Path) -> io::Result<(&Path, NamedTempFile)> {
+    let parent = final_path
+        .parent()
+        .expect("applied_packs::create_temp: path has parent");
+    fs::create_dir_all(parent)?;
+    let file_name = final_path
+        .file_name()
+        .expect("applied_packs::create_temp: path has file name")
+        .to_string_lossy();
+    // `with_prefix_in` already appends a random unique suffix, so this
+    // prefix only needs to be stable and recognisable — no pid/sequence
+    // needed for uniqueness.
+    let tmp = NamedTempFile::with_prefix_in(format!(".{file_name}.tmp"), parent)?;
+    Ok((parent, tmp))
+}
+
 #[cfg(unix)]
 pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
     match File::open(parent) {
-        Ok(dir) => dir.sync_all(),
+        Ok(dir) => kit_core::flush::file(&dir),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
@@ -760,6 +768,27 @@ mod tests {
             leftover.is_empty(),
             "no .tmp file should survive a successful persist"
         );
+    }
+
+    #[test]
+    fn cache_records_are_written_with_no_full_flush() {
+        let (_dir, kit_dir) = fresh_kit_dir();
+        let dir = tempfile::tempdir().unwrap();
+        let before = kit_core::fault::flushes();
+        let mut applied = AppliedPacks::load(&kit_dir, "origin").unwrap();
+        applied.record_applied(&pk("pack-1")).unwrap();
+        applied.persist().unwrap();
+        write_cache_record(&dir.path().join("record"), b"bytes").unwrap();
+        let tip = h("tip");
+        crate::anchor::persist(&dir.path().join("verified"), &tip).unwrap();
+        assert_eq!(kit_core::fault::flushes(), before);
+        assert_eq!(crate::anchor::load(&dir.path().join("verified")), Some(tip));
+
+        // A durable pointer flushes the file and its directory.
+        write_atomic(&dir.path().join("pointer"), b"bytes").unwrap();
+        // Windows has no directory flush, so there it is the file alone.
+        let pointer = if cfg!(unix) { 2 } else { 1 };
+        assert_eq!(kit_core::fault::flushes(), before + pointer);
     }
 
     #[test]

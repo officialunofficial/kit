@@ -33,7 +33,7 @@
 //! `SQLite`'s macOS sync strategy:
 //!
 //! Every staged file gets a real per-file writeback before the batch's
-//! full flush — Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`,
+//! full flush — Apple `fsync(2)`, Linux `fdatasync`,
 //! Windows `FlushFileBuffers`. Each barrier is issued from a background
 //! worker pool as soon as its file is staged, so device latency overlaps
 //! the caller's chunking and hashing and runs at queue depth, not
@@ -136,30 +136,26 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 pub(crate) struct RealSyncer;
 
 impl RealSyncer {
-    /// Per-file write barrier: order this file's writeback ahead of the
-    /// batch's terminal device flush, as cheaply as the platform allows.
+    /// Per-file writeback: send this file's bytes to the drive ahead of the
+    /// batch's terminal device flush.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn file_barrier(file: &File) -> io::Result<()> {
-        use std::os::unix::io::AsRawFd;
         // Apple: `File::sync_data()`/`sync_all()` both map to
-        // `fcntl(F_FULLFSYNC)` — a full device-cache flush. F_BARRIERFSYNC
-        // is the cheaper primitive the module docs assume: it forces this
-        // file's writeback and orders it ahead of later writes WITHOUT a
-        // device flush. The single terminal `device_flush` (one
-        // F_FULLFSYNC) still makes the whole batch durable, so the per-
-        // file step stays a true barrier rather than N full flushes.
-        //
-        // SAFETY: `fcntl(2)` with `F_BARRIERFSYNC` takes only the fd and
-        // the command — it reads/writes no user memory, and the fd is
-        // valid for the borrow of `file`.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) };
-        if rc == -1 {
-            // Some filesystems reject the fcntl — fall back to the full
-            // flush rather than weaken durability.
-            return file.sync_data();
+        // `fcntl(F_FULLFSYNC)`, a full device-cache flush. `fsync(2)` is the
+        // writeout: it hands the file's bytes to the drive and does not flush
+        // the drive's cache. The single terminal `device_flush` (one
+        // F_FULLFSYNC) drains that cache and makes every earlier writeout of
+        // the batch durable, so the per-file step is a writeout and not N
+        // full flushes. A `F_BARRIERFSYNC` per file costs as much as a full
+        // flush on an Apple SSD and adds nothing here, because a full flush
+        // always follows before a ref or the index names the objects.
+        match rustix::fs::fsync(file) {
+            Ok(()) => Ok(()),
+            // Some filesystems reject it: fall back to the full flush rather
+            // than weaken durability.
+            Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => file.sync_data(),
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     /// Linux: `fdatasync`. Windows: `FlushFileBuffers` (requires the
@@ -172,9 +168,8 @@ impl RealSyncer {
 
 impl Syncer for RealSyncer {
     fn barrier(&self, file: &File, _path: &Path) -> io::Result<()> {
-        // Per-file writeback on EVERY platform — Apple: fcntl
-        // F_BARRIERFSYNC (writeback + ordering barrier, no device-cache
-        // flush); Linux: fdatasync; Windows: FlushFileBuffers. This is
+        // Per-file writeback on EVERY platform — Apple: fsync(2) (writeout,
+        // no device-cache flush); Linux: fdatasync; Windows: FlushFileBuffers. This is
         // what makes a committed batch durable on all filesystems, not
         // just metadata-journaling ones in ordered-data mode — XFS,
         // btrfs, ext4 data=writeback, and NTFS get the same guarantee.
@@ -185,7 +180,7 @@ impl Syncer for RealSyncer {
     }
 
     fn full(&self, file: &File, _path: &Path) -> io::Result<()> {
-        file.sync_all()
+        crate::flush::file(file)
     }
 
     fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
@@ -249,7 +244,7 @@ impl Syncer for RealSyncer {
         // Linux: fsync of the objects root; cheap insurance on top of
         // the per-dir fsyncs above.
         match File::open(objects_root) {
-            Ok(d) => d.sync_all(),
+            Ok(d) => crate::flush::file(&d),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }
@@ -470,7 +465,7 @@ impl<'s> WriteBatch<'s> {
         // No flush on this thread: the barrier is queued to the
         // background pool below — sequential per-file barriers
         // would re-serialise the batch on device latency
-        // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
+        // (measured ~4.6ms per full flush on Apple SSDs,
         // ~8s for a 100 MiB ingest).
         let mut guard = self.inner.lock().expect("batch state mutex poisoned");
         let st = &mut *guard;
@@ -1606,6 +1601,28 @@ mod tests {
         let store =
             ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    /// The real syncer makes the full flushes the batch is pinned to: one for
+    /// a file and one for the objects root, none for a store that is not there.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn the_real_syncer_makes_counted_full_flushes() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("f");
+        let file = File::create(&path).expect("create");
+        let before = crate::fault::flushes();
+        RealSyncer.full(&file, &path).expect("full");
+        assert_eq!(crate::fault::flushes(), before + 1);
+        #[cfg(unix)]
+        {
+            RealSyncer.device_flush(dir.path()).expect("device flush");
+            assert_eq!(crate::fault::flushes(), before + 2);
+            RealSyncer
+                .device_flush(&dir.path().join("missing"))
+                .expect("a store that is not there");
+            assert_eq!(crate::fault::flushes(), before + 2);
+        }
     }
 
     /// Store with a shared `RecordingSyncer` injected.
