@@ -200,11 +200,11 @@ fn temp_path(dest: &Path) -> io::Result<PathBuf> {
 /// Create a new, empty temp file beside `dest`, named `.kit.tmp.<pid>.<seq>`.
 /// The file is created with `create_new`, which never follows a link and
 /// never truncates: a name that is taken, by a file or a link, is skipped and
-/// the next one is tried. Every temp file this crate writes is created here.
-/// A streaming writer that publishes into the same layout (a blob store
-/// writing `packs/`) creates its temp files here too, so it can never
-/// collide with this crate's own writes. The caller removes the file when it
-/// fails to publish it.
+/// the next one is tried. A streaming writer that publishes into the same
+/// layout (a blob store writing `packs/`) creates its temp files here, so it
+/// can never collide with the pointer writes of this crate, which go through
+/// `kit_core::durable` and add a random suffix to the same prefix. The caller
+/// removes the file when it fails to publish it.
 ///
 /// # Errors
 /// `InvalidInput` if `dest` has no parent directory or no file name. Any

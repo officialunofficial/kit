@@ -741,7 +741,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         "the failed appends must be reported once; stderr:\n{stderr}"
     );
     assert_eq!(
-        stderr.matches("/.origin.tmp").count(),
+        stderr.matches("/.kit.tmp.").count(),
         0,
         "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );

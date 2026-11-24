@@ -163,7 +163,13 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            fs::metadata(dir).ok().map(|meta| meta.dev())
+            match fs::metadata(dir) {
+                Ok(meta) => Some(meta.dev()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                // A directory that cannot be inspected is not one that is gone:
+                // keep it in the flush, which then fails for it.
+                Err(_) => Some(0),
+            }
         }
         #[cfg(not(unix))]
         {
@@ -210,7 +216,7 @@ impl RealSyncer {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     // Linux does not compile this implementation.
     #[cfg_attr(false, mutants::skip)]
-    fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
+    fn dir_barrier(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         match File::open(dir) {
@@ -241,7 +247,7 @@ impl RealSyncer {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
+    fn dir_barrier(dir: &Path) -> io::Result<()> {
         // Linux: the directory fsync IS the durability mechanism (the
         // journal commit orders ordered-mode file data ahead of the
         // dirents), so the "barrier" must stay a real fsync. Windows:
@@ -282,7 +288,7 @@ impl Syncer for RealSyncer {
     }
 
     fn dir_writeout(&self, dir: &Path) -> io::Result<()> {
-        self.dir_barrier(dir)?;
+        Self::dir_barrier(dir)?;
         crate::durable::note_writeout(dir);
         Ok(())
     }

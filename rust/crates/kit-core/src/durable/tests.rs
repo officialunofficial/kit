@@ -275,6 +275,15 @@ mod counted {
     }
 
     #[test]
+    fn each_flush_appends_one_line_to_the_log() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("flushes");
+        append_flush_line(&log);
+        append_flush_line(&log);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "full\nfull\n");
+    }
+
+    #[test]
     fn the_hook_counts_the_flushes_and_writeouts_under_a_directory() {
         let (inside, outside) = (TempDir::new().unwrap(), TempDir::new().unwrap());
         let counter = fault::count_flushes(inside.path());
@@ -428,6 +437,19 @@ fn a_token_of_another_group_is_refused() {
     let staged = group.stage(&dest, b"1", Parents::Existing).unwrap();
     let foreign = other.flush().unwrap();
     assert!(group.publish(staged, &foreign).is_err());
+    assert!(!dest.exists());
+
+    // A token whose clock would cover the file is still refused: the other
+    // group has made two writes, so its token is newer than the file's.
+    let staged = group.stage(&dest, b"3", Parents::Existing).unwrap();
+    let _one = other
+        .stage(&dir.path().join("o1"), b"x", Parents::Existing)
+        .unwrap();
+    let _two = other
+        .stage(&dir.path().join("o2"), b"x", Parents::Existing)
+        .unwrap();
+    let newer = other.flush().unwrap();
+    assert!(group.publish(staged, &newer).is_err());
     assert!(!dest.exists());
 
     // A file staged by another group is refused too, whatever the token.
