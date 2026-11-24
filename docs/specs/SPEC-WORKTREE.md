@@ -76,7 +76,9 @@ a path that the pull changed: the same object id and mode as the pre-pull tree
 at a path that the target modified or removed, or no entry at a path that the
 target added. Staging other paths does not lift the refusal. An index that
 holds the target's entries, as after a finished restore or `reset --hard`, does
-not trigger it. `status` warns while it holds. The check reads the trees and
+not trigger it, until the user stages a pre-pull version of a changed path;
+then the user removes the marker, as no command but a pull clears it.
+`status` warns while it holds. The check reads the trees and
 the index and writes nothing.
 
 A fast-forward that finds no marker restores only the entries whose mode or

@@ -141,7 +141,7 @@ pub enum Error {
     ReadPullState(std::io::Error),
     /// An interrupted pull has not finished restoring the index and files.
     #[error(
-        "an interrupted pull has not finished: HEAD is at {} but the index still holds files from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or, with no remote, `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes",
+        "an interrupted pull has not finished: HEAD is at {} but the index still holds files from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or, with no remote, `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes; after that reset, remove `.kit/PULL_HEAD` to commit a deliberate undo of the pull",
         hash::to_hex(.0)
     )]
     PullUnfinished(Hash),
