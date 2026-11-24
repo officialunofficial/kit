@@ -787,9 +787,6 @@ mod tests {
         ) -> Result<(), SourceError> {
             self.inner.download_pack(key, hint, sink)
         }
-        fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
-            self.inner.pack_exists(key, hint)
-        }
         fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
             if self.knows_length {
                 self.inner.pack_len(key, hint)
