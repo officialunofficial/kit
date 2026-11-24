@@ -105,7 +105,7 @@ mod tests {
             before_tree: crate::hash::hash(b"pull-before-tree"),
         };
         assert_eq!(PullState::at_head(&layout).unwrap(), None);
-        std::fs::create_dir(layout.worktree_state_dir()).unwrap();
+        std::fs::create_dir_all(layout.worktree_state_dir()).unwrap();
         std::fs::write(layout.pull_head_file(), state.encode()).unwrap();
         // HEAD names an unborn branch, then another commit.
         assert_eq!(PullState::at_head(&layout).unwrap(), None);
