@@ -315,6 +315,9 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(None) => return emit_err("no revert in progress", exit::GENERAL_ERROR),
         Err(e) => return emit_err(&format!("read revert state: {e}"), exit::GENERAL_ERROR),
     };
+    if let Err(e) = conflict_state::ensure_conflict_list(layout) {
+        return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR);
+    }
     let records = match conflict_state::read_conflicts(layout.worktree_state_dir()) {
         Ok(r) => r,
         Err(e) => return emit_err(&format!("read conflicts: {e}"), exit::GENERAL_ERROR),

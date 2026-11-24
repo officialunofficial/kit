@@ -140,3 +140,26 @@ fn a_merge_is_aborted_when_its_result_tree_is_missing() {
     assert!(!root.join(".kit/MERGE_HEAD").exists());
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "main\n");
 }
+
+#[test]
+fn a_continue_refuses_an_operation_whose_conflict_list_is_missing() {
+    for (op, marker) in [
+        ("merge", "MERGE_HEAD"),
+        ("cherry-pick", "CHERRY_PICK_HEAD"),
+        ("revert", "REVERT_HEAD"),
+    ] {
+        let td = diverged_repo(false);
+        let root = td.path();
+        let target = if op == "revert" { "HEAD~1" } else { "side" };
+        assert!(!run_in(root, &[op, target]).status.success(), "{op}");
+        assert!(root.join(".kit").join(marker).exists(), "{op}");
+        fs::remove_file(root.join(".kit/kit-conflicts")).unwrap();
+        // The file still holds conflict markers.
+        let before = run_in(root, &["rev-parse", "HEAD"]).stdout;
+
+        let out = run_in(root, &[op, "--continue"]);
+        assert!(!out.status.success(), "{op} --continue: {out:?}");
+        assert_eq!(run_in(root, &["rev-parse", "HEAD"]).stdout, before, "{op}");
+        assert!(root.join(".kit").join(marker).exists(), "{op}");
+    }
+}

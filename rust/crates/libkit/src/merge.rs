@@ -347,6 +347,7 @@ pub fn resume(
     signing: &dyn Signing,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
+    conflict_state::ensure_conflict_list(layout).map_err(Error::ReadConflicts)?;
     if let Some(path) = conflict::first_unresolved_marker(layout.worktree_root(), &records)? {
         return Err(Error::UnresolvedMarkers(path));
     }

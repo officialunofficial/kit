@@ -530,6 +530,23 @@ pub fn clear_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     Ok(())
 }
 
+/// Refuse to go on with a merge, cherry-pick or revert whose conflict list is
+/// missing. The writers always write the list, empty for a clean operation, and
+/// they write it before the head marker. So a marker without a list is a torn
+/// state, and finishing it would take every conflict as resolved.
+///
+/// # Errors
+/// [`ConflictStateError::Io`] with kind `NotFound` when the list is missing.
+pub fn ensure_conflict_list(layout: &RepoLayout) -> ConflictStateResult<()> {
+    if layout.conflicts_file().is_file() {
+        return Ok(());
+    }
+    Err(ConflictStateError::Io(io::Error::new(
+        io::ErrorKind::NotFound,
+        "the conflict list of the operation in progress is missing (its state was not fully written); abort the operation or run `kit reset --hard` to drop it",
+    )))
+}
+
 /// Remove the state of a merge, a cherry-pick and a revert (idempotent). A
 /// hard reset does this, as git does: the operation is over, so a later
 /// commit must not record it. Each marker goes first, so a stop part way

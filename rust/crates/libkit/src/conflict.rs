@@ -518,6 +518,14 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), Error> {
     })
 }
 
+/// `op_result_tree`, when the store holds all of it, else `None`. Both steps
+/// of an abort use this one test, so they agree on whether the operation has a
+/// result tree: with none, only the conflict paths are the operation's, and
+/// the guards protect every other path.
+fn readable_result_tree(sink: &EphemeralSink<'_>, op_result_tree: Option<Hash>) -> Option<Hash> {
+    op_result_tree.filter(|tree| diff_trees(sink, None, Some(*tree)).is_ok())
+}
+
 /// Refuse an abort before it changes anything, when going back to
 /// `target_tree` would overwrite user work that is not conflict material.
 ///
@@ -563,25 +571,23 @@ pub fn ensure_abort_safe(
 
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
     let mut discardable = conflict_paths.clone();
-    // A result tree that the store cannot read is the same as no result
-    // tree: the operation can still be aborted for its conflict paths.
-    if let Some(result_tree) = op_result_tree
-        && let Ok(authored) = diff_trees(&snapshot, current_tree, Some(result_tree))
-    {
+    // A result tree that the store cannot read is the same as no result tree.
+    if let Some(result_tree) = readable_result_tree(&snapshot, op_result_tree) {
+        let authored = diff_trees(&snapshot, current_tree, Some(result_tree))
+            .map_err(check("check operation changes"))?;
         // The paths that the user changed after the operation paused.
         let mut modified: HashSet<String> = HashSet::new();
-        let mut readable = true;
         for tree in [index_tree, worktree_tree] {
-            match diff_trees(&snapshot, Some(result_tree), Some(tree)) {
-                Ok(diff) => modified.extend(diff.entries.into_iter().map(|e| e.path)),
-                Err(_) => readable = false,
+            for e in diff_trees(&snapshot, Some(result_tree), Some(tree))
+                .map_err(check("check operation changes"))?
+                .entries
+            {
+                modified.insert(e.path);
             }
         }
-        if readable {
-            for e in authored.entries {
-                if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
-                    discardable.insert(e.path);
-                }
+        for e in authored.entries {
+            if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
+                discardable.insert(e.path);
             }
         }
     }
@@ -709,12 +715,12 @@ pub fn reset_paths(
 
     let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
     // A result tree that the store cannot read is the same as no result tree.
-    if let Some(result_tree) = op_result_tree {
-        let snapshot = EphemeralSink::new(store);
-        if let Ok(authored) = diff_trees(&snapshot, Some(target_tree), Some(result_tree)) {
-            for e in authored.entries {
-                paths.insert(e.path);
-            }
+    let snapshot = EphemeralSink::new(store);
+    if let Some(result_tree) = readable_result_tree(&snapshot, op_result_tree) {
+        let authored = diff_trees(&snapshot, Some(target_tree), Some(result_tree))
+            .map_err(check("check operation changes"))?;
+        for e in authored.entries {
+            paths.insert(e.path);
         }
     }
 
