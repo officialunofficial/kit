@@ -63,6 +63,56 @@ fn check_within<S: ObjectSource + ?Sized>(
     measure(store, root, (max_leaves, max_bytes), &mut seen, 0).map(|_| ())
 }
 
+/// A budget for one walk that visits only some of a tree's entries, such as a
+/// diff or a merge, and so must not size whole trees up front. It counts the
+/// entries the walk compares and the leaves of each subtree it takes whole, and
+/// refuses past [`MAX_TREE_LEAVES`] in all. Subtrees are sized with one memo
+/// for the whole walk.
+pub(crate) struct WalkBudget {
+    used: u64,
+    limit: u64,
+    seen: HashMap<Hash, Size>,
+}
+
+impl WalkBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(MAX_TREE_LEAVES)
+    }
+
+    pub(crate) fn with_limit(limit: u64) -> Self {
+        Self {
+            used: 0,
+            limit,
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Count one compared entry.
+    pub(crate) fn visit(&mut self) -> StoreResult<()> {
+        self.used += 1;
+        if self.used > self.limit {
+            return Err(StoreError::TreeTooLarge);
+        }
+        Ok(())
+    }
+
+    /// Count the leaves of `tree`, which the walk takes whole.
+    pub(crate) fn take_subtree<S: ObjectSource + ?Sized>(
+        &mut self,
+        store: &S,
+        tree: Hash,
+    ) -> StoreResult<()> {
+        let remaining = self.limit.saturating_sub(self.used);
+        let caps = (remaining, MAX_INDEX_BYTES - INDEX_HEADER_BYTES);
+        let size = measure(store, tree, caps, &mut self.seen, 0)?;
+        self.used += size.leaves;
+        if self.used > self.limit {
+            return Err(StoreError::TreeTooLarge);
+        }
+        Ok(())
+    }
+}
+
 /// The size of `tree`, memoised by tree id. A size past a cap fails.
 fn measure<S: ObjectSource + ?Sized>(
     store: &S,

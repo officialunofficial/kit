@@ -17,7 +17,7 @@ use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
 use crate::store::{
-    MAX_TREE_DEPTH, MAX_TREE_LEAVES, ObjectSource, ObjectStore, StoreError, check_tree_leaves,
+    MAX_TREE_DEPTH, MAX_TREE_LEAVES, ObjectSource, ObjectStore, StoreError, WalkBudget,
 };
 use crate::worktree::{self, WorktreeError};
 
@@ -216,10 +216,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     let new_entries = load_entries(store, new_hash)?;
 
     let mut out: Vec<DiffEntry> = Vec::new();
-    let mut visited = Visited {
-        count: 0,
-        limit: MAX_TREE_LEAVES,
-    };
+    let mut budget = WalkBudget::new();
     diff_entries_recursive(
         store,
         &old_entries,
@@ -228,7 +225,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
         &mut out,
         ignore_regular_executable_mode,
         0,
-        &mut visited,
+        &mut budget,
     )?;
     // git orders diff entries by pathname. The name-sorted walk is already
     // sorted for the common cases; sort to also cover a dir/file replacement
@@ -238,19 +235,14 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     Ok(DiffResult { entries: out })
 }
 
-/// How many entry pairs a diff has compared, and the most it may compare.
-struct Visited {
-    count: u64,
-    limit: u64,
-}
-
 /// Lockstep walk of two name-sorted entry arrays.
 ///
-/// `visited` counts the entry pairs the walk has compared, over the whole
-/// diff. Two trees whose every shared subtree differs expand as far as a tree
-/// bomb does, so the count is capped at [`MAX_TREE_LEAVES`]. A subtree that
-/// only one side has is sized by [`check_tree_leaves`] first. A walk costs
-/// what the change costs, and no pass over the unchanged trees is added.
+/// `budget` counts the entry pairs the walk compares and the leaves of each
+/// subtree only one side has, over the whole diff, and caps the total at
+/// [`MAX_TREE_LEAVES`]. Two trees whose every shared subtree differs expand as
+/// far as a tree bomb does, and so does a wide tree of names that all share one
+/// large subtree. A walk costs what the change costs, and no pass over the
+/// unchanged trees is added.
 #[allow(clippy::too_many_arguments)]
 fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     store: &S,
@@ -260,7 +252,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     ignore_regular_executable_mode: bool,
     depth: usize,
-    visited: &mut Visited,
+    budget: &mut WalkBudget,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -269,19 +261,16 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     let mut j = 0usize;
 
     while i < old_entries.len() && j < new_entries.len() {
-        visited.count += 1;
-        if visited.count > visited.limit {
-            return Err(StoreError::TreeTooLarge);
-        }
+        budget.visit()?;
         let o = &old_entries[i];
         let n = &new_entries[j];
         match o.name.as_slice().cmp(n.name.as_slice()) {
             std::cmp::Ordering::Less => {
-                add_removed_entries(store, o, prefix, out, depth)?;
+                add_removed_entries(store, o, prefix, out, depth, budget)?;
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                add_added_entries(store, n, prefix, out, depth)?;
+                add_added_entries(store, n, prefix, out, depth, budget)?;
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -298,7 +287,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             out,
                             ignore_regular_executable_mode,
                             depth + 1,
-                            visited,
+                            budget,
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
@@ -308,8 +297,8 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                     // the new entry added — never a single Modified blob whose
                     // tree hash would be misread as a blob by the patch
                     // renderer.
-                    add_removed_entries(store, o, prefix, out, depth)?;
-                    add_added_entries(store, n, prefix, out, depth)?;
+                    add_removed_entries(store, o, prefix, out, depth, budget)?;
+                    add_added_entries(store, n, prefix, out, depth, budget)?;
                 } else if worktree::content_eq(store, &o.object_hash, &n.object_hash)? {
                     if o.mode == n.mode {
                         i += 1;
@@ -345,11 +334,11 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     }
 
     while i < old_entries.len() {
-        add_removed_entries(store, &old_entries[i], prefix, out, depth)?;
+        add_removed_entries(store, &old_entries[i], prefix, out, depth, budget)?;
         i += 1;
     }
     while j < new_entries.len() {
-        add_added_entries(store, &new_entries[j], prefix, out, depth)?;
+        add_added_entries(store, &new_entries[j], prefix, out, depth, budget)?;
         j += 1;
     }
     Ok(())
@@ -368,9 +357,10 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
+    budget: &mut WalkBudget,
 ) -> Result<(), StoreError> {
     if entry.mode == EntryMode::Tree {
-        check_tree_leaves(store, entry.object_hash)?;
+        budget.take_subtree(store, entry.object_hash)?;
     }
     walk_removed_entries(store, entry, prefix, out, depth)
 }
@@ -411,9 +401,10 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
+    budget: &mut WalkBudget,
 ) -> Result<(), StoreError> {
     if entry.mode == EntryMode::Tree {
-        check_tree_leaves(store, entry.object_hash)?;
+        budget.take_subtree(store, entry.object_hash)?;
     }
     walk_added_entries(store, entry, prefix, out, depth)
 }
@@ -3400,18 +3391,47 @@ mod tests {
     }
 
     #[test]
-    fn two_trees_that_differ_at_every_path_stop_at_the_visit_cap() {
+    fn two_trees_that_differ_at_every_path_stop_at_the_walk_budget() {
         let (_dir, store) = fresh_store();
         // Every subtree pair differs, so the walk would compare 2^12 leaves.
         let old = load_entries(&store, Some(doubling(&store, 12, b"one"))).unwrap();
         let new = load_entries(&store, Some(doubling(&store, 12, b"two"))).unwrap();
         let walk = |limit| {
             let mut out = Vec::new();
-            let mut visited = Visited { count: 0, limit };
-            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut visited)
+            let mut budget = WalkBudget::with_limit(limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
                 .map(|()| out.len())
         };
         assert_eq!(walk(100_000).unwrap(), 4096);
         assert!(matches!(walk(1000), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn many_names_over_one_shared_subtree_share_one_budget() {
+        let (_dir, store) = fresh_store();
+        // Each name holds 2^12 leaves, which is under any one subtree's cap.
+        let shared = doubling(&store, 12, b"x");
+        let wide = |names: usize| {
+            (0..names)
+                .map(|i| entry(format!("d{i:04}").as_bytes(), EntryMode::Tree, shared))
+                .collect::<Vec<_>>()
+        };
+        let added = |names, limit| {
+            let mut out = Vec::new();
+            let mut budget = WalkBudget::with_limit(limit);
+            diff_entries_recursive(
+                &store,
+                &[],
+                &wide(names),
+                "",
+                &mut out,
+                false,
+                0,
+                &mut budget,
+            )
+            .map(|()| out.len())
+        };
+        assert_eq!(added(10, 100_000).unwrap(), 10 * 4096);
+        assert!(matches!(added(100, 100_000), Err(StoreError::TreeTooLarge)));
     }
 }

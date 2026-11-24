@@ -133,18 +133,20 @@ fn a_tree_that_shares_subtrees_but_stays_under_the_cap_still_walks() {
 }
 
 #[test]
-fn merge_refuses_a_tree_bomb_before_reading_it() {
+fn a_wide_tree_over_one_large_subtree_is_refused_by_diff() {
+    // Each of 10,000 names holds 2^20 leaves, under the cap on its own. The
+    // diff against nothing adds them all, and the cap applies to the sum.
     let (_dir, store) = open();
-    let bomb = tree_bomb(&store, 60);
-    let fine = tree_bomb(&store, 3);
+    let shared = tree_bomb(&store, 20);
+    let entries = (0..10_000)
+        .map(|i| tree_entry(format!("d{i:05}").as_bytes(), EntryMode::Tree, shared))
+        .collect();
+    let root = put(&store, &Object::Tree(Tree { entries }));
+
     let started = Instant::now();
-    for (base, ours, theirs) in [
-        (Some(fine), Some(fine), Some(bomb)),
-        (Some(bomb), Some(fine), Some(fine)),
-        (None, Some(bomb), Some(fine)),
-    ] {
-        let error = kit_core::ops::merge::merge_trees(&store, base, ours, theirs).unwrap_err();
-        assert!(is_too_large(&error), "{error:?}");
-    }
+    let error = diff_trees(&store, None, Some(root)).unwrap_err();
+    assert!(is_too_large(&error), "{error:?}");
+    let error = diff_trees(&store, Some(root), None).unwrap_err();
+    assert!(is_too_large(&error), "{error:?}");
     assert!(started.elapsed() < FAST);
 }
