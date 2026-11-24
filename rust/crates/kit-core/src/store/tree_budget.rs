@@ -66,11 +66,13 @@ fn check_within<S: ObjectSource + ?Sized>(
 /// A budget for one walk that visits only some of a tree's entries, such as a
 /// diff or a merge, and so must not size whole trees up front. It counts the
 /// entries the walk compares and the leaves of each subtree it takes whole, and
-/// refuses past [`MAX_TREE_LEAVES`] in all. Subtrees are sized with one memo
-/// for the whole walk.
+/// refuses past [`MAX_TREE_LEAVES`] in all. It also counts the bytes of the
+/// paths the walk may build, with each path's whole prefix, and refuses past
+/// what an index file holds. Subtrees are sized with one memo for the walk.
 pub(crate) struct WalkBudget {
     used: u64,
     limit: u64,
+    bytes: u64,
     seen: HashMap<Hash, Size>,
 }
 
@@ -83,33 +85,41 @@ impl WalkBudget {
         Self {
             used: 0,
             limit,
+            bytes: 0,
             seen: HashMap::new(),
         }
     }
 
-    /// Count one compared entry.
-    pub(crate) fn visit(&mut self) -> StoreResult<()> {
-        self.used += 1;
-        if self.used > self.limit {
+    fn check(&self) -> StoreResult<()> {
+        if self.used > self.limit || self.bytes > MAX_INDEX_BYTES - INDEX_HEADER_BYTES {
             return Err(StoreError::TreeTooLarge);
         }
         Ok(())
     }
 
-    /// Count the leaves of `tree`, which the walk takes whole.
+    /// Count one compared entry whose path is `path_len` bytes long.
+    pub(crate) fn visit(&mut self, path_len: usize) -> StoreResult<()> {
+        self.used += 1;
+        self.bytes += INDEX_ENTRY_FIXED_BYTES + path_len as u64;
+        self.check()
+    }
+
+    /// Count the leaves of `tree`, which the walk takes whole below a
+    /// directory whose path is `prefix_len` bytes long.
     pub(crate) fn take_subtree<S: ObjectSource + ?Sized>(
         &mut self,
         store: &S,
         tree: Hash,
+        prefix_len: usize,
     ) -> StoreResult<()> {
-        let remaining = self.limit.saturating_sub(self.used);
-        let caps = (remaining, MAX_INDEX_BYTES - INDEX_HEADER_BYTES);
+        let caps = (
+            self.limit.saturating_sub(self.used),
+            (MAX_INDEX_BYTES - INDEX_HEADER_BYTES).saturating_sub(self.bytes),
+        );
         let size = measure(store, tree, caps, &mut self.seen, 0)?;
         self.used += size.leaves;
-        if self.used > self.limit {
-            return Err(StoreError::TreeTooLarge);
-        }
-        Ok(())
+        self.bytes += size.index_bytes + size.leaves * (prefix_len as u64 + 1);
+        self.check()
     }
 }
 

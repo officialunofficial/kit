@@ -214,7 +214,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     let new_entries = load_entries(store, new_hash)?;
 
     let mut out: Vec<DiffEntry> = Vec::new();
-    let mut budget = WalkBudget::new();
+    let mut budget = DiffBudget::new();
     diff_entries_recursive(
         store,
         &old_entries,
@@ -233,11 +233,40 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     Ok(DiffResult { entries: out })
 }
 
+/// The budgets of one diff: the entry pairs compared, and the leaves of the
+/// subtrees only the old side or only the new side has. A renamed directory
+/// is removed on one side and added on the other, so each side has its own
+/// cap.
+struct DiffBudget {
+    pairs: WalkBudget,
+    removed: WalkBudget,
+    added: WalkBudget,
+}
+
+impl DiffBudget {
+    fn new() -> Self {
+        Self {
+            pairs: WalkBudget::new(),
+            removed: WalkBudget::new(),
+            added: WalkBudget::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limit(limit: u64) -> Self {
+        Self {
+            pairs: WalkBudget::with_limit(limit),
+            removed: WalkBudget::with_limit(limit),
+            added: WalkBudget::with_limit(limit),
+        }
+    }
+}
+
 /// Lockstep walk of two name-sorted entry arrays.
 ///
-/// `budget` counts the entry pairs the walk compares and the leaves of each
-/// subtree only one side has, over the whole diff, and caps the total at
-/// [`MAX_TREE_LEAVES`]. Two trees whose every shared subtree differs expand as
+/// `budget` counts the entry pairs the walk compares, and the leaves of the
+/// subtrees each side has alone, over the whole diff, and caps each at
+/// [`MAX_TREE_LEAVES`] files and an index file's bytes of paths. Two trees whose every shared subtree differs expand as
 /// far as a tree bomb does, and so does a wide tree of names that all share one
 /// large subtree. A walk costs what the change costs, and no pass over the
 /// unchanged trees is added.
@@ -250,7 +279,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     ignore_regular_executable_mode: bool,
     depth: usize,
-    budget: &mut WalkBudget,
+    budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -259,7 +288,8 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     let mut j = 0usize;
 
     while i < old_entries.len() && j < new_entries.len() {
-        budget.visit()?;
+        let name = o.name.len().max(n.name.len());
+        budget.pairs.visit(prefix.len() + 1 + name)?;
         let o = &old_entries[i];
         let n = &new_entries[j];
         match o.name.as_slice().cmp(n.name.as_slice()) {
@@ -355,10 +385,14 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
-    budget: &mut WalkBudget,
+    budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
     if entry.mode == EntryMode::Tree {
-        budget.take_subtree(store, entry.object_hash)?;
+        budget.removed.take_subtree(
+            store,
+            entry.object_hash,
+            prefix.len() + 1 + entry.name.len(),
+        )?;
     }
     walk_removed_entries(store, entry, prefix, out, depth)
 }
@@ -399,10 +433,14 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
-    budget: &mut WalkBudget,
+    budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
     if entry.mode == EntryMode::Tree {
-        budget.take_subtree(store, entry.object_hash)?;
+        budget.added.take_subtree(
+            store,
+            entry.object_hash,
+            prefix.len() + 1 + entry.name.len(),
+        )?;
     }
     walk_added_entries(store, entry, prefix, out, depth)
 }
@@ -3396,7 +3434,7 @@ mod tests {
         let new = load_entries(&store, Some(doubling(&store, 12, b"two"))).unwrap();
         let walk = |limit| {
             let mut out = Vec::new();
-            let mut budget = WalkBudget::with_limit(limit);
+            let mut budget = DiffBudget::with_limit(limit);
             diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
                 .map(|()| out.len())
         };
@@ -3416,7 +3454,7 @@ mod tests {
         };
         let added = |names, limit| {
             let mut out = Vec::new();
-            let mut budget = WalkBudget::with_limit(limit);
+            let mut budget = DiffBudget::with_limit(limit);
             diff_entries_recursive(
                 &store,
                 &[],
@@ -3431,5 +3469,42 @@ mod tests {
         };
         assert_eq!(added(10, 100_000).unwrap(), 10 * 4096);
         assert!(matches!(added(100, 100_000), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn a_renamed_directory_is_charged_once_on_each_side() {
+        let (_dir, store) = fresh_store();
+        // 2^11 leaves removed and the same added: each is under the cap of 3000
+        // and the two together are over it.
+        let big = doubling(&store, 11, b"x");
+        let old = vec![entry(b"src", EntryMode::Tree, big)];
+        let new = vec![entry(b"lib", EntryMode::Tree, big)];
+        let walk = |limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(3000).unwrap(), 2 * 2048);
+        assert!(matches!(walk(2000), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn a_long_prefix_counts_against_the_byte_budget() {
+        let (_dir, store) = fresh_store();
+        // 2^10 leaves taken whole under a 100 KiB path: well under any leaf
+        // cap, and over an index file's bytes.
+        let tree = doubling(&store, 10, b"x");
+        let mut budget = WalkBudget::new();
+        let long = 100 * 1024;
+        assert!(budget.take_subtree(&store, tree, 10).is_ok());
+        assert!(matches!(
+            WalkBudget::new().take_subtree(&store, tree, long * 3),
+            Err(StoreError::TreeTooLarge)
+        ));
+        assert!(matches!(
+            (0..3000).try_for_each(|_| WalkBudget::visit(&mut budget, long)),
+            Err(StoreError::TreeTooLarge)
+        ));
     }
 }

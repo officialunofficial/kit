@@ -584,7 +584,6 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
     let mut ti = 0usize;
 
     while bi < base_entries.len() || oi < ours_entries.len() || ti < theirs_entries.len() {
-        budget.visit()?;
         let b_name: Option<&[u8]> = base_entries.get(bi).map(|e| e.name.as_slice());
         let o_name: Option<&[u8]> = ours_entries.get(oi).map(|e| e.name.as_slice());
         let t_name: Option<&[u8]> = theirs_entries.get(ti).map(|e| e.name.as_slice());
@@ -592,6 +591,7 @@ fn merge_entries_recursive<S: ObjectSource + ObjectSink + ?Sized>(
         let Some(min_name) = min_of_three(b_name, o_name, t_name) else {
             break;
         };
+        budget.visit(prefix.len() + 1 + min_name.len())?;
 
         let has_base = b_name.is_some_and(|n| n == min_name);
         let has_ours = o_name.is_some_and(|n| n == min_name);
