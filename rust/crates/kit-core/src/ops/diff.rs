@@ -273,10 +273,11 @@ impl DiffBudget {
 
 /// Lockstep walk of two name-sorted entry arrays.
 ///
-/// `budget` counts the entry pairs the walk compares, and the leaves of the
-/// subtrees each side has alone, over the whole diff, and caps each at
-/// [`MAX_TREE_LEAVES`] files and an index file's bytes of paths. Two trees whose every shared subtree differs expand as
-/// far as a tree bomb does, and so does a wide tree of names that all share one
+/// `budget` counts the entry pairs the walk compares, and the entries of the
+/// subtrees each side has alone, over the whole diff, files and directories
+/// both, and caps each at twice [`crate::store::MAX_TREE_LEAVES`] entries and
+/// twice an index file's bytes of paths. Two trees whose every shared subtree
+/// differs expand as far as a tree bomb does, and so does a wide tree of names that all share one
 /// large subtree. A walk costs what the change costs, and no pass over the
 /// unchanged trees is added.
 #[allow(clippy::too_many_arguments)]
@@ -3527,7 +3528,7 @@ mod tests {
     #[test]
     fn a_renamed_directory_is_charged_once_on_each_side() {
         let (_dir, store) = fresh_store();
-        // 2^11 files removed and the same added, 6143 entries each with their
+        // 2^11 files removed and the same added, 6142 entries each with their
         // directories: each is under the cap of 7000, the two together are not.
         let big = doubling(&store, 11, b"x");
         let old = vec![entry(b"src", EntryMode::Tree, big)];
