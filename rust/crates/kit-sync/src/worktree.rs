@@ -1120,7 +1120,10 @@ mod refusal_message_tests {
             super::overwrite_untracked_message("a\u{1b}b"),
             super::remove_untracked_message("a\u{1b}b"),
         ] {
-            assert!(text.contains("a\\u{1b}b") && !text.contains('\u{1b}'), "{text:?}");
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
         }
     }
 }

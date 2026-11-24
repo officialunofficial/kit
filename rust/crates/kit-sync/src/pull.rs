@@ -515,7 +515,10 @@ mod recovery_message_tests {
             super::pull_recovery_changes_message("a\u{1b}b"),
             super::pull_recovery_untracked_message("a\u{1b}b"),
         ] {
-            assert!(text.contains("a\\u{1b}b") && !text.contains('\u{1b}'), "{text:?}");
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
         }
     }
 }
