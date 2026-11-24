@@ -33,7 +33,7 @@ use kit_core::ops::restore::is_restore_temp_name;
 use kit_core::ops::{BINARY_SNIFF_LEN, apply_hunks_subset, enumerate_hunks, is_binary};
 use kit_core::serialize;
 use kit_core::store::{HashOnlySink, ObjectSink, ObjectStore, StoreError};
-use kit_core::worktree::{self, LoadedBlob, WorktreeError};
+use kit_core::worktree::{self, LoadedBlob, TrackedStats, WorktreeError};
 use kit_sync::fanout;
 use kit_sync::worktree::{index_tracks_path_or_descendant, read_or_seed_index_from_head};
 
@@ -621,7 +621,8 @@ fn prepare(
         }
         if target == "." {
             let mut seen = HashSet::new();
-            add_tree(root, root, false, idx, &ignores, &mut seen, &mut pending)?;
+            let stats = TrackedStats::collect(root, idx);
+            add_tree(root, root, false, idx, &stats, &ignores, &mut seen, &mut pending)?;
             mark_missing_paths_removed(root, idx, &seen);
         } else {
             ensure_within_repo(root, &abs)?;
@@ -1149,6 +1150,7 @@ fn add_tree(
     dir: &Path,
     parent_ignored: bool,
     idx: &mut Index,
+    stats: &TrackedStats,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
     pending: &mut Vec<PendingHash>,
@@ -1166,11 +1168,6 @@ fn add_tree(
     })?;
     for ent in rd.flatten() {
         let p = ent.path();
-        let meta = p.symlink_metadata().map_err(|source| Error::Metadata {
-            path: p.clone(),
-            source,
-        })?;
-        let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
         let native_relative = p.strip_prefix(root).unwrap_or(&p);
@@ -1181,6 +1178,16 @@ fn add_tree(
             .map(|component| component.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
+        // A tracked file may have its stat from the pass already; any other
+        // path, or one the pass could not stat, is stat'ed here.
+        let meta = match stats.get(&rel_path) {
+            Some(meta) => meta.clone(),
+            None => p.symlink_metadata().map_err(|source| Error::Metadata {
+                path: p.clone(),
+                source,
+            })?,
+        };
+        let is_dir = meta.file_type().is_dir();
         if !is_dir
             && native_relative
                 .file_name()
@@ -1203,7 +1210,7 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;
+            add_tree(root, &p, entry_ignored, idx, stats, ignores, seen, pending)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The decision to include is made, so `force` skips the second
             // look at the ignore rules in `route_path`.

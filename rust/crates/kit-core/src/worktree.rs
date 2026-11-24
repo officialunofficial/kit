@@ -230,6 +230,7 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     // and the walk consults it once per regular file.
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+    let stats = TrackedStats::collect(dir, index);
     let mut misses = Vec::new();
     let pending = build_tree_inner(
         sink,
@@ -238,6 +239,7 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
         &ignores,
         index,
         &by_path,
+        &stats,
         false,
         skip_restore_temps,
         &mut misses,
@@ -303,6 +305,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     ignores: &IgnoreList,
     index: &Index,
     by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
+    stats: &TrackedStats,
     parent_ignored: bool,
     skip_restore_temps: bool,
     misses: &mut Vec<PendingFileHash<'e>>,
@@ -320,14 +323,22 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
             .to_str()
             .ok_or(WorktreeError::InvalidUtf8)?
             .to_string();
-        // `symlink_metadata` does not follow symlinks.
-        let meta = entry.path().symlink_metadata()?;
-        let is_dir = meta.is_dir();
         let rel_path = if rel_dir.is_empty() {
             name_str.clone()
         } else {
             format!("{rel_dir}/{name_str}")
         };
+        // `symlink_metadata` does not follow symlinks. A tracked file's stat
+        // may already be there from the stat pass; any other path, or one the
+        // pass could not stat, is stat'ed here, so its error surfaces here.
+        let fresh;
+        let meta = if let Some(meta) = stats.get(&rel_path) {
+            meta
+        } else {
+            fresh = entry.path().symlink_metadata()?;
+            &fresh
+        };
+        let is_dir = meta.is_dir();
         // A historical entry, including a staged deletion, still has a path
         // of its own. A scratch file cannot take the place of a tracked directory.
         if skip_restore_temps
@@ -361,11 +372,11 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
             // O(content) for unchanged files. The object was stored at
             // `add` time, so the tree reference stays resolvable.
             let indexed = by_path.get(rel_path.as_str()).copied();
-            let cached = indexed.filter(|e| stat_matches(e, &meta));
+            let cached = indexed.filter(|e| stat_matches(e, meta));
             if let Some(e) = cached {
                 entries.push(TreeEntry {
                     name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(&meta),
+                    mode: entry_mode_from_file_metadata(meta),
                     object_hash: e.object_hash,
                 });
             } else {
@@ -404,6 +415,7 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                 ignores,
                 index,
                 by_path,
+                stats,
                 entry_ignored,
                 skip_restore_temps,
                 misses,
@@ -445,6 +457,64 @@ fn symlink_entry<S: ObjectSink + ?Sized>(
         mode: EntryMode::Symlink,
         object_hash: sink.put_parts(&[&prologue, target_bytes])?,
     })
+}
+
+/// Below this many tracked entries a walk stats each file as it reaches it:
+/// the dispatch to the thread pool costs more than the stats it spreads. A
+/// `lstat` of a cached path is a few microseconds, so about 500 of them cost
+/// as much as waking the pool.
+#[cfg(not(target_arch = "wasm32"))]
+const STAT_PASS_MIN_ENTRIES: usize = 512;
+
+/// The `lstat` of the files an index tracks, taken on the thread pool before
+/// a walk of the worktree that will ask for almost every one of them.
+///
+/// It is a cache the walk consults, never a replacement for the walk. The
+/// walk looks a path up only after it found the name in a directory it read,
+/// so a path behind a symlink or inside a directory the walk does not enter
+/// is never asked for, though `lstat("link/x")` would follow the link. A path
+/// the pass could not stat, because the file is gone or unreadable, has no
+/// entry: the walk stats it itself, so the error and its place in the walk
+/// stay what they were. Entries are looked up by path, so the order the pool
+/// finished them in changes nothing.
+///
+/// A file that changes between the pass and the walk is judged as it was at
+/// the pass, as git's `preloadindex` does; an edit made while the command
+/// runs has no defined side of it either way.
+#[derive(Debug, Default)]
+pub struct TrackedStats {
+    stats: std::collections::HashMap<String, fs::Metadata>,
+}
+
+impl TrackedStats {
+    /// Stat every entry of `index` that is not a deletion, under `root`.
+    /// Below [`STAT_PASS_MIN_ENTRIES`] entries, on one thread, and on wasm,
+    /// it takes none and leaves every stat to the walk.
+    #[must_use]
+    pub fn collect(root: &Path, index: &Index) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if available_threads() > 1 && index.entries.len() >= STAT_PASS_MIN_ENTRIES {
+            use rayon::prelude::*;
+            let stats = index
+                .entries
+                .par_iter()
+                .filter(|entry| entry.status != index::EntryStatus::Removed)
+                .filter_map(|entry| {
+                    let meta = fs::symlink_metadata(root.join(&entry.path)).ok()?;
+                    Some((entry.path.clone(), meta))
+                })
+                .collect();
+            return Self { stats };
+        }
+        let _ = (root, index);
+        Self::default()
+    }
+
+    /// The stat the pass took of the tracked path `path`, if it took one.
+    #[must_use]
+    pub fn get(&self, path: &str) -> Option<&fs::Metadata> {
+        self.stats.get(path)
+    }
 }
 
 /// Directory entries retain their walk slots until every file has been hashed.
