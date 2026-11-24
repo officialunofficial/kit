@@ -72,6 +72,19 @@ fn init_in_an_existing_repository_is_an_error() {
 }
 
 #[test]
+fn init_again_after_an_init_that_was_killed_before_the_format_marker() {
+    let (cwd, xdg) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // `init` made `objects/` and stopped before it wrote the marker.
+    std::fs::create_dir_all(cwd.path().join(".kit/objects")).unwrap();
+    assert!(!is_repo(cwd.path()));
+    let out = run(cwd.path(), xdg.path(), &["init"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(is_repo(cwd.path()));
+    let status = run(cwd.path(), xdg.path(), &["status"]);
+    assert!(status.status.success(), "{}", stderr(&status));
+}
+
+#[test]
 fn quiet_drops_the_success_line_and_not_the_errors() {
     let (cwd, xdg) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     for flag in ["-q", "--quiet"] {

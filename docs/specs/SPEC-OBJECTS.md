@@ -648,7 +648,9 @@ A writer that found its object already visible MUST make its location
 durable before referencing it. Flush the loose shard or the pack
 directory and, if needed, the directory containing the pack directory.
 When another process can retire the selected location, follow the
-guard and re-resolution rules in SPEC-CONCURRENCY §3.4.
+guard and re-resolution rules in SPEC-CONCURRENCY §3.4. A per-object write
+that creates a loose shard directory also flushes `objects/`, which holds the
+new directory entry.
 
 Local batched and per-object writes look in loose storage and in their
 discovered pack catalog. They MAY accept a loose file or packed frame of

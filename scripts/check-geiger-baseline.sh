@@ -14,11 +14,9 @@
 # `ceiling_for()` and explain why in the same commit.
 #
 # Why one first-party crate has a non-zero count:
-#   kit-core - three `#[allow(unsafe_code)]` sites, all documented in the
+#   kit-core - two `#[allow(unsafe_code)]` sites, all documented in the
 #               header of rust/crates/kit-core/src/lib.rs: the
-#               `libc::geteuid()` call in `sign::effective_uid`, the
-#               `libc::fcntl(.., F_BARRIERFSYNC)` call in
-#               `batch::RealSyncer::file_barrier` on macOS and iOS, and the
+#               `libc::geteuid()` call in `sign::effective_uid`, and the
 #               `libc::getrlimit(RLIMIT_NOFILE, ..)` call in
 #               `batch::soft_open_file_limit` on Linux.
 #

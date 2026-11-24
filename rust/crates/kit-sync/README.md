@@ -232,10 +232,10 @@ reads and the concurrent re-baseline retry retain their existing behavior.
 
 New packs still pass digest and signature verification. Only after successful
 application and closure verification does fetch durably publish the tracking
-ref, then atomically write and fsync the checkpoint, under the same worktree
-lock. Tracking directories now sync per branch before checkpoint publication.
-A crash before the checkpoint write leaves the old record; the next fetch
-walks more nodes. Cache write failure does not fail an otherwise successful fetch.
+ref, then write the checkpoint with a temporary file and a rename and no device
+flush, under the same worktree lock. Tracking directories sync per branch before
+checkpoint publication. A crash before the checkpoint write, or one that loses
+the write, leaves the old record or none; the next fetch walks more nodes. Cache write failure does not fail an otherwise successful fetch.
 
 For a single branch, one listing page, one pack per node, and no retries,
 let `N` be the total chain length after the operation. Count each ListRefs,

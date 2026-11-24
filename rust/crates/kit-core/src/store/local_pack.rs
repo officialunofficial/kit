@@ -810,7 +810,7 @@ fn stage_index(
 ) -> StoreResult<tempfile::NamedTempFile> {
     let mut tmp = stage_file(dir, ".tmp.idx")?;
     tmp.write_all(&index::encode(pair.key, rows))?;
-    tmp.as_file().sync_all()?;
+    crate::flush::file(tmp.as_file())?;
     let staged = Pair {
         key: pair.key,
         pack: pack.to_path_buf(),

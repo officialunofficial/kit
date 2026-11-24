@@ -588,7 +588,14 @@ pub fn create(
     if pending.merge.is_some() {
         conflict_state::clear_merge_state(layout).map_err(Error::ClearMergeState)?;
     }
-    sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
+    // A plain commit leaves the index as it was: the tree came from these
+    // entries, so rebuilding them from the tree would read every tree object
+    // and write the same index again. A staged removal is not in the tree, so
+    // it rebuilds the index. So does a merge or an amend, which keep their
+    // own rebuild.
+    if pending.merge.is_some() || pending.amend.is_some() || !index_is_the_tree(&idx) {
+        sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
+    }
 
     let branch = match refs::read_head(layout) {
         Ok(Head::Branch(b)) => Some(b),
@@ -605,6 +612,18 @@ pub fn create(
         parents,
         branch,
         base_tree,
+    })
+}
+
+/// Whether every entry of `idx` is a file or a link that the tree built from
+/// it holds. A removal is dropped from the tree, and a tree entry is not
+/// staged.
+fn index_is_the_tree(idx: &index::Index) -> bool {
+    !idx.entries.iter().any(|entry| {
+        matches!(
+            entry.status,
+            index::EntryStatus::Removed | index::EntryStatus::Tree
+        )
     })
 }
 

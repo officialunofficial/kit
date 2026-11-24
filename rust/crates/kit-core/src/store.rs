@@ -473,9 +473,11 @@ impl ObjectStore {
 
     /// Initialise a fresh common dir for the repository described by
     /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
-    /// common dir already exists.
+    /// common dir already exists, unless a killed `init` made it: a common
+    /// dir with no format marker and no objects holds nothing and is
+    /// initialised again, as `git init` does.
     pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
-        if layout.common_dir().exists() {
+        if layout.common_dir().exists() && !is_unfinished_init(layout)? {
             return Err(StoreError::AlreadyInitialized);
         }
         let objects_root = layout.objects_dir();
@@ -664,8 +666,16 @@ impl ObjectStore {
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
+        // A shard that this call creates is an entry of `objects/`, which the
+        // shard flush in `write_atomic` does not cover.
+        let new_shard = fs::create_dir(shard_dir).is_ok();
+        // A no-op when the shard exists; otherwise it makes `objects/` or names
+        // why the shard cannot be made.
         fs::create_dir_all(shard_dir)?;
         write_atomic(&final_path, bytes, &**self.syncer())?;
+        if new_shard {
+            self.syncer().dir_sync(&self.objects_root)?;
+        }
         Ok(h)
     }
 
@@ -1498,7 +1508,7 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
         // accept a failed content flush or change object permissions.
         options.write(true);
     }
-    options.open(path)?.sync_all()
+    crate::flush::file(&options.open(path)?)
 }
 
 /// Fill the header buffer unless the reader reaches EOF.
@@ -1564,6 +1574,19 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
         });
     }
     Ok(())
+}
+
+/// Whether `layout`'s common dir is what a killed `init` leaves: no format
+/// marker, because the marker is written last, and no object under
+/// `objects/`.
+fn is_unfinished_init(layout: &RepoLayout) -> io::Result<bool> {
+    if layout.format_file().try_exists()? {
+        return Ok(false);
+    }
+    if !layout.objects_dir().try_exists()? {
+        return Ok(true);
+    }
+    Ok(fs::read_dir(layout.objects_dir())?.next().is_none())
 }
 
 /// Atomically write `bytes` to `final_path` with per-object durability
@@ -1778,6 +1801,65 @@ mod tests {
         let _ = ObjectStore::init(&RepoLayout::single(dir.path())).unwrap();
         assert!(dir.path().join(KIT_DIR).is_dir());
         assert!(dir.path().join(KIT_DIR).join(OBJECTS_DIR).is_dir());
+    }
+
+    #[test]
+    fn init_again_after_a_killed_init_that_left_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        // `init` stopped after it made `objects/` and before it wrote the
+        // format marker.
+        fs::create_dir_all(layout.objects_dir()).unwrap();
+        ObjectStore::init(&layout).unwrap();
+        assert!(layout.format_file().is_file());
+        // A directory with nothing in it at all counts as new too.
+        let bare = TempDir::new().unwrap();
+        let bare_layout = RepoLayout::single(bare.path());
+        fs::create_dir_all(bare_layout.common_dir()).unwrap();
+        ObjectStore::init(&bare_layout).unwrap();
+        assert!(ObjectStore::open(&bare_layout).is_ok());
+    }
+
+    #[test]
+    fn a_write_that_creates_a_shard_syncs_the_objects_dir() {
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut store = ObjectStore::init(&layout).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+        let root = store.objects_root().to_path_buf();
+        let synced = |rec: &RecordingSyncer| {
+            rec.events()
+                .iter()
+                .filter(|ev| matches!(ev, Ev::DirSync(dir) if *dir == root))
+                .count()
+        };
+
+        // Each object that opens a new shard flushes `objects/` once. One that
+        // lands in a shard that already exists does not.
+        let mut shards = std::collections::BTreeSet::new();
+        let mut repeated = false;
+        for n in 0..300_u32 {
+            let id = store.write(format!("object {n}").as_bytes()).unwrap();
+            let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+            repeated |= !shards.insert(shard);
+            assert_eq!(synced(&rec), shards.len(), "after object {n}");
+        }
+        assert!(repeated, "300 objects must reuse a shard of 256");
+        // The same bytes again hit the dedup path and create no shard.
+        let before = synced(&rec);
+        store.write(b"object 0").unwrap();
+        assert_eq!(synced(&rec), before);
+    }
+
+    #[test]
+    fn init_refuses_a_common_dir_with_objects_but_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.objects_dir().join("ab")).unwrap();
+        let err = ObjectStore::init(&layout).unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyInitialized));
     }
 
     #[test]
@@ -2493,6 +2575,18 @@ mod bulk_writer_tests {
         assert_eq!(writer.write(bytes).unwrap(), h);
         writer.commit().unwrap();
         assert_eq!(store.read(&h).unwrap(), bytes);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_reused_object_is_flushed_with_its_content() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("object");
+        fs::write(&path, b"bytes").unwrap();
+        let before = crate::fault::flushes();
+        sync_reused_file(&path).unwrap();
+        assert_eq!(crate::fault::flushes(), before + 1);
+        assert!(sync_reused_file(&td.path().join("missing")).is_err());
     }
 
     #[test]
