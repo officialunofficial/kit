@@ -2495,6 +2495,18 @@ mod bulk_writer_tests {
         assert_eq!(store.read(&h).unwrap(), bytes);
     }
 
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_reused_object_is_flushed_with_its_content() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("object");
+        fs::write(&path, b"bytes").unwrap();
+        let before = crate::fault::flushes();
+        sync_reused_file(&path).unwrap();
+        assert_eq!(crate::fault::flushes(), before + 1);
+        assert!(sync_reused_file(&td.path().join("missing")).is_err());
+    }
+
     #[test]
     fn bulk_writer_round_trips_and_rewrites() {
         let td = tempfile::tempdir().unwrap();

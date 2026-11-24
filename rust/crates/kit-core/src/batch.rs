@@ -1598,6 +1598,28 @@ mod tests {
         (dir, store)
     }
 
+    /// The real syncer makes the full flushes the batch is pinned to: one for
+    /// a file and one for the objects root, none for a store that is not there.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn the_real_syncer_makes_counted_full_flushes() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("f");
+        let file = File::create(&path).expect("create");
+        let before = crate::fault::flushes();
+        RealSyncer.full(&file, &path).expect("full");
+        assert_eq!(crate::fault::flushes(), before + 1);
+        #[cfg(unix)]
+        {
+            RealSyncer.device_flush(dir.path()).expect("device flush");
+            assert_eq!(crate::fault::flushes(), before + 2);
+            RealSyncer
+                .device_flush(&dir.path().join("missing"))
+                .expect("a store that is not there");
+            assert_eq!(crate::fault::flushes(), before + 2);
+        }
+    }
+
     /// Store with a shared `RecordingSyncer` injected.
     fn recording_store() -> (TempDir, ObjectStore, Arc<RecordingSyncer>) {
         let (dir, mut store) = fresh_store();

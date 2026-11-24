@@ -7,17 +7,16 @@
 //! file named by `KIT_FLUSH_LOG` for each full flush (see `kit_core::flush`),
 //! and the test counts the lines.
 //!
-//! The counts are for Apple file systems, where a per-file writeout is
+//! The pinned counts are for Apple file systems, where a per-file writeout is
 //! `fsync(2)`, a full flush is `F_FULLFSYNC`, and the batch makes one full flush
 //! for its objects and one for each directory it names. Linux flushes the
-//! shard directories one by one, so its counts differ.
-#![cfg(target_os = "macos")]
+//! shard directories one by one, so its counts differ; there only the log
+//! itself is checked.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 mod common;
 
 use std::fs;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use common::{Repo, kit_env};
@@ -36,12 +35,26 @@ fn flushes(cwd: &Path, xdg: &Path, log: &Path, args: &[&str]) -> usize {
 }
 
 /// Edit one small file of `repo`, so the commit has a few trees to build.
+#[cfg(target_os = "macos")]
 fn edit(repo: &Repo, round: u32) {
     repo.write("dir/sub/edited.txt", format!("round {round}\n").as_bytes());
 }
 
+/// On every platform each full flush of a command is one line of the log.
+#[test]
+fn a_command_that_writes_logs_its_full_flushes() {
+    let repo = Repo::new();
+    repo.write("f.txt", b"x\n");
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("flushes");
+    assert!(flushes(repo.path(), repo.xdg(), &log, &["add", "f.txt"]) >= 1);
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
+    use std::os::unix::fs::MetadataExt as _;
+
     let origin = Repo::new();
     for dir in ["a", "b", "dir/sub"] {
         for file in 0..4 {

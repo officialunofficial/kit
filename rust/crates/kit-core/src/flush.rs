@@ -42,3 +42,20 @@ fn log() {
         let _ = log.write_all(b"full\n");
     }
 }
+
+#[cfg(all(test, feature = "fault-injection"))]
+mod tests {
+    use super::*;
+    use crate::fault::flushes;
+
+    #[test]
+    fn each_call_is_one_counted_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = File::create(dir.path().join("f")).unwrap();
+        let before = flushes();
+        file(&handle).unwrap();
+        assert_eq!(flushes(), before + 1);
+        file(&handle).unwrap();
+        assert_eq!(flushes(), before + 2);
+    }
+}
