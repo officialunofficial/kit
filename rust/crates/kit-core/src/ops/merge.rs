@@ -1731,9 +1731,9 @@ mod walk_budget_tests {
         let store = crate::store::ObjectStore::init(&crate::layout::RepoLayout::single(dir.path()))
             .unwrap();
         // Ours and theirs both add trees that differ below every name, so the
-        // walk would compare 2^12 add/add pairs.
-        let ours = doubling(&store, 12, b"ours");
-        let theirs = doubling(&store, 12, b"theirs");
+        // walk would compare 2^7 add/add pairs.
+        let ours = doubling(&store, 7, b"ours");
+        let theirs = doubling(&store, 7, b"theirs");
         let merge = |limit| {
             let (mut merged, mut conflicts) = (Vec::new(), Vec::new());
             let mut budget = WalkBudget::with_limit(limit);
@@ -1750,6 +1750,6 @@ mod walk_budget_tests {
             )
         };
         merge(1_000_000).unwrap();
-        assert!(matches!(merge(1000), Err(StoreError::TreeTooLarge)));
+        assert!(matches!(merge(100), Err(StoreError::TreeTooLarge)));
     }
 }
