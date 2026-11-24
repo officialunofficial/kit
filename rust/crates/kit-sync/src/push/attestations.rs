@@ -705,7 +705,11 @@ struct Prepared {
 impl Prepared {
     fn upload(&self, tx: &PushContext<'_>) -> Result<(), Failure> {
         let key = PackKey::new(self.id);
-        if !tx.pack_exists(&key, ATTESTMAP_REF)? {
+        // Skipped only when the remote holds the pack at its own length, as
+        // for a data pack; any other answer, an error and an unknown length
+        // included, uploads over it.
+        let whole = tx.pack_len(&key, ATTESTMAP_REF).ok().flatten() == Some(self.pack.len());
+        if !whole {
             tx.upload_pack(self, &key, ATTESTMAP_REF)?;
         }
         Ok(())
