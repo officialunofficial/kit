@@ -213,12 +213,10 @@ pub enum StoreError {
     ObjectTooLarge,
     #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
     TreeTooDeep,
-    /// A tree expands to more files than [`MAX_TREE_LEAVES`] allows.
-    #[error("tree expands to more than {limit} files")]
-    TreeTooLarge {
-        /// The cap the tree went past.
-        limit: u64,
-    },
+    /// A tree expands to more than [`MAX_TREE_LEAVES`] files, or to paths an
+    /// index file could not hold.
+    #[error("tree expands to more files, or longer paths, than a repository holds")]
+    TreeTooLarge,
     /// A caller-selected in-memory operation budget was exhausted.
     #[error("object operation exceeded {0} limit")]
     OperationLimitExceeded(&'static str),

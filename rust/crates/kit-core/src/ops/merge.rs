@@ -89,7 +89,9 @@ impl MergeResult {
 ///
 /// # Errors
 ///
-/// Propagates [`StoreError`] from reads and writes, including budget exhaustion.
+/// Propagates [`StoreError`] from reads and writes, including budget exhaustion,
+/// and returns [`StoreError::TreeTooLarge`] when any of the three trees expands
+/// past [`crate::store::MAX_TREE_LEAVES`] files.
 /// Earlier writes are retained on failure; this operation is not transactional.
 pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
     store: &S,
@@ -97,6 +99,12 @@ pub fn merge_trees<S: ObjectSource + ObjectSink + ?Sized>(
     ours_hash: Option<Hash>,
     theirs_hash: Option<Hash>,
 ) -> Result<MergeResult, StoreError> {
+    // Each side's subtrees may differ at every path, so the walk below expands
+    // as far as the trees do. Size them first: a tree bomb is refused before
+    // anything is read or written.
+    for root in [base_hash, ours_hash, theirs_hash].into_iter().flatten() {
+        crate::store::check_tree_leaves(store, root)?;
+    }
     let base_entries = load_entries(store, base_hash)?;
     let ours_entries = load_entries(store, ours_hash)?;
     let theirs_entries = load_entries(store, theirs_hash)?;

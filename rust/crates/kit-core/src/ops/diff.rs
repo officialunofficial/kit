@@ -16,7 +16,9 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError, check_tree_leaves};
+use crate::store::{
+    MAX_TREE_DEPTH, MAX_TREE_LEAVES, ObjectSource, ObjectStore, StoreError, check_tree_leaves,
+};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -187,8 +189,8 @@ fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl
 ///
 /// Propagates [`StoreError`] when an expected tree object is missing or
 /// fails its read-time hash check, and returns [`StoreError::TreeTooLarge`]
-/// when either tree expands to more than [`crate::store::MAX_TREE_LEAVES`]
-/// files.
+/// when a subtree only one side has, or the pairs the walk compares, expand
+/// past [`crate::store::MAX_TREE_LEAVES`].
 pub fn diff_trees<S: ObjectSource + ?Sized>(
     store: &S,
     old_hash: Option<Hash>,
@@ -209,14 +211,15 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
         (Some(a), Some(b)) if a == b => return Ok(DiffResult::default()),
         _ => {}
     }
-    for root in [old_hash, new_hash].into_iter().flatten() {
-        check_tree_leaves(store, root)?;
-    }
 
     let old_entries = load_entries(store, old_hash)?;
     let new_entries = load_entries(store, new_hash)?;
 
     let mut out: Vec<DiffEntry> = Vec::new();
+    let mut visited = Visited {
+        count: 0,
+        limit: MAX_TREE_LEAVES,
+    };
     diff_entries_recursive(
         store,
         &old_entries,
@@ -225,6 +228,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
         &mut out,
         ignore_regular_executable_mode,
         0,
+        &mut visited,
     )?;
     // git orders diff entries by pathname. The name-sorted walk is already
     // sorted for the common cases; sort to also cover a dir/file replacement
@@ -234,7 +238,20 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     Ok(DiffResult { entries: out })
 }
 
+/// How many entry pairs a diff has compared, and the most it may compare.
+struct Visited {
+    count: u64,
+    limit: u64,
+}
+
 /// Lockstep walk of two name-sorted entry arrays.
+///
+/// `visited` counts the entry pairs the walk has compared, over the whole
+/// diff. Two trees whose every shared subtree differs expand as far as a tree
+/// bomb does, so the count is capped at [`MAX_TREE_LEAVES`]. A subtree that
+/// only one side has is sized by [`check_tree_leaves`] first. A walk costs
+/// what the change costs, and no pass over the unchanged trees is added.
+#[allow(clippy::too_many_arguments)]
 fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     store: &S,
     old_entries: &[TreeEntry],
@@ -243,6 +260,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     ignore_regular_executable_mode: bool,
     depth: usize,
+    visited: &mut Visited,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -251,6 +269,10 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     let mut j = 0usize;
 
     while i < old_entries.len() && j < new_entries.len() {
+        visited.count += 1;
+        if visited.count > visited.limit {
+            return Err(StoreError::TreeTooLarge);
+        }
         let o = &old_entries[i];
         let n = &new_entries[j];
         match o.name.as_slice().cmp(n.name.as_slice()) {
@@ -276,6 +298,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             out,
                             ignore_regular_executable_mode,
                             depth + 1,
+                            visited,
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
@@ -346,6 +369,19 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     depth: usize,
 ) -> Result<(), StoreError> {
+    if entry.mode == EntryMode::Tree {
+        check_tree_leaves(store, entry.object_hash)?;
+    }
+    walk_removed_entries(store, entry, prefix, out, depth)
+}
+
+fn walk_removed_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    entry: &TreeEntry,
+    prefix: &str,
+    out: &mut Vec<DiffEntry>,
+    depth: usize,
+) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
     }
@@ -353,7 +389,7 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_removed_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
+            walk_removed_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
@@ -376,6 +412,19 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     depth: usize,
 ) -> Result<(), StoreError> {
+    if entry.mode == EntryMode::Tree {
+        check_tree_leaves(store, entry.object_hash)?;
+    }
+    walk_added_entries(store, entry, prefix, out, depth)
+}
+
+fn walk_added_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    entry: &TreeEntry,
+    prefix: &str,
+    out: &mut Vec<DiffEntry>,
+    depth: usize,
+) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
     }
@@ -383,7 +432,7 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_added_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
+            walk_added_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
@@ -3330,5 +3379,39 @@ mod tests {
         assert!(!changes.minimal);
         assert_eq!(changes.old, vec![false]);
         assert_eq!(changes.new, vec![true, true, true, false]);
+    }
+
+    /// `levels` doubling trees over one file holding `leaf`.
+    fn doubling(store: &ObjectStore, levels: usize, leaf: &[u8]) -> Hash {
+        let mut cur = put_tree(
+            store,
+            vec![entry(b"f", EntryMode::Blob, put_blob(store, leaf))],
+        );
+        for _ in 0..levels {
+            cur = put_tree(
+                store,
+                vec![
+                    entry(b"a", EntryMode::Tree, cur),
+                    entry(b"b", EntryMode::Tree, cur),
+                ],
+            );
+        }
+        cur
+    }
+
+    #[test]
+    fn two_trees_that_differ_at_every_path_stop_at_the_visit_cap() {
+        let (_dir, store) = fresh_store();
+        // Every subtree pair differs, so the walk would compare 2^12 leaves.
+        let old = load_entries(&store, Some(doubling(&store, 12, b"one"))).unwrap();
+        let new = load_entries(&store, Some(doubling(&store, 12, b"two"))).unwrap();
+        let walk = |limit| {
+            let mut out = Vec::new();
+            let mut visited = Visited { count: 0, limit };
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut visited)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(100_000).unwrap(), 4096);
+        assert!(matches!(walk(1000), Err(StoreError::TreeTooLarge)));
     }
 }

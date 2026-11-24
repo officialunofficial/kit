@@ -634,7 +634,8 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
 /// # Errors
 /// Propagates object-store errors and returns [`IndexError::NotTree`]
 /// if `tree_hash` does not point at a tree object. A tree that expands to
-/// more than [`crate::store::MAX_TREE_LEAVES`] files fails with
+/// more than [`crate::store::MAX_TREE_LEAVES`] files, or to paths an index
+/// file could not hold, fails with
 /// [`StoreError::TreeTooLarge`] before any entry is built.
 pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
     check_tree_leaves(store, tree_hash).map_err(|e| match e {

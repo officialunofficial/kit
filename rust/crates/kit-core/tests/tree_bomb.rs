@@ -10,8 +10,7 @@ use kit_core::index::{self, IndexError};
 use kit_core::layout::RepoLayout;
 use kit_core::ops::restore::{self, RestoreError, RestoreOptions, restore_tree_to_worktree};
 use kit_core::{
-    Blob, EntryMode, MAX_TREE_LEAVES, Object, ObjectStore, StoreError, Tree, TreeEntry, diff_trees,
-    serialize,
+    Blob, EntryMode, Object, ObjectStore, StoreError, Tree, TreeEntry, diff_trees, serialize,
 };
 use tempfile::TempDir;
 
@@ -67,7 +66,7 @@ fn open() -> (TempDir, ObjectStore) {
 }
 
 fn is_too_large(error: &StoreError) -> bool {
-    matches!(error, StoreError::TreeTooLarge { limit } if *limit == MAX_TREE_LEAVES)
+    matches!(error, StoreError::TreeTooLarge)
 }
 
 #[test]
@@ -131,4 +130,21 @@ fn a_tree_that_shares_subtrees_but_stays_under_the_cap_still_walks() {
         restore_tree_to_worktree(&store, &root, worktree.path(), &RestoreOptions::default())
             .unwrap();
     assert_eq!(report.files_written, 64);
+}
+
+#[test]
+fn merge_refuses_a_tree_bomb_before_reading_it() {
+    let (_dir, store) = open();
+    let bomb = tree_bomb(&store, 60);
+    let fine = tree_bomb(&store, 3);
+    let started = Instant::now();
+    for (base, ours, theirs) in [
+        (Some(fine), Some(fine), Some(bomb)),
+        (Some(bomb), Some(fine), Some(fine)),
+        (None, Some(bomb), Some(fine)),
+    ] {
+        let error = kit_core::ops::merge::merge_trees(&store, base, ours, theirs).unwrap_err();
+        assert!(is_too_large(&error), "{error:?}");
+    }
+    assert!(started.elapsed() < FAST);
 }

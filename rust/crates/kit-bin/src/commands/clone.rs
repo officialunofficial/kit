@@ -38,15 +38,15 @@ struct CloneOpts {
     #[cfg(feature = "sparse-checkout")]
     #[arg(long = "sparse", value_name = "PATTERN", num_args = 1.., conflicts_with = "no_checkout")]
     sparse: Vec<String>,
+    /// Fetch and set the branch and HEAD, but write no worktree files and no
+    /// index. `kit checkout <branch>` fills the worktree later.
+    #[arg(short = 'n', long = "no-checkout")]
+    no_checkout: bool,
     /// Check out `<branch>` instead of the remote's default branch. Must
     /// name a branch the remote actually advertises; unlike the default
     /// heuristic (current default branch, falling back to whatever the
     /// remote advertises first) this never silently substitutes another
     /// branch.
-    /// Fetch and set the branch and HEAD, but write no worktree files and no
-    /// index. `kit checkout <branch>` fills the worktree later.
-    #[arg(short = 'n', long = "no-checkout")]
-    no_checkout: bool,
     #[arg(short = 'b', long = "branch", value_name = "NAME")]
     branch: Option<String>,
     /// Name the cloned remote `<name>` in the new repo's `.kit/config`

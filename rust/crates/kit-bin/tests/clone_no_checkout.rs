@@ -47,8 +47,9 @@ fn worktree_entries(dir: &Path) -> Vec<String> {
     names
 }
 
-#[test]
-fn no_checkout_writes_no_files_and_no_index_and_checkout_fills_the_worktree() {
+/// An upstream with `dir/a.txt` and `b.txt` on `main`. Returns the work tree,
+/// the bare remote, its URL and `main`'s tip; both directories must stay alive.
+fn upstream() -> (tempfile::TempDir, tempfile::TempDir, String, String) {
     let up = tempfile::tempdir().unwrap();
     let bare = tempfile::tempdir().unwrap();
     let url = format!("kit+file://{}", bare.path().display());
@@ -70,7 +71,12 @@ fn no_checkout_writes_no_files_and_no_index_and_checkout_fills_the_worktree() {
             .success()
     );
     let tip = read_ref(up.path(), "refs/heads/main").unwrap();
+    (up, bare, url, tip)
+}
 
+#[test]
+fn no_checkout_writes_no_files_and_no_index_and_checkout_fills_the_worktree() {
+    let (_up, _bare, url, tip) = upstream();
     let parent = tempfile::tempdir().unwrap();
     let out = run_in(parent.path(), &["clone", "--no-checkout", &url, "copy"]);
     assert!(out.status.success(), "{}", stderr_str(&out));
@@ -96,6 +102,25 @@ fn no_checkout_writes_no_files_and_no_index_and_checkout_fills_the_worktree() {
     assert!(status.stdout.is_empty(), "{status:?}");
 }
 
+#[test]
+fn the_first_checkout_still_refuses_to_overwrite_an_untracked_file() {
+    let (_up, _bare, url, _tip) = upstream();
+    let parent = tempfile::tempdir().unwrap();
+    assert!(
+        run_in(parent.path(), &["clone", "-n", &url, "copy"])
+            .status
+            .success()
+    );
+    let copy = parent.path().join("copy");
+    fs::write(copy.join("b.txt"), "mine").unwrap();
+    let out = run_in(&copy, &["checkout", "main"]);
+    assert!(!out.status.success());
+    assert_eq!(fs::read_to_string(copy.join("b.txt")).unwrap(), "mine");
+    assert!(!copy.join("dir").exists(), "nothing else is written");
+    assert!(!copy.join(".kit/index").exists());
+}
+
+#[cfg(feature = "sparse-checkout")]
 #[test]
 fn no_checkout_conflicts_with_sparse() {
     let parent = tempfile::tempdir().unwrap();
