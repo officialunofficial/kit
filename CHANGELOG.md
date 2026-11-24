@@ -9,10 +9,12 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
 - Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
 
 ### Fixed
 
+- A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
 - A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
 - `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.

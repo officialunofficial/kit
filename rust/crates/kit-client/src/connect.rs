@@ -487,6 +487,10 @@ pub enum Error {
     Limit(&'static str),
     #[error("invalid response/input: {0}")]
     Invalid(&'static str),
+    /// A 5xx or 429 answer whose body is not Connect error JSON, such as an
+    /// edge or proxy error page. Scheduling remains host-owned.
+    #[error("server error (status {status})")]
+    ServerStatus { status: u16 },
     #[error("transport: {0}")]
     Transport(String),
     /// An explicitly transient channel failure. Scheduling remains host-owned.
@@ -1547,7 +1551,7 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
                     cause: &error.to_string(),
                     limit: Some(limit),
                 })
-                .unwrap_or(Error::Invalid("Connect error JSON"))
+                .unwrap_or_else(|| non_connect_failure(response.status()))
         })?;
         error.status = response.status().as_u16();
         error.headers = response.headers().clone();
@@ -1590,6 +1594,18 @@ pub(crate) fn decode_response_diagnosed<D: FailureObserver + ?Sized>(
     }
     let (parts, body) = response.into_parts();
     Ok((body, parts.headers))
+}
+
+/// A non-Connect error body: a 5xx or 429 is an intermediary's transient
+/// answer, any other status is a malformed remote.
+fn non_connect_failure(status: http::StatusCode) -> Error {
+    if status.is_server_error() || status == http::StatusCode::TOO_MANY_REQUESTS {
+        Error::ServerStatus {
+            status: status.as_u16(),
+        }
+    } else {
+        Error::Invalid("Connect error JSON")
+    }
 }
 
 fn strip_type(url: &str) -> &str {
