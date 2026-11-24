@@ -28,7 +28,9 @@
 //!
 //! ## Concurrency
 //!
-//! [`record`] and [`expire`] are **not** internally synchronized.
+//! [`record`] takes the leaf `recovery-log.lock`, so two linked trees that
+//! append at once cannot cut each other's line off with the torn-tail repair.
+//! [`expire`] is **not** internally synchronized.
 //! [`expire`] reads-filters-rewrites the log, so an [`record`] append
 //! that interleaves between its read and its atomic replace would be
 //! clobbered — and the superseded commit would silently drop out of
@@ -47,6 +49,7 @@ use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::bounded_read;
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
+use crate::repo_lock;
 
 /// File name under `.kit/` for the append-only recovery log.
 pub const RECOVERY_LOG: &str = "recovery-log";
@@ -135,6 +138,8 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
         return Ok(());
     }
     fs::create_dir_all(layout.common_dir())?;
+    let _lock = repo_lock::acquire_default(layout.common_dir(), repo_lock::RECOVERY_LOG_LOCK)
+        .map_err(|e| RecoveryError::Io(io::Error::other(e)))?;
     let line = format!(
         "{}\t{}\t{}\t{}\n",
         entry.timestamp,
@@ -158,9 +163,12 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
 }
 
 /// Cut a last line that has no newline off `file`: the torn end of an earlier
-/// append. Appending to it would glue the new line to the torn bytes.
+/// append. Appending to it would glue the new line to the torn bytes. The
+/// caller holds the recovery-log lock, so no append lands between the scan and
+/// the cut.
 fn cut_unterminated_tail(file: &mut File) -> io::Result<()> {
-    let mut end = file.seek(SeekFrom::End(0))?;
+    let first_end = file.seek(SeekFrom::End(0))?;
+    let mut end = first_end;
     let keep = loop {
         if end == 0 {
             break 0;
@@ -174,8 +182,7 @@ fn cut_unterminated_tail(file: &mut File) -> io::Result<()> {
         }
         end = start;
     };
-    let len = file.metadata()?.len();
-    if keep < len {
+    if keep < first_end {
         file.set_len(keep)?;
     }
     Ok(())
@@ -520,6 +527,23 @@ mod tests {
         assert!(roots(&md).unwrap().is_empty());
         record(&md, &entry(200, 2)).unwrap();
         assert_eq!(roots(&md).unwrap(), BTreeSet::from([h(2)]));
+    }
+
+    #[test]
+    fn records_from_parallel_writers_are_all_kept() {
+        let (_d, md) = md();
+        std::thread::scope(|scope| {
+            for writer in 0..8_u8 {
+                let md = &md;
+                scope.spawn(move || {
+                    for n in 0..20_u8 {
+                        let id = writer * 20 + n + 1;
+                        record(md, &entry(u64::from(id), id)).unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(roots(&md).unwrap().len(), 160);
     }
 
     #[test]

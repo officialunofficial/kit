@@ -198,7 +198,8 @@ fn write(layout: &RepoLayout, repo: &Config) -> Result<(), Error> {
 /// Add or replace a remote. With no `name`, set the flat default remote.
 ///
 /// `repo` is the repo layer of the config. The operation changes it and writes
-/// it back.
+/// it back. The caller holds [`config::lock`] from before it read `repo`, so a
+/// change made at the same time is kept.
 ///
 /// # Errors
 /// [`Error::UrlControlCharacters`], [`Error::UnsupportedScheme`],
@@ -234,6 +235,8 @@ pub fn add(
 /// [`Error::UrlControlCharacters`] or [`Error::UnsupportedScheme`] for the
 /// address. [`Error::NoDefault`] or [`Error::NotFound`] when the remote does
 /// not exist. [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn set_url(layout: &RepoLayout, repo: &mut Config, name: &str, url: &str) -> Result<(), Error> {
     let transport = validate_url(url)?;
     if name == DEFAULT_REMOTE_NAME {
@@ -299,6 +302,8 @@ pub fn list(merged: &Config) -> Listing {
 /// # Errors
 /// [`Error::NoDefault`] or [`Error::NotFound`] when the remote does not
 /// exist. [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn remove(
     layout: &RepoLayout,
     repo: &mut Config,
@@ -343,6 +348,8 @@ pub fn remove(
 /// [`Error::RenameDefault`], [`Error::NameControlCharacters`],
 /// [`Error::InvalidName`], [`Error::NotFound`], [`Error::AlreadyExists`] or
 /// [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn rename(
     layout: &RepoLayout,
     repo: &mut Config,

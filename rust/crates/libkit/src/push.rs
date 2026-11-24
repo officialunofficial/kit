@@ -346,6 +346,16 @@ pub fn record_upstream(
     let mut repo = config::read_layered(layout, environment, observer)
         .map_err(Error::RecordUpstream)?
         .repo;
+    // The check above used the config read before the push. Check again on
+    // the layer read under the lock, so an upstream set during the push stays.
+    if !replace
+        && repo
+            .branch_upstreams
+            .get(branch)
+            .is_some_and(|set| !set.remote.is_empty())
+    {
+        return Ok(());
+    }
     repo.branch_upstreams.insert(branch.to_owned(), upstream);
     config::write(layout, &repo).map_err(Error::RecordUpstream)
 }

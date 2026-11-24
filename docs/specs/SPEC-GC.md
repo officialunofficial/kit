@@ -190,15 +190,16 @@ its recovery entry is lost. A last line without its newline is an append that a
 crash or a full disk cut short: readers ignore it, and `record` cuts the file
 back to its last newline before it appends. The caller moves the ref only after
 `record` returns, so a cut entry protects nothing that moved. A tab in the
-branch field is two entries glued together and fails the parse. `record` and `expire` are **not** internally
+branch field is two entries glued together and fails the parse. `record`
+takes the leaf `recovery-log.lock` for its append, so two trees that record at
+once cannot cut each other's line off. `expire` is **not** internally
 synchronized: `ops::recovery`'s own concurrency note requires callers to
 hold "the repo lock" &mdash; in practice each producer's per-tree
 `worktree.lock` (see SPEC-CONCURRENCY §3.2). gc's "expire → collect
 roots → prune" sequence runs under the full lock set SPEC-CONCURRENCY §4
 assigns to `gc` &mdash; every registered tree's `worktree.lock`, a superset of
 any single producer's one tree &mdash; so a producer append can never race an
-`expire` rewrite and vanish, without either side needing a distinct,
-dedicated recovery-log lock.
+`expire` rewrite and vanish, without `expire` needing the recovery-log lock.
 
 **Status:** complete. The recovery log and its producers
 are implemented &mdash; `commit --amend`, `reset`, and `rebase` each

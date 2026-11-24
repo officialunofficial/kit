@@ -103,6 +103,12 @@ pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
 /// this one, so it may be taken under any other lock.
 pub const CONFIG_LOCK: &str = "config.lock";
 
+/// Basename of the common-directory lock that serialises appends to
+/// `.kit/recovery-log`. Linked trees append under their own `worktree.lock`,
+/// so two appends can overlap, and an append may cut a torn tail off the file
+/// first. A holder takes no other lock while it holds this one.
+pub const RECOVERY_LOG_LOCK: &str = "recovery-log.lock";
+
 /// Maximum filename length for a lock name.
 const MAX_NAME_LEN: usize = 255;
 

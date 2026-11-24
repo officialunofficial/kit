@@ -43,6 +43,7 @@ document points here.
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
 | `config.lock` | common dir | per-repo | one read-modify-write of `.kit/config` (`kit remote`, `kit config`, setting an upstream). The holder takes no other lock, so the lock may be taken under any other | this document |
+| `recovery-log.lock` | common dir | per-repo | one `recovery::record` append, with the repair of a torn tail before it. The holder takes no other lock | §3.2 (this document) |
 | `gc-auto` | common dir | per-repo, try-only | one automatic maintenance step at a time. The file holds its advisory stamp | SPEC-GC, "Automatic maintenance" |
 | shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except the prune guard, which lasts a whole fetch or the branch phase of a push | shared for bulk writes, cached reuse, format validation, gc pack copying, and the fetch and push prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
 | `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
@@ -134,10 +135,11 @@ Residual gaps this warning does **not** close:
 
 ### 3.2 Recovery-log `record`/`expire` synchronization
 
-`ops::recovery::record` and `ops::recovery::expire` are not internally
-synchronized (see that module's own concurrency note) and have no
-dedicated lock of their own. Correctness instead relies on lock
-**superset** containment:
+`ops::recovery::record` takes the leaf `recovery-log.lock` for its append, so
+two linked trees that record at once cannot cut each other's line off when one
+repairs a torn tail (§2). `ops::recovery::expire` is not internally
+synchronized (see that module's own concurrency note). Its correctness against
+`record` relies on lock **superset** containment:
 
 - Every producer (`commit --amend`, `reset`, `rebase`, `stash pop`)
   calls `record` while already holding *its own tree's* `worktree.lock`
@@ -149,11 +151,12 @@ dedicated lock of their own. Correctness instead relies on lock
 
 Because gc's lock set always contains whichever single `worktree.lock`
 a producer would be holding, a producer's `record` append and gc's
-`expire` rewrite can never interleave &mdash; without a separate recovery-log
-lock being necessary. `ops::recovery`'s module doc calls this "the repo
+`expire` rewrite can never interleave &mdash; without `expire` needing the
+recovery-log lock. `ops::recovery`'s module doc calls this "the repo
 lock" generically rather than naming a specific lock file, precisely
-because the guarantee comes from lock containment, not from a
-dedicated primitive.
+because the guarantee against `expire` comes from lock containment. Two
+producers in different trees hold different `worktree.lock` files, so the
+appends of `record` meet only at `recovery-log.lock`.
 
 ### 3.3 First-parent history publication
 
@@ -271,7 +274,9 @@ the fetch's interrupt handling and total lock-wait limit.
 
 The short-lived shared/exclusive `format` lock (§3.4) is innermost in
 both chains. Holders acquire no further repository locks; gc never waits
-for its exclusive acquisition. Per-command sets below omit this implicit
+for its exclusive acquisition. The leaf `config.lock` and `recovery-log.lock`
+(§2) are likewise held with no further repository lock and may be taken under
+any other. Per-command sets below omit this implicit
 object-store lock.
 
 The file transport's locks serialize every write condition to one ref within
