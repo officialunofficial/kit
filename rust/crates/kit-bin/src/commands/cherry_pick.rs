@@ -214,7 +214,7 @@ fn start(
         // git-shaped per-path conflict lines (additive), then kit's
         // resumable-flow hint.
         for rec in &records {
-            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", super::display_path(&rec.path));
         }
         let _ = writeln!(
             stderr,

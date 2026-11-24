@@ -438,12 +438,15 @@ pub fn keyid_matches_pubkey(keyid: &str, pubkey: &[u8]) -> bool {
     }
 }
 
-/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`.
+/// Shorten a keyid for display: `<prefix>:<first-16-hex>…`. The cut is at the
+/// last character boundary within 16 bytes, because a keyid from a fetched
+/// envelope can hold multi-byte characters.
 #[must_use]
 pub fn short_keyid(keyid: &str) -> String {
     match keyid.split_once(':') {
         Some((prefix, body)) if body.len() > 16 => {
-            format!("{prefix}:{}…", &body[..16])
+            let end = (0..=16).rev().find(|&i| body.is_char_boundary(i)).unwrap_or(0);
+            format!("{prefix}:{}…", &body[..end])
         }
         _ => keyid.to_owned(),
     }
@@ -452,6 +455,16 @@ pub fn short_keyid(keyid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_keyid_cuts_on_a_character_boundary() {
+        // Byte 16 is inside the 3-byte character that starts at byte 15.
+        let keyid = format!("ed25519:{}€{}", "a".repeat(15), "b".repeat(8));
+        assert_eq!(short_keyid(&keyid), format!("ed25519:{}…", "a".repeat(15)));
+        // A cut exactly on a boundary keeps all 16 bytes.
+        let keyid = format!("ed25519:{}", "é".repeat(9));
+        assert_eq!(short_keyid(&keyid), format!("ed25519:{}…", "é".repeat(8)));
+    }
 
     #[test]
     fn parse_missing_file_is_empty() {

@@ -1,6 +1,8 @@
 //! Backend-neutral failures returned by a remote source.
 
-use kit_core::protocol::{AdmissionRequired, TransportError};
+use kit_core::protocol::{
+    AdmissionRequired, TransportError, escape_terminal_text, sanitize_remote_error_text,
+};
 use std::time::Duration;
 
 /// Host scheduling classification. No class causes the library to retry.
@@ -50,11 +52,11 @@ pub enum SourceError {
     TlsConfiguration(String),
     #[error("admission helper failed: {0}")]
     AdmissionHelperFailed(String),
-    #[error("remote error: {0}")]
+    #[error("remote error: {}", sanitize_remote_error_text(.0))]
     RemoteError(String),
     #[error("ref CAS precondition failed")]
     RefConflict,
-    #[error("invalid ref name: {0}")]
+    #[error("invalid ref name: {}", escape_terminal_text(.0, false))]
     InvalidRef(String),
     #[error("connection to remote failed")]
     ConnectionFailed,
@@ -101,7 +103,7 @@ fn remote_display(remote: &RemoteFailure) -> String {
     match remote.code.as_str() {
         "not_found" => "pack not found on remote".to_owned(),
         "unauthenticated" | "permission_denied" => "access denied by remote".to_owned(),
-        _ => format!("remote error: {}", remote.message),
+        _ => format!("remote error: {}", sanitize_remote_error_text(&remote.message)),
     }
 }
 

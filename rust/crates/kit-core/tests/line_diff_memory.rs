@@ -214,8 +214,9 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
     assert_within_ceiling("blame_file", peak);
     drop(result);
 
-    // Reassembly and splitting still grow with input size. The root line
-    // check prevents attribution buffers for a file above the line limit.
+    // Reassembly still grows with input size. The line count runs before the
+    // split, and the root line check prevents attribution buffers for a file
+    // above the line limit.
     let root = commit(b'a', MIB / 2, vec![]);
     let (result, peak) = peak_of(|| blame_file(&store, root, "f"));
     assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == MIB / 2));

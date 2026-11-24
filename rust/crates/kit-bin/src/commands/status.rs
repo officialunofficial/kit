@@ -360,7 +360,7 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
             "  (use \"kit add <file>...\" to include in what will be committed)"
         );
         for e in &untracked {
-            let _ = writeln!(stderr, "\t{}", e.diff.path);
+            let _ = writeln!(stderr, "\t{}", super::display_path(&e.diff.path));
         }
     }
 
@@ -397,7 +397,11 @@ fn human_label(kind: DiffKind) -> &'static str {
 /// (git's form); every other kind is just its path.
 fn human_path(e: &StatusEntry) -> String {
     match (e.diff.kind, &e.diff.old_path) {
-        (DiffKind::Renamed, Some(old)) => format!("{old} -> {}", e.diff.path),
-        _ => e.diff.path.clone(),
+        (DiffKind::Renamed, Some(old)) => format!(
+            "{} -> {}",
+            super::display_path(old),
+            super::display_path(&e.diff.path)
+        ),
+        _ => super::display_path(&e.diff.path),
     }
 }

@@ -656,7 +656,9 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
         | remote::Error::InvalidName(_)
         | remote::Error::RenameDefault => exit::PROTOCOL_ERROR,
         // The config cannot take the remote.
-        remote::Error::AlreadyExists(_) | remote::Error::Write(_) => exit::CANTCREAT,
+        remote::Error::AlreadyExists(_)
+        | remote::Error::OverlappingName { .. }
+        | remote::Error::Write(_) => exit::CANTCREAT,
         remote::Error::NoDefault | remote::Error::NotFound(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
@@ -953,6 +955,14 @@ mod tests {
             (remote::Error::RenameDefault.into(), exit::PROTOCOL_ERROR),
             (
                 remote::Error::AlreadyExists("x".to_owned()).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                remote::Error::OverlappingName {
+                    name: "x/y".to_owned(),
+                    other: "x".to_owned(),
+                }
+                .into(),
                 exit::CANTCREAT,
             ),
             (remote::Error::NoDefault.into(), exit::GENERAL_ERROR),

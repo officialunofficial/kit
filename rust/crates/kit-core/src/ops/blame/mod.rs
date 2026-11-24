@@ -288,7 +288,8 @@ pub enum BlameError {
     #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
     ReverseRange { start: String, end: String },
     /// A loaded file or matcher input exceeded [`BLAME_MAX_LINES`].
-    /// Reassembly and splitting precede the check; attribution follows it.
+    /// Reassembly precedes the check, which counts newlines before the split;
+    /// attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
     /// A stored file is larger than
@@ -733,6 +734,8 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         }
         _ => return Err(BlameError::NotABlob),
     };
+    // Count the lines before the split allocates a `Vec` per line.
+    check_line_count(data.iter().filter(|&&b| b == b'\n').count())?;
     let lines = split_lines(&data);
     check_line_count(lines.len())?;
     Ok(lines)

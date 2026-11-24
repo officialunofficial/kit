@@ -590,7 +590,7 @@ pub fn unified_hunks_opts(
     context: usize,
     mode: WhitespaceMode,
 ) -> Option<Vec<u8>> {
-    if is_binary(old_bytes) || is_binary(new_bytes) {
+    if shown_as_binary(old_bytes) || shown_as_binary(new_bytes) {
         return None;
     }
     let old_lines = split_lines(old_bytes);
@@ -654,7 +654,7 @@ pub struct PatchHunk {
 /// [`apply_hunks_subset`].
 #[must_use]
 pub fn enumerate_hunks(old_bytes: &[u8], new_bytes: &[u8]) -> Option<Vec<PatchHunk>> {
-    if is_binary(old_bytes) || is_binary(new_bytes) {
+    if shown_as_binary(old_bytes) || shown_as_binary(new_bytes) {
         return None;
     }
     let old_lines = split_lines(old_bytes);
@@ -802,7 +802,7 @@ fn merge_within_edits(
     theirs: &[u8],
     max_edits: usize,
 ) -> Option<Vec<u8>> {
-    if is_binary(base) || is_binary(ours) || is_binary(theirs) {
+    if shown_as_binary(base) || shown_as_binary(ours) || shown_as_binary(theirs) {
         return None;
     }
     let base_lines = split_lines(base);
@@ -928,7 +928,7 @@ fn apply_merge_regions(
 /// non-UTF-8 text.
 #[must_use]
 pub fn diff_line_counts(old_bytes: &[u8], new_bytes: &[u8]) -> Option<(usize, usize)> {
-    if is_binary(old_bytes) || is_binary(new_bytes) {
+    if shown_as_binary(old_bytes) || shown_as_binary(new_bytes) {
         return None;
     }
     let old_lines = split_lines(old_bytes);
@@ -966,6 +966,22 @@ pub const BINARY_SNIFF_LEN: usize = 8000;
 #[must_use]
 pub fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
+}
+
+/// Most lines a text diff or merge builds a line table for. Git has no line
+/// cap: it only treats a file above `core.bigFileThreshold` (512 MiB) as
+/// binary. That byte threshold does not bound memory here, because a blob of
+/// `\n` bytes is one line per byte and the table costs 24 bytes per line, so
+/// the largest blob under git's threshold would need over 12 GiB. A blob with
+/// more lines than this is shown as binary, as git shows a big file. One
+/// million lines is about 24 MiB of table per side and above any hand-written
+/// text file.
+const MAX_DIFF_LINES: usize = 1_000_000;
+
+/// Whether `bytes` is shown as binary: git's NUL heuristic, or more lines than
+/// [`MAX_DIFF_LINES`]. The line count runs before any line table exists.
+fn shown_as_binary(bytes: &[u8]) -> bool {
+    is_binary(bytes) || bytes.iter().filter(|&&b| b == b'\n').count() > MAX_DIFF_LINES
 }
 
 /// A single line (raw bytes) plus whether the source had a trailing newline
@@ -2888,6 +2904,27 @@ mod tests {
             if distance(&ours) <= max_edits && distance(&theirs) <= max_edits {
                 proptest::prop_assert_eq!(limited, unlimited);
             }
+        }
+    }
+
+    #[test]
+    fn a_blob_past_the_line_cap_is_shown_as_binary() {
+        let at_cap = vec![b'\n'; MAX_DIFF_LINES];
+        let past_cap = vec![b'\n'; MAX_DIFF_LINES + 1];
+        let mut changed = at_cap.clone();
+        changed[0] = b'x';
+        assert!(!shown_as_binary(&at_cap));
+        assert!(shown_as_binary(&past_cap));
+
+        assert!(unified_hunks(&at_cap, &changed).is_some());
+        assert!(diff_line_counts(&at_cap, &changed).is_some());
+        assert!(enumerate_hunks(&at_cap, &changed).is_some());
+        for (old, new) in [(&at_cap, &past_cap), (&past_cap, &at_cap)] {
+            assert!(unified_hunks(old, new).is_none());
+            assert!(unified_hunks_opts(old, new, 3, WhitespaceMode::Exact).is_none());
+            assert!(diff_line_counts(old, new).is_none());
+            assert!(enumerate_hunks(old, new).is_none());
+            assert!(merge_blob_3way(&at_cap, old, new).is_none());
         }
     }
 
