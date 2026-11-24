@@ -28,3 +28,15 @@ fn a_clone_dir_with_objects_but_no_format_marker_is_refused() {
     std::fs::create_dir_all(dir.path().join(".kit/objects/ab")).unwrap();
     assert!(kit_sync::init_clone_dir(dir.path(), &remote()).is_err());
 }
+
+#[test]
+fn a_clone_dir_with_a_killed_init_and_other_files_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".kit/objects")).unwrap();
+    std::fs::write(dir.path().join("notes.txt"), b"mine").unwrap();
+    assert!(kit_sync::init_clone_dir(dir.path(), &remote()).is_err());
+    assert_eq!(
+        std::fs::read(dir.path().join("notes.txt")).unwrap(),
+        b"mine"
+    );
+}

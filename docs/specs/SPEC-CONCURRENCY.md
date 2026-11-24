@@ -50,8 +50,8 @@ document points here.
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
-The recovery log (`.kit/recovery-log`) has **no dedicated lock** &mdash; see
-§3.2.
+The recovery log (`.kit/recovery-log`) has `recovery-log.lock` for its appends
+only; `expire` has no lock of its own &mdash; see §3.2.
 
 In the schematic names above, `<ref>` MUST be the lowercase hexadecimal BLAKE3
 digest of the full UTF-8 ref path relative to the common directory, such as

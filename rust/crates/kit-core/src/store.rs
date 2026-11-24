@@ -666,10 +666,17 @@ impl ObjectStore {
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
-        // A shard that this write creates is an entry of `objects/`, which the
+        // A shard that this call creates is an entry of `objects/`, which the
         // shard flush in `write_atomic` does not cover.
-        let new_shard = !shard_dir.is_dir();
-        fs::create_dir_all(shard_dir)?;
+        let new_shard = match fs::create_dir(shard_dir) {
+            Ok(()) => true,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(shard_dir)?;
+                true
+            }
+            Err(e) => return Err(e.into()),
+        };
         write_atomic(&final_path, bytes, &**self.syncer())?;
         if new_shard {
             self.syncer().dir_sync(&self.objects_root)?;
