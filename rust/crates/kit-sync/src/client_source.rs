@@ -143,6 +143,7 @@ fn source_error(error: ClientError) -> SourceError {
         // HttpTransport does not classify its string errors. Refused redirects
         // and malformed/oversized responses must not become transient failures.
         ClientError::Connection(_) => SourceError::ServerError { status: 503 },
+        ClientError::ServerStatus { status } => SourceError::ServerError { status },
         ClientError::RequestTimeout(cause) => SourceError::RemoteError(cause),
         ClientError::Transport(cause) => SourceError::RemoteError(format!("transport: {cause}")),
         ClientError::AdmissionRequired(challenges) => SourceError::AdmissionRequired { challenges },
@@ -724,6 +725,36 @@ mod tests {
         };
         assert_eq!(challenges.www_authenticate, ["Admission opaque"]);
         assert_eq!(challenges.admission_required, ["opaque-admission"]);
+    }
+
+    #[test]
+    fn an_edge_error_page_is_transient_and_a_client_error_page_is_a_refusal() {
+        use crate::FailureClass;
+        for (status, body, class) in [
+            (503, "<html>bad gateway</html>", FailureClass::Transient),
+            (429, "slow down", FailureClass::Transient),
+            (400, "<html>bad request</html>", FailureClass::Refusal),
+        ] {
+            let mut response = failure_response(body, None);
+            *response.status_mut() = http::StatusCode::from_u16(status).unwrap();
+            response
+                .headers_mut()
+                .insert("content-type", "text/html".parse().unwrap());
+            let transport = FailureResponse(RefCell::new(Some(response)));
+            let dest =
+                Destination::new("https://vcs.example.org".into(), "default".into()).unwrap();
+            let client = Client::anonymous(&transport, dest);
+            let source = ClientSource::new(&client, &FuturesExecutor);
+            let error = source.list_branches().unwrap_err();
+            assert_eq!(error.class(), class, "{status}: {error:?}");
+            match (class, error) {
+                (FailureClass::Transient, SourceError::ServerError { status: seen }) => {
+                    assert_eq!(seen, status);
+                }
+                (FailureClass::Refusal, SourceError::InvalidResponse) => (),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 
     #[test]

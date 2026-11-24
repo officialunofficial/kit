@@ -285,7 +285,7 @@ fn a_non_connect_error_body_is_transient_only_for_5xx_and_429() {
         });
         let error = block_on(anonymous(&script).read_ref("refs/heads/main", None)).unwrap_err();
         assert!(
-            matches!(error, Error::Invalid("Connect error JSON")),
+            matches!(error, Error::ServerStatus { status: seen } if seen == status),
             "{status}: {error:?}"
         );
         assert_eq!(script.seen.borrow().len(), 1, "no client retry");
