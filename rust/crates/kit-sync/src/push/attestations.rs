@@ -705,7 +705,17 @@ struct Prepared {
 impl Prepared {
     fn upload(&self, tx: &PushContext<'_>) -> Result<(), Failure> {
         let key = PackKey::new(self.id);
-        if !tx.pack_exists(&key, ATTESTMAP_REF)? {
+        // One existence check, as before. A pack that is there and whose
+        // length the remote reports is skipped only at its own length, as for
+        // a data pack; a remote that reports none (ssh, connect) keeps the
+        // name-only skip and is asked nothing more.
+        let whole = tx.pack_exists(&key, ATTESTMAP_REF)?
+            && match tx.pack_len(&key, ATTESTMAP_REF) {
+                Ok(Some(len)) => len == self.pack.len(),
+                Ok(None) => true,
+                Err(_) => false,
+            };
+        if !whole {
             tx.upload_pack(self, &key, ATTESTMAP_REF)?;
         }
         Ok(())
@@ -731,7 +741,7 @@ impl PackBody for Prepared {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::RemoteSource as _;
+    use crate::RemoteSource;
     #[test]
     fn another_push_sweeping_spools_preserves_prepared_attestation_packs() {
         let temp = tempfile::tempdir().unwrap();
@@ -755,6 +765,137 @@ mod tests {
                 .unwrap()
         );
     }
+    /// A source over a memory remote that counts what a push asks of it and
+    /// can report no pack length, as an ssh or connect remote does.
+    struct Counting<'a> {
+        inner: crate::TransportSource<'a>,
+        uploads: std::cell::Cell<usize>,
+        exists: std::cell::Cell<usize>,
+        lengths: std::cell::Cell<usize>,
+        knows_length: bool,
+    }
+    impl<'a> Counting<'a> {
+        fn new(transport: &'a kit_transport_memory::MemoryTransport, knows_length: bool) -> Self {
+            Self {
+                inner: crate::TransportSource::new(transport),
+                uploads: std::cell::Cell::new(0),
+                exists: std::cell::Cell::new(0),
+                lengths: std::cell::Cell::new(0),
+                knows_length,
+            }
+        }
+    }
+    impl RemoteSource for Counting<'_> {
+        fn list_branches(&self) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+            self.inner.list_branches()
+        }
+        fn list_refs(&self, prefix: &str) -> Result<Vec<kit_core::refs::Ref>, SourceError> {
+            self.inner.list_refs(prefix)
+        }
+        fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
+            self.inner.read_ref(name)
+        }
+        fn download_blob(&self, key: &PackKey, hint: &str) -> Result<Vec<u8>, SourceError> {
+            self.inner.download_blob(key, hint)
+        }
+        fn download_pack(
+            &self,
+            key: &PackKey,
+            hint: &str,
+            sink: &mut dyn kit_core::protocol::PackSink,
+        ) -> Result<(), SourceError> {
+            self.inner.download_pack(key, hint, sink)
+        }
+        fn pack_exists(&self, key: &PackKey, hint: &str) -> Result<bool, SourceError> {
+            self.exists.set(self.exists.get() + 1);
+            self.inner.pack_exists(key, hint)
+        }
+        fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+            self.lengths.set(self.lengths.get() + 1);
+            if self.knows_length {
+                self.inner.pack_len(key, hint)
+            } else {
+                Ok(None)
+            }
+        }
+        fn upload_pack(
+            &self,
+            pack: &dyn PackBody,
+            key: &PackKey,
+            hint: &str,
+        ) -> Result<(), SourceError> {
+            self.uploads.set(self.uploads.get() + 1);
+            self.inner.upload_pack(pack, key, hint)
+        }
+    }
+
+    /// One prepared attestation pack, and the context that built it.
+    fn prepared(store: &ObjectStore, source: &dyn RemoteSource) -> Prepared {
+        let context = PushContext::new(source, &crate::NoopObserver, store);
+        let bytes = include_bytes!("../../../../tests/golden/attest/envelope_basic.json");
+        let mut batch = Batch::new(4096);
+        let mut packs = Vec::new();
+        batch
+            .add(bytes.to_vec(), &context, &mut packs, &mut Vec::new(), "")
+            .unwrap();
+        batch.flush(&context, &mut packs).unwrap();
+        packs.remove(0)
+    }
+
+    #[test]
+    fn a_stored_attestation_pack_is_skipped_only_at_its_own_length_where_the_length_is_known() {
+        use kit_core::protocol::Transport as _;
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(temp.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let transport = kit_transport_memory::MemoryTransport::new();
+        let source = Counting::new(&transport, true);
+        let pack = prepared(&store, &source);
+        let context = PushContext::new(&source, &crate::NoopObserver, &store);
+        let key = PackKey::new(pack.id);
+        let stored = || transport.pack_len(&key, None).unwrap();
+
+        // Not stored: one existence check, no length check, uploaded.
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 1);
+        assert_eq!((source.exists.get(), source.lengths.get()), (1, 0));
+        assert_eq!(stored(), Some(pack.pack.len()));
+        // Whole: skipped.
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 1);
+        // Cut short by damage outside the push: uploaded again, and whole.
+        transport
+            .upload_pack(&kit_core::protocol::SliceBody(b"cut"), &key, None)
+            .unwrap();
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 2);
+        assert_eq!(stored(), Some(pack.pack.len()));
+        // Longer than the local pack: uploaded again.
+        let long = vec![0u8; usize::try_from(pack.pack.len()).unwrap() + 1];
+        transport
+            .upload_pack(&kit_core::protocol::SliceBody(&long), &key, None)
+            .unwrap();
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 3);
+        assert_eq!(stored(), Some(pack.pack.len()));
+    }
+
+    #[test]
+    fn a_stored_attestation_pack_on_a_remote_with_no_length_keeps_the_name_only_skip() {
+        let temp = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(temp.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let transport = kit_transport_memory::MemoryTransport::new();
+        let source = Counting::new(&transport, false);
+        let pack = prepared(&store, &source);
+        let context = PushContext::new(&source, &crate::NoopObserver, &store);
+        // Not stored: uploaded; stored: skipped, as before.
+        pack.upload(&context).unwrap();
+        pack.upload(&context).unwrap();
+        assert_eq!(source.uploads.get(), 1);
+        assert_eq!(source.exists.get(), 2);
+    }
+
     #[test]
     fn append_never_publishes_a_chain_beyond_the_reader_walk_limit() {
         use kit_core::protocol::Transport as _;
