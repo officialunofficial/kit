@@ -497,7 +497,10 @@ A pull writes the per-worktree `PULL_HEAD` sidecar before moving the branch
 and HEAD, then removes it after restoring the files and index. A retry checks
 for local work before finishing a partial restore. It reports completion even
 when the branch tip stays the same. This covers a killed process, not power
-loss. See SPEC-WORKTREE for its layout and recovery rules.
+loss. A caller that commits from the index must refuse while the marker names
+HEAD and the index holds a pre-pull entry; SPEC-WORKTREE states the check, and
+`libkit::commit::unfinished_pull` makes it. See SPEC-WORKTREE for its layout and
+recovery rules.
 
 ## Features
 

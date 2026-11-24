@@ -74,6 +74,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::ops::conflict_state;
 use kit_core::ops::{DiffKind, StatusEntry, StatusStaging};
 use kit_core::refs;
+use kit_core::store::ObjectStore;
 use libkit::status::{self, Detail, Record};
 
 use crate::clap_args;
@@ -152,6 +153,8 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return super::fail(e),
     };
 
+    warn_unfinished_pull(&layout);
+
     if porcelain {
         if opts.porcelain == Some(PorcelainVersion::V2) {
             render_porcelain_v2(&layout, &report, opts.z)
@@ -160,6 +163,29 @@ pub fn run(args: &[String]) -> u8 {
         }
     } else {
         render_human(&layout, &report.entries)
+    }
+}
+
+/// Warn on standard error while an interrupted pull has moved `HEAD` and
+/// left the index behind it. A commit of that index would undo the pull.
+fn warn_unfinished_pull(layout: &RepoLayout) {
+    let unfinished = ObjectStore::open(layout)
+        .map_err(|e| format!("open store: {e}"))
+        .and_then(|store| {
+            libkit::commit::unfinished_pull(layout, &store).map_err(|e| e.to_string())
+        });
+    let mut stderr = std::io::stderr().lock();
+    match unfinished {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            let _ = writeln!(
+                stderr,
+                "warning: an interrupted pull has not finished restoring files; run `kit pull` to finish it before you commit, or `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes"
+            );
+        }
+        Err(e) => {
+            let _ = writeln!(stderr, "warning: unfinished pull check failed: {e}");
+        }
     }
 }
 
