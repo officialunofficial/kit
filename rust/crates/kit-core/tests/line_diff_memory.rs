@@ -1,6 +1,7 @@
 //! One line diff or text merge of a file up to 1 MiB stays under a fixed memory
 //! ceiling however many of its lines changed. Blame compares a rewritten file
 //! at its line limit within the same ceiling. Its other buffers grow with file size.
+//! A blob of newlines past the line cap builds no line table at all.
 //!
 //! These tests watch the bytes that a call holds at once. The allocator refuses
 //! to pass a hard ceiling, so a search that grows with the input aborts here
@@ -145,6 +146,26 @@ fn short_lines_stay_under_the_ceiling() {
         let (counts, peak) = peak_of(|| diff_line_counts(&base, &ours));
         assert_eq!(counts, Some((bytes / 2, bytes / 2)));
         assert_within_ceiling("diff_line_counts", peak);
+    }
+}
+
+#[test]
+fn a_blob_of_newlines_past_the_line_cap_builds_no_line_table() {
+    let _guard = serial();
+    // 4 MiB of `\n` is 4,194,304 lines, past the cap. A table would cost 24
+    // bytes a line on each side.
+    for bytes in [4 * MIB, 8 * MIB] {
+        let old = vec![b'\n'; bytes];
+        let mut new = old.clone();
+        new[0] = b'x';
+
+        let (hunks, peak) = peak_of(|| unified_hunks(&old, &new));
+        assert_eq!(hunks, None);
+        assert_within_ceiling("unified_hunks", peak);
+
+        let (counts, peak) = peak_of(|| diff_line_counts(&old, &new));
+        assert_eq!(counts, None);
+        assert!(peak < MIB, "diff_line_counts held {peak} bytes");
     }
 }
 
