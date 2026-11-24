@@ -456,7 +456,8 @@ fn name_grammar_ok(name: &str, max_segments: usize) -> bool {
 /// Canonical per-branch lock name for ancestry publication and recovery.
 #[cfg(feature = "history-mmr")]
 pub(crate) fn history_lock_name(branch: &str) -> String {
-    let full_ref = format!("refs/heads/{branch}");
+    // ASCII-folded, like `cas_lock_name`.
+    let full_ref = format!("refs/heads/{}", branch.to_ascii_lowercase());
     format!(
         "refs-history-{}.lock",
         to_hex(&crate::hash::hash(full_ref.as_bytes()))
@@ -483,10 +484,16 @@ pub fn pending_history_roots(layout: &RepoLayout) -> RefResult<BTreeSet<Hash>> {
 /// Hash the complete identity so nested or punctuation-heavy names cannot
 /// overflow a single lock filename. Namespace prefixes remain in the digest;
 /// history and mutation guards also have distinct filename prefixes.
+///
+/// The key is ASCII-lowercased. On a case-insensitive file system `Main` and
+/// `main` are one ref file, and two spellings must share one lock, as git's
+/// `Main.lock` and `main.lock` do. On a case-sensitive file system the two
+/// refs only share a lock, which is safe.
 pub(crate) fn cas_lock_name(common_dir: &Path, path: &Path) -> String {
     let ref_key = path
         .strip_prefix(common_dir)
-        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy());
+        .map_or_else(|_| path.to_string_lossy(), |p| p.to_string_lossy())
+        .to_ascii_lowercase();
     format!(
         "refs-{}.lock",
         to_hex(&crate::hash::hash(ref_key.as_bytes()))
@@ -2459,6 +2466,56 @@ mod tests {
                 "history and mutation guards must be distinct"
             );
         }
+    }
+
+    #[test]
+    fn two_spellings_of_one_ref_share_one_lock_key() {
+        let (_dir, layout) = fresh_repo();
+        for namespace in [HEADS_DIR, TAGS_DIR, "refs/remotes/default"] {
+            let lower = ref_path(layout.common_dir(), namespace, "release/v1");
+            let mixed = ref_path(layout.common_dir(), namespace, "Release/V1");
+            assert_eq!(
+                cas_lock_name(layout.common_dir(), &lower),
+                cas_lock_name(layout.common_dir(), &mixed)
+            );
+        }
+        let branch = ref_path(layout.common_dir(), HEADS_DIR, "v1");
+        let tag = ref_path(layout.common_dir(), TAGS_DIR, "v1");
+        assert_ne!(
+            cas_lock_name(layout.common_dir(), &branch),
+            cas_lock_name(layout.common_dir(), &tag),
+            "a branch and a tag keep distinct locks"
+        );
+        #[cfg(feature = "history-mmr")]
+        assert_eq!(history_lock_name("Main"), history_lock_name("main"));
+    }
+
+    #[test]
+    fn a_write_waits_for_the_lock_held_under_another_spelling_of_the_branch() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, layout) = fresh_repo();
+        update_ref(&layout, "main", RefWriteCondition::Any, &h("base")).unwrap();
+        let held = crate::repo_lock::acquire_default(
+            layout.common_dir(),
+            &cas_lock_name(
+                layout.common_dir(),
+                &ref_path(layout.common_dir(), HEADS_DIR, "main"),
+            ),
+        )
+        .unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = update_ref(&layout, "Main", RefWriteCondition::Any, &h("next"));
+            done_tx.send(result).unwrap();
+        });
+        let premature = done_rx.recv_timeout(Duration::from_millis(200));
+        drop(held);
+        worker.join().unwrap();
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "a write under `Main` ran while `main` was locked: {premature:?}"
+        );
     }
 
     /// All mutations must join the CAS critical section, including calls

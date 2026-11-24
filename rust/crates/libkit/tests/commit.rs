@@ -12,6 +12,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Identity, Object, Tree};
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
 use kit_core::ops::pull_state::PullState;
+use kit_core::ops::merge::ConflictKind;
 use kit_core::ops::recovery;
 use kit_core::refs;
 use kit_core::serialize;
@@ -566,4 +567,32 @@ fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_m
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     f.stage("other.txt", "x\n");
     f.begin(false).unwrap();
+
+#[test]
+fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    let other = f.loose_commit("other", vec![]);
+    let state = MergeState {
+        merge_head: other,
+        orig_head: f.head().unwrap(),
+        message: b"Merge branch 'other'".to_vec(),
+    };
+    let conflicts = [ConflictRecord {
+        path: "a.txt".into(),
+        kind: ConflictKind::ModifyModify,
+        base_hash: None,
+        ours_hash: None,
+        theirs_hash: None,
+    }];
+    conflict_state::write_merge_state(&f.layout, &state, &conflicts).unwrap();
+    fs::remove_file(f.layout.conflicts_file()).unwrap();
+    f.stage("b.txt", "merged\n");
+    let before = f.head();
+
+    let pending = f.begin(false).unwrap();
+    let error = f.make("Merge branch 'other'", false, &pending).unwrap_err();
+    assert!(matches!(error, Error::MergeStateIncomplete), "{error:?}");
+    assert_eq!(f.head(), before, "the branch is untouched");
 }

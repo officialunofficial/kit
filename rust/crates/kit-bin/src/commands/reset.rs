@@ -17,7 +17,8 @@
 //!
 //! - **`--hard`** — move HEAD, reset the index to the target tree, AND
 //!   reset the worktree to it (discarding tracked-file changes). Like
-//!   git, untracked files are left in place. This is the one destructive
+//!   git, untracked files are left in place, and a merge, cherry-pick or
+//!   revert in progress is cleared. This is the one destructive
 //!   variant, so it runs the same dirty/untracked guard as `checkout`:
 //!   it **refuses** to discard locally-modified or staged content
 //!   unless `-f`/`--force` is given. That guard is a kit safety
@@ -30,6 +31,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
+use kit_core::ops::conflict_state;
 use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
@@ -250,6 +252,12 @@ pub fn run(args: &[String]) -> u8 {
         if reset_index {
             super::sync_index_to_tree(&layout, &store, tree_hash)
                 .map_err(|e| (e, exit::CANTCREAT))?;
+        }
+        // The operation is over, as in git. It goes last: a stop before it
+        // leaves the state, and a hard reset run again clears it.
+        if opts.hard {
+            conflict_state::clear_operation_state(&layout)
+                .map_err(|e| (format!("clear operation state: {e}"), exit::CANTCREAT))?;
         }
         Ok(())
     });

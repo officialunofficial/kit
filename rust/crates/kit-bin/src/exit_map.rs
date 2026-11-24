@@ -504,7 +504,8 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         | commit::Error::NothingToAmend
         | commit::Error::NothingStaged
         | commit::Error::MergeDiscarded
-        | commit::Error::PullUnfinished(_) => exit::USAGE,
+        | commit::Error::PullUnfinished(_)
+        | commit::Error::MergeStateIncomplete => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged

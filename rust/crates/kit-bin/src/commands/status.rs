@@ -13,6 +13,9 @@
 //!   M  modified.txt                 # to stderr
 //! ```
 //!
+//! A merge, cherry-pick, revert or rebase in progress adds one line that
+//! names it, after the branch line. The porcelain output does not change.
+//!
 //! Banners and section headers go to stderr; per-file lines also go to
 //! stderr in default mode because they are formatted for humans.
 //! Scripts should use `--porcelain` (see below) for stdout output
@@ -68,6 +71,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
+use kit_core::ops::conflict_state;
 use kit_core::ops::{DiffKind, StatusEntry, StatusStaging};
 use kit_core::refs;
 use kit_core::store::ObjectStore;
@@ -333,6 +337,13 @@ fn render_human(layout: &RepoLayout, entries: &[StatusEntry]) -> u8 {
         None => {
             let _ = writeln!(stderr, "On branch main\n\nNo commits yet");
         }
+    }
+
+    if let Some(op) = conflict_state::in_progress_op_name(layout) {
+        let _ = writeln!(
+            stderr,
+            "\nA {op} is in progress (finish it, or run `kit {op} --abort`)."
+        );
     }
 
     if entries.is_empty() {

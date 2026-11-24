@@ -102,6 +102,12 @@ pub enum Error {
         "nothing to commit: the staged merge was discarded (its result differs from HEAD but the index matches HEAD); re-stage it or run `kit merge --abort`"
     )]
     MergeDiscarded,
+    /// The merge is recorded without its conflict list: a write that stopped
+    /// part way, or a state from an older version.
+    #[error(
+        "the merge in progress has no conflict list (its state was not fully written); run `kit merge --abort` or `kit reset --hard` to drop it"
+    )]
+    MergeStateIncomplete,
     /// The key cannot sign.
     #[error(transparent)]
     Signer(#[from] signer::Error),
@@ -484,6 +490,12 @@ pub fn create(
     // A merge needs every conflict resolved and staged, as `merge --continue`
     // does. A clean merge has no record, so both checks pass.
     if pending.merge.is_some() {
+        // A merge always has a conflict list, empty for a clean one. Without
+        // the file the state is torn, and a commit would record "ours" with
+        // the other side as a parent.
+        if !layout.conflicts_file().is_file() {
+            return Err(Error::MergeStateIncomplete);
+        }
         let records = conflict_state::read_conflicts(layout.worktree_state_dir())
             .map_err(Error::ReadConflicts)?;
         gate(&records).map_err(Error::Unresolved)?;
