@@ -625,7 +625,7 @@ fn abort_still_moves_the_branch_when_head_is_not_the_merge() {
     start(&f, &merge_request("topic")).unwrap();
     // A commit with the same parents but another order is not this merge.
     let other = f.commit(
-        &[("a.txt", "x\n"), ("b.txt", "b\n")],
+        &[("a.txt", "ours\n"), ("b.txt", "b\n")],
         &[theirs, ours],
         "other",
         9,
@@ -657,11 +657,21 @@ fn abort_keeps_a_file_that_the_user_untracked() {
     idx.remove_path("t.txt");
     index::write_index(&f.layout, &idx).unwrap();
 
+    // The file is untracked work now. The abort keeps it, and the restore
+    // refuses as it does for any untracked file that is not in the target.
+    let err = merge::abort(&f.layout, &f.store).unwrap_err();
+    assert!(
+        matches!(err, Error::Worktree(ref m) if m.contains("'t.txt'")),
+        "{err:?}"
+    );
+    assert_eq!(f.read("t.txt"), "mine\n");
+
+    // With the file moved away, the abort goes through and leaves it there.
+    std::fs::rename(f.path("t.txt"), f.path("kept.txt")).unwrap();
     assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
     assert_eq!(f.read("a.txt"), "ours\n");
-    assert_eq!(f.read("t.txt"), "mine\n");
-    let idx = index::read_index(&f.layout).unwrap();
-    assert!(idx.find_entry("t.txt").is_none());
+    assert_eq!(f.read("kept.txt"), "mine\n");
+    assert!(!is_merge_in_progress(&f.layout));
 }
 
 #[test]

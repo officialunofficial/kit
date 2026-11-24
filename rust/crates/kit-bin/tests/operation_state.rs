@@ -170,9 +170,9 @@ const OPERATIONS: [(&str, &str); 3] = [
     ("revert", "REVERT_HEAD"),
 ];
 
-/// A repository with `op` paused on a text conflict in `a.txt`.
-fn paused(op: &str) -> tempfile::TempDir {
-    let td = if op == "revert" {
+/// A repository where `op` conflicts in `a.txt`, and the target to give it.
+fn conflicting(op: &str) -> (tempfile::TempDir, &'static str) {
+    if op == "revert" {
         let td = tempfile::tempdir().unwrap();
         let root = td.path();
         ok(root, &["init"]);
@@ -183,14 +183,15 @@ fn paused(op: &str) -> tempfile::TempDir {
         commit_all(root, "change");
         write(root, "a.txt", "later\n");
         commit_all(root, "later");
-        td
+        (td, "HEAD~1")
     } else {
-        diverged_repo(false)
-    };
-    let target = match op {
-        "revert" => "HEAD~1",
-        _ => "side",
-    };
+        (diverged_repo(false), "side")
+    }
+}
+
+/// A repository with `op` paused on a text conflict in `a.txt`.
+fn paused(op: &str) -> tempfile::TempDir {
+    let (td, target) = conflicting(op);
     let out = run_in(td.path(), &[op, target]);
     assert!(!out.status.success(), "{op}: {out:?}");
     assert!(td.path().join(".kit/kit-conflicts").is_file(), "{op}");
@@ -239,45 +240,30 @@ fn a_soft_reset_keeps_an_operation_in_progress() {
     }
 }
 
+/// Gives a directory its mode back, also when a test fails.
+#[cfg(unix)]
+struct Restore<'a>(&'a Path);
+
+#[cfg(unix)]
+impl Drop for Restore<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
 #[test]
 fn the_state_of_an_operation_is_on_disk_before_its_material_is() {
+    use std::os::unix::fs::PermissionsExt;
     for (op, marker) in OPERATIONS {
-        let td = tempfile::tempdir().unwrap();
+        let (td, target) = conflicting(op);
         let root = td.path();
-        ok(root, &["init"]);
-        ok(root, &["keygen"]);
-        write(root, "a.txt", "base\n");
-        commit_all(root, "base");
-        let target = if op == "revert" {
-            write(root, "a.txt", "changed\n");
-            commit_all(root, "change");
-            write(root, "a.txt", "later\n");
-            commit_all(root, "later");
-            "HEAD~1"
-        } else {
-            ok(root, &["branch", "side"]);
-            ok(root, &["checkout", "side"]);
-            write(root, "a.txt", "side\n");
-            commit_all(root, "side");
-            ok(root, &["checkout", "main"]);
-            write(root, "a.txt", "main\n");
-            commit_all(root, "main");
-            "side"
-        };
-        // The object of the other side is gone, so the conflict is found
-        // but its material cannot be written. A stop after the material and
-        // before the state looks the same on disk as the state this leaves.
-        let spec = if op == "revert" {
-            "HEAD~2:a.txt"
-        } else {
-            "side:a.txt"
-        };
-        let hex = String::from_utf8(run_in(root, &["rev-parse", spec]).stdout).unwrap();
-        let hex = hex.trim();
-        let loose = root.join(".kit/objects").join(&hex[..2]).join(&hex[2..]);
-        assert!(loose.is_file(), "{op}: {loose:?}");
-        fs::remove_file(loose).unwrap();
-
+        // The files cannot be written, so the conflict is found and the state
+        // is written, and then the material fails. A stop between the
+        // material and the state would look the same on disk.
+        fs::set_permissions(root, fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = Restore(root);
         let out = run_in(root, &[op, target]);
         assert!(!out.status.success(), "{op}: {out:?}");
         assert!(
