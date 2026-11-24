@@ -692,3 +692,84 @@ fn a_large_file_is_added_as_one_pack_and_one_loose_manifest() {
     assert_eq!(packs, 2);
     assert_eq!(loose, 2, "the old and the new manifest");
 }
+
+/// The index file as a test sees a rewrite of it: the bytes, and the inode,
+/// which a temporary file and a rename change.
+#[cfg(unix)]
+fn index_file(layout: &RepoLayout) -> (Vec<u8>, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = layout.index_file();
+    (fs::read(&path).unwrap(), fs::metadata(path).unwrap().ino())
+}
+
+#[cfg(unix)]
+#[test]
+fn an_add_that_changes_nothing_leaves_the_index_file_alone() {
+    let f = Fixture::new(&[], &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+    // The files are older than the racy window of the index the add writes,
+    // so the index keeps their stat cache and the next add finds them clean.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    f.paths(&["."]).unwrap();
+    let settled = index_file(&f.layout);
+
+    f.paths(&["a.txt"]).unwrap();
+    assert_eq!(index_file(&f.layout), settled, "an add of an unchanged file");
+    f.run(&Request { all: true, ..BULK }).unwrap();
+    assert_eq!(index_file(&f.layout), settled, "add -A on a clean tree");
+    f.run(&Request {
+        update: true,
+        ..BULK
+    })
+    .unwrap();
+    assert_eq!(index_file(&f.layout), settled, "add -u on a clean tree");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_add_that_stages_something_writes_the_index() {
+    let f = Fixture::new(&[], &[("a.txt", "one\n")]);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    f.paths(&["a.txt"]).unwrap();
+    let before = index_file(&f.layout);
+
+    fs::write(f.root.join("a.txt"), "changed\n").unwrap();
+    f.paths(&["a.txt"]).unwrap();
+    assert_ne!(index_file(&f.layout), before);
+    assert_eq!(f.staged("a.txt").as_deref(), Some("changed\n"));
+
+    fs::remove_file(f.root.join("a.txt")).unwrap();
+    f.run(&Request { update: true, ..BULK }).unwrap();
+    assert_eq!(f.staged("a.txt"), None, "a deletion is recorded");
+}
+
+#[test]
+fn an_add_writes_an_index_it_seeded_from_head_even_when_nothing_changed() {
+    // A repository whose index file is gone starts from the tree of HEAD. The
+    // add stages nothing, and the file is still written, so the next command
+    // finds the seeded entries.
+    let f = Fixture::new(&[], &[("a.txt", "one\n")]);
+    f.paths(&["a.txt"]).unwrap();
+    let tree = kit_core::worktree::build_tree_from_index(
+        &f.store,
+        &index::read_index(&f.layout).unwrap(),
+    )
+    .unwrap();
+    let commit = Object::Commit(kit_core::object::Commit::new_unannotated(
+        tree,
+        Vec::new(),
+        kit_core::object::Identity::ed25519([1; 32]),
+        [1; 32],
+        b"first".to_vec(),
+        0,
+        [0; 64],
+    ));
+    let head = f
+        .store
+        .write(&serialize::serialize(&commit).unwrap())
+        .unwrap();
+    refs::write_ref(&f.layout, "main", &head).unwrap();
+    fs::remove_file(f.layout.index_file()).unwrap();
+
+    f.paths(&["a.txt"]).unwrap();
+    assert_eq!(f.staged("a.txt").as_deref(), Some("one\n"));
+}

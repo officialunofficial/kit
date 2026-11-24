@@ -1,6 +1,6 @@
-//! Injected write failures, for tests of how a full disk ends a transfer, and a
+//! Injected write failures, for tests of how a full disk ends a transfer, a
 //! hook on the store's dirent flushes, for tests of what is durable before a
-//! ref names it.
+//! ref names it, and a count of full flushes.
 //!
 //! Built with the `fault-injection` feature,
 //! which only test builds turn on. A failure applies to every thread of the
@@ -95,6 +95,23 @@ pub(crate) fn sync_step(step: impl FnOnce() -> SyncStep) {
     if let Some(hook) = hook.as_ref() {
         hook(&step());
     }
+}
+
+thread_local! {
+    static FLUSHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many full flushes the calling thread has made, counting every file and
+/// directory that [`crate::flush::file`] flushed. A test takes the count
+/// before and after a call and compares them. Another thread's flush is not
+/// counted, so tests run in parallel do not disturb each other.
+#[must_use]
+pub fn flushes() -> u64 {
+    FLUSHES.with(std::cell::Cell::get)
+}
+
+pub(crate) fn count_flush() {
+    FLUSHES.with(|count| count.set(count.get() + 1));
 }
 
 static LOOSE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
