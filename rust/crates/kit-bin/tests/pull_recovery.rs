@@ -178,6 +178,34 @@ fn recovery_refuses_soft_reset_work_with_a_stale_marker() {
 }
 
 #[test]
+fn a_commit_is_refused_while_a_pull_has_not_finished_restoring() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let status = run(dir, &["status"]);
+    let warning = String::from_utf8(status.stderr).unwrap();
+    assert!(warning.contains("interrupted pull"), "{warning}");
+    for args in [
+        ["commit", "-m", "would revert the pull"].as_slice(),
+        ["commit", "-a", "-m", "would revert the pull"].as_slice(),
+        ["commit", "--amend", "-m", "would revert the pull"].as_slice(),
+    ] {
+        let out = run(dir, args);
+        assert!(!out.status.success(), "{args:?}");
+        let message = String::from_utf8(out.stderr).unwrap();
+        assert!(message.contains("kit pull"), "{message}");
+        assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    }
+    ok(dir, &["pull"]);
+    let status = run(dir, &["status"]);
+    let quiet = String::from_utf8(status.stderr).unwrap();
+    assert!(!quiet.contains("interrupted pull"), "{quiet}");
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    ok(dir, &["commit", "-m", "work"]);
+}
+
+#[test]
 fn recovery_cleans_a_regular_restore_temporary_file() {
     let pending = Pending::new();
     let dir = pending.local.path();
