@@ -155,7 +155,7 @@ fn conflict_messages_quote_a_name_with_a_control_character() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains('\u{1b}'), "raw escape byte: {stderr:?}");
     assert!(
-        stderr.contains(r#"markers remain in '"x\033[2Jy.txt"'"#),
+        stderr.contains(r"markers remain in 'x\u{1b}[2Jy.txt'"),
         "{stderr}"
     );
 }

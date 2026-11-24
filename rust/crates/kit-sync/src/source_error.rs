@@ -202,7 +202,10 @@ mod tests {
         let error = SourceError::RemoteError("a\u{1b}[2Jb".into());
         assert_eq!(error.to_string(), "remote error: a\\u{1b}[2Jb");
         let error = SourceError::RemoteError("x".repeat(1000));
-        assert_eq!(error.to_string(), format!("remote error: {}", "x".repeat(256)));
+        assert_eq!(
+            error.to_string(),
+            format!("remote error: {}", "x".repeat(256))
+        );
         let error = SourceError::InvalidRef("refs/heads/a\u{7}b".into());
         assert_eq!(error.to_string(), "invalid ref name: refs/heads/a\\u{7}b");
         let error = SourceError::Remote(Box::new(RemoteFailure {
@@ -213,7 +216,14 @@ mod tests {
             headers: Vec::new(),
         }));
         let text = error.to_string();
-        assert!(!text.contains('\u{1b}') && !text.contains('\u{7}'), "{text:?}");
-        assert!(text.len() <= "remote error: ".len() + 256 * 6, "{}", text.len());
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
+        assert!(
+            text.len() <= "remote error: ".len() + 256 * 6,
+            "{}",
+            text.len()
+        );
     }
 }
