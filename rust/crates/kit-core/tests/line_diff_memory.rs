@@ -204,10 +204,8 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             .write(&serialize::serialize(&object).unwrap())
             .unwrap()
     };
-    let commit = |tag, lines, parents: Vec<Hash>| {
-        let blob = put(Object::Blob(Blob {
-            data: short_lines(tag, 2 * lines),
-        }));
+    let commit = |data: Vec<u8>, parents: Vec<Hash>| {
+        let blob = put(Object::Blob(Blob { data }));
         let tree = put(Object::Tree(Tree {
             entries: vec![TreeEntry {
                 name: b"f".to_vec(),
@@ -225,8 +223,8 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
             [0; 64],
         )))
     };
-    let parent = commit(b'a', BLAME_MAX_LINES, vec![]);
-    let head = commit(b'b', BLAME_MAX_LINES, vec![parent]);
+    let parent = commit(short_lines(b'a', 2 * BLAME_MAX_LINES), vec![]);
+    let head = commit(short_lines(b'b', 2 * BLAME_MAX_LINES), vec![parent]);
     let (result, peak) = peak_of(|| blame_file(&store, head, "f"));
     let result = result.unwrap();
     assert_eq!(result.lines.len(), BLAME_MAX_LINES);
@@ -238,9 +236,17 @@ fn blame_of_rewritten_short_lines_stays_under_the_ceiling() {
     // Reassembly still grows with input size. The line count runs before the
     // split, and the root line check prevents attribution buffers for a file
     // above the line limit.
-    let root = commit(b'a', MIB / 2, vec![]);
+    let root = commit(short_lines(b'a', MIB), vec![]);
     let (result, peak) = peak_of(|| blame_file(&store, root, "f"));
     assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == MIB / 2));
     eprintln!("one MiB root blame peak: {peak} bytes");
     assert_within_ceiling("root blame_file", peak);
+
+    // A blob of newlines is refused by its newline count, before the split
+    // builds a `Vec` for each of its 8 Mi lines.
+    let bomb = commit(vec![b'\n'; 8 * MIB], vec![]);
+    let (result, peak) = peak_of(|| blame_file(&store, bomb, "f"));
+    assert!(matches!(result, Err(BlameError::FileTooLarge { lines }) if lines == 8 * MIB));
+    eprintln!("newline blob blame peak: {peak} bytes");
+    assert_within_ceiling("newline blame_file", peak);
 }

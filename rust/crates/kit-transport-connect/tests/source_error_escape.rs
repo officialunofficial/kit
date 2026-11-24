@@ -1,4 +1,4 @@
-//! Hunt V5a: a hostile Connect server's error message must not reach a
+//! A hostile Connect server's error message must not reach a
 //! terminal raw through the `kit-sync` `SourceError` a library embedder sees.
 //!
 //! The server below answers every request with a Connect `internal` error

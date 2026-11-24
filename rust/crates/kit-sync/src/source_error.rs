@@ -196,4 +196,24 @@ mod tests {
         };
         assert_eq!(challenges.reason, Some("helper failed"));
     }
+
+    #[test]
+    fn remote_text_is_escaped_and_cut() {
+        let error = SourceError::RemoteError("a\u{1b}[2Jb".into());
+        assert_eq!(error.to_string(), "remote error: a\\u{1b}[2Jb");
+        let error = SourceError::RemoteError("x".repeat(1000));
+        assert_eq!(error.to_string(), format!("remote error: {}", "x".repeat(256)));
+        let error = SourceError::InvalidRef("refs/heads/a\u{7}b".into());
+        assert_eq!(error.to_string(), "invalid ref name: refs/heads/a\\u{7}b");
+        let error = SourceError::Remote(Box::new(RemoteFailure {
+            code: "internal".into(),
+            message: "\u{1b}]0;t\u{7}".repeat(100),
+            details: Vec::new(),
+            status: 500,
+            headers: Vec::new(),
+        }));
+        let text = error.to_string();
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{7}'), "{text:?}");
+        assert!(text.len() <= "remote error: ".len() + 256 * 6, "{}", text.len());
+    }
 }

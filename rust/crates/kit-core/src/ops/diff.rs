@@ -979,7 +979,7 @@ pub fn is_binary(bytes: &[u8]) -> bool {
 const MAX_DIFF_LINES: usize = 1_000_000;
 
 /// Whether `bytes` is shown as binary: git's NUL heuristic, or more lines than
-/// [`MAX_DIFF_LINES`]. The line count runs before any line table exists.
+/// [`MAX_DIFF_LINES`] newlines. The count runs before any line table exists.
 fn shown_as_binary(bytes: &[u8]) -> bool {
     is_binary(bytes) || newline_count(bytes) > MAX_DIFF_LINES
 }

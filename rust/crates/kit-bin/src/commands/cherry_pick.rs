@@ -354,7 +354,8 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
-                    "unresolved conflict markers remain in '{path}'; resolve and `kit add` it"
+                    "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+                    super::display_path(&path)
                 ),
                 exit::GENERAL_ERROR,
             );
