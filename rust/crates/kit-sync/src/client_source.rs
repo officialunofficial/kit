@@ -732,7 +732,10 @@ mod tests {
         use crate::FailureClass;
         for (status, body, class) in [
             (503, "<html>bad gateway</html>", FailureClass::Transient),
+            (500, "oops", FailureClass::Transient),
             (429, "slow down", FailureClass::Transient),
+            (428, "<html>precondition</html>", FailureClass::Refusal),
+            (404, "<html>missing</html>", FailureClass::Refusal),
             (400, "<html>bad request</html>", FailureClass::Refusal),
         ] {
             let mut response = failure_response(body, None);
