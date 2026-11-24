@@ -1002,10 +1002,19 @@ impl ObjectStore {
         if repair {
             // A pack that lost its index is invisible. Verify it whole, then
             // give it back its index.
+            let mut first_error = None;
             for pair in list_pairs(&dir)? {
                 if lacks_index(&pair)? {
-                    rebuilt += usize::from(self.rebuild_index(&dir, &pair, true)?);
+                    match self.rebuild_index(&dir, &pair, true) {
+                        Ok(done) => rebuilt += usize::from(done),
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
+                    }
                 }
+            }
+            if let Some(error) = first_error {
+                return Err(error);
             }
         }
         Ok(rebuilt)

@@ -294,16 +294,13 @@ impl ObjectStore {
         Ok((plan, pairs))
     }
 
-    /// Plan to remove the old packs that have no index. Call it only after a
-    /// mark that read every live object: a live object that only such a pack
-    /// held would have failed that mark, so what is left in these packs is
-    /// not needed.
-    pub(crate) fn plan_lone_packs(
-        &self,
-        plan: &mut PackSweep,
-        now: u64,
-        grace: u64,
-    ) -> StoreResult<()> {
+    /// Plan to remove the old packs that have no index. Call it before a mark
+    /// and keep the plan only if that mark read every live object: a live
+    /// object that only such a pack held would have failed the mark, so what
+    /// is left in these packs is not needed. Planning first matters: a pack
+    /// whose index went away during the mark may have served it.
+    pub(crate) fn plan_lone_packs(&self, now: u64, grace: u64) -> StoreResult<PackSweep> {
+        let mut plan = PackSweep::default();
         let dir = self.pack_dir();
         if let Some(entries) = read_pack_dir(&dir)? {
             for entry in entries {
@@ -316,7 +313,7 @@ impl ObjectStore {
                 }
             }
         }
-        Ok(())
+        Ok(plan)
     }
 
     pub(crate) fn sweep_loose_duplicates(
@@ -463,6 +460,11 @@ impl ObjectStore {
 }
 
 impl PackSweep {
+    /// Take over the leftovers that `other` planned.
+    pub(crate) fn absorb_leftovers(&mut self, other: Self) {
+        self.leftovers.extend(other.leftovers);
+    }
+
     fn add_old_leftover(&mut self, path: PathBuf, now: u64, grace: u64) {
         if let Some(stamp) = Stamp::read(&path)
             && stamp.old_enough(now, grace)

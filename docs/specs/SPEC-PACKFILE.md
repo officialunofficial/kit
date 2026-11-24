@@ -169,7 +169,9 @@ unknown version, readers MUST raise `IncompatibleRepoFormat` and tell the
 user to update kit. Readers check the version before using its declared
 layout. Repair MUST preserve such a pair. A pair in which only one file has
 an unknown version, or in which the two versions differ, is damage to that
-pair, reported as such (SPEC-OBJECTS, "Object lookup").
+pair, reported as such (SPEC-OBJECTS, "Object lookup"). A change to either
+format therefore bumps both versions together, so that an older reader can
+tell a newer pair from damage.
 
 The exact version-1 index size is `1,100 + 44 × N` bytes. Before
 allocating or following an offset, check the magic, version, key, count,

@@ -1291,8 +1291,10 @@ attestation support warn once per command and skip the log.
   `{"ok":false,"error":"..."}` on failure.
 - **Automatic local pack maintenance (default on).** After applying a
   pack or pruning a remote-tracking ref, fetch and pull remove abandoned
-  staging files and lone pack members past the 14-day grace period.
-  They periodically retire wholly dead packs past grace, and rewrite,
+  staging files and lone indexes past the 14-day grace period.
+  They periodically retire wholly dead packs past grace, remove a pack
+  that lost its index past grace only after a collection's mark found
+  nothing live that needs it, and rewrite,
   merge and retire covered packs. `kit commit` runs the same step after
   it publishes, so a repository that never fetches does not build up
   packs, and `kit add` alone does not run it. A fetch or clone that applies packs creates the advisory stamp. A clone that finds fewer than

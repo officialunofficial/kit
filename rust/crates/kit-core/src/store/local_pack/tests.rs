@@ -94,10 +94,10 @@ fn an_orphan_plan_keeps_a_pack_whose_index_is_published_before_the_lock() {
 
     let index = fs::read(&pair.index).unwrap();
     fs::remove_file(&pair.index).unwrap();
-    let (mut plan, pairs) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
+    let (sweep, pairs) = store.plan_pack_leftovers(u64::MAX, 0).unwrap();
     assert_eq!(pairs, 0);
-    assert!(plan.is_empty(), "the sweep alone leaves a lone pack");
-    store.plan_lone_packs(&mut plan, u64::MAX, 0).unwrap();
+    assert!(sweep.is_empty(), "the sweep alone leaves a lone pack");
+    let plan = store.plan_lone_packs(u64::MAX, 0).unwrap();
     assert!(!plan.is_empty());
     fs::write(&pair.index, index).unwrap();
     drop(guard);
@@ -3816,5 +3816,25 @@ fn damage_to_the_pack_is_not_blamed_on_the_index() {
         );
         assert!(text.contains(&pack), "{text}");
         assert!(!text.contains("repair-indexes"), "{text}");
+    }
+}
+
+#[test]
+fn an_index_borrowed_from_another_pair_does_not_hide_the_pair_it_replaced() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3], vec![4, 5, 6]]);
+    fs::copy(&pairs[1].index, &pairs[0].index).unwrap();
+    let held = packed_blob(1).0;
+
+    for (full, budgets) in CATALOG_MODES {
+        let reader = reopen(&layout, full, budgets);
+        let error = reader.read(&held).unwrap_err();
+        assert!(
+            matches!(error, StoreError::LocalPackDamaged { .. }),
+            "full {full}, budgets {budgets:?}: {error}"
+        );
+        assert!(matches!(
+            reader.list_shard(held[0]),
+            Err(StoreError::LocalPackDamaged { .. })
+        ));
     }
 }

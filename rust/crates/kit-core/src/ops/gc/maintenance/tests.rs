@@ -1648,3 +1648,18 @@ fn an_old_lone_pack_stays_while_the_step_does_not_mark() {
     assert_eq!(report.leftovers_removed, 0);
     assert!(pack.exists());
 }
+
+#[test]
+fn a_pack_that_loses_its_index_during_the_step_survives() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, ids) = repo.old_pack(&[b"served the mark"]);
+    repo.pin("served", &ids[0]);
+    let index = pack.with_extension("idx");
+
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        fs::remove_file(&index).unwrap();
+    });
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(pack.exists());
+}

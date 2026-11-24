@@ -111,22 +111,32 @@ impl Pair {
     /// The file whose version differs from the other file's, as damage.
     fn version_damage(&self, found: Option<String>) -> StoreError {
         let [pack, index] = self.versions();
-        let reason = |kind: &str, version: u32| {
-            format!("{kind} version {version} does not match the other file of the pair")
+        let reason = |kind: &str, version: u32, other: Option<u32>| {
+            if other.is_some() {
+                format!("{kind} version {version} does not match the other file of the pair")
+            } else {
+                format!("{kind} version {version} is not one this kit reads")
+            }
         };
         match (pack, index) {
-            (_, Some(version)) if version != 1 => self.index_error(reason("local index", version)),
-            (Some(version), _) if version != 1 => self.error(reason("local pack", version)),
+            (_, Some(version)) if version != 1 => {
+                self.index_error(reason("local index", version, pack))
+            }
+            (Some(version), _) if version != 1 => self.error(reason("local pack", version, index)),
             _ => self.error(found.unwrap_or_else(|| "unknown version".to_owned())),
         }
     }
 
-    /// The shards whose ids this pair can hold, from its fanout, once the
-    /// fanout agrees with the pack's count. `None` when it cannot be read or
-    /// checked, so the pair may hold any shard.
+    /// The shards whose ids this pair can hold, for an index that is cut or
+    /// padded: its fanout is read once it agrees with the pack's count, and
+    /// its length is the only thing wrong. `None` for any other failure, such
+    /// as ids that leave their bucket or an index of another pair, where the
+    /// fanout cannot be trusted and the pair may hold any shard.
     pub(super) fn shards(&self) -> Option<Box<[bool; 256]>> {
         let mut head = [0; FANOUT_END];
-        open_regular(&self.index).ok()?.read_exact(&mut head).ok()?;
+        let mut index = open_regular(&self.index).ok()?;
+        let index_len = index.metadata().ok()?.len();
+        index.read_exact(&mut head).ok()?;
         let mut pack = open_regular(&self.pack).ok()?;
         let len = pack.metadata().ok()?.len();
         let (count, _, _) = read_header_sized(&mut pack, len).ok()?;
@@ -134,6 +144,9 @@ impl Pair {
             return None;
         }
         validate_fanout_bounds(&head[12..], count).ok()?;
+        if index_len == (INDEX_BASE_LEN + INDEX_ROW_LEN * count) as u64 {
+            return None;
+        }
         let mut shards = Box::new([false; 256]);
         let mut before = 0;
         for (shard, end) in head[12..].chunks_exact(4).map(le_u32).enumerate() {
