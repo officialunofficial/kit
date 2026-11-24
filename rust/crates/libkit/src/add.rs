@@ -327,7 +327,7 @@ fn stage_with_limit(
         return stage_tracked_observed(layout, &store, observer);
     }
 
-    let mut idx = read_or_seed_index_from_head(layout, &store).map_err(Error::ReadIndex)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, &store).map_err(Error::ReadIndex)?;
     let previous = idx.clone();
 
     // One durability batch for the whole call. A staged object costs no full
@@ -361,7 +361,33 @@ fn stage_with_limit(
     // The objects become durable before the index that names them.
     batch.commit().map_err(Error::Store)?;
     retain_content_identities(&store, &previous, &mut idx)?;
-    index::write_index(layout, &idx).map_err(Error::WriteIndex)
+    write_index_if_changed(layout, &previous, &idx, on_disk).map_err(Error::WriteIndex)
+}
+
+/// The index of the repository, or, when it holds no entry, the one that
+/// `HEAD` names. The flag is true when the entries came from the index file.
+fn read_index_or_seed(layout: &RepoLayout, store: &ObjectStore) -> Result<(Index, bool), String> {
+    let idx = index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    if idx.entries.is_empty() {
+        read_or_seed_index_from_head(layout, store).map(|seeded| (seeded, false))
+    } else {
+        Ok((idx, true))
+    }
+}
+
+/// Write `next`, unless it holds what the index file held. A command that
+/// finds nothing to stage leaves the file, and its flushes, alone. An index
+/// that came from `HEAD`, not from the file, is always written.
+fn write_index_if_changed(
+    layout: &RepoLayout,
+    previous: &Index,
+    next: &Index,
+    previous_was_on_disk: bool,
+) -> Result<(), index::IndexError> {
+    if previous_was_on_disk && previous == next {
+        return Ok(());
+    }
+    index::write_index(layout, next)
 }
 
 /// Report to `observer` each entry of `next` that a real run would add, update
@@ -419,7 +445,7 @@ fn stage_tracked_observed(
     observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     let root = layout.worktree_root();
-    let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Refresh)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, store).map_err(Error::Refresh)?;
     check_size(&idx, index::MAX_INDEX_BYTES)?;
     let previous = idx.clone();
 
@@ -519,7 +545,8 @@ fn stage_tracked_observed(
         .map_err(|e| Error::Refresh(format!("store: {e}")))?;
     retain_content_identities(store, &previous, &mut idx)
         .map_err(|e| Error::Refresh(e.to_string()))?;
-    index::write_index(layout, &idx).map_err(|e| Error::Refresh(format!("write index: {e}")))
+    write_index_if_changed(layout, &previous, &idx, on_disk)
+        .map_err(|e| Error::Refresh(format!("write index: {e}")))
 }
 
 fn is_gone(e: &io::Error) -> bool {
