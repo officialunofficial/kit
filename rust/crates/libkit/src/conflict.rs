@@ -518,6 +518,17 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), Error> {
     })
 }
 
+/// `op_result_tree`, when the store holds all of it, else `None`. Both steps
+/// of an abort use this one test, so they agree on whether the operation has a
+/// result tree: with none, only the conflict paths are the operation's, and
+/// the guards protect every other path.
+fn readable_result_tree(store: &ObjectStore, op_result_tree: Option<Hash>) -> Option<Hash> {
+    // A fresh snapshot, so the answer never depends on trees that a caller
+    // built in memory.
+    let snapshot = EphemeralSink::new(store);
+    op_result_tree.filter(|tree| diff_trees(&snapshot, None, Some(*tree)).is_ok())
+}
+
 /// Refuse an abort before it changes anything, when going back to
 /// `target_tree` would overwrite user work that is not conflict material.
 ///
@@ -563,7 +574,8 @@ pub fn ensure_abort_safe(
 
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
     let mut discardable = conflict_paths.clone();
-    if let Some(result_tree) = op_result_tree {
+    // A result tree that the store cannot read is the same as no result tree.
+    if let Some(result_tree) = readable_result_tree(store, op_result_tree) {
         let authored = diff_trees(&snapshot, current_tree, Some(result_tree))
             .map_err(check("check operation changes"))?;
         // The paths that the user changed after the operation paused.
@@ -705,8 +717,9 @@ pub fn reset_paths(
         .collect();
 
     let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
-    if let Some(result_tree) = op_result_tree {
-        let snapshot = EphemeralSink::new(store);
+    // A result tree that the store cannot read is the same as no result tree.
+    let snapshot = EphemeralSink::new(store);
+    if let Some(result_tree) = readable_result_tree(store, op_result_tree) {
         let authored = diff_trees(&snapshot, Some(target_tree), Some(result_tree))
             .map_err(check("check operation changes"))?;
         for e in authored.entries {

@@ -23,13 +23,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kit_core::hash::{self, Hash};
 use kit_core::index;
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Commit, Identity, Object};
+use kit_core::object::{Commit, EntryMode, Identity, Object, TreeEntry};
 use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
+use kit_core::ops::pull_state::PullState;
 use kit_core::ops::recovery::{self, RecoveryEntry};
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
 use kit_core::serialize;
-use kit_core::store::ObjectStore;
+use kit_core::store::{MAX_TREE_DEPTH, ObjectStore};
 use kit_core::worktree;
 use kit_sync::worktree::sync_index_to_tree;
 
@@ -101,6 +102,12 @@ pub enum Error {
         "nothing to commit: the staged merge was discarded (its result differs from HEAD but the index matches HEAD); re-stage it or run `kit merge --abort`"
     )]
     MergeDiscarded,
+    /// The merge is recorded without its conflict list: a write that stopped
+    /// part way, or a state from an older version.
+    #[error(
+        "the merge in progress has no conflict list (its state was not fully written); run `kit merge --abort` or `kit reset --hard` to drop it"
+    )]
+    MergeStateIncomplete,
     /// The key cannot sign.
     #[error(transparent)]
     Signer(#[from] signer::Error),
@@ -133,6 +140,17 @@ pub enum Error {
     /// The merge state cannot be cleared.
     #[error("clear merge state: {0}")]
     ClearMergeState(conflict_state::ConflictStateError),
+    /// The record of an unfinished pull cannot be read.
+    #[error(
+        "read the unfinished pull: {0}; if no pull is running, check the files, then remove `.kit/PULL_HEAD`"
+    )]
+    ReadPullState(std::io::Error),
+    /// An interrupted pull has not finished restoring the index and files.
+    #[error(
+        "an interrupted pull has not finished: HEAD is at {} but the index still holds files from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or, with no remote, `kit reset --hard -f` to restore the files of HEAD and discard uncommitted changes; after that reset, remove `.kit/PULL_HEAD` to commit a deliberate undo of the pull",
+        hash::to_hex(.0)
+    )]
+    PullUnfinished(Hash),
 }
 
 /// The state that a commit reads before its message is composed.
@@ -166,6 +184,7 @@ impl Pending {
 /// [`Error`] when the merge state or `HEAD` cannot be read, when an amend meets
 /// a merge in progress, or when there is no commit to amend.
 pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pending, Error> {
+    refuse_unfinished_pull(layout, store)?;
     let merge = read_merge(layout)?;
     if merge.is_some() && amend {
         return Err(Error::AmendDuringMerge);
@@ -187,6 +206,168 @@ pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pe
         amend: amend_target,
         head,
     })
+}
+
+/// Refuse while a pull that stopped partway leaves the index behind `HEAD`.
+fn refuse_unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Error> {
+    match unfinished_pull(layout, store)? {
+        Some(target) => Err(Error::PullUnfinished(target)),
+        None => Ok(()),
+    }
+}
+
+/// The commit of a pull that stopped partway, when a commit would undo it.
+///
+/// A pull records its target, moves the branch and `HEAD`, restores the files
+/// and writes the index last. A pull stopped in the restore leaves `HEAD` at
+/// the target and the index at the tree from before the pull. A commit of
+/// that index undoes the pulled change, and `commit -a` records a mixture of
+/// both trees.
+///
+/// The pull is unfinished while its record names `HEAD` and the index still
+/// holds the pre-pull entry, content and mode, at a path that the pull
+/// changed, or lacks a path that the pull added. Staging other paths does not
+/// hide it. A restore that reached the index, `reset --hard`
+/// and a pull that has not moved `HEAD` leave no such path, and a commit goes
+/// on. The check reads the index and writes nothing.
+///
+/// # Errors
+/// [`Error::ReadPullState`] when the record or a tree cannot be read,
+/// [`Error::ReadIndex`] when the index cannot. A commit waits for a repair.
+pub fn unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<Option<Hash>, Error> {
+    let Some(state) = PullState::at_head(layout).map_err(Error::ReadPullState)? else {
+        return Ok(None);
+    };
+    let Some(target_tree) = commit_tree(store, &state.target) else {
+        return Err(Error::ReadPullState(std::io::Error::other(
+            "the target of the pull is not a commit",
+        )));
+    };
+    let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
+    let behind =
+        Behind { store, index: &idx }.walk(Some(state.before_tree), Some(target_tree), "", 0)?;
+    Ok(behind.then_some(state.target))
+}
+
+/// A walk over the trees of a pull that finds a path where the index is still
+/// behind the pull.
+struct Behind<'a> {
+    store: &'a ObjectStore,
+    index: &'a index::Index,
+}
+
+impl Behind<'_> {
+    fn entries(&self, tree: Option<Hash>) -> Result<Vec<TreeEntry>, Error> {
+        let Some(hash) = tree else {
+            return Ok(Vec::new());
+        };
+        match self.store.read_object(&hash) {
+            Ok(Object::Tree(tree)) => Ok(tree.entries),
+            Ok(_) => Err(unreadable("a pull tree is not a tree")),
+            Err(e) => Err(unreadable(e)),
+        }
+    }
+
+    /// Whether some path under `before` and `target` is behind. The walk
+    /// skips a subtree that both sides share and stops at the first path.
+    fn walk(
+        &self,
+        before: Option<Hash>,
+        target: Option<Hash>,
+        prefix: &str,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        if before == target {
+            return Ok(false);
+        }
+        if depth > MAX_TREE_DEPTH {
+            return Err(unreadable("a pull tree is too deep"));
+        }
+        let old = self.entries(before)?;
+        let new = self.entries(target)?;
+        let (mut i, mut j) = (0, 0);
+        while i < old.len() || j < new.len() {
+            let order = match (old.get(i), new.get(j)) {
+                (Some(o), Some(n)) => o.name.cmp(&n.name),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Greater,
+            };
+            let (o, n) = match order {
+                std::cmp::Ordering::Less => (old.get(i), None),
+                std::cmp::Ordering::Greater => (None, new.get(j)),
+                std::cmp::Ordering::Equal => (old.get(i), new.get(j)),
+            };
+            if order != std::cmp::Ordering::Greater {
+                i += 1;
+            }
+            if order != std::cmp::Ordering::Less {
+                j += 1;
+            }
+            if self.entry_behind(o, n, prefix, depth)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn entry_behind(
+        &self,
+        old: Option<&TreeEntry>,
+        new: Option<&TreeEntry>,
+        prefix: &str,
+        depth: usize,
+    ) -> Result<bool, Error> {
+        let Some(name) = old.or(new).map(|entry| &entry.name) else {
+            return Ok(false);
+        };
+        let path = if prefix.is_empty() {
+            String::from_utf8_lossy(name).into_owned()
+        } else {
+            format!("{prefix}/{}", String::from_utf8_lossy(name))
+        };
+        let tree_of = |entry: Option<&TreeEntry>| {
+            entry
+                .filter(|entry| entry.mode == EntryMode::Tree)
+                .map(|entry| entry.object_hash)
+        };
+        let (old_tree, new_tree) = (tree_of(old), tree_of(new));
+        if (old_tree.is_some() || new_tree.is_some())
+            && self.walk(old_tree, new_tree, &path, depth + 1)?
+        {
+            return Ok(true);
+        }
+        match (leaf_of(old), leaf_of(new)) {
+            (Some(o), Some(n)) if o.object_hash == n.object_hash && o.mode == n.mode => Ok(false),
+            (Some(o), _) => Ok(self.holds(&path, Some(o))),
+            (None, Some(_)) => Ok(self.holds(&path, None)),
+            (None, None) => Ok(false),
+        }
+    }
+
+    /// Whether the index holds `entry` at `path`, with the same content and
+    /// mode, or holds nothing there for `None`.
+    fn holds(&self, path: &str, entry: Option<&TreeEntry>) -> bool {
+        let staged = self
+            .index
+            .find_entry(path)
+            .map(|i| &self.index.entries[i])
+            .filter(|staged| staged.status != index::EntryStatus::Removed);
+        match entry {
+            Some(entry) => staged.is_some_and(|staged| {
+                staged.object_hash == entry.object_hash && staged.status as u8 == entry.mode as u8
+            }),
+            None => staged.is_none(),
+        }
+    }
+}
+
+/// The entry when it is a file or a link, `None` for a directory.
+fn leaf_of(entry: Option<&TreeEntry>) -> Option<&TreeEntry> {
+    entry.filter(|entry| entry.mode != EntryMode::Tree)
+}
+
+fn unreadable(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
+    Error::ReadPullState(std::io::Error::other(reason))
 }
 
 fn read_merge(layout: &RepoLayout) -> Result<Option<MergeState>, Error> {
@@ -284,6 +465,11 @@ pub fn create(
     // reads what must not shift under a change.
     let _lock = lock::acquire_worktree(layout, observer)?;
 
+    // This runs before `all` stages the files: a pull stopped partway leaves
+    // some files new and the index old, and staging them would record a
+    // mixture.
+    refuse_unfinished_pull(layout, store)?;
+
     // The state of [`begin`] could change before the lock. Any change to the
     // merge decides which parents the commit has, so any change is an abort.
     if read_merge(layout)? != pending.merge {
@@ -304,6 +490,12 @@ pub fn create(
     // A merge needs every conflict resolved and staged, as `merge --continue`
     // does. A clean merge has no record, so both checks pass.
     if pending.merge.is_some() {
+        // A merge always has a conflict list, empty for a clean one. Without
+        // the file the state is torn, and a commit would record "ours" with
+        // the other side as a parent.
+        if !layout.conflicts_file().is_file() {
+            return Err(Error::MergeStateIncomplete);
+        }
         let records = conflict_state::read_conflicts(layout.worktree_state_dir())
             .map_err(Error::ReadConflicts)?;
         gate(&records).map_err(Error::Unresolved)?;

@@ -195,7 +195,7 @@ with a warning.
 - No `@` allowed (Git permits `@{reflog}`-style refs; kit does not).
 - No `+`, `:`, `~`, `^`, `?`, `*`, `[` allowed.
 - No Unicode in ref names.
-- Case-sensitive: `main` and `Main` are distinct.
+- Case-sensitive: `main` and `Main` are distinct names. On a case-insensitive file system they resolve to one ref file; the local ref locks key on the ASCII-lowercased name, and a sibling-tree checkout guard treats them as one branch.
 
 This is a deliberately restrictive grammar to simplify cross-transport
 name validation.
