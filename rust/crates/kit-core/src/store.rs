@@ -57,6 +57,7 @@ mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
+mod tree_budget;
 pub(crate) use local_pack::Catalog as PackCatalog;
 #[cfg(test)]
 pub(crate) use local_pack::set_test_output_entries;
@@ -67,6 +68,9 @@ pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
 pub use source::{
     ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
 };
+pub use tree_budget::{MAX_TREE_LEAVES, check_tree_leaves};
+#[cfg(test)]
+pub(crate) use tree_budget::check_tree_leaves_within;
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.
@@ -211,6 +215,12 @@ pub enum StoreError {
     ObjectTooLarge,
     #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
     TreeTooDeep,
+    /// A tree expands to more files than [`MAX_TREE_LEAVES`] allows.
+    #[error("tree expands to more than {limit} files")]
+    TreeTooLarge {
+        /// The cap the tree went past.
+        limit: u64,
+    },
     /// A caller-selected in-memory operation budget was exhausted.
     #[error("object operation exceeded {0} limit")]
     OperationLimitExceeded(&'static str),

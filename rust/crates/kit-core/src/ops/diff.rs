@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError, check_tree_leaves};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -186,7 +186,9 @@ fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl
 /// # Errors
 ///
 /// Propagates [`StoreError`] when an expected tree object is missing or
-/// fails its read-time hash check.
+/// fails its read-time hash check, and returns [`StoreError::TreeTooLarge`]
+/// when either tree expands to more than [`crate::store::MAX_TREE_LEAVES`]
+/// files.
 pub fn diff_trees<S: ObjectSource + ?Sized>(
     store: &S,
     old_hash: Option<Hash>,
@@ -206,6 +208,9 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
         (None, None) => return Ok(DiffResult::default()),
         (Some(a), Some(b)) if a == b => return Ok(DiffResult::default()),
         _ => {}
+    }
+    for root in [old_hash, new_hash].into_iter().flatten() {
+        check_tree_leaves(store, root)?;
     }
 
     let old_entries = load_entries(store, old_hash)?;

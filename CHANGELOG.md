@@ -7,6 +7,10 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `kit clone --no-checkout` (`-n`) fetches, sets the branch and HEAD, and writes no worktree file and no index; `kit checkout <branch>` fills the worktree later. `kit_sync::SyncOptions` gains `checkout`, set with `with_checkout`.
+
 ### Changed
 
 - `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
@@ -14,6 +18,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A tree that expands to more than 2,000,000 files, such as a chain of trees that each name the level below twice, is now refused before anything is built or written, by `index::from_tree`, `diff_trees`, the restore and `check_nested_repositories`, and so by `kit clone`, `kit pull`, `kit checkout` and `kit status`. The count is memoised per tree, so a bomb of 22 objects fails in milliseconds and not after a walk of every path. `kit_core::StoreError` gains `TreeTooLarge { limit }`, and `kit_core::{MAX_TREE_LEAVES, check_tree_leaves}` are public.
 - A 5xx or 429 answer with a non-Connect body, such as an edge or proxy error page, is now `SourceError::ServerError` (or `TransportError::ServerError` from `ConnectTransport`) with the transient class and no longer `InvalidResponse`, so a caller can retry the clone; other statuses with such a body stay invalid.
 - A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".

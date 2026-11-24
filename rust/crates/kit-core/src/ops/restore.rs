@@ -689,6 +689,7 @@ fn restore_tree_to_worktree_impl<F>(
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
 {
+    check_tree_size(store, *tree)?;
     // Only a clean sweep uses ignore rules. A non-clean restore must also
     // be able to recover a malformed ignore file.
     let ignore_list = if opts.clean {
@@ -955,6 +956,7 @@ pub fn check_nested_repositories(
     options: &RestoreOptions,
     base: Option<Hash>,
 ) -> RestoreResult<()> {
+    check_tree_size(store, tree)?;
     let sparse = options.sparse_patterns.as_deref().map(SparseMatcher::new);
     check_nested_repositories_inner(
         store,
@@ -968,6 +970,15 @@ pub fn check_nested_repositories(
         None,
         &mut std::collections::HashMap::new(),
     )
+}
+
+/// Refuse a tree that expands past [`crate::store::MAX_TREE_LEAVES`] files,
+/// before any walk of it allocates or writes.
+fn check_tree_size(store: &ObjectStore, tree: Hash) -> RestoreResult<()> {
+    crate::store::check_tree_leaves(store, tree).map_err(|e| match e {
+        crate::store::StoreError::TreeTooDeep => RestoreError::TreeTooDeep,
+        e => RestoreError::Store(e),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
