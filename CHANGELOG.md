@@ -20,6 +20,9 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A push now skips uploading an attestation pack that is already on a file or S3 remote only when the remote holds it at the pack's own length, so a pack left truncated or damaged there is repaired by the next push; ssh and connect remotes, which report no length, keep skipping a pack by name.
 - `kit pull` on a branch that is ahead of the remote now prints "Already up to date." and exits 0, as git does, and changes nothing. For library users, `kit_sync::pull` (and `libkit::transfer::pull_*`) now returns `PullOutcome::UpToDate` instead of `SyncError::NonFastForwardPull` when the local branch is ahead. A branch that has diverged from the remote still fails with "would not fast-forward".
 - `kit serve` on a path that is not a kit repository, or that does not exist, now prints `kit serve: <path>: not a kit repository` on standard error, so an ssh client sees the cause and not only a failed handshake. It keeps exit 65 (not a repository) or 66 (no such path) and writes nothing to standard output.
+- `kit reset --hard` now ends a merge, cherry-pick or revert in progress, as git does, so the next commit no longer records the discarded merge as a second parent. `kit status` names an operation in progress.
+- The state of a merge, cherry-pick or revert is now written with temp, sync and rename, and its head marker last, so a failed write (a full disk, for example) leaves no operation in progress. `kit commit` refuses a merge that has no conflict list. For library users, `kit_core::ops::conflict_state::clear_operation_state` clears the three.
+- `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` now treat an operation result tree that the store cannot read as absent, instead of failing with `check operation changes`.
 
 ## [0.10.0] - 2026-11-22
 
