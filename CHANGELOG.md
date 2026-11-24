@@ -9,6 +9,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `kit status`, `kit add -A` and the safety check before a restore, such as `kit pull`'s, take the `lstat` of the tracked files on the thread pool before they walk the worktree, as git's `core.preloadindex` does, so they wait less on a tree of thousands of files. A tree below 512 tracked files, a machine with one thread and a wasm build stat each file as they reach it. For library users, `kit_core::worktree::TrackedStats` holds the stats.
+- `kit pull` reads each directory of the worktree once for its safety check, not twice, and no longer walks the directories its restore leaves alone a third time, since the safety check has refused every untracked path outside the ignore rules there already. For library users, `kit_core::worktree::DirListings` and `build_tree_filtered_listed_with_source` return what the walk read, and `kit_core::ops::restore::restore_tree_to_worktree_gated` is the restore for a caller that has run that check.
 - `kit_client::Error` gains `ServerStatus { status }`, returned for a 5xx or 429 answer whose body is not Connect error JSON; `kit_sync::ClientSource` and `kit_transport_connect::ConnectTransport` map it to a server error.
 - Automatic maintenance ignores the mark of an earlier out-of-budget step once that step is more than a day old, so only two out-of-budget steps within a day wait 30 days; one that ran days earlier no longer counts.
 
