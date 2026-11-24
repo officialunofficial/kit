@@ -134,11 +134,12 @@ fn a_tree_that_shares_subtrees_but_stays_under_the_cap_still_walks() {
 
 #[test]
 fn a_wide_tree_over_one_large_subtree_is_refused_by_diff() {
-    // Each of 10,000 names holds 2^20 leaves, under the cap on its own. The
-    // diff against nothing adds them all, and the cap applies to the sum.
+    // Each name holds 2^20 leaves, under the cap on its own; three of them are
+    // over it. The diff against nothing adds them all, and the cap applies to
+    // the sum. (With 10,000 names the walk would emit about 10^10 entries.)
     let (_dir, store) = open();
     let shared = tree_bomb(&store, 20);
-    let entries = (0..10_000)
+    let entries = (0..4)
         .map(|i| tree_entry(format!("d{i:05}").as_bytes(), EntryMode::Tree, shared))
         .collect();
     let root = put(&store, &Object::Tree(Tree { entries }));
