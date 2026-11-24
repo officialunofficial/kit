@@ -210,20 +210,15 @@ mod tests {
         assert_eq!(error.to_string(), "invalid ref name: refs/heads/a\\u{7}b");
         let error = SourceError::Remote(Box::new(RemoteFailure {
             code: "internal".into(),
-            message: "\u{1b}]0;t\u{7}".repeat(100),
+            message: "\u{1b}".repeat(300),
             details: Vec::new(),
             status: 500,
             headers: Vec::new(),
         }));
-        let text = error.to_string();
-        assert!(
-            !text.contains('\u{1b}') && !text.contains('\u{7}'),
-            "{text:?}"
-        );
-        assert!(
-            text.len() <= "remote error: ".len() + 256 * 6,
-            "{}",
-            text.len()
+        // 256 bytes of text, each escaped to six characters.
+        assert_eq!(
+            error.to_string(),
+            format!("remote error: {}", "\\u{1b}".repeat(256))
         );
     }
 }
