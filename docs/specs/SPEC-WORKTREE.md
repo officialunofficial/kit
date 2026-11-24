@@ -47,7 +47,9 @@ closed. The `pull_state` golden vector pins both fields and their order.
 The target and pre-pull tree are GC roots while the marker exists. A following pull rejects
 detached HEAD before touching files. It discards a well-formed marker when
 neither HEAD nor the selected branch tip names it, because restore cannot
-have started in that state. Corrupt markers fail closed.
+have started in that state. Corrupt markers fail closed. A `reset` that
+resets the index (every mode but `--soft`) removes the marker, because the
+index then follows HEAD.
 
 Before recovery, the current index tree must equal the recorded pre-pull tree
 or the target tree. Otherwise recovery refuses before changing files, HEAD,

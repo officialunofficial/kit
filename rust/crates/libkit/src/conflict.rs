@@ -716,6 +716,7 @@ pub fn reset_paths(
         .map(|e| (e.path.as_str(), e))
         .collect();
 
+    let conflict_paths: HashSet<&str> = records.iter().map(|r| r.path.as_str()).collect();
     let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
     // A result tree that the store cannot read is the same as no result tree.
     let snapshot = EphemeralSink::new(store);
@@ -775,6 +776,16 @@ pub fn reset_paths(
         // aligns it. Only a stale index entry at the path itself goes.
         if is_directory_in(&target_map, path) {
             idx.remove_path(path);
+            continue;
+        }
+        // A clean hunk of the operation whose index entry is gone: the user
+        // stopped tracking the file, so it is theirs now, as in git. A
+        // conflict path stays the operation's, markers and edits included.
+        if !conflict_paths.contains(path.as_str())
+            && !idx
+                .find_entry(path)
+                .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed)
+        {
             continue;
         }
         // The operation added the path. Remove it. A directory that the user

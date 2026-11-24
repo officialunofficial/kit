@@ -18,7 +18,7 @@ use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Object};
 use kit_core::ops::conflict_state::{
-    self, RevertState, in_progress_op_name, is_revert_in_progress,
+    self, ConflictRecord, RevertState, in_progress_op_name, is_revert_in_progress,
 };
 use kit_core::ops::revert::revert as revert_tree;
 use kit_core::refs;
@@ -160,16 +160,8 @@ fn start(
         if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        let records = match libkit::conflict::materialize(
-            layout,
-            store,
-            result.tree_hash,
-            &result.conflicts,
-            &super::conflict::Notes,
-        ) {
-            Ok(r) => r,
-            Err(e) => return super::fail(e),
-        };
+        let records: Vec<ConflictRecord> =
+            result.conflicts.iter().map(ConflictRecord::from).collect();
         let state = RevertState {
             revert_head: target,
             orig_head: ours,
@@ -185,6 +177,18 @@ fn start(
         }
         if let Err(e) = conflict_state::write_revert_state(layout, &state, &records) {
             return emit_err(&format!("write revert state: {e}"), exit::CANTCREAT);
+        }
+        // The state is on disk before the material. A stop in between leaves
+        // an operation that `--abort` can undo, and never markers with no
+        // operation behind them.
+        if let Err(e) = libkit::conflict::materialize(
+            layout,
+            store,
+            result.tree_hash,
+            &result.conflicts,
+            &super::conflict::Notes,
+        ) {
+            return super::fail(e);
         }
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(
@@ -428,7 +432,7 @@ fn restore_to(
     layout: &RepoLayout,
     store: &ObjectStore,
     target: Hash,
-    records: &[kit_core::ops::conflict_state::ConflictRecord],
+    records: &[ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
     // The operation's result tree lets the guards treat its clean hunks (not
