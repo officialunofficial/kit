@@ -515,11 +515,11 @@ fn a_flush_covers_each_device_once() {
     let _a = group.stage(&x.join("a"), b"1", Parents::Existing).unwrap();
     let _b = group.stage(&x.join("b"), b"2", Parents::Existing).unwrap();
     let _c = group.stage(&y.join("c"), b"3", Parents::Existing).unwrap();
-    group.flush().unwrap();
+    let _first = group.flush().unwrap();
     assert_eq!(flushes(&rec), [x.clone(), y.clone()]);
 
     // The flush emptied the pending set: a flush with no new write is free.
-    group.flush().unwrap();
+    let _second = group.flush().unwrap();
     assert_eq!(flushes(&rec).len(), 2);
 }
 
@@ -535,7 +535,7 @@ fn files_and_directories_that_other_code_wrote_are_written_out_and_flushed() {
         rec.events(),
         [Ev::Barrier(file), Ev::DirBarrier(dir.path().to_path_buf())]
     );
-    group.flush().unwrap();
+    let _token = group.flush().unwrap();
     assert_eq!(flushes(&rec), [dir.path().to_path_buf()]);
     assert!(group.note_file(&dir.path().join("missing")).is_err());
 }
@@ -545,7 +545,7 @@ fn a_directory_that_is_gone_has_nothing_to_flush() {
     let dir = TempDir::new().unwrap();
     let (rec, mut group) = recording();
     group.note_dir(&dir.path().join("gone")).unwrap();
-    group.flush().unwrap();
+    let _token = group.flush().unwrap();
     assert!(flushes(&rec).is_empty());
 }
 
