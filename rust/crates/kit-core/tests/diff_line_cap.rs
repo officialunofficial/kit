@@ -53,7 +53,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        LIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             Some(v.saturating_sub(layout.size()))
         })
         .ok();
@@ -64,7 +64,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
             return std::ptr::null_mut();
         }
         let moved = unsafe { System.realloc(ptr, layout, new_size) };
-        LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        LIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
             Some(v.saturating_sub(layout.size()))
         })
         .ok();
