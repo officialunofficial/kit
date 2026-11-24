@@ -563,22 +563,25 @@ pub fn ensure_abort_safe(
 
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
     let mut discardable = conflict_paths.clone();
-    if let Some(result_tree) = op_result_tree {
-        let authored = diff_trees(&snapshot, current_tree, Some(result_tree))
-            .map_err(check("check operation changes"))?;
+    // A result tree that the store cannot read is the same as no result
+    // tree: the operation can still be aborted for its conflict paths.
+    if let Some(result_tree) = op_result_tree
+        && let Ok(authored) = diff_trees(&snapshot, current_tree, Some(result_tree))
+    {
         // The paths that the user changed after the operation paused.
         let mut modified: HashSet<String> = HashSet::new();
+        let mut readable = true;
         for tree in [index_tree, worktree_tree] {
-            for e in diff_trees(&snapshot, Some(result_tree), Some(tree))
-                .map_err(check("check operation changes"))?
-                .entries
-            {
-                modified.insert(e.path);
+            match diff_trees(&snapshot, Some(result_tree), Some(tree)) {
+                Ok(diff) => modified.extend(diff.entries.into_iter().map(|e| e.path)),
+                Err(_) => readable = false,
             }
         }
-        for e in authored.entries {
-            if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
-                discardable.insert(e.path);
+        if readable {
+            for e in authored.entries {
+                if conflict_paths.contains(&e.path) || !modified.contains(&e.path) {
+                    discardable.insert(e.path);
+                }
             }
         }
     }
@@ -705,12 +708,13 @@ pub fn reset_paths(
         .collect();
 
     let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
+    // A result tree that the store cannot read is the same as no result tree.
     if let Some(result_tree) = op_result_tree {
         let snapshot = EphemeralSink::new(store);
-        let authored = diff_trees(&snapshot, Some(target_tree), Some(result_tree))
-            .map_err(check("check operation changes"))?;
-        for e in authored.entries {
-            paths.insert(e.path);
+        if let Ok(authored) = diff_trees(&snapshot, Some(target_tree), Some(result_tree)) {
+            for e in authored.entries {
+                paths.insert(e.path);
+            }
         }
     }
 

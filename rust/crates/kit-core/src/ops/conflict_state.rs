@@ -237,8 +237,41 @@ pub fn clear_result_tree(dir: &Path) {
 fn write_hex_file(state_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult<()> {
     let mut buf = hash::to_hex(h);
     buf.push('\n');
-    fs::write(state_dir.join(name), buf.as_bytes())?;
+    write_state_file(&state_dir.join(name), buf.as_bytes())
+}
+
+/// Write one state file with temp, sync and rename, so a failed or stopped
+/// write leaves the old file or none, never a short one.
+fn write_state_file(path: &Path, bytes: &[u8]) -> ConflictStateResult<()> {
+    crate::atomic::write_atomic(path, bytes, false)?;
     Ok(())
+}
+
+/// Write the files of one operation: the other files first, the head marker
+/// last. The marker is what says an operation is in progress, so a write that
+/// fails or stops part way leaves no marker. On an error, `clear` removes
+/// what was written.
+fn write_operation_state(
+    layout: &RepoLayout,
+    head_name: &str,
+    head: &Hash,
+    orig_head: &Hash,
+    message: (&Path, &[u8]),
+    conflicts: &[ConflictRecord],
+    clear: fn(&RepoLayout) -> ConflictStateResult<()>,
+) -> ConflictStateResult<()> {
+    let dir = layout.worktree_state_dir();
+    let written = (|| {
+        fs::create_dir_all(dir)?;
+        write_hex_file(dir, ORIG_HEAD, orig_head)?;
+        write_state_file(message.0, message.1)?;
+        write_state_file(&layout.conflicts_file(), &serialize_conflicts(conflicts))?;
+        write_hex_file(dir, head_name, head)
+    })();
+    if written.is_err() {
+        let _ = clear(layout);
+    }
+    written
 }
 
 fn read_hex_file(path: &Path) -> ConflictStateResult<Option<Hash>> {
@@ -302,12 +335,15 @@ pub fn write_revert_state(
     state: &RevertState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(layout.worktree_state_dir())?;
-    write_hex_file(layout.worktree_state_dir(), REVERT_HEAD, &state.revert_head)?;
-    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
-    fs::write(layout.revert_msg_file(), &state.message)?;
-    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
-    Ok(())
+    write_operation_state(
+        layout,
+        REVERT_HEAD,
+        &state.revert_head,
+        &state.orig_head,
+        (&layout.revert_msg_file(), &state.message),
+        conflicts,
+        clear_revert_state,
+    )
 }
 
 /// Read revert state. Returns `Ok(None)` when none is in progress.
@@ -360,12 +396,15 @@ pub fn write_merge_state(
     state: &MergeState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(layout.worktree_state_dir())?;
-    write_hex_file(layout.worktree_state_dir(), MERGE_HEAD, &state.merge_head)?;
-    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
-    fs::write(layout.merge_msg_file(), &state.message)?;
-    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
-    Ok(())
+    write_operation_state(
+        layout,
+        MERGE_HEAD,
+        &state.merge_head,
+        &state.orig_head,
+        (&layout.merge_msg_file(), &state.message),
+        conflicts,
+        clear_merge_state,
+    )
 }
 
 /// Read merge state. Returns `Ok(None)` when no merge is in progress.
@@ -399,16 +438,15 @@ pub fn write_cherry_pick_state(
     state: &CherryPickState,
     conflicts: &[ConflictRecord],
 ) -> ConflictStateResult<()> {
-    fs::create_dir_all(layout.worktree_state_dir())?;
-    write_hex_file(
-        layout.worktree_state_dir(),
+    write_operation_state(
+        layout,
         CHERRY_PICK_HEAD,
         &state.cherry_pick_head,
-    )?;
-    write_hex_file(layout.worktree_state_dir(), ORIG_HEAD, &state.orig_head)?;
-    fs::write(layout.cherry_pick_msg_file(), &state.message)?;
-    fs::write(layout.conflicts_file(), serialize_conflicts(conflicts))?;
-    Ok(())
+        &state.orig_head,
+        (&layout.cherry_pick_msg_file(), &state.message),
+        conflicts,
+        clear_cherry_pick_state,
+    )
 }
 
 /// Read cherry-pick state. Returns `Ok(None)` when none is in progress.
@@ -455,8 +493,7 @@ pub fn read_conflicts(dir: &Path) -> ConflictStateResult<Vec<ConflictRecord>> {
 /// [`ConflictStateError::Io`] on filesystem failures.
 pub fn write_conflicts(dir: &Path, conflicts: &[ConflictRecord]) -> ConflictStateResult<()> {
     fs::create_dir_all(dir)?;
-    fs::write(dir.join(CONFLICTS_FILE), serialize_conflicts(conflicts))?;
-    Ok(())
+    write_state_file(&dir.join(CONFLICTS_FILE), &serialize_conflicts(conflicts))
 }
 
 fn remove_if_present(path: &Path) -> ConflictStateResult<()> {
@@ -491,6 +528,19 @@ pub fn clear_cherry_pick_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     remove_if_present(&layout.conflicts_file())?;
     remove_if_present(&layout.result_tree_file())?;
     Ok(())
+}
+
+/// Remove the state of a merge, a cherry-pick and a revert (idempotent). A
+/// hard reset does this, as git does: the operation is over, so a later
+/// commit must not record it. Each marker goes first, so a stop part way
+/// leaves loose files and no operation.
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures other than absence.
+pub fn clear_operation_state(layout: &RepoLayout) -> ConflictStateResult<()> {
+    clear_merge_state(layout)?;
+    clear_cherry_pick_state(layout)?;
+    clear_revert_state(layout)
 }
 
 /// `true` when a merge is in progress (`MERGE_HEAD` present).
@@ -699,5 +749,96 @@ mod tests {
         write_cherry_pick_state(&kit, &state, &[]).unwrap();
         fs::write(kit.cherry_pick_msg_file(), &big).unwrap();
         assert!(read_cherry_pick_state(&kit).is_err());
+    }
+    #[test]
+    fn a_failed_merge_state_write_leaves_no_merge_in_progress() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        // A directory at the sidecar path makes the sidecar write fail.
+        fs::create_dir_all(kit.conflicts_file()).unwrap();
+        let state = MergeState {
+            merge_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"Merge branch 'x'".to_vec(),
+        };
+        let conflicts = vec![ConflictRecord {
+            path: "a.txt".into(),
+            kind: ConflictKind::ModifyModify,
+            base_hash: Some(h("b")),
+            ours_hash: Some(h("o")),
+            theirs_hash: Some(h("t")),
+        }];
+        assert!(write_merge_state(&kit, &state, &conflicts).is_err());
+        assert!(
+            !is_merge_in_progress(&kit),
+            "a merge whose conflict list was not written must not be in progress"
+        );
+        assert!(
+            !kit.orig_head_file().exists() && !kit.merge_msg_file().exists(),
+            "what was written before the failure is removed"
+        );
+    }
+
+    #[test]
+    fn a_failed_cherry_pick_or_revert_state_write_leaves_no_operation() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        fs::create_dir_all(kit.worktree_state_dir()).unwrap();
+        fs::create_dir_all(kit.conflicts_file()).unwrap();
+        let pick = CherryPickState {
+            cherry_pick_head: h("picked"),
+            orig_head: h("orig"),
+            message: b"pick".to_vec(),
+        };
+        assert!(write_cherry_pick_state(&kit, &pick, &[]).is_err());
+        assert!(!is_cherry_pick_in_progress(&kit));
+        let revert = RevertState {
+            revert_head: h("reverted"),
+            orig_head: h("orig"),
+            message: b"revert".to_vec(),
+        };
+        assert!(write_revert_state(&kit, &revert, &[]).is_err());
+        assert!(!is_revert_in_progress(&kit));
+    }
+
+    #[test]
+    fn state_files_are_written_whole_and_the_marker_comes_last() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        let state = MergeState {
+            merge_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"Merge branch 'x'".to_vec(),
+        };
+        write_merge_state(&kit, &state, &[]).unwrap();
+        assert_eq!(read_merge_state(&kit).unwrap(), Some(state));
+        assert!(kit.conflicts_file().is_file(), "a clean merge has an empty list");
+        let leftovers: Vec<_> = fs::read_dir(kit.worktree_state_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".kit.tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp file stays: {leftovers:?}");
+    }
+
+    #[test]
+    fn clearing_the_operation_state_removes_a_merge_a_pick_and_a_revert() {
+        let tmp = TempDir::new().unwrap();
+        let kit = RepoLayout::single(tmp.path());
+        let merge = MergeState {
+            merge_head: h("theirs"),
+            orig_head: h("orig"),
+            message: b"m".to_vec(),
+        };
+        write_merge_state(&kit, &merge, &[]).unwrap();
+        write_result_tree(kit.worktree_state_dir(), &h("tree")).unwrap();
+        clear_operation_state(&kit).unwrap();
+        assert!(!is_merge_in_progress(&kit));
+        assert!(!kit.orig_head_file().exists());
+        assert!(!kit.conflicts_file().exists());
+        assert_eq!(read_result_tree(kit.worktree_state_dir()).unwrap(), None);
+        // Nothing to clear is no error.
+        clear_operation_state(&kit).unwrap();
     }
 }

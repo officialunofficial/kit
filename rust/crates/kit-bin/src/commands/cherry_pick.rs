@@ -200,14 +200,15 @@ fn start(
             orig_head: ours,
             message: result.original_message.clone(),
         };
-        if let Err(e) = conflict_state::write_cherry_pick_state(layout, &state, &records) {
-            return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
-        }
         // Record the result tree so `--abort` treats the operation's clean
-        // hunks (not just conflict paths) as discardable.
+        // hunks (not just conflict paths) as discardable. It goes before the
+        // state, whose head marker is written last.
         if let Err(e) =
             conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
         {
+            return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
+        }
+        if let Err(e) = conflict_state::write_cherry_pick_state(layout, &state, &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
