@@ -503,7 +503,8 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::AmendDuringMerge
         | commit::Error::NothingToAmend
         | commit::Error::NothingStaged
-        | commit::Error::MergeDiscarded => exit::USAGE,
+        | commit::Error::MergeDiscarded
+        | commit::Error::PullUnfinished(_) => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged
@@ -513,6 +514,7 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::ReadHead(_)
         | commit::Error::AmendNotACommit(_)
         | commit::Error::ReadAmendTarget { .. }
+        | commit::Error::ReadPullState(_)
         | commit::Error::Serialize(_) => exit::DATAERR,
         // The commit, its log or the index cannot be written.
         commit::Error::Store(_) | commit::Error::Recovery(_) | commit::Error::SyncIndex(_) => {

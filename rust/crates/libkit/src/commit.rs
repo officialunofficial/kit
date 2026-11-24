@@ -26,6 +26,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Identity, Object};
 use kit_core::observer::Observer;
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
+use kit_core::ops::pull_state::PullState;
 use kit_core::ops::recovery::{self, RecoveryEntry};
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
 use kit_core::serialize;
@@ -133,6 +134,15 @@ pub enum Error {
     /// The merge state cannot be cleared.
     #[error("clear merge state: {0}")]
     ClearMergeState(conflict_state::ConflictStateError),
+    /// The record of an unfinished pull cannot be read.
+    #[error("read PULL_HEAD: {0}")]
+    ReadPullState(std::io::Error),
+    /// An interrupted pull has not finished restoring the index and files.
+    #[error(
+        "an interrupted pull has not finished: HEAD is at {} but the index still holds the tree from before the pull, so a commit would undo the pulled change; run `kit pull` to finish it, or `kit reset --hard -f` to restore the files of HEAD",
+        hash::to_hex(.0)
+    )]
+    PullUnfinished(Hash),
 }
 
 /// The state that a commit reads before its message is composed.
@@ -166,6 +176,7 @@ impl Pending {
 /// [`Error`] when the merge state or `HEAD` cannot be read, when an amend meets
 /// a merge in progress, or when there is no commit to amend.
 pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pending, Error> {
+    refuse_unfinished_pull(layout, store)?;
     let merge = read_merge(layout)?;
     if merge.is_some() && amend {
         return Err(Error::AmendDuringMerge);
@@ -187,6 +198,30 @@ pub fn begin(layout: &RepoLayout, store: &ObjectStore, amend: bool) -> Result<Pe
         amend: amend_target,
         head,
     })
+}
+
+/// Refuse while a pull that stopped partway has moved `HEAD` to its target
+/// and left the index at the tree from before the pull. A commit of that
+/// index undoes the pulled change.
+///
+/// An index that holds the target tree, or any other tree, is not the one the
+/// pull left, and the commit goes on. So does a pull that has not moved
+/// `HEAD`. A pull that changed no tree has nothing to finish.
+fn refuse_unfinished_pull(layout: &RepoLayout, store: &ObjectStore) -> Result<(), Error> {
+    let Some(state) = PullState::at_head(layout).map_err(Error::ReadPullState)? else {
+        return Ok(());
+    };
+    if commit_tree(store, &state.target) == Some(state.before_tree) {
+        return Ok(());
+    }
+    let idx = index::read_index(layout).map_err(Error::ReadIndex)?;
+    let tree =
+        worktree::build_tree_from_index_against(store, store, &idx, false, Some(state.before_tree))
+            .map_err(Error::BuildTree)?;
+    if tree == state.before_tree {
+        return Err(Error::PullUnfinished(state.target));
+    }
+    Ok(())
 }
 
 fn read_merge(layout: &RepoLayout) -> Result<Option<MergeState>, Error> {
@@ -283,6 +318,11 @@ pub fn create(
     // needed the lock. Everything from here on changes the repository, or
     // reads what must not shift under a change.
     let _lock = lock::acquire_worktree(layout, observer)?;
+
+    // This runs before `all` stages the files: a pull stopped partway leaves
+    // some files new and the index old, and staging them would record a
+    // mixture.
+    refuse_unfinished_pull(layout, store)?;
 
     // The state of [`begin`] could change before the lock. Any change to the
     // merge decides which parents the commit has, so any change is an abort.

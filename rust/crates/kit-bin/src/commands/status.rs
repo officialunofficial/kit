@@ -68,6 +68,7 @@ use std::io::Write;
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
+use kit_core::ops::pull_state::PullState;
 use kit_core::ops::{DiffKind, StatusEntry, StatusStaging};
 use kit_core::refs;
 use libkit::status::{self, Detail, Record};
@@ -148,6 +149,8 @@ pub fn run(args: &[String]) -> u8 {
         Err(e) => return super::fail(e),
     };
 
+    warn_unfinished_pull(&layout, &report.entries);
+
     if porcelain {
         if opts.porcelain == Some(PorcelainVersion::V2) {
             render_porcelain_v2(&layout, &report, opts.z)
@@ -156,6 +159,28 @@ pub fn run(args: &[String]) -> u8 {
         }
     } else {
         render_human(&layout, &report.entries)
+    }
+}
+
+/// Warn on standard error while an interrupted pull has moved `HEAD` and
+/// left staged changes. Those changes are the old tree against the pulled
+/// one, and a commit of them would undo the pull.
+fn warn_unfinished_pull(layout: &RepoLayout, entries: &[StatusEntry]) {
+    if !entries.iter().any(|e| e.staging == StatusStaging::Staged) {
+        return;
+    }
+    let mut stderr = std::io::stderr().lock();
+    match PullState::at_head(layout) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            let _ = writeln!(
+                stderr,
+                "warning: an interrupted pull has not finished restoring files; the staged changes may undo it. Run `kit pull` to finish it"
+            );
+        }
+        Err(e) => {
+            let _ = writeln!(stderr, "warning: read PULL_HEAD: {e}");
+        }
     }
 }
 

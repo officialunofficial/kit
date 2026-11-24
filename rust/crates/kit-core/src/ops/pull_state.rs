@@ -49,6 +49,18 @@ impl PullState {
             .map(Some)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed PULL_HEAD"))
     }
+
+    /// The record of an unfinished pull whose target `HEAD` names.
+    ///
+    /// A record that `HEAD` does not name is stale: the pull has not moved
+    /// `HEAD` yet, or later work has. `None` for it, and for no record.
+    pub fn at_head(layout: &RepoLayout) -> io::Result<Option<Self>> {
+        let Some(state) = Self::read(layout)? else {
+            return Ok(None);
+        };
+        let head = crate::refs::resolve_head(layout).map_err(io::Error::other)?;
+        Ok((head == Some(state.target)).then_some(state))
+    }
 }
 
 #[cfg(test)]
