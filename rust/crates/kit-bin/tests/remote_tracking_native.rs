@@ -199,13 +199,14 @@ fn remote_rename_moves_and_remove_deletes_tracking_refs() {
 /// entry, as a hand-edited config would hold it. `kit remote add` refuses the
 /// name.
 fn plant_overlapping_remote(r: &Repo, name: &str, url: &str) {
+    use std::io::Write as _;
     let layout = RepoLayout::single(r.path());
-    let path = layout.config_file();
-    let mut config = std::fs::read_to_string(&path).unwrap_or_default();
-    config.push_str(&format!(
-        "remote.{name}.url = {url}\nremote.{name}.type = file\n"
-    ));
-    std::fs::write(&path, config).unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(layout.config_file())
+        .unwrap();
+    write!(file, "remote.{name}.url = {url}\nremote.{name}.type = file\n").unwrap();
 }
 
 /// Plant a marker file under `.kit/git/<name>/` to stand in for
