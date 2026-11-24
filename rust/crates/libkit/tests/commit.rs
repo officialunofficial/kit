@@ -567,6 +567,7 @@ fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_m
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     f.stage("other.txt", "x\n");
     f.begin(false).unwrap();
+}
 
 #[test]
 fn a_merge_whose_conflict_list_is_missing_is_not_committed() {
