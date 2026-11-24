@@ -2490,6 +2490,34 @@ mod tests {
         assert_eq!(history_lock_name("Main"), history_lock_name("main"));
     }
 
+    #[test]
+    fn a_write_waits_for_the_lock_held_under_another_spelling_of_the_branch() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (_dir, layout) = fresh_repo();
+        update_ref(&layout, "main", RefWriteCondition::Any, &h("base")).unwrap();
+        let held = crate::repo_lock::acquire_default(
+            layout.common_dir(),
+            &cas_lock_name(
+                layout.common_dir(),
+                &ref_path(layout.common_dir(), HEADS_DIR, "main"),
+            ),
+        )
+        .unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = update_ref(&layout, "Main", RefWriteCondition::Any, &h("next"));
+            done_tx.send(result).unwrap();
+        });
+        let premature = done_rx.recv_timeout(Duration::from_millis(200));
+        drop(held);
+        worker.join().unwrap();
+        assert!(
+            matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)),
+            "a write under `Main` ran while `main` was locked: {premature:?}"
+        );
+    }
+
     /// All mutations must join the CAS critical section, including calls
     /// from a linked tree with its own unrelated worktree lock.
     #[test]
