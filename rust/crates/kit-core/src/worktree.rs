@@ -4793,6 +4793,7 @@ mod tests {
     #[test]
     fn the_stat_pass_leaves_the_tree_the_walk_builds_as_it_was() {
         let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
         let work = TempDir::new().unwrap();
         let idx = tracked_files(work.path(), 700);
         fs::write(work.path().join("untracked.txt"), b"new").unwrap();
@@ -4800,8 +4801,9 @@ mod tests {
         fs::remove_file(work.path().join("d01/f0001.txt")).unwrap();
         let mut observed = Vec::new();
         let with_index =
-            build_tree_filtered_observed(&store, work.path(), Some(&idx), &mut observed).unwrap();
-        assert_eq!(with_index, build_tree(&store, work.path()).unwrap());
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
     }
 
     /// The pass takes the `lstat` of each tracked file that is there, none for
@@ -4844,15 +4846,18 @@ mod tests {
     #[test]
     fn a_symlinked_directory_is_not_entered_after_the_stat_pass() {
         let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
         let work = TempDir::new().unwrap();
         let idx = tracked_files(work.path(), 700);
         fs::rename(work.path().join("d03"), work.path().join("real")).unwrap();
         std::os::unix::fs::symlink("real", work.path().join("d03")).unwrap();
         let mut observed = Vec::new();
         let with_index =
-            build_tree_filtered_observed(&store, work.path(), Some(&idx), &mut observed).unwrap();
-        assert_eq!(with_index, build_tree(&store, work.path()).unwrap());
-        let Object::Tree(root) = store.read_object(&with_index).unwrap() else {
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
+        use crate::store::ObjectSource as _;
+        let Object::Tree(root) = snapshot.read_object(&with_index).unwrap() else {
             panic!("expected tree");
         };
         let link = root.entries.iter().find(|e| e.name == b"d03").unwrap();
