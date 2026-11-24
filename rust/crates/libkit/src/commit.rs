@@ -327,7 +327,6 @@ impl Behind<'_> {
         {
             return Ok(true);
         }
-        let leaf_of = |entry: Option<&TreeEntry>| entry.filter(|entry| entry.mode != EntryMode::Tree);
         match (leaf_of(old), leaf_of(new)) {
             (Some(o), Some(n)) if o.object_hash == n.object_hash && o.mode == n.mode => Ok(false),
             (Some(o), _) => Ok(self.holds(&path, Some(o))),
@@ -351,6 +350,11 @@ impl Behind<'_> {
             None => staged.is_none(),
         }
     }
+}
+
+/// The entry when it is a file or a link, `None` for a directory.
+fn leaf_of(entry: Option<&TreeEntry>) -> Option<&TreeEntry> {
+    entry.filter(|entry| entry.mode != EntryMode::Tree)
 }
 
 fn unreadable(reason: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Error {
