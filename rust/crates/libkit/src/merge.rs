@@ -26,6 +26,7 @@ use kit_core::ops::conflict_state::{
 };
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::{find_merge_base_strict, merge_trees};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError, RefWriteCondition};
 use kit_core::store::{ObjectStore, StoreError};
 use kit_core::worktree::{self, WorktreeError};
@@ -91,7 +92,10 @@ pub enum Error {
     #[error("read conflicts: {0}")]
     ReadConflicts(ConflictStateError),
     /// A conflicting file still holds markers.
-    #[error("unresolved conflict markers remain in '{0}'; resolve and `kit add` it")]
+    #[error(
+        "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+        escape_terminal_text(.0, false)
+    )]
     UnresolvedMarkers(String),
     /// The tree of the resolved index cannot be built.
     #[error("build tree from index: {0}")]
@@ -275,11 +279,12 @@ pub fn start(
         ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
         let records =
             conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
-        conflict_state::write_merge_state(layout, &state, &records).map_err(Error::WriteState)?;
         // The result tree lets an abort treat the clean hunks of the merge,
-        // and not only the conflict paths, as material to discard.
+        // and not only the conflict paths, as material to discard. It goes
+        // before the state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
             .map_err(Error::WriteState)?;
+        conflict_state::write_merge_state(layout, &state, &records).map_err(Error::WriteState)?;
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
@@ -299,11 +304,12 @@ pub fn start(
         // that only deletes files would leave an empty index, and a continue
         // or an abort would seed it from the old tree of `HEAD`.
         conflict::stage_removals(layout, store, Some(ours_tree), result.tree_hash)?;
-        conflict_state::write_merge_state(layout, &state, &[]).map_err(Error::WriteState)?;
         // The result tree tells the staged merge, which an abort discards,
-        // from the work that the user staged on top of it.
+        // from the work that the user staged on top of it. It goes before the
+        // state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
             .map_err(Error::WriteState)?;
+        conflict_state::write_merge_state(layout, &state, &[]).map_err(Error::WriteState)?;
         return Ok(Outcome::Staged {
             tree: result.tree_hash,
         });
@@ -345,6 +351,7 @@ pub fn resume(
     signing: &dyn Signing,
 ) -> Result<Merged, Error> {
     let (state, records) = read_state(layout)?;
+    conflict_state::ensure_conflict_list(layout).map_err(Error::ReadConflicts)?;
     if let Some(path) = conflict::first_unresolved_marker(layout.worktree_root(), &records)? {
         return Err(Error::UnresolvedMarkers(path));
     }

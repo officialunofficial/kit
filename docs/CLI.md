@@ -1229,9 +1229,7 @@ attestation support warn once per command and skip the log.
   failure, a name mismatch, a missing tag map or object, or a history past the
   check's bound.
   A remote tag name that kit cannot push prints a `warning:` line and is not a
-  refusal. A tag listing that fails, for example one too large for one
-  `kit serve` frame, prints `error: tag listing failed (possibly too many
-  tags): <error>`. A refused tag or a failed listing never stops the branches
+  refusal. A tag listing that fails prints `error: tag listing failed: <error>`. A refused tag or a failed listing never stops the branches
   or the other tags, and the fetch then exits 1 after everything else is
   published; the next fetch tries the tag again.
   `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
@@ -1430,9 +1428,7 @@ attestation support warn once per command and skip the log.
   (<reason>)`. A remote tag with another value is refused unless `--force`
   or `--force-with-lease`; both condition on the value the push read. A push
   refuses an unsigned annotated tag (re-create it with `kit tag -s`, or push
-  a lightweight tag), an annotated tag whose object names another tag, and,
-  over `kit+ssh` and `kit+file`, a new tag that would take the remote's tag
-  listing past 960 KiB. On a ticketed Connect remote, tags whose history
+  a lightweight tag), an annotated tag whose object names another tag. On a ticketed Connect remote, tags whose history
   needs more than one advance are refused: push the branch first, then the
   tags. A refused tag does not stop the others, and the push exits 1.
   `--format=json` prints `{"ok":<bool>,"remote":"...","endpoint":"...",
@@ -1529,9 +1525,9 @@ attestation support warn once per command and skip the log.
   `.kit/server-meta` (exit 78), because the refs of that root live in a
   database. A session may send at most 10,000 frames after `Hello`; the
   server refuses the next one with an error that names the limit. An
-  unchanged fetch costs two frames (the branch and tag listings) plus at
-  least two per branch, so one session fetches at most 4,999 branches
-  (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
+  unchanged fetch costs the frames of the branch and tag listings (one for each
+  1,000 refs) plus at least two per branch, so one session fetches at most
+  4,997 branches (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
   frames, so a clone of about 5,000 of them fails the same way.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a

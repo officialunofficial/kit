@@ -503,7 +503,9 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::AmendDuringMerge
         | commit::Error::NothingToAmend
         | commit::Error::NothingStaged
-        | commit::Error::MergeDiscarded => exit::USAGE,
+        | commit::Error::MergeDiscarded
+        | commit::Error::PullUnfinished(_)
+        | commit::Error::MergeStateIncomplete => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged
@@ -513,6 +515,7 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         commit::Error::ReadHead(_)
         | commit::Error::AmendNotACommit(_)
         | commit::Error::ReadAmendTarget { .. }
+        | commit::Error::ReadPullState(_)
         | commit::Error::Serialize(_) => exit::DATAERR,
         // The commit, its log or the index cannot be written.
         commit::Error::Store(_) | commit::Error::Recovery(_) | commit::Error::SyncIndex(_) => {
@@ -656,7 +659,9 @@ fn remote_exit_code(error: &remote::Error) -> u8 {
         | remote::Error::InvalidName(_)
         | remote::Error::RenameDefault => exit::PROTOCOL_ERROR,
         // The config cannot take the remote.
-        remote::Error::AlreadyExists(_) | remote::Error::Write(_) => exit::CANTCREAT,
+        remote::Error::AlreadyExists(_)
+        | remote::Error::OverlappingName { .. }
+        | remote::Error::Write(_) => exit::CANTCREAT,
         remote::Error::NoDefault | remote::Error::NotFound(_) => exit::GENERAL_ERROR,
         _ => exit::GENERAL_ERROR,
     }
@@ -953,6 +958,14 @@ mod tests {
             (remote::Error::RenameDefault.into(), exit::PROTOCOL_ERROR),
             (
                 remote::Error::AlreadyExists("x".to_owned()).into(),
+                exit::CANTCREAT,
+            ),
+            (
+                remote::Error::OverlappingName {
+                    name: "x/y".to_owned(),
+                    other: "x".to_owned(),
+                }
+                .into(),
                 exit::CANTCREAT,
             ),
             (remote::Error::NoDefault.into(), exit::GENERAL_ERROR),
