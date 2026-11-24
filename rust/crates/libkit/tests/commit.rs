@@ -452,7 +452,7 @@ fn commit_all_is_refused_before_it_stages_a_half_restored_tree() {
 
 #[test]
 fn staging_other_files_does_not_hide_an_interrupted_pull() {
-    let mut s = StoppedPull::new();
+    let s = StoppedPull::new();
     s.record();
     // A new file, then every file of a half-restored worktree.
     s.fixture.stage("new.txt", "work\n");
