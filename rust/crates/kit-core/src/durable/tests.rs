@@ -559,6 +559,22 @@ fn a_flush_is_anchored_at_a_directory_that_is_still_there() {
 }
 
 #[test]
+fn a_flush_with_no_directory_left_on_a_device_fails_and_poisons_the_group() {
+    let dir = TempDir::new().unwrap();
+    let (staging, done) = (dir.path().join("staging"), dir.path().join("done"));
+    fs::create_dir_all(&staging).unwrap();
+    let (rec, mut group) = recording();
+    group.note_dir(&staging).unwrap();
+    // The writeout is still on the device, under another name: the flush has
+    // no directory to anchor at, and a token for it would be a false one.
+    fs::rename(&staging, &done).unwrap();
+
+    assert!(group.flush().is_err());
+    assert!(flushes(&rec).is_empty());
+    assert!(group.note_dir(dir.path()).is_err());
+}
+
+#[test]
 fn a_bare_file_name_is_flushed_in_the_current_directory() {
     // Cargo runs a test with the package directory as its current one.
     let (rec, mut group) = recording();

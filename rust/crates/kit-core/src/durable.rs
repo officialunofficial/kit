@@ -597,22 +597,36 @@ impl Group {
     /// covers every write and rename the group has made so far.
     ///
     /// # Errors
-    /// A flush failed, or the group is poisoned. A failed flush poisons the
-    /// group.
+    /// A flush failed, every directory the group wrote in on a device is gone
+    /// or moved, or the group is poisoned. A failed flush poisons the group.
     pub fn flush(&mut self) -> io::Result<Flushed> {
         self.live()?;
         let anchors = std::mem::take(&mut self.pending);
         if self.syncer.writeouts_need_flush() {
             for (device, dirs) in &anchors {
-                // A directory that is gone since its write holds nothing to
-                // flush: anchor at one that is still there, or skip the device
-                // when none is.
-                let alive = dirs
-                    .iter()
-                    .find(|dir| self.syncer.device_of(dir) == Some(*device));
-                if let Some(anchor) = alive {
-                    let flushed = self.syncer.flush(anchor);
-                    self.guard(flushed)?;
+                // A flush on any directory of the device covers every writeout
+                // on it. A directory that is gone or moved since its write is
+                // no anchor, since the open of a gone one would fail quietly:
+                // use one that is still on the device before and after, and
+                // when there is none the writeouts could not be flushed, which
+                // fails the group.
+                let mut flushed = false;
+                for dir in dirs {
+                    if self.syncer.device_of(dir) != Some(*device) {
+                        continue;
+                    }
+                    let result = self.syncer.flush(dir);
+                    self.guard(result)?;
+                    if self.syncer.device_of(dir) == Some(*device) {
+                        flushed = true;
+                        break;
+                    }
+                }
+                if !flushed {
+                    let result = Err(io::Error::other(
+                        "a directory the group wrote in is gone: its writeouts cannot be flushed",
+                    ));
+                    return self.guard(result);
                 }
             }
         }
