@@ -158,7 +158,7 @@ pub fn export(
         let _ = std::fs::remove_file(state.join("map"));
         std::fs::create_dir_all(&staging)
             .map_err(|e| step(Class::CannotCreate, "create staging dir", e))?;
-        git_in(&staging, &["init", "--bare", "--quiet", "."])
+        git_in(&staging, &["init", "--bare", "--quiet", "--template=", "."])
             .map_err(|e| step(Class::CannotCreate, "init staging repo", e))?;
     }
     staging::check_mirror(&staging)?;

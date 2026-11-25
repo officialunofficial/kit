@@ -298,7 +298,14 @@ fn import_into(
     } else {
         git_in(
             state.as_path(),
-            &["clone", "--bare", "--quiet", &clone_url, "repo.git"],
+            &[
+                "clone",
+                "--bare",
+                "--quiet",
+                "--template=",
+                &clone_url,
+                "repo.git",
+            ],
         )
         .map_err(|e| step(Class::Unavailable, "clone upstream", e))?;
     }

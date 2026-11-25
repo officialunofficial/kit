@@ -217,3 +217,70 @@ fn export_refuses_a_mirror_with_a_url_rewrite() {
     );
     assert!(!other.join("refs/heads/main").exists());
 }
+
+/// A template directory in the user's git config is not copied into a mirror
+/// that kit creates, so the mirror keeps the shape the check accepts.
+#[test]
+fn a_template_directory_is_not_copied_into_a_new_mirror() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let template = root.path().join("template");
+    std::fs::create_dir_all(template.join("hooks")).unwrap();
+    std::fs::write(template.join("config"), "[core]\n\tsshCommand = true\n").unwrap();
+    std::fs::write(template.join("hooks/pre-push"), "#!/bin/sh\n").unwrap();
+    let global = home.path().join(".gitconfig");
+    std::fs::write(
+        &global,
+        format!("[init]\n\ttemplateDir = {}\n", template.display()),
+    )
+    .unwrap();
+
+    let up = root.path().join("upstream");
+    std::fs::create_dir(&up).unwrap();
+    git(&up, &["init", "--quiet", "--initial-branch=main", "."]);
+    std::fs::write(up.join("a.txt"), "hello\n").unwrap();
+    git(&up, &["add", "a.txt"]);
+    git(&up, &["commit", "--quiet", "-m", "first"]);
+
+    let fork = root.path().join("fork");
+    let kit = |cwd: &Path, args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_kit"))
+            .args(args)
+            .current_dir(cwd)
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("spawn kit");
+        assert!(out.status.success(), "kit {args:?}: {out:?}");
+    };
+    let import = [
+        "git",
+        "import",
+        up.to_str().unwrap(),
+        "fork",
+        "--remote-name",
+        "up",
+    ];
+    kit(root.path(), &import);
+    kit(&fork, &["git", "fetch", "--remote-name", "up"]);
+    let dest = root.path().join("mirror");
+    let export = [
+        "git",
+        "export",
+        dest.to_str().unwrap(),
+        "--remote-name",
+        "m",
+        "--no-attest",
+    ];
+    kit(&fork, &export);
+
+    for name in ["up", "m"] {
+        let mirror = fork.join(".kit/git").join(name).join("repo.git");
+        let config = std::fs::read_to_string(mirror.join("config")).unwrap();
+        assert!(!config.contains("sshCommand"), "{name}: {config}");
+        assert!(!mirror.join("hooks/pre-push").exists(), "{name}");
+    }
+}
