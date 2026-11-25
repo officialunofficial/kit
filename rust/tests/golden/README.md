@@ -52,6 +52,11 @@ test rewrites them. The test `kit-core/tests/formats_stay_readable.rs` reads
 them, and the vectors of the other directories, with the current readers.
 CONTRIBUTING, "Formats stay readable", states the rule.
 
+`formats/stash-08-*` is a stash that kit 0.8.1 saved: its manifest and the loose
+objects of its repository, copied as that release wrote them. They have no
+reference check, since the stash index wrapper is a local format that no spec
+lists byte by byte.
+
 ## Facts that a reference check takes from the fixture
 
 A reference check cannot derive some inputs from the spec. These inputs are
