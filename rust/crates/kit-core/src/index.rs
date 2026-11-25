@@ -267,9 +267,16 @@ impl Index {
 
     /// Retain only entries matching `keep`, rebuilding `by_path` in one
     /// pass afterward. `O(n)` — the same cost `Vec::retain` already pays.
-    pub fn retain_entries(&mut self, keep: impl FnMut(&IndexEntry) -> bool) {
-        self.entries.retain(keep);
-        self.rebuild_path_index();
+    pub fn retain_entries(&mut self, mut keep: impl FnMut(&IndexEntry) -> bool) {
+        let mut remap = Vec::with_capacity(self.entries.len());
+        let mut next = 0;
+        self.entries.retain(|entry| {
+            let kept = keep(entry);
+            remap.push(if kept { Some(next) } else { None });
+            next += usize::from(kept);
+            kept
+        });
+        self.remap_path_index(&remap);
     }
 
     /// Remove any entry that conflicts with staging `path` as a file leaf:
@@ -294,11 +301,23 @@ impl Index {
         if !has_ancestor_conflict && !has_descendant_conflict {
             return;
         }
-        self.entries.retain(|entry| {
+        self.retain_entries(|entry| {
             entry.path == path
                 || !(path_descends_from(&entry.path, path) || path_descends_from(path, &entry.path))
         });
-        self.rebuild_path_index();
+    }
+
+    /// Update `by_path` after entries were dropped. `remap[old]` is the new
+    /// position of the entry that sat at `old`, or `None` if it was dropped.
+    /// Visits each map slot once and clones no path. `O(n)`.
+    fn remap_path_index(&mut self, remap: &[Option<usize>]) {
+        self.by_path.retain(|_, pos| {
+            remap[*pos].is_some_and(|new| {
+                *pos = new;
+                true
+            })
+        });
+        self.debug_assert_consistent();
     }
 
     /// Rebuild `by_path` from `entries` in one `O(n log n)` pass. Called by
@@ -1653,6 +1672,27 @@ mod tests {
         assert_eq!(idx.entries[idx.find_entry("d.txt").unwrap()].path, "d.txt");
         assert_eq!(idx.find_entry("b.txt"), None);
         assert_eq!(idx.find_entry("c.txt"), None);
+    }
+
+    /// Dropping scattered entries, none, or all keeps every position exact.
+    #[test]
+    fn retain_entries_keeps_every_position_exact() {
+        let mut idx = Index::new();
+        for i in 0..100 {
+            idx.upsert_entry(blob_entry(&format!("dir{}/f{i:03}", i % 7)));
+        }
+        idx.retain_entries(|e| !e.path.ends_with('4') && !e.path.ends_with("07"));
+        let kept: Vec<String> = idx.entries.iter().map(|e| e.path.clone()).collect();
+        assert!(kept.len() < 100 && !kept.is_empty());
+        for (i, path) in kept.iter().enumerate() {
+            assert_eq!(idx.find_entry(path), Some(i));
+        }
+        assert_eq!(idx.find_entry("dir4/f004"), None);
+        idx.retain_entries(|_| true);
+        assert_eq!(idx.entries.len(), kept.len());
+        idx.retain_entries(|_| false);
+        assert!(idx.entries.is_empty());
+        assert_eq!(idx.find_entry(&kept[0]), None);
     }
 
     /// The common `add -A` case: staging an unrelated file has no ancestor

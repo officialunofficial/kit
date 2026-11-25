@@ -50,6 +50,10 @@ name = "ignore_match"
 harness = false
 
 [[bench]]
+name = "index_retain"
+harness = false
+
+[[bench]]
 name = "restore_chunk_fanout"
 harness = false
 
