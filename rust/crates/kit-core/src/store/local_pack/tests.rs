@@ -1020,6 +1020,26 @@ fn one_damaged_pair_does_not_stop_repair_of_the_others() {
 }
 
 #[test]
+fn a_busy_repair_lock_stays_a_busy_lock_with_several_pairs_to_repair() {
+    let (_dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3]]);
+    for pair in &pairs {
+        fs::write(&pair.index, b"damaged").unwrap();
+    }
+    let store = ObjectStore::open(&layout).unwrap();
+    let guard = store.prune_guard().unwrap();
+    let error = store.check_local_packs(true).unwrap_err();
+    assert!(
+        matches!(&error, StoreError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "{error:?}"
+    );
+    for pair in &pairs {
+        assert_eq!(fs::read(&pair.index).unwrap(), b"damaged");
+    }
+    drop(guard);
+    assert_eq!(store.check_local_packs(true).unwrap(), 3);
+}
+
+#[test]
 fn a_damaged_live_pair_does_not_hide_a_damaged_lone_pack() {
     let (_dir, layout, pairs) = packed_store(&[vec![1], vec![2], vec![3]]);
     fs::remove_file(&pairs[0].index).unwrap();
