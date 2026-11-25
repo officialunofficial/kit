@@ -338,9 +338,10 @@ non-normative except for the binding semantics below):
 - `import-spec-version` (§1.2).
 - The staging mirror (`repo.git`) is kit's own state, and git applies a
   mirror's own configuration, so every command that runs `git` in it
-  first checks that the directory is a plain directory with no
-  `commondir`, `config.worktree` or `gitdir` file, and that its config
-  holds only the keys `git clone --bare` and `git init --bare` write
+  first checks that the directory is a plain directory that git itself
+  uses as its repository (no `.git` entry, a valid `HEAD`), with no
+  `commondir`, `config.worktree`, `gitdir` or alternates file, and that
+  its config holds each key at most once and only the keys `git clone --bare` and `git init --bare` write
   (`core.*` repository format and sharing keys,
   `receive.denyNonFastForwards`, `extensions.objectformat`,
   `extensions.compatobjectformat`, `extensions.refstorage` and

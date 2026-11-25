@@ -33,6 +33,15 @@ pub fn git_command(repo: &Path) -> Command {
     let mut c = Command::new("git");
     c.arg("-C").arg(repo);
     apply_hygiene(&mut c);
+    // Git looks in `repo` and then in each parent for a repository. A `repo`
+    // that is not a valid git directory must fail, not fall through to the
+    // repository that holds it, so the search stops below the parent.
+    if let Some(parent) = std::path::absolute(repo)
+        .ok()
+        .and_then(|abs| abs.parent().map(Path::to_path_buf))
+    {
+        c.env("GIT_CEILING_DIRECTORIES", parent);
+    }
     c
 }
 

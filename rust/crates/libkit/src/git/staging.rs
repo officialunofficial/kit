@@ -36,9 +36,15 @@ const MIRROR_KEYS: &[&str] = &[
     "remote.origin.url",
 ];
 
-/// Files in the mirror directory that make git read configuration from
-/// somewhere else.
-const REDIRECTING_FILES: &[&str] = &["commondir", "config.worktree", "gitdir"];
+/// Files in the mirror directory that make git read configuration or objects
+/// from somewhere else. Kit never creates one.
+const REDIRECTING_FILES: &[&str] = &[
+    "commondir",
+    "config.worktree",
+    "gitdir",
+    "objects/info/alternates",
+    "objects/info/http-alternates",
+];
 
 /// Check the mirror at `staging` and return the url it fetches from.
 ///
@@ -93,6 +99,7 @@ pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
         )));
     }
     let mut origin = None;
+    let mut seen = Vec::new();
     for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
         if entry.is_empty() {
             continue;
@@ -101,9 +108,31 @@ pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
         if !MIRROR_KEYS.contains(&key) {
             return Err(refuse(format!("its config sets `{key}`")));
         }
+        // Kit's mirrors never repeat a key, and `git config --get` and
+        // `git fetch` read a repeated `remote.origin.url` differently.
+        if seen.contains(&key) {
+            return Err(refuse(format!("its config sets `{key}` twice")));
+        }
+        seen.push(key);
         if key == "remote.origin.url" {
             origin = Some(value.trim().to_owned());
         }
+    }
+
+    // Every later `git -C <mirror>` must use this directory as its
+    // repository, and not search upward for another one: a `.git` entry in
+    // any case, or a missing or invalid `HEAD`, would send it elsewhere.
+    let used = kit_git_bridge::gitsrc::git_command(staging)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| plain(Class::Unavailable, format!("spawn git rev-parse: {e}")))?;
+    let reported = String::from_utf8_lossy(&used.stdout);
+    let same = std::fs::canonicalize(reported.trim()).ok() == std::fs::canonicalize(staging).ok();
+    if !used.status.success() || !same {
+        return Err(refuse(
+            "git does not use it as its own repository".to_owned(),
+        ));
     }
     Ok(origin)
 }
@@ -159,11 +188,23 @@ mod tests {
         for (key, value) in [
             ("core.sharedrepository", "group"),
             ("receive.denyNonFastForwards", "true"),
-            ("extensions.refstorage", "reftable"),
         ] {
             git(&m, &["config", key, value]);
         }
         assert!(check_mirror(&m).unwrap().is_some());
+
+        // A reftable mirror, where this git can make one.
+        let reftable = tmp.path().join("reftable.git");
+        let made = Command::new("git")
+            .args(["init", "--quiet", "--bare", "--ref-format=reftable"])
+            .arg(&reftable)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if made {
+            check_mirror(&reftable).unwrap();
+        }
     }
 
     #[test]
@@ -194,6 +235,49 @@ mod tests {
             let why = refusal(&m);
             assert!(why.contains(name), "{name}: {why}");
         }
+    }
+
+    #[test]
+    fn a_repeated_key_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = mirror(tmp.path());
+        git(&m, &["config", "--add", "remote.origin.url", "/elsewhere"]);
+        assert!(refusal(&m).contains("twice"));
+    }
+
+    #[test]
+    fn an_alternates_file_is_refused() {
+        for name in ["alternates", "http-alternates"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mirror(tmp.path());
+            std::fs::write(m.join("objects/info").join(name), "/elsewhere\n").unwrap();
+            assert!(refusal(&m).contains(name), "{name}");
+        }
+    }
+
+    /// Git looks for `<dir>/.git` before it takes `<dir>` for a git
+    /// directory, and for a parent when `<dir>` is not one.
+    #[test]
+    fn a_mirror_that_git_would_not_use_as_its_repository_is_refused() {
+        // A `.git` directory and a `.git` file inside the mirror.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = mirror(tmp.path());
+        let inner = m.join(".git");
+        std::fs::create_dir(&inner).unwrap();
+        git(&inner, &["init", "--quiet", "--bare", "."]);
+        assert!(refusal(&m).contains("its own repository"));
+        std::fs::remove_dir_all(&inner).unwrap();
+        std::fs::write(m.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(refusal(&m).contains("its own repository"));
+
+        // A mirror without a `HEAD`, below a directory that is a repository.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        git(&state, &["init", "--quiet", "--bare", "."]);
+        let m = mirror(&state);
+        std::fs::remove_file(m.join("HEAD")).unwrap();
+        assert!(refusal(&m).contains("its own repository"));
     }
 
     #[cfg(unix)]

@@ -284,3 +284,23 @@ fn a_template_directory_is_not_copied_into_a_new_mirror() {
         assert!(!mirror.join("hooks/pre-push").exists(), "{name}");
     }
 }
+
+/// With no valid `HEAD` in the mirror, git would search the directories above
+/// it for a repository and use that one.
+#[test]
+fn fetch_refuses_a_mirror_that_git_would_replace_with_a_parent() {
+    let f = Fixture::imported();
+    let state = f.fork().join(".kit/git/up");
+    git(&state, &["init", "--quiet", "--bare", "."]);
+    std::fs::write(
+        state.join("config"),
+        format!(
+            "[core]\n\tbare = true\n[remote \"origin\"]\n\turl = {}\n\tuploadpack = touch {}; git-upload-pack\n",
+            f.root.path().join("upstream").display(),
+            f.marker().display()
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(f.mirror().join("HEAD")).unwrap();
+    f.fetch_refuses();
+}

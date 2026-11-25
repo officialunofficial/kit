@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use kit_attest::{Envelope, PAYLOAD_TYPE_IN_TOTO, Sig, Signer, statement};
 use kit_core::layout::RepoLayout;
@@ -718,7 +718,10 @@ fn ensure_dest(dest: &str) -> Result<String, Error> {
     }
     let path = PathBuf::from(dest);
     let needs_init = if path.exists() {
-        let is_repo = kit_git_bridge::gitsrc::git_command(&path)
+        let mut probe = Command::new("git");
+        probe.arg("-C").arg(&path);
+        kit_git_bridge::gitsrc::apply_hygiene(&mut probe);
+        let is_repo = probe
             .args(["rev-parse", "--git-dir"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

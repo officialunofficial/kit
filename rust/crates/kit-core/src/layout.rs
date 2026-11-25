@@ -644,8 +644,11 @@ pub fn remove_lock(state_dir: &Path) -> std::io::Result<()> {
 /// See [`DiscoverError`].
 pub fn discover(worktree_root: &Path) -> Result<RepoLayout, DiscoverError> {
     let layout = discover_unverified(worktree_root)?;
-    if !layout.is_single() {
-        verify_registered(&layout, &worktree_root.join(KIT_DIR))?;
+    let dot_kit = worktree_root.join(KIT_DIR);
+    // Every pointer file is checked, even one whose state dir and common dir
+    // resolve to the same directory.
+    if std::fs::symlink_metadata(&dot_kit).is_ok_and(|meta| !meta.is_dir()) {
+        verify_registered(&layout, &dot_kit)?;
     }
     Ok(layout)
 }
@@ -668,7 +671,11 @@ fn verify_registered(layout: &RepoLayout, dot_kit: &Path) -> Result<(), Discover
         ));
     }
     match read_capped_line(&state.join(BACKPOINTER_FILE_NAME)) {
-        Ok(Some(back)) if paths_refer_to_same(Path::new(&back), dot_kit) => Ok(()),
+        Ok(Some(back))
+            if Path::new(&back).is_absolute() && paths_refer_to_same(Path::new(&back), dot_kit) =>
+        {
+            Ok(())
+        }
         _ => Err(DiscoverError::BackpointerMismatch(dot_kit.to_path_buf())),
     }
 }
@@ -1369,6 +1376,30 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (_main, tree, state) = scaffold_linked(tmp.path());
         std::fs::remove_file(state.join(BACKPOINTER_FILE_NAME)).unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::BackpointerMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn discover_checks_a_pointer_whose_state_dir_is_its_own_common_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        // The state dir and the default commondir are the same directory.
+        write_pointer_file(&tree, tmp.path()).unwrap();
+        assert!(matches!(
+            discover(&tree),
+            Err(DiscoverError::NotRegistered(..))
+        ));
+    }
+
+    #[test]
+    fn discover_refuses_a_relative_backpointer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, tree, state) = scaffold_linked(tmp.path());
+        std::fs::write(state.join(BACKPOINTER_FILE_NAME), ".kit\n").unwrap();
         assert!(matches!(
             discover(&tree),
             Err(DiscoverError::BackpointerMismatch(_))
