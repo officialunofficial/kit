@@ -28,7 +28,16 @@ const INDEX_ENTRY_FIXED_BYTES: u64 = 67;
 
 /// The most entries, files and directories together, one tree may expand to.
 /// A tree of [`MAX_TREE_LEAVES`] files may also hold a directory for each.
-const MAX_TREE_ENTRIES: u64 = 2 * MAX_TREE_LEAVES;
+const MAX_TREE_ENTRIES: u64 = 4_000_000;
+
+/// The most bytes of index entries one tree may expand to: the largest index
+/// file, less its header and checksum.
+const MAX_TREE_INDEX_BYTES: u64 = 268_435_415;
+
+// The caps are written out so that a change to the limits they follow is a
+// compile error here, not a silent drift.
+const _: () = assert!(MAX_TREE_ENTRIES == 2 * MAX_TREE_LEAVES);
+const _: () = assert!(MAX_TREE_INDEX_BYTES == MAX_INDEX_BYTES - INDEX_HEADER_BYTES);
 
 /// What a tree expands to: its files, every entry (a directory entry counts
 /// besides what lies below it, so a tree of empty directories is sized too),
@@ -66,7 +75,7 @@ pub fn check_tree_leaves<S: ObjectSource + ?Sized>(store: &S, root: Hash) -> Sto
         Caps {
             leaves: MAX_TREE_LEAVES,
             entries: MAX_TREE_ENTRIES,
-            index_bytes: MAX_INDEX_BYTES - INDEX_HEADER_BYTES,
+            index_bytes: MAX_TREE_INDEX_BYTES,
         },
     )
 }
@@ -103,7 +112,7 @@ impl WalkBudget {
             used: 0,
             limit,
             bytes: 0,
-            byte_limit: MAX_INDEX_BYTES - INDEX_HEADER_BYTES,
+            byte_limit: MAX_TREE_INDEX_BYTES,
             seen: HashMap::new(),
         }
     }
@@ -325,6 +334,19 @@ mod tests {
         check_within(&store, root, caps(u64::MAX, u64::MAX, exact)).unwrap();
         let err = check_within(&store, root, caps(u64::MAX, u64::MAX, exact - 1)).unwrap_err();
         assert!(matches!(err, StoreError::TreeTooLarge));
+        // The directory entry counts besides its two files.
+        check_within(&store, root, caps(u64::MAX, 3, u64::MAX)).unwrap();
+        let err = check_within(&store, root, caps(u64::MAX, 2, u64::MAX)).unwrap_err();
+        assert!(matches!(err, StoreError::TreeTooLarge));
+    }
+
+    #[test]
+    fn a_walk_budget_allows_its_entry_limit_and_refuses_one_past_it() {
+        let mut budget = WalkBudget::with_limit(3);
+        for _ in 0..3 {
+            budget.visit(0).unwrap();
+        }
+        assert!(matches!(budget.visit(0), Err(StoreError::TreeTooLarge)));
     }
 
     #[test]
