@@ -575,6 +575,51 @@ fn a_flush_with_no_directory_left_on_a_device_fails_and_poisons_the_group() {
 }
 
 #[test]
+fn a_directory_that_moves_after_its_writeout_still_fails_the_flush() {
+    let dir = TempDir::new().unwrap();
+    let (staging, done) = (dir.path().join("staging"), dir.path().join("done"));
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("log"), b"x").unwrap();
+    let (rec, mut group) = recording();
+    rec.move_after_writeout(&staging, &done);
+    // The writeout succeeds and the directory is gone before it is recorded.
+    group.note_file(&staging.join("log")).unwrap();
+
+    assert!(group.flush().is_err());
+    assert!(flushes(&rec).is_empty());
+}
+
+#[test]
+fn an_anchor_that_is_gone_when_the_flush_returns_is_not_an_anchor() {
+    let dir = TempDir::new().unwrap();
+    let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let (rec, mut group) = recording();
+    group.note_dir(&first).unwrap();
+    group.note_dir(&second).unwrap();
+    rec.remove_anchor_in_next_flush();
+
+    // The first flush returns for a directory that vanished: the second one
+    // makes the flush.
+    let _token = group.flush().unwrap();
+    assert_eq!(flushes(&rec), [first, second]);
+}
+
+#[test]
+fn a_lone_anchor_that_is_gone_when_the_flush_returns_fails_the_group() {
+    let dir = TempDir::new().unwrap();
+    let only = dir.path().join("only");
+    fs::create_dir_all(&only).unwrap();
+    let (rec, mut group) = recording();
+    group.note_dir(&only).unwrap();
+    rec.remove_anchor_in_next_flush();
+
+    assert!(group.flush().is_err());
+    assert!(group.note_dir(dir.path()).is_err());
+}
+
+#[test]
 fn a_bare_file_name_is_flushed_in_the_current_directory() {
     // Cargo runs a test with the package directory as its current one.
     let (rec, mut group) = recording();

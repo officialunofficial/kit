@@ -493,11 +493,13 @@ impl Group {
     }
 
     /// Record a writeout of an item in the directory `anchor`, which also
-    /// anchors the flush of its device. A directory that is gone has no device,
-    /// and there is nothing left to flush for it.
-    fn wrote(&mut self, anchor: &Path) {
+    /// anchors the flush of its device. `device` is the device of `anchor`
+    /// taken before the writeout: a directory that was gone then has no device
+    /// and nothing was written, and one that moves after the writeout stays
+    /// recorded, so the flush fails rather than skip it.
+    fn wrote(&mut self, anchor: &Path, device: Option<u64>) {
         self.clock += 1;
-        if let Some(device) = self.syncer.device_of(anchor) {
+        if let Some(device) = device {
             let anchors = self.pending.entry(device).or_default();
             if !anchors.iter().any(|known| known == anchor) {
                 anchors.push(anchor.to_path_buf());
@@ -539,9 +541,10 @@ impl Group {
         let parent = prepare_parent(dest, parents)?;
         let mut tmp = temp_file_in(parent)?;
         fill(tmp.as_file_mut())?;
+        let device = self.syncer.device_of(parent);
         let written = self.syncer.writeout(tmp.as_file(), tmp.path());
         self.guard(written)?;
-        self.wrote(parent);
+        self.wrote(parent, device);
         Ok(Staged {
             group: self.id,
             at: self.clock,
@@ -566,15 +569,16 @@ impl Group {
             options.write(true);
         }
         let file = options.open(path)?;
-        let written = self.syncer.writeout(&file, path);
-        self.guard(written)?;
         // A bare file name lives in the current directory.
         let dir = match path.parent() {
             Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
             Some(parent) => parent,
             None => path,
         };
-        self.wrote(dir);
+        let device = self.syncer.device_of(dir);
+        let written = self.syncer.writeout(&file, path);
+        self.guard(written)?;
+        self.wrote(dir, device);
         Ok(())
     }
 
@@ -586,9 +590,10 @@ impl Group {
     /// failed writeout poisons the group.
     pub fn note_dir(&mut self, dir: &Path) -> io::Result<()> {
         self.live()?;
+        let device = self.syncer.device_of(dir);
         let written = self.syncer.dir_writeout(dir);
         self.guard(written)?;
-        self.wrote(dir);
+        self.wrote(dir, device);
         Ok(())
     }
 

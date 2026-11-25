@@ -1571,6 +1571,10 @@ pub(crate) mod testing {
         devices: Mutex<Vec<(PathBuf, u64)>>,
         /// Renames still allowed to succeed; `None` allows every one.
         renames_left: Mutex<Option<usize>>,
+        /// A directory to move after the next writeout, with its new name.
+        move_after_writeout: Mutex<Option<(PathBuf, PathBuf)>>,
+        /// Remove the anchor of the next flush once it has been recorded.
+        remove_anchor_in_next_flush: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingSyncer {
@@ -1604,6 +1608,26 @@ pub(crate) mod testing {
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
+        /// Rename the directory `from` to `to` right after the next writeout
+        /// of a file or a directory.
+        pub(crate) fn move_after_writeout(&self, from: &Path, to: &Path) {
+            *self.move_after_writeout.lock().unwrap() =
+                Some((from.to_path_buf(), to.to_path_buf()));
+        }
+
+        /// Make the next [`Syncer::flush`] remove its anchor directory after
+        /// it is recorded, and succeed: the open of a gone anchor does.
+        pub(crate) fn remove_anchor_in_next_flush(&self) {
+            self.remove_anchor_in_next_flush
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn run_move(&self) {
+            if let Some((from, to)) = self.move_after_writeout.lock().unwrap().take() {
+                fs::rename(from, to).unwrap();
+            }
+        }
+
         /// Let `n` more renames succeed, then fail every later one: a
         /// crash in the middle of the renames, seen from the store.
         pub(crate) fn fail_renames_after(&self, n: usize) {
@@ -1620,6 +1644,7 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push(Ev::Barrier(path.to_path_buf()));
+            self.run_move();
             Ok(())
         }
 
@@ -1659,6 +1684,7 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push(Ev::DirBarrier(dir.to_path_buf()));
+            self.run_move();
             Ok(())
         }
 
@@ -1669,6 +1695,12 @@ pub(crate) mod testing {
                 .push(Ev::Full(anchor.to_path_buf()));
             if self.fail_flushes.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(io::Error::other("injected flush failure"));
+            }
+            if self
+                .remove_anchor_in_next_flush
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::remove_dir(anchor).unwrap();
             }
             Ok(())
         }
