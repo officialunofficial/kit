@@ -673,42 +673,33 @@ mod tests {
     }
 
     #[test]
-    fn the_packs_of_a_chain_share_one_decoded_budget() {
-        // Two packs, each holding one compressible 64 KiB blob, which the
-        // pack stores compressed and the reader counts as 64 KiB decoded.
+    fn a_chain_of_honest_packs_needs_nothing_but_their_own_length_in_the_fetch_budget() {
+        // Two packs, each holding one compressible 4 MiB blob, which the pack
+        // stores compressed and the reader counts as 4 MiB decoded. Each
+        // pack's length brings more than that to a budget that starts empty.
         let tx = MemoryTransport::new();
-        let (first, second) = (vec![b'a'; 64 << 10], vec![b'b'; 64 << 10]);
+        let (first, second) = (vec![b'a'; 4 << 20], vec![b'b'; 4 << 20]);
         let a = upload_blob_pack(&tx, &[&first]);
         let b = upload_blob_pack(&tx, &[&second]);
-        let run = |limit: u64| {
-            let (_td, _layout, store, mut applied) = store_and_record();
-            store.try_activate_local_packs().unwrap();
-            let mut done = ChainApplied::default();
-            let result = apply_pack_chain(
-                &store,
-                &TransportSource::new(&tx),
-                &NoopObserver,
-                "origin",
-                "refs/heads/main",
-                &[a, b],
-                &mut applied,
-                false,
-                &mut done,
-                &store.prune_guard().unwrap(),
-                &mut FetchDecodeBudget::with_limit(limit),
-                |_| Ok(()),
-            );
-            (result, done.packs)
-        };
-        let (result, packs) = run(100 << 10);
-        assert!(matches!(
-            result,
-            Err(SyncError::Pack(PackError::PackfileTooLarge))
-        ));
-        assert_eq!(packs, 1, "the first pack fits, the second does not");
-        let (result, packs) = run(200 << 10);
-        result.unwrap();
-        assert_eq!(packs, 2);
+        let (_td, _layout, store, mut applied) = store_and_record();
+        store.try_activate_local_packs().unwrap();
+        let mut done = ChainApplied::default();
+        apply_pack_chain(
+            &store,
+            &TransportSource::new(&tx),
+            &NoopObserver,
+            "origin",
+            "refs/heads/main",
+            &[a, b],
+            &mut applied,
+            false,
+            &mut done,
+            &store.prune_guard().unwrap(),
+            &mut FetchDecodeBudget::with_limit(0),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(done.packs, 2);
     }
 
     #[test]

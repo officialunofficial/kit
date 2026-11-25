@@ -194,8 +194,9 @@ fn claiming_pack(claims: &[u32]) -> Vec<u8> {
 }
 
 /// A pack that stays under its own cap can still be one of a million. With a
-/// budget of 2 GiB, the first pack takes it all and the next, which is small,
-/// may decode nothing. Alone, the same pack passes.
+/// budget of 2 GiB and a few tens of bytes of pack, the first pack takes the
+/// 2 GiB and the next, which is small, may decode what its own length adds and
+/// not its 1 GiB claim. Alone, the same pack passes.
 #[test]
 fn a_fetch_decodes_no_more_than_its_budget() {
     let gib = 1u32 << 30;
@@ -232,4 +233,26 @@ fn a_fetch_decodes_no_more_than_its_budget() {
         !matches!(error, PackError::PackfileTooLarge),
         "alone it fits: {error:?}"
     );
+}
+
+/// The zstd entry that expands most, a 64 MiB blob of zeros, takes a few
+/// kilobytes of pack. A fetch of it fits a budget that starts empty, since the
+/// length of the pack adds more than it decodes.
+#[test]
+fn a_fetch_of_the_most_compressible_pack_needs_no_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path().join("repo"))).unwrap();
+    let object = blob(vec![0u8; 64 * MIB - serialize::BLOB_PROLOGUE_LEN]);
+    let bytes = build_pack(pack::VERSION_V2, &[(0x03u8, zstd_payload(&object))]);
+    drop(object);
+    let pack = verified(&bytes, dir.path());
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    PackReader::stage_verified(
+        &pack,
+        &store,
+        &[],
+        &staged,
+        &mut FetchDecodeBudget::with_limit(0),
+    )
+    .unwrap();
 }

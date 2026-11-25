@@ -153,25 +153,33 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
 }
 
-/// The most a fetch decodes from all its packs together: 1 TiB.
+/// What a fetch may decode before its packs add to it: 1 TiB.
 ///
 /// A pack's own cap ([`decoded_bytes_cap`]) never falls under
 /// [`MIN_TOTAL_DECODED`], so a fetch of a million tiny packs could decode
-/// that much from each. No ratio to the wire bytes can bound the total: a
-/// delta of a 16 MiB manifest takes about a hundred wire bytes, as does a
-/// hostile delta that copies one base again and again. The limit is a plain
-/// number that a fetch of a repository this size or smaller does not reach. A
-/// fetch of more compressible content than that is refused, and no setting
-/// raises the limit.
-const MAX_FETCH_DECODED: u64 = 1 << 40;
+/// that much from each. This bounds what such a fetch decodes in all, however
+/// small its packs are. Each pack the fetch reads then adds
+/// [`FETCH_DECODED_PER_WIRE_BYTE`] times its length to the budget.
+const FETCH_DECODED_FLOOR: u64 = 1 << 40;
+
+/// What each wire byte of a pack adds to the budget of its fetch: 4 Mi
+/// decoded bytes.
+///
+/// The writer keeps every pack under this ratio, so a fetch of packs a writer
+/// made never runs out, however much it holds. A zstd entry decodes to at
+/// most 32,768 times its frame (an all-zero block of 128 KiB takes 4 bytes).
+/// A delta of a 16 MiB manifest, the most the planner deltas, takes at least
+/// 32 bytes of base hash and 5 of entry frame and about 20 of instructions
+/// when one run changes, which is a ratio of about 290,000.
+const FETCH_DECODED_PER_WIRE_BYTE: u64 = 4 << 20;
 
 /// The decoded bytes the packs of one fetch may still expand to.
 ///
 /// Each pack of the fetch obeys its own cap and also what is left here, and
 /// the bytes it decodes, a failed pack's included, come off what is left.
 ///
-/// A retry of a chain decodes its packs again and is charged again, so a fetch
-/// that retries has less of the limit.
+/// A retry of a chain decodes its packs again and is charged again, and adds
+/// the length of each pack to the budget again.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct FetchDecodeBudget {
@@ -179,20 +187,24 @@ pub struct FetchDecodeBudget {
 }
 
 impl FetchDecodeBudget {
-    /// The budget of a fetch that has applied no pack: [`MAX_FETCH_DECODED`].
+    /// The budget of a fetch that has applied no pack: [`FETCH_DECODED_FLOOR`].
     #[must_use]
     pub const fn new() -> Self {
-        Self::with_limit(MAX_FETCH_DECODED)
+        Self::with_limit(FETCH_DECODED_FLOOR)
     }
 
-    /// A budget of `bytes`, for a host that wants a smaller one.
+    /// A budget of `bytes`, before the packs add to it.
     #[must_use]
     pub const fn with_limit(bytes: u64) -> Self {
         Self { remaining: bytes }
     }
 
-    /// The cap on what a pack of `pack_len` bytes may decode.
-    fn admit(&self, pack_len: u64) -> u64 {
+    /// Add what a pack of `pack_len` bytes brings, and return the cap on what
+    /// it may decode.
+    fn admit(&mut self, pack_len: u64) -> u64 {
+        self.remaining = self
+            .remaining
+            .saturating_add(pack_len.saturating_mul(FETCH_DECODED_PER_WIRE_BYTE));
         self.remaining.min(decoded_bytes_cap(
             usize::try_from(pack_len).unwrap_or(usize::MAX),
         ))
@@ -3847,17 +3859,27 @@ mod tests {
 
     #[test]
     fn a_fetch_budget_caps_each_pack_and_loses_what_a_pack_decodes() {
-        let fetch = FetchDecodeBudget::new();
+        let mut fetch = FetchDecodeBudget::new();
         // A fresh budget leaves each pack its own cap.
         assert_eq!(fetch.admit(100), decoded_bytes_cap(100));
         assert_eq!(fetch.admit(64 << 20), MAX_TOTAL_DECODED);
-        // What a pack decodes comes off what is left for the next.
+        // What a pack decodes comes off what is left for the next, and each
+        // pack adds a share of its own length.
+        let share = 100 * FETCH_DECODED_PER_WIRE_BYTE;
         let mut fetch = FetchDecodeBudget::with_limit(3 << 30);
         assert_eq!(fetch.admit(100), MIN_TOTAL_DECODED);
         fetch.settle(MIN_TOTAL_DECODED);
-        assert_eq!(fetch.admit(100), 1 << 30);
+        assert_eq!(fetch.admit(100), (1 << 30) + 2 * share);
         fetch.settle(u64::MAX);
-        assert_eq!(fetch.admit(100), 0);
+        assert_eq!(fetch.admit(100), share);
+        // A fetch whose packs all stay under the ratio never runs out, however
+        // many there are.
+        let mut fetch = FetchDecodeBudget::with_limit(0);
+        for _ in 0..1000 {
+            let cap = fetch.admit(100);
+            assert!(cap >= 100 * FETCH_DECODED_PER_WIRE_BYTE.min(MIN_TOTAL_DECODED));
+            fetch.settle(100 * (FETCH_DECODED_PER_WIRE_BYTE - 1));
+        }
     }
 
     #[test]

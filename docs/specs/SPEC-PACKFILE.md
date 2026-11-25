@@ -902,14 +902,16 @@ uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
 
-A fetch also bounds what all its packs decode together: at most 1 TiB, a
-plain number and not a ratio of the wire bytes, since a delta of a large
-manifest and a hostile delta both expand by more than any fixed ratio that an
-honest pack stays under. Each pack still obeys its own cap, and the bytes it
-decodes, a pack that fails included, come off what the fetch has left for the
-next pack. A retry of a chain decodes its packs again and is charged again, so
-a fetch that retries has less of the limit. A delta base read from the store counts as decoded bytes each time it is
-read.
+A fetch also bounds what all its packs decode together: 1 TiB, and 4 Mi
+decoded bytes more for each wire byte of each pack it reads. The writer keeps
+every pack under that ratio (a zstd entry expands at most 32,768 times, and a
+delta of a 16 MiB manifest, the most the planner deltas, about 290,000 times),
+so a fetch of packs a writer made is never refused, however much it holds; the
+1 TiB bounds what a fetch of many tiny hostile packs decodes. Each pack still
+obeys its own cap, and the bytes it decodes, a pack that fails included, come
+off what the fetch has left for the next pack. A retry of a chain decodes its
+packs again, is charged again and adds their lengths again. A delta base read
+from the store counts as decoded bytes each time it is read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of
