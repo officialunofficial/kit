@@ -158,7 +158,7 @@ fn copy_exact(file: &mut File, source: &mut dyn Read, len: u64) -> io::Result<()
 /// the test hooks only.
 ///
 /// With the `fault-injection` feature, `fault::flushes` counts the flushes of
-/// a thread, [`crate::fault::SyncStep::Flush`] reports each one, and a process
+/// a thread, `fault::SyncStep::Flush` reports each one, and a process
 /// whose environment sets `KIT_FLUSH_LOG` to a path appends one line to that
 /// file for each full flush of any thread, so a test that runs the binary
 /// counts the lines. Without the feature this is `sync_all` and the
