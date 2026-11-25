@@ -446,11 +446,7 @@ the remote to advertise a limit:
 
 A writer puts a single entry that is over one of its caps alone in a pack of its own, except a delta whose result, stream and base together pass the decoded-byte budget: the planner sends the object raw instead, since no reader of that budget could take the delta, and `Plan::prepare` refuses a delta its caller supplies.
 
-A pack that fits these limits is read by `PackReader::read` (which also counts
-each delta base it reads from the store, where a writer counts only the
-longest, so a pack of deltas over several bases of hundreds of MiB each may
-exceed its cap; a push stays under it, since the planner keeps the manifest
-bases it reads to 256 MiB for a plan and its other bases to 1 MiB each), by
+A pack that fits these limits is read by `PackReader::read`, by
 `decode_entries_with` and `rewrite_excluding` with `DecodeLimits::default()`
 and by the window reader with it. A caller of those that sets a larger
 decoded-byte budget accepts more, never less. `rewrite_excluding` refuses
@@ -832,9 +828,10 @@ window at a time, so its memory does not grow with the pack's length.
   window names it. No decoded byte is held across a window boundary. A delta
   whose base an earlier window stored reads it back from the store, so a base
   shared across windows is read once per window that uses it. Each such read
-  is charged to the decoded share while the base is held, and counts against
-  the cumulative decoded cap, as the slice reader counts the one read it
-  makes of each base not in the pack. A window closes when the next frame would take it past 64 MiB,
+  is charged to the decoded share while the base is held. It also counts
+  toward what a fetch decodes (§11.1), where a pack has one, and not toward
+  the cap of the pack, since a writer counts only the longest base. A window
+  closes when the next frame would take it past 64 MiB,
   so two windows in a row hold more than 64 MiB of frames: there are at most
   the entry count over 65,536, plus twice the frame bytes over 64 MiB, plus
   one windows.
@@ -905,14 +902,14 @@ one-pack working memory.
 A fetch also bounds what all its packs decode together: 16 GiB, and 2 Mi
 decoded bytes more for each wire byte of each pack it reads. A kit writer stays
 under that ratio. A zstd entry expands at most 32,768 times (a 128 KiB block of
-one byte takes 4 bytes). A delta stream expands at most 9,363 times (a COPY of
+one byte takes 4 bytes). A delta stream expands at most 9,362 times (a COPY of
 65,535 bytes takes 7, SPEC-DELTA §7). The most a pack counts per wire byte is a
 zstd delta entry whose stream is 256 COPYs of one block: a result of 16 MiB,
 the most the planner deltas, with a base of 16 MiB read from the store, about
 33 MiB counted for about 70 bytes of pack, or 470,000 times, which is under
 half of 2 Mi. A fetch of packs a writer made is never refused, however much it
 holds. A hostile pack that claims 2 GiB from a hundred bytes is 21 million
-times, and a fetch of a few hundred of them runs out. Each pack still obeys its
+times, and a fetch of nine of them runs out. Each pack still obeys its
 own cap, and the bytes it decodes, a pack that fails included, come off what
 the fetch has left for the next pack. A retry of a chain decodes its packs
 again, is charged again and adds their lengths again. A delta base read from

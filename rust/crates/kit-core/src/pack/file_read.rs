@@ -438,9 +438,12 @@ pub(super) fn decode_file(
     #[cfg(test)] boundary: Option<BoundaryHook<'_>>,
 ) -> Result<UnpackReport, PackError> {
     let (version, count) = read_header(pack)?;
-    let decoded_cap = match fetch.as_deref_mut() {
+    let (decoded_cap, fetch_left) = match fetch.as_deref_mut() {
         Some(fetch) => fetch.admit(pack.len()),
-        None => decoded_bytes_cap(usize::try_from(pack.len()).unwrap_or(usize::MAX)),
+        None => (
+            decoded_bytes_cap(usize::try_from(pack.len()).unwrap_or(usize::MAX)),
+            u64::MAX,
+        ),
     };
     let budget = file_budget(
         pack.len(),
@@ -448,7 +451,8 @@ pub(super) fn decode_file(
         store.objects_root_len(),
         owned_bytes,
         decoded_cap,
-    )?;
+    )?
+    .with_fetch_left(fetch_left);
     let result = decode_windows(
         pack,
         store,
