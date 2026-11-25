@@ -33,6 +33,7 @@ use kit_git_bridge::import::{
 use kit_git_bridge::map::{self, Direction};
 use kit_git_bridge::remoteid::{attestation_remote, remote_identity};
 
+use super::staging;
 use super::state::read_stamp;
 use super::{
     Class, Error, Event, LockEvents, Skipped, git_in, git_version, json_escape, lock_state, plain,
@@ -192,12 +193,15 @@ pub fn fetch(
     }
     // Re-fetch through the staging mirror's own recorded origin (the
     // canonical identity strips `.git`, so it is NOT a fetch URL).
-    let origin = git_in(
-        &state.join("repo.git"),
-        &["config", "--get", "remote.origin.url"],
-    )
-    .map(|s| s.trim().to_owned())
-    .map_err(|e| step(Class::General, "staging origin", e))?;
+    let origin = staging::check_mirror(&state.join("repo.git"))?
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            step(
+                Class::General,
+                "staging origin",
+                "the mirror has no origin url",
+            )
+        })?;
     let mut summary = import_into(
         layout,
         &Request {
@@ -273,7 +277,15 @@ fn import_into(
     // successful clone); `git -C <state>` needs it to exist.
     std::fs::create_dir_all(&state)
         .map_err(|e| step(Class::CannotCreate, "create state dir", e))?;
+    staging::check_location(&staging)?;
     if staging.join("objects").is_dir() {
+        if staging::check_mirror(&staging)?.is_none_or(|url| url.is_empty()) {
+            return Err(step(
+                Class::General,
+                "staging origin",
+                "the mirror has no origin url",
+            ));
+        }
         // Explicit refspecs (not the mirror's +refs/*:refs/*) so
         // --prune is scoped to upstream namespaces: fork-mode export
         // state living in this repo (refs/kit-export/*, the
@@ -293,7 +305,16 @@ fn import_into(
     } else {
         git_in(
             state.as_path(),
-            &["clone", "--bare", "--quiet", &clone_url, "repo.git"],
+            &[
+                "clone",
+                "--bare",
+                "--quiet",
+                "--origin",
+                "origin",
+                "--template=",
+                &clone_url,
+                "repo.git",
+            ],
         )
         .map_err(|e| step(Class::Unavailable, "clone upstream", e))?;
     }

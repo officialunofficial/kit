@@ -24,6 +24,7 @@ use kit_git_bridge::{
     gitparse, import as bridge_import, map, reconstruct, verify as bridge_verify,
 };
 
+use super::staging;
 use super::state::{read_stamp, resolve};
 use super::{Class, Error, open_repo, plain, step};
 
@@ -456,6 +457,7 @@ pub fn verify(cwd: &Path, request: &Request<'_>) -> Result<Report, Error> {
         ));
     }
 
+    staging::check_mirror(&staging)?;
     let targets = audit_targets(request, &state, &name)?;
 
     let mut audit = Audit {
