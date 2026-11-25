@@ -372,14 +372,18 @@ repository-scoped verified-membership requirements of the server to
 external bases; naming another pack in the same operation does not establish
 that membership.
 
-**Delta-depth counting.** An entry reconstructed directly from `raw` or
+**Delta-depth counting.** A verifier that enforces a delta-depth cap counts
+depth as follows. An entry reconstructed directly from `raw` or
 `zstd-raw` bytes has delta depth zero. An entry reconstructed from a `delta`
 or `zstd-delta` instruction stream has depth one more than the depth of the
 base it resolved against: an in-pack earlier object contributes its own
 verified depth, and an external base contributes the supplier-provided depth
 carried by its repository-scoped member fact. Depth therefore counts delta
 edges on the longest chain that produced the object, and a chain at the
-caller-selected cap refuses rather than wraps or silently truncates.
+caller-selected cap refuses rather than wraps or silently truncates. The
+readers of `kit-core` select no cap. They resolve each delta against the
+full bytes of its base, so a long chain costs no more than its entries, which
+the limits of §5 and §11.1 bound.
 
 Writers SHOULD emit non-blob objects first (commits, trees,
 chunked_blob, remix), then base blobs, then delta blobs. This lets a
@@ -823,10 +827,10 @@ window at a time, so its memory does not grow with the pack's length.
   window. A base or delta target is kept only while a later entry of the same
   window names it. No decoded byte is held across a window boundary. A delta
   whose base an earlier window stored reads it back from the store, so a base
-  shared across windows is read once per window that uses it. That reading is
-  charged to the decoded share while the base is held, but not counted
-  against the cumulative decoded cap: it costs at most one read of each base
-  per window. A window closes when the next frame would take it past 64 MiB,
+  shared across windows is read once per window that uses it. Each such read
+  is charged to the decoded share while the base is held, and counts against
+  the cumulative decoded cap, as the slice reader counts the one read it
+  makes of each base not in the pack. A window closes when the next frame would take it past 64 MiB,
   so two windows in a row hold more than 64 MiB of frames: there are at most
   the entry count over 65,536, plus twice the frame bytes over 64 MiB, plus
   one windows.
@@ -893,6 +897,13 @@ chain metadata: one million packs and 100,000 pack-list nodes. Application
 uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
+
+A fetch also bounds what all its packs decode together. It may decode 2 GiB,
+the floor of one pack's cap, plus 32,768 bytes for each wire byte of the packs
+it applies, however many packs there are. Each pack still obeys its own cap,
+and the bytes it decodes, a pack that fails included, come off what the
+fetch has left for the next pack. A delta base read from the store counts as
+decoded bytes each time it is read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of

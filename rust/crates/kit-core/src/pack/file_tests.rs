@@ -2,7 +2,7 @@
 //! file-backed reader, checked against the slice reader.
 
 use super::file_read::{
-    SCAN_BUFFER, WindowShape, bookkeeping, decoded_share, file_budget, read_file,
+    SCAN_BUFFER, WindowShape, bookkeeping, decode_file, decoded_share, file_budget, read_file,
 };
 use super::*;
 use crate::layout::RepoLayout;
@@ -794,7 +794,7 @@ fn the_decoded_share_follows_the_pack_size_up_to_three_gib() {
     ] {
         assert_eq!(decoded_share(len), share, "share of a {len}-byte pack");
         let entries = usize::try_from(len / 64).unwrap().min(1000);
-        let budget = file_budget(len, entries, 30, None).unwrap();
+        let budget = file_budget(len, entries, 30, None, MIN_TOTAL_DECODED).unwrap();
         let admitted = usize::try_from(share).unwrap();
         drop(budget.charge(admitted).expect("the share is admitted"));
         assert!(budget.charge(admitted + 1).is_err(), "one past it is not");
@@ -873,6 +873,45 @@ fn a_base_used_in_two_windows_is_read_back_and_nothing_outlives_its_window() {
     }
 }
 
+/// A window that reads a stored base back counts the read toward the decoded
+/// cap, as it counts a result: a pack of three windows over one large stored
+/// base is refused when the third read passes what the pack's size allows.
+#[test]
+fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap() {
+    const BASE_LEN: usize = 3 << 20;
+    let (_d, store) = fresh_store();
+    let (base_id, base) = blob(&blob_data(9, BASE_LEN, false));
+    store.write(&base).unwrap();
+    // Three tiny results, so the reads of the base are almost all the charge.
+    let mut w = PackWriter::new();
+    for keep in [100, 101, 102] {
+        let (_, target) = blob(&blob_data(9, keep, false));
+        w.push_delta(&base_id, &delta::encode(&base, &target).unwrap())
+            .unwrap();
+    }
+    let pack = w.finish().unwrap();
+    let cap = pack.len() as u64 * DECODED_PER_WIRE_BYTE;
+    let read = BASE_LEN as u64 + 100;
+    assert!(
+        2 * read < cap && cap < 3 * read,
+        "two reads fit the cap and three do not: {cap}"
+    );
+
+    let dir = TempDir::new().unwrap();
+    let file = verified(&pack, dir.path());
+    let one_delta_a_window = WindowShape {
+        entries: 1,
+        bytes: u64::MAX,
+    };
+    let with = |remaining: u64| {
+        let mut fetch = FetchDecodeBudget { remaining };
+        decode_file(&file, &store, one_delta_a_window, None, None, Some(&mut fetch), None)
+    };
+    // The grant for the pack's wire bytes is the whole cap here.
+    assert!(matches!(with(0), Err(PackError::PackfileTooLarge)));
+    assert_eq!(with(3 * read).unwrap().delta_count, 3);
+}
+
 /// Every commit, remix and tag a pack stores is listed in `signed` with its
 /// length, in pack order, from either reader; nothing else is.
 #[test]
@@ -939,7 +978,7 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
     writer.push_raw(base, &base_bytes).unwrap();
     let first = verified(&writer.finish().unwrap(), dir.path());
     let pending = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&first, &store, &[], &pending).unwrap();
+    let report = PackReader::stage_verified(&first, &store, &[], &pending, &mut FetchDecodeBudget::new()).unwrap();
     assert_eq!(report.raw_count, 1);
     assert!(!store.contains(&base));
 
@@ -953,11 +992,11 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
     let second = verified(&writer.finish().unwrap(), dir.path());
     let staged = ObjectSpool::new(dir.path()).unwrap();
     assert!(matches!(
-        PackReader::stage_verified(&second, &store, &[], &staged),
+        PackReader::stage_verified(&second, &store, &[], &staged, &mut FetchDecodeBudget::new()),
         Err(PackError::DeltaBaseMissing(_)),
     ));
     let staged = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&second, &store, &[&pending], &staged).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&pending], &staged, &mut FetchDecodeBudget::new()).unwrap();
     assert_eq!((report.raw_count, report.delta_count), (1, 1));
     assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
     assert!(!store.contains(&base));
@@ -973,7 +1012,7 @@ fn a_delta_base_may_be_in_any_of_the_pending_windows() {
     writer.push_raw(base, &base_bytes).unwrap();
     let first = verified(&writer.finish().unwrap(), dir.path());
     let sealing = ObjectSpool::new(dir.path()).unwrap();
-    PackReader::stage_verified(&first, &store, &[], &sealing).unwrap();
+    PackReader::stage_verified(&first, &store, &[], &sealing, &mut FetchDecodeBudget::new()).unwrap();
     // The open window holds something else.
     let open = ObjectSpool::new(dir.path()).unwrap();
 
@@ -983,7 +1022,7 @@ fn a_delta_base_may_be_in_any_of_the_pending_windows() {
         .unwrap();
     let second = verified(&writer.finish().unwrap(), dir.path());
     let staged = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&second, &store, &[&open, &sealing], &staged).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&open, &sealing], &staged, &mut FetchDecodeBudget::new()).unwrap();
     assert_eq!(report.delta_count, 1);
     assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
 }

@@ -1,0 +1,168 @@
+//! Cumulative decode budgets of the pack readers on hostile packs.
+//!
+//! - The window reader refuses once the zstd claims it has yielded add up past
+//!   its budget, though each entry fits.
+//! - A fetch decodes at most one floor plus a fixed share of the wire bytes it
+//!   applied, however many packs it spreads them over.
+#![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+
+use std::path::Path;
+
+use kit_core::layout::RepoLayout;
+use kit_core::object::{Blob, Object};
+use kit_core::pack::{
+    self, FetchDecodeBudget, MIN_TOTAL_DECODED, ObjectSpool, PackSpool, VerifiedPack, window,
+};
+use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
+use kit_core::serialize;
+use kit_core::{
+    DecodeLimits, NoExternalBases, ObjectStore, PackEntry, PackError, PackReader,
+    decode_entries_with, hash::hash,
+};
+
+const MIB: usize = 1 << 20;
+
+fn build_pack(version: u32, frames: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(pack::MAGIC);
+    p.extend_from_slice(&version.to_le_bytes());
+    p.extend_from_slice(&(frames.len() as u32).to_le_bytes());
+    for (kind, payload) in frames {
+        p.push(*kind);
+        p.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        p.extend_from_slice(payload);
+    }
+    let trailer = hash(&p);
+    p.extend_from_slice(&trailer);
+    p
+}
+
+fn blob(data: Vec<u8>) -> Vec<u8> {
+    serialize::serialize(&Object::Blob(Blob { data })).unwrap()
+}
+
+/// `[u32 LE uncompressed_len][zstd frame]`, the 0x03 payload.
+fn zstd_payload(bytes: &[u8]) -> Vec<u8> {
+    let mut out = (bytes.len() as u32).to_le_bytes().to_vec();
+    out.extend_from_slice(&zstd::bulk::compress(bytes, 19).unwrap());
+    out
+}
+
+fn verified(bytes: &[u8], dir: &Path) -> VerifiedPack {
+    let mut spool = PackSpool::create(dir, PACK_BODY_LIMIT).unwrap();
+    spool.begin(Some(bytes.len() as u64)).unwrap();
+    spool.write(bytes).unwrap();
+    spool.finish(&PackKey::new(pack::pack_key(bytes))).unwrap()
+}
+
+/// 64 zstd entries, each claiming 16 MiB through RLE blocks, against a
+/// `WindowReader` whose `max_decoded_bytes` is 32 MiB. Each entry fits the
+/// budget alone; the sum of 1 GiB does not.
+#[test]
+fn window_reader_sums_decoded_bytes() {
+    const ENTRIES: usize = 64;
+    const CLAIM: usize = 16 * MIB;
+    const BUDGET: u64 = 32 * MIB as u64;
+    let object = blob(vec![0u8; CLAIM - serialize::BLOB_PROLOGUE_LEN]);
+    assert_eq!(object.len(), CLAIM);
+    let payload = zstd_payload(&object);
+    drop(object);
+    let frames: Vec<_> = (0..ENTRIES).map(|_| (0x03u8, payload.clone())).collect();
+    let pack = build_pack(pack::VERSION_V2, &frames);
+    let limits = DecodeLimits::default().with_max_decoded_bytes(BUDGET);
+
+    // The buffered decoders charge the cumulative claim up front.
+    let buffered = decode_entries_with(&pack, &mut NoExternalBases, limits, |_| Ok(()));
+    assert!(matches!(buffered, Err(PackError::PackfileTooLarge)));
+
+    let mut source = pack.as_slice();
+    let mut delivered = 0u64;
+    let result = window::read_all(
+        &mut source,
+        pack.len() as u64,
+        64 << 10,
+        limits,
+        None,
+        |entry| {
+            if let PackEntry::Raw { bytes } = entry {
+                delivered += bytes.len() as u64;
+            }
+            Ok(())
+        },
+    );
+    assert!(
+        matches!(result, Err(PackError::PackfileTooLarge)),
+        "WindowReader delivered {delivered} bytes against a {BUDGET}-byte budget without refusing"
+    );
+    assert!(delivered <= BUDGET, "it stopped within the budget");
+
+    // A budget that holds the sum reads the pack to the end.
+    let limits = DecodeLimits::default().with_max_decoded_bytes((ENTRIES * CLAIM) as u64);
+    let mut source = pack.as_slice();
+    let mut entries = 0usize;
+    window::read_all(
+        &mut source,
+        pack.len() as u64,
+        64 << 10,
+        limits,
+        None,
+        |_| {
+            entries += 1;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(entries, ENTRIES);
+}
+
+/// A pack of one zstd entry per claim, each claim passing the pack's own cap
+/// and then failing on the bogus frame, so the test needs no object bigger
+/// than the claim's few bytes.
+fn claiming_pack(claims: &[u32]) -> Vec<u8> {
+    let frames: Vec<_> = claims
+        .iter()
+        .map(|claim| {
+            let mut payload = claim.to_le_bytes().to_vec();
+            payload.extend_from_slice(&zstd::bulk::compress(b"tiny", 3).unwrap());
+            (0x03u8, payload)
+        })
+        .collect();
+    build_pack(pack::VERSION_V2, &frames)
+}
+
+/// A pack that stays under its own cap can still be one of a million. The
+/// first pack takes the fetch's floor; the next, 90 bytes long, may decode a
+/// share of its own length and no more. Alone, the same pack passes.
+#[test]
+fn a_fetch_decodes_one_floor_plus_a_share_of_its_wire_bytes() {
+    let gib = 1u32 << 30;
+    assert_eq!(MIN_TOTAL_DECODED, 2 * u64::from(gib));
+    let dir = tempfile::tempdir().unwrap();
+    let store = ObjectStore::init(&RepoLayout::single(dir.path().join("repo"))).unwrap();
+    let first = verified(&claiming_pack(&[gib, gib]), dir.path());
+    let second = verified(&claiming_pack(&[gib]), dir.path());
+
+    let stage = |pack: &VerifiedPack, fetch: &mut FetchDecodeBudget| {
+        let staged = ObjectSpool::new(dir.path()).unwrap();
+        PackReader::stage_verified(pack, &store, &[], &staged, fetch)
+    };
+    let mut fetch = FetchDecodeBudget::new();
+    // Two claims of 1 GiB fit the floor. The frames are bogus, so the pack
+    // fails after its claims were charged, and a failed pack still spent them.
+    let error = stage(&first, &mut fetch).unwrap_err();
+    assert!(
+        !matches!(error, PackError::PackfileTooLarge),
+        "the first pack is within the floor: {error:?}"
+    );
+    let error = stage(&second, &mut fetch).unwrap_err();
+    assert!(
+        matches!(error, PackError::PackfileTooLarge),
+        "the floor is spent: {error:?}"
+    );
+
+    let error = stage(&second, &mut FetchDecodeBudget::new()).unwrap_err();
+    assert!(
+        !matches!(error, PackError::PackfileTooLarge),
+        "alone it fits the floor: {error:?}"
+    );
+}

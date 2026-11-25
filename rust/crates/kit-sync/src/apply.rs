@@ -78,7 +78,9 @@ impl ProgressSink<'_> {
 }
 
 use kit_core::hash::Hash;
-use kit_core::pack::{ObjectSpool, PackError, PackReader, PackSpool, RetainedPacks, VerifiedPack};
+use kit_core::pack::{
+    FetchDecodeBudget, ObjectSpool, PackError, PackReader, PackSpool, RetainedPacks, VerifiedPack,
+};
 use kit_core::protocol::{PACK_BODY_LIMIT, PackKey};
 use kit_core::store::{ObjectStore, PruneGuard};
 
@@ -234,6 +236,7 @@ pub(crate) fn apply_pack_chain(
     require_signed: bool,
     done: &mut ChainApplied,
     guard: &PruneGuard,
+    decoded: &mut FetchDecodeBudget,
     validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
 ) -> Result<(), SyncError> {
     let retained = RetainedPacks::new(&store.spool_dir());
@@ -249,6 +252,7 @@ pub(crate) fn apply_pack_chain(
         require_signed,
         done,
         guard,
+        decoded,
         &retained,
         &mut unsettled,
         validate,
@@ -311,6 +315,7 @@ fn apply_chain(
     require_signed: bool,
     done: &mut ChainApplied,
     guard: &PruneGuard,
+    decoded: &mut FetchDecodeBudget,
     retained: &RetainedPacks,
     unsettled: &mut Vec<Unsettled>,
     validate: impl FnOnce(&PendingView<'_>) -> Result<(), SyncError>,
@@ -346,8 +351,8 @@ fn apply_chain(
         });
         let held = unsettled.last().expect("pushed a pack");
         let pack = held.pack.as_ref().expect("the newest pack is open");
-        let decoded = decode_pack(store, pack, &publication, require_signed);
-        let (spool, unpacked) = match decoded {
+        let staged = decode_pack(store, pack, &publication, require_signed, decoded);
+        let (spool, unpacked) = match staged {
             Ok(decoded) => decoded,
             Err(error) => {
                 failure = Some(error);
@@ -391,12 +396,13 @@ fn decode_pack(
     pack: &VerifiedPack,
     publication: &Publication<'_>,
     require_signed: bool,
+    decoded: &mut FetchDecodeBudget,
 ) -> Result<(ObjectSpool, usize), SyncError> {
     let spool = publication.decode_spool().map_err(|e| {
         let dir = store.spool_dir();
         spool_error(&dir, e.kind(), &e.to_string())
     })?;
-    let report = PackReader::stage_verified(pack, store, &publication.pending(), &spool)?;
+    let report = PackReader::stage_verified(pack, store, &publication.pending(), &spool, decoded)?;
     verify_new_object_signatures(
         &PendingView::new(store, Some(&spool)),
         &report.signed,
@@ -417,7 +423,13 @@ fn apply_pack(
 ) -> Result<usize, SyncError> {
     let guard = store.prune_guard()?;
     let mut publication = Publication::new(store, &guard)?;
-    let (spool, unpacked) = decode_pack(store, pack, &publication, require_signed)?;
+    let (spool, unpacked) = decode_pack(
+        store,
+        pack,
+        &publication,
+        require_signed,
+        &mut FetchDecodeBudget::new(),
+    )?;
     publication.accept(&spool, *key, observer, remote, applied)?;
     publication.seal(observer, remote, applied)?;
     if unpacked > 0 {
@@ -544,6 +556,7 @@ mod tests {
             false,
             done,
             &store.prune_guard()?,
+            &mut FetchDecodeBudget::new(),
             |_| Ok(()),
         )
     }
@@ -676,6 +689,7 @@ mod tests {
             true,
             &mut ChainApplied::default(),
             &store.prune_guard().unwrap(),
+            &mut FetchDecodeBudget::new(),
             |view| {
                 assert!(view.contains(&blob(b"kept").id().unwrap()));
                 assert!(!store.contains(&blob(b"kept").id().unwrap()));
@@ -1177,6 +1191,7 @@ mod tests {
             false,
             &mut ChainApplied::default(),
             &store.prune_guard().unwrap(),
+            &mut FetchDecodeBudget::new(),
             |view| {
                 // The first window is sealed and recorded, the second is open.
                 assert!(store.contains(&first));

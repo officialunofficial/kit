@@ -12,7 +12,10 @@
 //! match [`super::PackEntries`]; zstd uses `ZstdEntryTruncated`,
 //! `DecompressedSizeOverCap`, `DecompressedSizeMismatch`, and `ZstdDecompress`.
 //! The decoded budget includes owned entry buffers, including carried wire bytes
-//! plus decoded output when both are live. Decoder-internal memory is additional
+//! plus decoded output when both are live. It also caps the sum, over the entries a
+//! reader has yielded, of the sizes their zstd frames decompress to, so a pack of
+//! many small claims cannot pass one entry at a time. A reader resumed from a
+//! cursor counts from zero. Decoder-internal memory is additional
 //! (in particular the zstd window buffer; see the parent module).
 //!
 //! A resumed run re-fetches its current window and checks the checkpoint's
@@ -139,6 +142,9 @@ pub struct WindowReader {
     exact_resume: Option<ExactWindow>,
     integrity_only: bool,
     one_pass: bool,
+    // Bytes the zstd entries read so far decompress to. A resumed reader
+    // starts again from zero: the cursor does not carry it.
+    decoded: u64,
     #[cfg(test)]
     peak: usize,
 }
@@ -178,6 +184,28 @@ impl LivePrefix {
             self.previous = prefix;
         }
     }
+}
+
+/// Add what a zstd entry decompresses to onto `decoded`, the total of the
+/// run, and refuse a total past `limits.max_decoded_bytes`. Other entries add
+/// nothing: they are the wire bytes already held.
+fn charge_run(
+    decoded: &mut u64,
+    kind: u8,
+    limits: DecodeLimits,
+    payload: &[u8],
+) -> Result<(), PackError> {
+    if !matches!(kind, 3 | 4) {
+        return Ok(());
+    }
+    let prefix = if kind == 4 { 32 } else { 0 };
+    let (claim, _) = zstd_claim(payload.get(prefix..).ok_or(PackError::DeltaEntryTruncated)?)?;
+    *decoded = u64::try_from(claim)
+        .ok()
+        .and_then(|claim| decoded.checked_add(claim))
+        .filter(|&total| total <= limits.max_decoded_bytes)
+        .ok_or(PackError::PackfileTooLarge)?;
+    Ok(())
 }
 
 fn us(n: u64) -> Result<usize, PackError> {
@@ -300,6 +328,7 @@ impl WindowReader {
             exact_resume: None,
             integrity_only: false,
             one_pass: false,
+            decoded: 0,
             #[cfg(test)]
             peak: 0,
         }
@@ -607,6 +636,7 @@ impl WindowReader {
                 .ok_or(PackError::PackfileTooLarge)?;
             let payload = &self.window[begin..end];
             self.check_budget(payload, 0)?;
+            charge_run(&mut self.decoded, self.kind, self.limits, payload)?;
             let entry = own_entry(decode_payload(self.kind, self.state.version, payload)?)?;
             self.record_peak(entry_len(&entry));
             self.state.pos = self
@@ -650,6 +680,7 @@ impl WindowReader {
             == self.payload_len
         {
             self.check_budget(&self.carry, self.payload_len)?;
+            charge_run(&mut self.decoded, self.kind, self.limits, &self.carry)?;
             let released = self.release_carried_window()?;
             let entry = if matches!(self.kind, 0 | 2) {
                 let mut bytes = std::mem::take(&mut self.carry);
@@ -674,9 +705,10 @@ impl WindowReader {
                 entry
             };
             if let Some(cursor) = released {
-                let frame = self.last_frame;
+                let (frame, decoded) = (self.last_frame, self.decoded);
                 *self = Self::resume(&cursor, self.limits)?;
                 self.last_frame = frame;
+                self.decoded = decoded;
             } else {
                 self.entry_finished()?;
             }
