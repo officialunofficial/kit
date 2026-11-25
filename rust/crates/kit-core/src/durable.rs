@@ -668,6 +668,8 @@ impl Group {
     pub(crate) fn note_renamed(&mut self) {
         self.clock += 1;
         self.last_rename = self.clock;
+        // A rename outside the group ends a run of sibling publishes.
+        self.siblings = None;
     }
 
     /// An ordering point: one full flush for each device written to since the

@@ -94,7 +94,8 @@ impl State {
             tip: refs::read_ref(&layout, "main").unwrap(),
             index: fs::read(root.join(".kit/index")).unwrap_or_default(),
             log: fs::read_to_string(root.join(".kit/recovery-log")).unwrap_or_default(),
-            merging: root.join(".kit/MERGE_HEAD").exists(),
+            merging: root.join(".kit/MERGE_HEAD").exists()
+                || root.join(".kit/CHERRY_PICK_HEAD").exists(),
             layout,
         }
     }
@@ -321,6 +322,54 @@ fn every_crash_point_of_a_merge_commit_clears_the_merge_after_the_ref_is_durable
                 states[n - 1].tip(),
                 new,
                 "point {n}: the merge state went before the ref was durable"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_crash_point_of_a_cherry_pick_commit_clears_the_state_after_the_ref_is_durable() {
+    let repo = base_repo();
+    repo.ok(&["branch", "side"]);
+    repo.write("a/f0.txt", b"main\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    repo.ok(&["commit", "-m", "main"]);
+    repo.ok(&["checkout", "side"]);
+    repo.write("a/f0.txt", b"side\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    repo.ok(&["commit", "-m", "side"]);
+    let picked = to_hex(
+        &refs::read_ref(&RepoLayout::single(repo.path()), "side")
+            .unwrap()
+            .unwrap(),
+    );
+    repo.ok(&["checkout", "main"]);
+    // The pick conflicts and stops; the resolution is staged and committed.
+    let stopped = kit(repo.path(), repo.xdg(), &["cherry-pick", &picked]);
+    assert!(!stopped.status.success(), "the pick conflicts");
+    repo.write("a/f0.txt", b"resolved\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    let scratch = tempfile::tempdir().unwrap();
+    let points = crash_points(&repo, scratch.path(), &["commit", "-m", "picked"]);
+    assert_points(&points, 4);
+    let states = check_each(&points, repo.xdg(), "cherry-pick");
+
+    let (old, new) = (states[0].tip(), states.last().unwrap().tip());
+    assert_ne!(old, new, "the commit moved the ref");
+    assert!(states[0].merging(), "the pick was in progress");
+    assert!(!states.last().unwrap().merging(), "the pick was concluded");
+    for (n, state) in states.iter().enumerate() {
+        let tip = state.tip();
+        assert!(tip == old || tip == new, "the ref is old or new");
+        if !state.merging() {
+            assert_eq!(
+                tip, new,
+                "point {n}: the pick state is gone, the ref is not new"
+            );
+            assert_eq!(
+                states[n - 1].tip(),
+                new,
+                "point {n}: the pick state went before the ref was durable"
             );
         }
     }

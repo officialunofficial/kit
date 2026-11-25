@@ -20,7 +20,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use kit_core::durable::Group;
+use kit_core::durable::{Flushed, Group};
 use kit_core::hash::{self, Hash};
 use kit_core::index;
 use kit_core::layout::RepoLayout;
@@ -487,6 +487,33 @@ fn expected_tip(
     }
 }
 
+/// Flush 3: the ref and the index names, published on the token of flush 2.
+/// The ref lock is held until the flush that covers the rename returns, also
+/// when the index cannot be published: the ref is then renamed already, so
+/// the flush is tried once before the error returns. A poisoned group refuses
+/// it without a device call.
+fn publish_pointers(
+    layout: &RepoLayout,
+    group: &mut Group,
+    (staged_head, staged_index): (head::StagedAdvance, Option<index::StagedIndex>),
+    condition: RefWriteCondition,
+    durable: &Flushed,
+    commit: &Hash,
+) -> Result<(), Error> {
+    let ref_lock = head::publish_advance(layout, group, staged_head, condition, durable)
+        .map_err(|e| branch_moved(e, commit))?;
+    if let Some(staged_index) = staged_index
+        && let Err(e) = index::publish_staged_index(group, staged_index, durable)
+    {
+        let _ = group.flush();
+        drop(ref_lock);
+        return Err(Error::SyncIndex(format!("write index: {e}")));
+    }
+    let _named = group.flush().map_err(store_io)?;
+    drop(ref_lock);
+    Ok(())
+}
+
 /// Make the commit.
 ///
 /// `gate` checks the conflicts of a merge that the commit concludes. It
@@ -621,15 +648,15 @@ pub fn create(
         Some(h) => RefWriteCondition::Match(h),
         None => RefWriteCondition::Missing,
     };
-    let ref_lock = head::publish_advance(layout, &mut group, staged_head, condition, &durable)
-        .map_err(|e| branch_moved(e, &commit))?;
-    if let Some(staged_index) = staged_index {
-        index::publish_staged_index(&mut group, staged_index, &durable)
-            .map_err(|e| Error::SyncIndex(format!("write index: {e}")))?;
-    }
-    // Flush 3: the ref and the index names. The ref lock is held until then.
-    let _named = group.flush().map_err(store_io)?;
-    drop(ref_lock);
+    // Flush 3 is inside: the ref and the index names.
+    publish_pointers(
+        layout,
+        &mut group,
+        (staged_head, staged_index),
+        condition,
+        &durable,
+        &commit,
+    )?;
 
     // The merge is recorded, so the repository is no longer merging. This
     // goes after the ref name is durable: a crash before it leaves the merge

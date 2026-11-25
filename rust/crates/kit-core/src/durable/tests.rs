@@ -900,6 +900,21 @@ fn a_plain_publish_ends_a_run_of_siblings() {
 }
 
 #[test]
+fn a_rename_outside_the_group_ends_a_run_of_siblings() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish_sibling(first, &token).unwrap();
+    // Objects are renamed by code outside the group after the first sibling.
+    group.note_renamed();
+    assert!(group.publish_sibling(second, &token).is_err());
+    assert!(!b.exists());
+}
+
+#[test]
 fn a_new_token_starts_a_new_run_of_siblings() {
     let dir = TempDir::new().unwrap();
     let (a, b) = (dir.path().join("a"), dir.path().join("b"));

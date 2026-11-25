@@ -633,7 +633,7 @@ follow this schedule:
 | Step | Writes | Durable before |
 |---|---|---|
 | 1 | The bytes of the new objects and of the ref temp file | The objects are renamed |
-| 2 | The object names, the recovery-log line of an amend, the bytes of an index that is built from the new trees | Any ref or index rename |
+| 2 | The object names, the recovery-log line of an amend, the bytes of the new index of an `add`, an amend or a merge commit | Any ref or index rename |
 | 3 | The ref name and the index name, under the ref's lock | The command reports success |
 | 4 | The removal of the merge state of a commit that concludes a merge or a cherry-pick | The command reports success |
 
@@ -658,11 +658,15 @@ Crash table for a plain `commit` (a crash is a power loss after the step):
 | step 3 | new | all durable | Committed. |
 
 An amend follows the same table. A recovery-log line that is durable while the
-ref is old is harmless: it names a commit that is still live. A commit that
-concludes a merge clears the merge state after step 3, so a crash between the
-two leaves the merge state over the new merge commit (a state the next
-`merge --abort` or `commit` handles as it handles any stale merge state), and
-never a merge commit that lost its second parent.
+ref is old is harmless: it names a commit that is still live. Between step 2
+and step 3 the ref and the index of an amend or a merge commit are two renames
+that survive a crash separately, so the ref may be new while the index is old
+or the reverse; each is the old or the new value, never another. A commit that
+concludes a merge or a cherry-pick clears the merge state after step 3, so a
+crash between the two leaves the merge state over the new commit, and never a
+merge commit that lost its second parent. That leftover state is the existing
+stale merge state: a later `merge --abort` moves the branch back over the
+merge commit and writes no recovery entry.
 
 For each local pair, the publisher MUST enforce this order. Hold the
 shared `format` guard or its exclusive lock from staging through the
