@@ -151,6 +151,23 @@ A format change updates the spec and the golden vectors in the same commit. The
 golden vectors must pass in the Rust code and in an independent reference check.
 Never change a published tag, magic or constant to fix a style issue.
 
+## Formats stay readable
+
+Every object id and every format version that a release wrote stays readable.
+
+- A format change adds a new version marker and a reader for the new version.
+  The reader of the old version stays.
+- Readers only widen. A change never makes a reader refuse bytes that it
+  accepted before, and never gives an existing object a different id.
+- A new version brings its own vectors under `rust/tests/golden/`. The vectors
+  of the old version stay. Never regenerate a vector to follow a code change.
+- Add each new vector to `rust/crates/kit-core/tests/formats_stay_readable.rs`,
+  or to the golden test of the crate that owns the format.
+- A record that a reader may drop and rebuild, such as a cache, a cursor or a
+  checkpoint, is exempt. Its spec says that it is disposable.
+- A change that cannot follow these rules needs the maintainers' agreement
+  before it is written, and a "Breaking" line in the changelog.
+
 ## Writing
 
 Docs, comments, commits and issues use short, active sentences in the present

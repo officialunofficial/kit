@@ -164,8 +164,8 @@ Readers MUST enforce:
   before interpreting entries. The checksum detects corruption, not malicious
   replacement by an actor who can rewrite the entire local file.
 
-Only version 3 is supported. Readers MUST reject every other version without
-rewriting the index. An unsupported index MUST NOT be rebuilt from
+Version 3 is the only version so far. Readers MUST reject a version they do
+not read without rewriting the index. An unsupported index MUST NOT be rebuilt from
 HEAD or working files, because those cannot recover its staged selections.
 
 GC MUST abort before sweeping if any registered worktree index is corrupt or

@@ -55,14 +55,20 @@ cleanup, not a normative requirement of this section.
 
 ### 2.2 Versioning
 
-A reader accepts one version of each format. It rejects every other
-version. A format change bumps the version and does not add a second read
-path. This rule follows from §2.1's bindingness axis:
+Every version of a format that a release wrote stays readable, and every
+object id stays the same. A reader accepts each version that kit has written
+and rejects each version it does not know. A format change adds a new version
+marker and a reader for the new version. The reader of each older version
+stays, and the vectors of each older version stay (§5). Readers only widen: a
+change never makes a reader refuse bytes that it accepted before. This rule
+follows from §2.1's bindingness axis:
 
 - **`normative`** documents describe durable-state contracts, including
-  authoritative local-only state. A version bump replaces the old
-  version.
+  authoritative local-only state. A version bump adds a version. It does not
+  replace the old one.
 - **`advisory`** documents may describe disposable, reconstructible caches.
+  A reader may discard such a record when it does not know its version, and
+  rebuild it.
   Whether state can be rebuilt is determined by its contents and source of
   truth, not whether it crosses a network. Staged paths, selected object hashes,
   mode choices and deletion tombstones in `.kit/index` are authoritative:
@@ -130,6 +136,14 @@ domains, SPEC-SIGNING §2 for the commit, remix and tag signing domains); this d
 duplicate that list, only the naming rule.
 
 ## 5. Golden vectors and conformance tests
+
+A version of a format that a release wrote has committed bytes under
+`rust/tests/golden/`. A script or an example writes them once; no test
+rewrites them. A test reads them with the current reader and checks the id or
+the content that the bytes must give. A vector that stops reading is a format
+break, and the fix is a reader for the old bytes. The test
+`rust/crates/kit-core/tests/formats_stay_readable.rs` lists where each format
+is read.
 
 Where a `SPEC-*.md` document lists numbered test vectors, the
 corresponding fixtures live under `rust/tests/golden/<area>/`
