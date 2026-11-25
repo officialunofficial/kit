@@ -145,6 +145,7 @@ pub fn export(
     }
 
     let staging = state.join("repo.git");
+    staging::check_location(&staging)?;
     if !staging.join("objects").is_dir() {
         if request.passthrough {
             return Err(plain(

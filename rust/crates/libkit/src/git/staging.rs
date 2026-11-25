@@ -33,6 +33,7 @@ const MIRROR_KEYS: &[&str] = &[
     "extensions.objectformat",
     "extensions.compatobjectformat",
     "extensions.refstorage",
+    "extensions.submodulepathconfig",
     "remote.origin.url",
 ];
 
@@ -46,36 +47,101 @@ const REDIRECTING_FILES: &[&str] = &[
     "objects/info/http-alternates",
 ];
 
+/// What to do about a refused mirror. A mirror that is missing is rebuilt the
+/// same way.
+const REBUILD: &str = "Delete the mirror and run `kit git import <url> --remote-name <name>` (or \
+                       the export) again to rebuild it; a fork-mode mirror loses its export refs";
+
+fn refuse(staging: &Path, why: impl std::fmt::Display) -> Error {
+    plain(
+        Class::Config,
+        format!(
+            "refusing the staging mirror {}: {why}. {REBUILD}",
+            staging.display()
+        ),
+    )
+}
+
+/// Refuse a mirror location that is not a plain directory. A location that
+/// does not exist is fine: the command creates it.
+///
+/// # Errors
+/// [`Class::Config`] when `staging` is a link or a file.
+pub(crate) fn check_location(staging: &Path) -> Result<(), Error> {
+    match std::fs::symlink_metadata(staging) {
+        Ok(meta) if !meta.is_dir() => Err(refuse(staging, "it is not a plain directory")),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(refuse(staging, e)),
+    }
+}
+
+/// Refuse a link or a special file anywhere in the mirror. Git follows a link
+/// to a directory such as `refs` or `objects` and reads and writes the
+/// repository it points at. Kit and git never make one. The files inside the
+/// two-hex-digit object directories are not listed: a link there names one
+/// file, and git checks the id of what it reads.
+fn check_entries(staging: &Path, dir: &Path) -> Result<(), Error> {
+    let entries = std::fs::read_dir(dir).map_err(|e| refuse(staging, e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| refuse(staging, e))?;
+        let kind = entry.file_type().map_err(|e| refuse(staging, e))?;
+        let path = entry.path();
+        if kind.is_dir() {
+            let name = entry.file_name();
+            let loose = name.len() == 2
+                && name
+                    .to_str()
+                    .is_some_and(|n| n.bytes().all(|b| b.is_ascii_hexdigit()))
+                && dir.file_name().is_some_and(|d| d == "objects");
+            if !loose {
+                check_entries(staging, &path)?;
+            }
+        } else if !kind.is_file() {
+            let shown = path
+                .strip_prefix(staging)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            return Err(refuse(
+                staging,
+                format!("`{shown}` is a link or a special file"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Check the mirror at `staging` and return the url it fetches from.
 ///
 /// # Errors
-/// [`Class::Config`] when the mirror is a link, has a file that redirects
-/// git's configuration, or has a configuration key that kit does not write.
+/// [`Class::NoInput`] when the mirror does not exist. [`Class::Config`] when
+/// the mirror is a link, holds a link or a special file, has a file that
+/// redirects git's configuration or objects, has a configuration key that kit
+/// does not write, or is not the repository that git uses for that directory.
 /// [`Class::Unavailable`] when `git` cannot read the configuration.
 pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
-    let refuse = |why: String| {
-        plain(
-            Class::Config,
+    if !staging.exists() && std::fs::symlink_metadata(staging).is_err() {
+        return Err(plain(
+            Class::NoInput,
             format!(
-                "refusing the staging mirror {}: {why}. Delete the mirror and run the command \
-                 again to rebuild it",
+                "the staging mirror {} is missing; run `kit git import <url> --remote-name \
+                 <name>` (or the export) again to rebuild it",
                 staging.display()
             ),
-        )
-    };
-    let meta = std::fs::symlink_metadata(staging).map_err(|e| refuse(e.to_string()))?;
-    if !meta.is_dir() {
-        return Err(refuse("it is not a plain directory".to_owned()));
+        ));
     }
+    check_location(staging)?;
+    check_entries(staging, staging)?;
     for name in REDIRECTING_FILES {
         if std::fs::symlink_metadata(staging.join(name)).is_ok() {
-            return Err(refuse(format!("it has a `{name}` file")));
+            return Err(refuse(staging, format!("it has a `{name}` file")));
         }
     }
     let config = staging.join("config");
-    let meta = std::fs::symlink_metadata(&config).map_err(|e| refuse(e.to_string()))?;
+    let meta = std::fs::symlink_metadata(&config).map_err(|e| refuse(staging, e))?;
     if !meta.is_file() {
-        return Err(refuse("its config is not a plain file".to_owned()));
+        return Err(refuse(staging, "its config is not a plain file"));
     }
 
     // `--file` reads that one file and nothing else: no includes, and no
@@ -93,10 +159,13 @@ pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
         .output()
         .map_err(|e| plain(Class::Unavailable, format!("spawn git config: {e}")))?;
     if !out.status.success() {
-        return Err(refuse(format!(
-            "git cannot read its config: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        return Err(refuse(
+            staging,
+            format!(
+                "git cannot read its config: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
     }
     let mut origin = None;
     let mut seen = Vec::new();
@@ -106,12 +175,12 @@ pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
         }
         let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
         if !MIRROR_KEYS.contains(&key) {
-            return Err(refuse(format!("its config sets `{key}`")));
+            return Err(refuse(staging, format!("its config sets `{key}`")));
         }
         // Kit's mirrors never repeat a key, and `git config --get` and
         // `git fetch` read a repeated `remote.origin.url` differently.
         if seen.contains(&key) {
-            return Err(refuse(format!("its config sets `{key}` twice")));
+            return Err(refuse(staging, format!("its config sets `{key}` twice")));
         }
         seen.push(key);
         if key == "remote.origin.url" {
@@ -127,14 +196,40 @@ pub(crate) fn check_mirror(staging: &Path) -> Result<Option<String>, Error> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| plain(Class::Unavailable, format!("spawn git rev-parse: {e}")))?;
-    let reported = String::from_utf8_lossy(&used.stdout);
-    let same = std::fs::canonicalize(reported.trim()).ok() == std::fs::canonicalize(staging).ok();
+    let same = reported_path(&used.stdout)
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .zip(std::fs::canonicalize(staging).ok())
+        .is_some_and(|(reported, own)| reported == own);
     if !used.status.success() || !same {
         return Err(refuse(
-            "git does not use it as its own repository".to_owned(),
+            staging,
+            format!(
+                "git does not use it as its own repository: {}",
+                String::from_utf8_lossy(&used.stderr).trim()
+            ),
         ));
     }
     Ok(origin)
+}
+
+/// The path that `git rev-parse` printed, without its line end.
+fn reported_path(stdout: &[u8]) -> Option<std::path::PathBuf> {
+    let line = stdout.strip_suffix(b"\n").unwrap_or(stdout);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if line.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(line)))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(std::path::PathBuf::from(
+            String::from_utf8_lossy(line).into_owned(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +377,59 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_link_or_special_file_inside_the_mirror_is_refused() {
+        for name in ["refs", "objects", "packed-refs", "logs"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mirror(tmp.path());
+            let other = tmp.path().join("other");
+            std::fs::create_dir(&other).unwrap();
+            let target = m.join(name);
+            if target.is_dir() {
+                std::fs::remove_dir_all(&target).unwrap();
+            } else {
+                let _ = std::fs::remove_file(&target);
+            }
+            std::os::unix::fs::symlink(&other, &target).unwrap();
+            let why = refusal(&m);
+            assert!(why.contains("link or a special file"), "{name}: {why}");
+        }
+        // A link below a directory, and a pipe where `HEAD` goes.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = mirror(tmp.path());
+        std::os::unix::fs::symlink(tmp.path(), m.join("refs/heads/x")).unwrap();
+        assert!(refusal(&m).contains("refs/heads/x"));
+        std::fs::remove_file(m.join("refs/heads/x")).unwrap();
+        std::fs::remove_file(m.join("HEAD")).unwrap();
+        let made = Command::new("mkfifo").arg(m.join("HEAD")).status().unwrap();
+        assert!(made.success());
+        assert!(refusal(&m).contains("HEAD"));
+    }
+
+    #[test]
+    fn a_missing_mirror_says_how_to_rebuild_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let why = refusal(&tmp.path().join("repo.git"));
+        assert!(
+            why.contains("is missing") && why.contains("kit git import"),
+            "{why}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mirror_that_is_a_link_is_refused_before_anything_is_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let other = tmp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        let link = tmp.path().join("repo.git");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(check_location(&link).is_err());
+        assert!(check_location(&tmp.path().join("absent")).is_ok());
+        assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_mirror_or_config_that_is_a_link_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let m = mirror(tmp.path());
@@ -295,6 +443,6 @@ mod tests {
         let real = tmp.path().join("real-config");
         std::fs::rename(m.join("config"), &real).unwrap();
         std::os::unix::fs::symlink(&real, m.join("config")).unwrap();
-        assert!(refusal(&m).contains("not a plain file"));
+        assert!(refusal(&m).contains("link or a special file"));
     }
 }

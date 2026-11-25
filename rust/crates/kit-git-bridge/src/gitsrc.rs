@@ -35,7 +35,10 @@ pub fn git_command(repo: &Path) -> Command {
     apply_hygiene(&mut c);
     // Git looks in `repo` and then in each parent for a repository. A `repo`
     // that is not a valid git directory must fail, not fall through to the
-    // repository that holds it, so the search stops below the parent.
+    // repository that holds it, so the search stops below the parent. The
+    // list separator (`:`, or `;` on Windows) cannot be escaped, so a parent
+    // path that holds one loses this limit; the mirror check still catches a
+    // mirror that git does not use as its own repository.
     if let Some(parent) = std::path::absolute(repo)
         .ok()
         .and_then(|abs| abs.parent().map(Path::to_path_buf))
@@ -50,6 +53,26 @@ pub fn git_command(repo: &Path) -> Command {
 /// probe).
 pub fn apply_hygiene(c: &mut Command) {
     c.env("GIT_TERMINAL_PROMPT", "0");
+    // Variables that pick the repository, its objects or its index come from
+    // the caller's own repository (a git hook sets some of them) and must not
+    // redirect `git -C <mirror>`. The user's `GIT_CONFIG*` stay.
+    for var in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_NAMESPACE",
+        "GIT_QUARANTINE_PATH",
+    ] {
+        c.env_remove(var);
+    }
     // A mirrored `refs/replace/*` ref must not change the bytes git
     // returns for an object id.
     c.env("GIT_NO_REPLACE_OBJECTS", "1");

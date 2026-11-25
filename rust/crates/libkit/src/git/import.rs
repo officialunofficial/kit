@@ -277,6 +277,7 @@ fn import_into(
     // successful clone); `git -C <state>` needs it to exist.
     std::fs::create_dir_all(&state)
         .map_err(|e| step(Class::CannotCreate, "create state dir", e))?;
+    staging::check_location(&staging)?;
     if staging.join("objects").is_dir() {
         staging::check_mirror(&staging)?;
         // Explicit refspecs (not the mirror's +refs/*:refs/*) so
@@ -302,6 +303,8 @@ fn import_into(
                 "clone",
                 "--bare",
                 "--quiet",
+                "--origin",
+                "origin",
                 "--template=",
                 &clone_url,
                 "repo.git",

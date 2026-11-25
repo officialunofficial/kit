@@ -304,3 +304,67 @@ fn fetch_refuses_a_mirror_that_git_would_replace_with_a_parent() {
     std::fs::remove_file(f.mirror().join("HEAD")).unwrap();
     f.fetch_refuses();
 }
+
+/// A mirror whose `refs` directory is a link would make export move the
+/// branches of the repository the link names.
+#[cfg(unix)]
+#[test]
+fn export_refuses_a_mirror_whose_refs_is_a_link() {
+    let f = Fixture::imported();
+    let dest = f.root.path().join("mirror");
+    let run = || {
+        f.kit(
+            &f.fork(),
+            &[
+                "git",
+                "export",
+                dest.to_str().unwrap(),
+                "--remote-name",
+                "m",
+                "--no-attest",
+            ],
+        )
+    };
+    let out = run();
+    assert!(out.status.success(), "{out:?}");
+
+    let other = f.root.path().join("other-refs");
+    std::fs::create_dir(&other).unwrap();
+    let refs = f.fork().join(".kit/git/m/repo.git/refs");
+    std::fs::remove_dir_all(&refs).unwrap();
+    std::os::unix::fs::symlink(&other, &refs).unwrap();
+    let out = run();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refusing the staging mirror"),
+        "{out:?}"
+    );
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+}
+
+/// An export into a mirror location that is a link creates nothing in the
+/// directory that the link names.
+#[cfg(unix)]
+#[test]
+fn export_creates_nothing_through_a_link_in_place_of_the_mirror() {
+    let f = Fixture::imported();
+    let other = f.root.path().join("other-dir");
+    std::fs::create_dir(&other).unwrap();
+    let state = f.fork().join(".kit/git/m");
+    std::fs::create_dir_all(&state).unwrap();
+    std::os::unix::fs::symlink(&other, state.join("repo.git")).unwrap();
+    let dest = f.root.path().join("mirror");
+    let out = f.kit(
+        &f.fork(),
+        &[
+            "git",
+            "export",
+            dest.to_str().unwrap(),
+            "--remote-name",
+            "m",
+            "--no-attest",
+        ],
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
+}

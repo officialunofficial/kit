@@ -340,7 +340,8 @@ non-normative except for the binding semantics below):
   mirror's own configuration, so every command that runs `git` in it
   first checks that the directory is a plain directory that git itself
   uses as its repository (no `.git` entry, a valid `HEAD`), with no
-  `commondir`, `config.worktree`, `gitdir` or alternates file, and that
+  link or special file anywhere in it and no `commondir`,
+  `config.worktree`, `gitdir` or alternates file, and that
   its config holds each key at most once and only the keys `git clone --bare` and `git init --bare` write
   (`core.*` repository format and sharing keys,
   `receive.denyNonFastForwards`, `extensions.objectformat`,

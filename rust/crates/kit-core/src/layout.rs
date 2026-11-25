@@ -1387,8 +1387,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let tree = tmp.path().join("tree");
         std::fs::create_dir_all(&tree).unwrap();
-        // The state dir and the default commondir are the same directory.
+        // The state dir is its own common dir.
+        std::fs::write(tmp.path().join(COMMONDIR_FILE_NAME), ".\n").unwrap();
         write_pointer_file(&tree, tmp.path()).unwrap();
+        assert!(discover_unverified(&tree).unwrap().is_single());
         assert!(matches!(
             discover(&tree),
             Err(DiscoverError::NotRegistered(..))
@@ -1399,7 +1401,15 @@ mod tests {
     fn discover_refuses_a_relative_backpointer() {
         let tmp = tempfile::tempdir().unwrap();
         let (_main, tree, state) = scaffold_linked(tmp.path());
-        std::fs::write(state.join(BACKPOINTER_FILE_NAME), ".kit\n").unwrap();
+        // A path that resolves from the working directory to the tree's `.kit`.
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count());
+        let relative = format!("{up}{}", tree.join(KIT_DIR).display()).replace("//", "/");
+        assert!(paths_refer_to_same(
+            Path::new(&relative),
+            &tree.join(KIT_DIR)
+        ));
+        std::fs::write(state.join(BACKPOINTER_FILE_NAME), format!("{relative}\n")).unwrap();
         assert!(matches!(
             discover(&tree),
             Err(DiscoverError::BackpointerMismatch(_))
