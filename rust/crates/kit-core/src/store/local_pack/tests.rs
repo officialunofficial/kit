@@ -3905,6 +3905,29 @@ fn a_damaged_pair_fails_only_the_shards_it_can_hold() {
 }
 
 #[test]
+fn a_cut_index_narrows_the_failing_shards_only_while_its_head_is_trusted() {
+    let (_dir, _layout, pairs) = packed_store(&[vec![1, 2, 3]]);
+    let pair = &pairs[0];
+    let full = fs::read(&pair.index).unwrap();
+    let shards_of = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut bytes = full[..full.len() - 32].to_vec();
+        edit(&mut bytes);
+        fs::write(&pair.index, bytes).unwrap();
+        pair.shards()
+    };
+    let held = shards_of(&|_| {}).expect("a cut index with an agreeing head narrows");
+    assert!(held.iter().any(|&shard| shard));
+    assert!(
+        shards_of(&|bytes| bytes[0] ^= 1).is_none(),
+        "a wrong magic leaves the head untrusted"
+    );
+    assert!(
+        shards_of(&|bytes| bytes[8] ^= 1).is_none(),
+        "a count that differs from the pack's leaves the head untrusted"
+    );
+}
+
+#[test]
 fn damage_to_the_pack_is_not_blamed_on_the_index() {
     let (_dir, layout, pairs) = packed_store(&[vec![1, 2, 3]]);
     let mut bytes = fs::read(&pairs[0].pack).unwrap();
