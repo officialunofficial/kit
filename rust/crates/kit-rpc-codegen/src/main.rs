@@ -70,7 +70,15 @@ fn transport(repo: &Path, crate_dir: &Path) -> Result<()> {
     ];
     let out = crate_dir.join("generated/transport");
     clear(&out)?;
+    // The JSON impls are emitted behind kit-rpc's opt-in `json` feature, so a
+    // consumer that does not ask for JSON compiles none of them. The view
+    // types stay on, gated by the feature that already gates this module.
+    let mut buffa = connectrpc_build::CodeGenConfig::default();
+    buffa.generate_json = true;
+    buffa.gate_impls_on_crate_features = true;
+    buffa.feature_gate_names.views = "transport-messages".into();
     connectrpc_build::Config::new()
+        .buffa_config(buffa)
         .files(&files)
         .includes(&[&root])
         .include_file("_connectrpc.rs")
