@@ -539,9 +539,9 @@ impl Group {
     ) -> io::Result<Staged> {
         self.live()?;
         let parent = prepare_parent(dest, parents)?;
+        let device = self.syncer.device_of(parent);
         let mut tmp = temp_file_in(parent)?;
         fill(tmp.as_file_mut())?;
-        let device = self.syncer.device_of(parent);
         let written = self.syncer.writeout(tmp.as_file(), tmp.path());
         self.guard(written)?;
         self.wrote(parent, device);
@@ -561,6 +561,15 @@ impl Group {
     /// A failed writeout poisons the group.
     pub fn note_file(&mut self, path: &Path) -> io::Result<()> {
         self.live()?;
+        // A bare file name lives in the current directory.
+        let dir = match path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => path,
+        };
+        // The device is read before the file is opened, so a directory that
+        // moves later stays recorded and fails the flush.
+        let device = self.syncer.device_of(dir);
         let mut options = fs::OpenOptions::new();
         if cfg!(unix) {
             options.read(true);
@@ -569,13 +578,6 @@ impl Group {
             options.write(true);
         }
         let file = options.open(path)?;
-        // A bare file name lives in the current directory.
-        let dir = match path.parent() {
-            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
-            Some(parent) => parent,
-            None => path,
-        };
-        let device = self.syncer.device_of(dir);
         let written = self.syncer.writeout(&file, path);
         self.guard(written)?;
         self.wrote(dir, device);
@@ -583,7 +585,8 @@ impl Group {
     }
 
     /// Write out the entries of a directory: made by renames, links or
-    /// removals. A missing `dir` counts as written out.
+    /// removals. A missing `dir` counts as written out, so the caller must not
+    /// let another process move the directory it renamed into.
     ///
     /// # Errors
     /// The directory could not be written out, or the group is poisoned. A
