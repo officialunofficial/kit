@@ -638,6 +638,11 @@ impl StagedIndex {
     }
 }
 
+/// An index of `len` bytes is over [`MAX_INDEX_BYTES`].
+fn exceeds_index_limit(len: usize) -> bool {
+    len as u64 > MAX_INDEX_BYTES
+}
+
 /// Stage the write of `idx`, as [`write_index`] makes it but in two steps, so
 /// the bytes of the index share the flush of the objects it names.
 ///
@@ -650,7 +655,7 @@ pub fn stage_index(
     idx: &Index,
 ) -> IndexResult<StagedIndex> {
     let bytes = idx.serialize();
-    if bytes.len() as u64 > MAX_INDEX_BYTES {
+    if exceeds_index_limit(bytes.len()) {
         return Err(IndexError::TooLarge);
     }
     Ok(StagedIndex(group.stage(
@@ -1438,6 +1443,14 @@ mod tests {
         drop(f);
         let err = read_index(&RepoLayout::single(dir.path())).unwrap_err();
         assert!(matches!(err, IndexError::TooLarge));
+    }
+
+    #[test]
+    fn the_index_limit_is_inclusive() {
+        let limit = usize::try_from(MAX_INDEX_BYTES).unwrap();
+        assert!(!exceeds_index_limit(limit));
+        assert!(exceeds_index_limit(limit + 1));
+        assert!(!exceeds_index_limit(0));
     }
 
     #[test]
