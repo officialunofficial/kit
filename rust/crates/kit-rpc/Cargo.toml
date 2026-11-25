@@ -6,7 +6,7 @@ categories = ["encoding", "data-structures"]
 readme = "README.md"
 # Ship the sources only. The tests use goldens and helpers that live outside
 # this package, so they cannot run from a published copy.
-include = ["src/**", "/build.rs", "/generated/**", "/proto/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
+include = ["src/**", "/generated/**", "/proto/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,7 +22,7 @@ authors.workspace = true
 # only.
 [lints.clippy]
 # Drop pedantic + nursery + cargo for this crate. The buffa-generated
-# code (~640 KiB into $OUT_DIR) inherits docstrings from our .proto
+# code (~640 KiB under generated/) inherits docstrings from our .proto
 # files and uses code patterns that pedantic flags hundreds of times.
 # We keep `clippy::all` (the correctness + style baseline) and our
 # own hand-written code in src/ stays under it.
@@ -40,7 +40,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [features]
 # Shared wasm-clean TransportService and health messages and Connect bindings.
-transport = ["transport-messages", "dep:connectrpc", "dep:connectrpc-build"]
+transport = ["transport-messages", "dep:connectrpc"]
 # Canonical messages without Connect runtime bindings (no tokio dependency).
 transport-messages = ["dep:serde", "buffa/json"]
 # Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
@@ -73,19 +73,12 @@ thiserror = "2.0.21"
 # features on, so their builds still get `pack-zstd` via that edge.
 kit-core = { version = "=0.10.0", path = "../kit-core", default-features = false }
 
-[build-dependencies]
-connectrpc-build = { version = "0.9.0", optional = true }
-buffa-build = "0.9.2"
-
 # cargo-machete scans only the Rust sources under src/. It cannot see these
-# dependencies, so it lists them as unused. Each one is used.
-# - serde, connectrpc and arbitrary: the generated modules under generated/
-#   name `::serde`, `::connectrpc` and `::arbitrary::Arbitrary`. build.rs
-#   stages them into OUT_DIR, and src/lib.rs includes them.
-# - buffa-build and connectrpc-build: build.rs calls them when
-#   KIT_RPC_CODEGEN is set.
+# dependencies, so it lists them as unused. Each one is used: the generated
+# modules under generated/ name `::serde`, `::connectrpc` and
+# `::arbitrary::Arbitrary`, and src/lib.rs includes them.
 [package.metadata.cargo-machete]
-ignored = ["arbitrary", "buffa-build", "connectrpc", "connectrpc-build", "serde"]
+ignored = ["arbitrary", "connectrpc", "serde"]
 
 [package.metadata.docs.rs]
 # Build docs with every feature so docs.rs renders the feature-gated API.

@@ -36,8 +36,9 @@ Both protocols use the same length-prefixed framing:
 [u32 LE length][N bytes protobuf-encoded Frame]
 ```
 
-Generated code is vendored (not built fresh from `.proto` on every build);
-regenerate it with `scripts/regen-rpc-proto.sh` after editing a schema.
+Generated code is checked in under `generated/` and compiled as ordinary
+source: kit-rpc has no build script and no build dependencies. Regenerate it
+with `scripts/regen-rpc-proto.sh` after editing a schema.
 
 ## Shared Connect transport bindings
 
@@ -52,5 +53,5 @@ do not enable it. Refresh `generated/transport/` with
 For runtime-independent clients, enable `transport-messages` instead. It
 exposes the same message types at the same paths, without service bindings,
 ConnectRPC or tokio. The `transport` feature includes this feature. Both
-features stage the same generated files; the build script gates only the
-binding includes, including during regeneration. `kit-client` uses this surface.
+features compile the same generated files; the generator gates only the
+binding includes. `kit-client` uses this surface.
