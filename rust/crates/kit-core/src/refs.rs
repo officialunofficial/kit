@@ -3417,3 +3417,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod staged_tests;

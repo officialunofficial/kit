@@ -644,7 +644,11 @@ impl StagedIndex {
 /// # Errors
 /// [`IndexError::TooLarge`], or an I/O error when the temp file cannot be
 /// written or the group is poisoned.
-pub fn stage_index(group: &mut Group, layout: &RepoLayout, idx: &Index) -> IndexResult<StagedIndex> {
+pub fn stage_index(
+    group: &mut Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> IndexResult<StagedIndex> {
     let bytes = idx.serialize();
     if bytes.len() as u64 > MAX_INDEX_BYTES {
         return Err(IndexError::TooLarge);

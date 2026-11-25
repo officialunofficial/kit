@@ -76,7 +76,9 @@ enum Kind {
     /// A build with `history-mmr` writes the branch with its ancestry in one
     /// step, which has its own flushes.
     #[cfg(feature = "history-mmr")]
-    OneShot { new_head: Hash },
+    OneShot {
+        new_head: Hash,
+    },
 }
 
 /// The lock of a moved branch, held until its rename is durable.
@@ -106,12 +108,13 @@ pub fn stage_advance(
         },
         #[cfg(not(feature = "history-mmr"))]
         Head::Branch(branch) => {
-            let staged = refs::stage_ref_update(group, layout, &branch, new_head).map_err(
-                |source| Error::WriteRef {
-                    branch: branch.clone(),
-                    source,
-                },
-            )?;
+            let staged =
+                refs::stage_ref_update(group, layout, &branch, new_head).map_err(|source| {
+                    Error::WriteRef {
+                        branch: branch.clone(),
+                        source,
+                    }
+                })?;
             Kind::Branch { branch, staged }
         }
         Head::Detached(_) => Kind::Detached(
@@ -269,5 +272,101 @@ mod tests {
         advance(&layout, &c1, RefWriteCondition::Any).unwrap();
         assert_eq!(refs::resolve_head(&layout).unwrap(), Some(c1));
         assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(t0));
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use kit_core::refs::RefWriteCondition;
+
+    use super::*;
+
+    fn repo() -> (tempfile::TempDir, RepoLayout) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        refs::init(&layout).unwrap();
+        (dir, layout)
+    }
+
+    fn move_to(
+        layout: &RepoLayout,
+        group: &mut Group,
+        new_head: &Hash,
+        condition: RefWriteCondition,
+    ) -> Result<(), Error> {
+        let staged = stage_advance(layout, group, new_head)?;
+        let token = group.flush().unwrap();
+        let published = publish_advance(layout, group, staged, condition, &token)?;
+        let _named = group.flush().unwrap();
+        drop(published);
+        Ok(())
+    }
+
+    #[cfg(not(feature = "history-mmr"))]
+    #[test]
+    fn a_staged_move_of_the_branch_is_invisible_until_published_and_conditional() {
+        let (_dir, layout) = repo();
+        let mut group = Group::new();
+        let staged = stage_advance(&layout, &mut group, &[1; 32]).unwrap();
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), None);
+        let token = group.flush().unwrap();
+        let published = publish_advance(
+            &layout,
+            &mut group,
+            staged,
+            RefWriteCondition::Missing,
+            &token,
+        )
+        .unwrap();
+        drop(published);
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some([1; 32]));
+
+        // The condition fails when the branch is not where the caller read it.
+        let error = move_to(
+            &layout,
+            &mut group,
+            &[2; 32],
+            RefWriteCondition::Match([9; 32]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, Error::WriteRef { branch, source: RefError::Conflict(_) } if branch == "main"),
+            "{error:?}"
+        );
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some([1; 32]));
+
+        move_to(
+            &layout,
+            &mut group,
+            &[3; 32],
+            RefWriteCondition::Match([1; 32]),
+        )
+        .unwrap();
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some([3; 32]));
+    }
+
+    #[test]
+    fn a_staged_move_of_a_detached_head_ignores_the_condition() {
+        let (_dir, layout) = repo();
+        refs::write_head_detached(&layout, &[1; 32]).unwrap();
+        let mut group = Group::new();
+        move_to(
+            &layout,
+            &mut group,
+            &[2; 32],
+            RefWriteCondition::Match([9; 32]),
+        )
+        .unwrap();
+        assert_eq!(refs::resolve_head(&layout).unwrap(), Some([2; 32]));
+    }
+
+    #[test]
+    fn a_missing_head_stages_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut group = Group::new();
+        let error = stage_advance(&layout, &mut group, &[1; 32]).unwrap_err();
+        assert!(matches!(error, Error::ReadHead(_)), "{error:?}");
+        assert!(!layout.heads_dir().join("main").exists());
     }
 }

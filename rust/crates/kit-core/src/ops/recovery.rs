@@ -587,4 +587,76 @@ mod tests {
         fs::write(md.recovery_log_file(), glued).unwrap();
         assert!(read_all(&md).is_err());
     }
+
+    /// `record_in` appends the line under the lock, writes the file and its
+    /// directory out and leaves the flush to the group.
+    #[test]
+    fn record_in_writes_the_line_out_and_flushes_with_the_group() {
+        use crate::batch::Syncer;
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use crate::durable::Group;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.common_dir()).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        let mut group = Group::with_syncer(Arc::clone(&rec) as Arc<dyn Syncer>);
+        let entry = RecoveryEntry {
+            timestamp: 7,
+            op: "amend".to_owned(),
+            superseded: [9; 32],
+            branch: "main".to_owned(),
+        };
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert_eq!(read_all(&layout).unwrap(), std::slice::from_ref(&entry));
+        assert_eq!(
+            rec.events(),
+            [
+                Ev::Barrier(layout.recovery_log_file()),
+                Ev::DirBarrier(layout.common_dir().to_path_buf()),
+            ],
+            "written out, not flushed"
+        );
+        let _token = group.flush().unwrap();
+        assert_eq!(rec.events().len(), 3);
+        assert!(matches!(rec.events()[2], Ev::Full(_)));
+
+        // A torn tail is cut off before the new line, as `record` does.
+        let log = layout.recovery_log_file();
+        let mut text = fs::read_to_string(&log).unwrap();
+        text.push_str("9\tamend\tabc");
+        fs::write(&log, text).unwrap();
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert_eq!(read_all(&layout).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn record_in_refuses_a_field_with_a_tab_and_ignores_the_zero_hash() {
+        use crate::durable::Group;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut group = Group::new();
+        let mut entry = RecoveryEntry {
+            timestamp: 7,
+            op: "am\tend".to_owned(),
+            superseded: [9; 32],
+            branch: "main".to_owned(),
+        };
+        assert!(matches!(
+            record_in(&layout, &entry, &mut group),
+            Err(RecoveryError::InvalidField("op"))
+        ));
+        entry.op = "amend".to_owned();
+        entry.branch = "ma\nin".to_owned();
+        assert!(matches!(
+            record_in(&layout, &entry, &mut group),
+            Err(RecoveryError::InvalidField("branch"))
+        ));
+        entry.branch = "main".to_owned();
+        entry.superseded = hash::ZERO;
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert!(!layout.recovery_log_file().exists());
+    }
 }

@@ -182,7 +182,47 @@ pub fn flush_file(file: &File, path: &Path) -> io::Result<()> {
     }
     file.sync_all()?;
     #[cfg(feature = "fault-injection")]
-    crate::fault::sync_step(|| crate::fault::SyncStep::Flush(path.to_path_buf()));
+    {
+        snapshot_after_flush();
+        crate::fault::sync_step(|| crate::fault::SyncStep::Flush(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+/// A crash test that runs the binary names a tree in `KIT_FLUSH_SNAPSHOT_SRC`
+/// and a directory in `KIT_FLUSH_SNAPSHOT_DEST`. After each full flush, in
+/// order, the tree is copied to `<dest>/<n>` (n from 1), so the test can look
+/// at the repository as a power loss right after that flush would leave it. A
+/// copy that fails is skipped, since it only serves tests.
+#[cfg(feature = "fault-injection")]
+fn snapshot_after_flush() {
+    static ORDER: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    let (Some(src), Some(dest)) = (
+        std::env::var_os("KIT_FLUSH_SNAPSHOT_SRC"),
+        std::env::var_os("KIT_FLUSH_SNAPSHOT_DEST"),
+    ) else {
+        return;
+    };
+    let mut order = ORDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *order += 1;
+    let _ = copy_tree(Path::new(&src), &Path::new(&dest).join(order.to_string()));
+}
+
+#[cfg(feature = "fault-injection")]
+fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
     Ok(())
 }
 

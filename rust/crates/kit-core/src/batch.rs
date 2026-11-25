@@ -953,13 +953,7 @@ impl<'s> WriteBatch<'s> {
             touched_shards.insert(store.objects_root().to_path_buf());
         }
         if let Some(group) = group {
-            return self.flush_in_group(
-                group,
-                leftover,
-                staged,
-                small_staged,
-                touched_shards,
-            );
+            return self.flush_in_group(group, &leftover, staged, small_staged, touched_shards);
         }
         match self.policy {
             // New loose objects are already durable.
@@ -1019,7 +1013,7 @@ impl<'s> WriteBatch<'s> {
     fn flush_in_group(
         &self,
         group: &mut Group,
-        leftover: Vec<PathBuf>,
+        leftover: &[PathBuf],
         staged: HashMap<Hash, TempPath>,
         small_staged: usize,
         touched: HashSet<PathBuf>,
@@ -3204,3 +3198,6 @@ mod pack_sink_tests;
 
 #[cfg(test)]
 mod small_pack_tests;
+
+#[cfg(test)]
+mod commit_in_tests;

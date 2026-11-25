@@ -450,6 +450,43 @@ impl Created {
     }
 }
 
+/// The parents of the commit. A plain commit builds on `HEAD`. An amend takes
+/// the parents of `HEAD`, so the replaced commit leaves the chain. A merge
+/// takes the base of the merge and the other side, not the live `HEAD`. The
+/// result then matches `merge --continue` after a `reset` moved `HEAD`.
+fn commit_parents(layout: &RepoLayout, pending: &Pending) -> Vec<Hash> {
+    if let Some(prev) = &pending.amend {
+        prev.parents.clone()
+    } else if let Some(state) = &pending.merge {
+        vec![state.orig_head, state.merge_head]
+    } else {
+        match refs::resolve_head(layout) {
+            Ok(Some(h)) => vec![h],
+            _ => vec![],
+        }
+    }
+}
+
+/// The tip that the commit was built on, the condition of the move.
+/// - Amend: the commit that was replaced, which was checked against `HEAD`
+///   already. `first_parent` is one generation further back.
+/// - Merge: `HEAD` as it is now. The parents come from the merge state, not
+///   from `HEAD`, so they would let the move pass after `HEAD` moved.
+/// - Plain: the first parent, which is a fresh read of `HEAD` under the lock.
+fn expected_tip(
+    layout: &RepoLayout,
+    pending: &Pending,
+    first_parent: Option<Hash>,
+) -> Result<Option<Hash>, Error> {
+    if pending.amend.is_some() {
+        Ok(pending.head)
+    } else if pending.merge.is_some() {
+        refs::resolve_head(layout).map_err(Error::ReadHead)
+    } else {
+        Ok(first_parent)
+    }
+}
+
 /// Make the commit.
 ///
 /// `gate` checks the conflicts of a merge that the commit concludes. It
@@ -524,20 +561,7 @@ pub fn create(
         .map_err(Error::BuildTree)?;
     refuse_discarded_merge(layout, store, pending, tree)?;
 
-    // A plain commit builds on `HEAD`. An amend takes the parents of `HEAD`,
-    // so the replaced commit leaves the chain. A merge takes the base of the
-    // merge and the other side, not the live `HEAD`. The result then matches
-    // `merge --continue` after a `reset` moved `HEAD`.
-    let parents = if let Some(prev) = &pending.amend {
-        prev.parents.clone()
-    } else if let Some(state) = &pending.merge {
-        vec![state.orig_head, state.merge_head]
-    } else {
-        match refs::resolve_head(layout) {
-            Ok(Some(h)) => vec![h],
-            _ => vec![],
-        }
-    };
+    let parents = commit_parents(layout, pending);
     let first_parent = parents.first().copied();
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -580,7 +604,9 @@ pub fn create(
     // it rebuilds the index. So does a merge or an amend, which keep their
     // own rebuild. The new trees are visible now, so the rebuild reads them,
     // and its bytes ride the next flush.
-    let staged_index = if pending.merge.is_some() || pending.amend.is_some() || !index_is_the_tree(&idx)
+    let staged_index = if pending.merge.is_some()
+        || pending.amend.is_some()
+        || !index_is_the_tree(&idx)
     {
         Some(sync_index_to_tree_staged(&mut group, layout, store, tree).map_err(Error::SyncIndex)?)
     } else {
@@ -590,20 +616,7 @@ pub fn create(
     // the index are durable before a ref or the index names them.
     let durable = group.flush().map_err(store_io)?;
 
-    // The tip that the commit was built on is the condition of the move.
-    // - Amend: the commit that was replaced, which was checked against `HEAD`
-    //   above. `parents` is one generation further back.
-    // - Merge: `HEAD` as it is now. The parents come from the merge state, not
-    //   from `HEAD`, so they would let the move pass after `HEAD` moved.
-    // - Plain: the first parent, which is a fresh read of `HEAD` under this
-    //   lock.
-    let expected_tip = if pending.amend.is_some() {
-        pending.head
-    } else if pending.merge.is_some() {
-        refs::resolve_head(layout).map_err(Error::ReadHead)?
-    } else {
-        first_parent
-    };
+    let expected_tip = expected_tip(layout, pending, first_parent)?;
     let condition = match expected_tip {
         Some(h) => RefWriteCondition::Match(h),
         None => RefWriteCondition::Missing,
@@ -611,9 +624,8 @@ pub fn create(
     let ref_lock = head::publish_advance(layout, &mut group, staged_head, condition, &durable)
         .map_err(|e| branch_moved(e, &commit))?;
     if let Some(staged_index) = staged_index {
-        index::publish_staged_index(&mut group, staged_index, &durable).map_err(|e| {
-            Error::SyncIndex(format!("write index: {e}"))
-        })?;
+        index::publish_staged_index(&mut group, staged_index, &durable)
+            .map_err(|e| Error::SyncIndex(format!("write index: {e}")))?;
     }
     // Flush 3: the ref and the index names. The ref lock is held until then.
     let _named = group.flush().map_err(store_io)?;
@@ -888,5 +900,170 @@ mod tests {
         let error = advance_head(&layout, &c1, None).unwrap_err();
         assert!(matches!(error, Error::BranchMoved { .. }), "{error:?}");
         assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(raced_in));
+    }
+
+    use kit_core::index::IndexEntry;
+    use kit_core::object::Blob;
+    use kit_core::sign::KeyPair;
+
+    /// A repository with one commit of `a.txt`, `HEAD` on `main`, and the file
+    /// staged again with new bytes.
+    fn repo_with_staged_edit() -> (tempfile::TempDir, RepoLayout, ObjectStore, Hash) {
+        let (dir, layout) = fresh_repo();
+        let store = ObjectStore::open(&layout).unwrap();
+        stage(&layout, &store, "a.txt", b"one\n");
+        let first = create_commit(&layout, &store, "first", None);
+        stage(&layout, &store, "a.txt", b"two\n");
+        (dir, layout, store, first)
+    }
+
+    fn stage(layout: &RepoLayout, store: &ObjectStore, path: &str, bytes: &[u8]) {
+        let blob = Object::Blob(Blob {
+            data: bytes.to_vec(),
+        });
+        let hash = store.write(&serialize::serialize(&blob).unwrap()).unwrap();
+        let mut idx = index::read_index(layout).unwrap();
+        idx.entries.retain(|entry| entry.path != path);
+        idx.entries.push(IndexEntry {
+            path: path.to_owned(),
+            status: index::EntryStatus::Blob,
+            object_hash: hash,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+        index::write_index(layout, &idx).unwrap();
+    }
+
+    fn create_commit(
+        layout: &RepoLayout,
+        store: &ObjectStore,
+        message: &str,
+        amend: Option<bool>,
+    ) -> Hash {
+        let pending = begin(layout, store, amend.is_some()).unwrap();
+        let mut signer = Signer::File(KeyPair::from_seed([1; 32]));
+        let public = signer.public_key().unwrap();
+        let created = create(
+            layout,
+            store,
+            &pending,
+            &Request {
+                message,
+                author: Identity::ed25519(public),
+                signer_public: public,
+                all: false,
+                allow_empty: false,
+            },
+            &mut signer,
+            &|_| Ok(()),
+            &kit_core::observer::NoopObserver,
+        )
+        .unwrap();
+        created.commit
+    }
+
+    #[test]
+    fn a_plain_commit_moves_the_ref_and_leaves_the_index_and_no_temp_file() {
+        let (_dir, layout, store, first) = repo_with_staged_edit();
+        let index_before = std::fs::read(layout.index_file()).unwrap();
+        let second = create_commit(&layout, &store, "second", None);
+        assert_ne!(first, second);
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(second));
+        assert_eq!(std::fs::read(layout.index_file()).unwrap(), index_before);
+        let Object::Commit(commit) = store.read_object(&second).unwrap() else {
+            panic!("a commit");
+        };
+        assert_eq!(commit.parents, [first]);
+        for dir in [layout.heads_dir(), layout.common_dir().to_path_buf()] {
+            let temps = std::fs::read_dir(dir)
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".kit.tmp.")
+                })
+                .count();
+            assert_eq!(temps, 0, "no temp file is left behind");
+        }
+    }
+
+    /// The count the full flushes of a commit are pinned to on Apple file
+    /// systems: the bytes, the names, then the names of the ref and the index.
+    /// A build with `history-mmr` writes the ref with its ancestry in one step
+    /// of its own.
+    #[cfg(all(target_os = "macos", not(feature = "history-mmr")))]
+    #[test]
+    fn a_plain_commit_and_an_amend_make_three_full_flushes_each() {
+        let (_dir, layout, store, _first) = repo_with_staged_edit();
+        let before = kit_core::fault::flushes();
+        create_commit(&layout, &store, "second", None);
+        assert_eq!(kit_core::fault::flushes() - before, 3, "a commit");
+        stage(&layout, &store, "a.txt", b"three\n");
+        let before = kit_core::fault::flushes();
+        create_commit(&layout, &store, "amended", Some(true));
+        assert_eq!(kit_core::fault::flushes() - before, 3, "an amend");
+    }
+
+    #[test]
+    fn an_amend_records_the_replaced_tip_before_it_moves_the_ref() {
+        let (_dir, layout, store, first) = repo_with_staged_edit();
+        let second = create_commit(&layout, &store, "second", None);
+        stage(&layout, &store, "a.txt", b"three\n");
+        let amended = create_commit(&layout, &store, "amended", Some(true));
+        assert_ne!(amended, second);
+        assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(amended));
+        let log = recovery::read_all(&layout).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].superseded, second);
+        assert_eq!(log[0].op, "amend");
+        assert_eq!(log[0].branch, "main");
+        let Object::Commit(commit) = store.read_object(&amended).unwrap() else {
+            panic!("a commit");
+        };
+        assert_eq!(commit.parents, [first], "the amend replaced the tip");
+        // The rebuilt index holds the tree of the amended commit.
+        let idx = index::read_index(&layout).unwrap();
+        assert_eq!(idx.entries.len(), 1);
+        assert_eq!(
+            idx.entries[0].object_hash,
+            index::from_tree(&store, commit.tree_hash).unwrap().entries[0].object_hash
+        );
+    }
+
+    #[test]
+    fn a_lost_race_is_a_branch_that_moved_and_other_failures_are_not() {
+        let commit = [3; 32];
+        let moved = branch_moved(
+            head::Error::WriteRef {
+                branch: "main".to_owned(),
+                source: RefError::Conflict("main".to_owned()),
+            },
+            &commit,
+        );
+        assert!(
+            matches!(moved, Error::BranchMoved { ref branch, commit: c } if branch == "main" && c == commit),
+            "{moved:?}"
+        );
+        let other = branch_moved(
+            head::Error::WriteRef {
+                branch: "main".to_owned(),
+                source: RefError::NoHead,
+            },
+            &commit,
+        );
+        assert!(matches!(other, Error::Head(_)), "{other:?}");
+    }
+
+    #[test]
+    fn a_failed_flush_is_a_store_error() {
+        let error = store_io(std::io::Error::other("flush failed"));
+        assert!(
+            matches!(&error, Error::Store(kit_core::store::StoreError::Io(e)) if e.to_string() == "flush failed"),
+            "{error:?}"
+        );
     }
 }
