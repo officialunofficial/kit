@@ -230,7 +230,7 @@ proptest = "1.12.0"
 # `kit-transport-connect`'s own `client`/`client-tls` feature set (Cargo
 # unions dependency features across dependency kinds).
 # The `zstd` feature stays off: it pulls zstd 0.13, which has open advisories.
-connectrpc = { version = "0.9.1", default-features = false, features = ["server", "gzip", "json"] }
+connectrpc = { version = "0.9.1", default-features = false, features = ["server", "gzip"] }
 http = "1.5.0"
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
 # Real TLS proxy for the Connect CLI regression matrix.

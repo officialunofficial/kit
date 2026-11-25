@@ -55,3 +55,9 @@ exposes the same message types at the same paths, without service bindings,
 ConnectRPC or tokio. The `transport` feature includes this feature. Both
 features compile the same generated files; the generator gates only the
 binding includes. `kit-client` uses this surface.
+
+Proto3 JSON is opt-in. The `json` feature adds the serde impls on the transport
+messages and turns on the ConnectRPC JSON codec. Neither `transport` nor
+`transport-messages` enables it, and kit's own client and server speak binary
+protobuf, so a consumer that never asks for JSON compiles none of it. A crate
+that enables `connectrpc/json` on its own must also enable `kit-rpc/json`.

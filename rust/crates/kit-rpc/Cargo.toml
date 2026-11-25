@@ -42,7 +42,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 # Shared wasm-clean TransportService and health messages and Connect bindings.
 transport = ["transport-messages", "dep:connectrpc"]
 # Canonical messages without Connect runtime bindings (no tokio dependency).
-transport-messages = ["dep:serde", "buffa/json"]
+transport-messages = []
+# Opt-in proto3 JSON: serde impls on the transport messages and the Connect
+# JSON codec. Off by default, and neither `transport` nor `transport-messages`
+# turns it on, so a consumer that never speaks JSON compiles none of it. Kit's
+# own client and server speak binary protobuf.
+json = ["transport-messages", "dep:serde", "buffa/json", "connectrpc?/json"]
 # Opt-in `arbitrary::Arbitrary` derives on all generated wire types,
 # for fuzzing / property tests (used by the rust/fuzz harness). Off by
 # default so downstream consumers don't pull in `arbitrary`.
@@ -50,7 +55,7 @@ arbitrary = ["dep:arbitrary", "buffa/arbitrary"]
 
 [dependencies]
 # The `zstd` feature stays off: it pulls zstd 0.13, which has open advisories.
-connectrpc = { version = "0.9.1", default-features = false, features = ["gzip", "json"], optional = true }
+connectrpc = { version = "0.9.1", default-features = false, features = ["gzip"], optional = true }
 serde = { version = "1.0.229", features = ["derive"], optional = true }
 arbitrary = { version = "1.5.0", optional = true }
 buffa = "0.9.2"

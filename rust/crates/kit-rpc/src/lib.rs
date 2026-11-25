@@ -98,6 +98,20 @@ mod tests {
         assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
     }
 
+    #[cfg(all(feature = "json", feature = "transport"))]
+    #[test]
+    fn json_feature_gives_transport_messages_a_json_codec() {
+        use crate::transport::grpc::health::v1::HealthCheckRequest;
+        let request = HealthCheckRequest {
+            service: "kit".into(),
+            ..Default::default()
+        };
+        let json = connectrpc::codec::encode_json(&request).expect("encode json");
+        assert_eq!(&json[..], br#"{"service":"kit"}"#);
+        let back: HealthCheckRequest = connectrpc::codec::decode_json(&json).expect("decode json");
+        assert_eq!(back.service, "kit");
+    }
+
     #[cfg(feature = "transport-messages")]
     #[test]
     fn transport_credentials_debug_redact_values() {
