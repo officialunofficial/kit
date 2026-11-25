@@ -905,7 +905,15 @@ fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap()
     };
     let with = |remaining: u64| {
         let mut fetch = FetchDecodeBudget { remaining };
-        decode_file(&file, &store, one_delta_a_window, None, None, Some(&mut fetch), None)
+        decode_file(
+            &file,
+            &store,
+            one_delta_a_window,
+            None,
+            None,
+            Some(&mut fetch),
+            None,
+        )
     };
     // The grant for the pack's wire bytes is the whole cap here.
     assert!(matches!(with(0), Err(PackError::PackfileTooLarge)));
@@ -978,7 +986,9 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
     writer.push_raw(base, &base_bytes).unwrap();
     let first = verified(&writer.finish().unwrap(), dir.path());
     let pending = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&first, &store, &[], &pending, &mut FetchDecodeBudget::new()).unwrap();
+    let report =
+        PackReader::stage_verified(&first, &store, &[], &pending, &mut FetchDecodeBudget::new())
+            .unwrap();
     assert_eq!(report.raw_count, 1);
     assert!(!store.contains(&base));
 
@@ -996,7 +1006,14 @@ fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
         Err(PackError::DeltaBaseMissing(_)),
     ));
     let staged = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&second, &store, &[&pending], &staged, &mut FetchDecodeBudget::new()).unwrap();
+    let report = PackReader::stage_verified(
+        &second,
+        &store,
+        &[&pending],
+        &staged,
+        &mut FetchDecodeBudget::new(),
+    )
+    .unwrap();
     assert_eq!((report.raw_count, report.delta_count), (1, 1));
     assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
     assert!(!store.contains(&base));
@@ -1012,7 +1029,8 @@ fn a_delta_base_may_be_in_any_of_the_pending_windows() {
     writer.push_raw(base, &base_bytes).unwrap();
     let first = verified(&writer.finish().unwrap(), dir.path());
     let sealing = ObjectSpool::new(dir.path()).unwrap();
-    PackReader::stage_verified(&first, &store, &[], &sealing, &mut FetchDecodeBudget::new()).unwrap();
+    PackReader::stage_verified(&first, &store, &[], &sealing, &mut FetchDecodeBudget::new())
+        .unwrap();
     // The open window holds something else.
     let open = ObjectSpool::new(dir.path()).unwrap();
 
@@ -1022,7 +1040,14 @@ fn a_delta_base_may_be_in_any_of_the_pending_windows() {
         .unwrap();
     let second = verified(&writer.finish().unwrap(), dir.path());
     let staged = ObjectSpool::new(dir.path()).unwrap();
-    let report = PackReader::stage_verified(&second, &store, &[&open, &sealing], &staged, &mut FetchDecodeBudget::new()).unwrap();
+    let report = PackReader::stage_verified(
+        &second,
+        &store,
+        &[&open, &sealing],
+        &staged,
+        &mut FetchDecodeBudget::new(),
+    )
+    .unwrap();
     assert_eq!(report.delta_count, 1);
     assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
 }

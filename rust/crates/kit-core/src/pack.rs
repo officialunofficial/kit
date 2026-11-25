@@ -181,8 +181,9 @@ impl FetchDecodeBudget {
         self.remaining = self
             .remaining
             .saturating_add(pack_len.saturating_mul(DECODED_PER_WIRE_BYTE));
-        self.remaining
-            .min(decoded_bytes_cap(usize::try_from(pack_len).unwrap_or(usize::MAX)))
+        self.remaining.min(decoded_bytes_cap(
+            usize::try_from(pack_len).unwrap_or(usize::MAX),
+        ))
     }
 
     /// Take what a pack decoded off what is left.
@@ -3842,7 +3843,10 @@ mod tests {
         let mut fetch = FetchDecodeBudget::new();
         fetch.admit(100);
         fetch.settle(1 << 30);
-        assert_eq!(fetch.admit(100), (MIN_TOTAL_DECODED - (1 << 30)) + share(200));
+        assert_eq!(
+            fetch.admit(100),
+            (MIN_TOTAL_DECODED - (1 << 30)) + share(200)
+        );
         // A pack never gets more than its own cap, whatever is left.
         let mut fetch = FetchDecodeBudget::new();
         fetch.remaining = u64::MAX / 2;

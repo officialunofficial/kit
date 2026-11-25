@@ -199,7 +199,11 @@ fn charge_run(
         return Ok(());
     }
     let prefix = if kind == 4 { 32 } else { 0 };
-    let (claim, _) = zstd_claim(payload.get(prefix..).ok_or(PackError::DeltaEntryTruncated)?)?;
+    let (claim, _) = zstd_claim(
+        payload
+            .get(prefix..)
+            .ok_or(PackError::DeltaEntryTruncated)?,
+    )?;
     *decoded = u64::try_from(claim)
         .ok()
         .and_then(|claim| decoded.checked_add(claim))
