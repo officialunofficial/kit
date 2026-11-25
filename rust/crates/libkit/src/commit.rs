@@ -489,7 +489,8 @@ fn expected_tip(
 
 /// Flush 3: the ref and the index names, published on the token of flush 2.
 /// The ref lock is held until the flush that covers the rename returns, also
-/// when the index cannot be published: the ref is then renamed already, so
+/// when the index cannot be published (a ref publish that poisons the group
+/// itself returns before any flush can run): the ref is then renamed already, so
 /// the flush is tried once before the error returns. A poisoned group refuses
 /// it without a device call.
 fn publish_pointers(
