@@ -289,7 +289,8 @@ mod tests {
         // Two files under a 100 byte directory: 2 * (67 + 1) for the entries
         // as named in the tree, and 101 more bytes of prefix and `/` each.
         let exact = 2 * (67 + 1) + 2 * 101;
-        let take = |byte_limit| WalkBudget::with_byte_limit(byte_limit).take_subtree(&store, tree, 100);
+        let take =
+            |byte_limit| WalkBudget::with_byte_limit(byte_limit).take_subtree(&store, tree, 100);
         take(exact).unwrap();
         assert!(matches!(take(exact - 1), Err(StoreError::TreeTooLarge)));
     }
