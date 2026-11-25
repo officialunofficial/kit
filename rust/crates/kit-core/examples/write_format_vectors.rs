@@ -64,7 +64,7 @@ fn type_name(object: &Object) -> &'static str {
         Object::Remix(_) => "remix",
         Object::ChunkedBlob(_) => "chunked",
         Object::Tag(_) => "tag",
-        other => panic!("no name for {other:?}"),
+        Object::Delta(_) => panic!("a delta is never stored"),
     }
 }
 
