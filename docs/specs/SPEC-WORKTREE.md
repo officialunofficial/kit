@@ -333,8 +333,10 @@ The local stash index wrapper carries blobs `i` (serialized index) and `p`
 (scope), plus tree `t` (staged content). The scope blob is exactly one byte:
 `0` for a full stash and `1` for selected paths. Other values or a missing
 marker refuse apply and pop. Full stashes retain the whole-worktree restore
-guard; selected stashes guard only their saved paths. No earlier wrapper
-shape is read as a compatibility case.
+guard; selected stashes guard only their saved paths. The wrapper that kit
+0.8 wrote has only `i` and `t`, with no scope blob. A reader MUST read that
+exact shape as a full stash, since 0.8 had no selected stashes. A wrapper of
+any other shape is refused.
 
 Reference implementation: `kit-core/src/ops/stash.rs`
 (`serialize_list`, `deserialize_list`). The uniqueness test in

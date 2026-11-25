@@ -703,6 +703,19 @@ fn entry_is_scoped(store: &ObjectStore, entry: &StashEntry) -> StashResult<bool>
     let Object::Tree(wrapper) = store.read_object(&index.tree_hash)? else {
         return Err(StashError::InvalidFormat);
     };
+    // Kit 0.8 wrote `{ i, t }` with no scope marker: every such entry saved the
+    // whole worktree, so it reads as unscoped.
+    if let [i, t] = wrapper.entries.as_slice() {
+        return if i.name == b"i"
+            && i.mode == EntryMode::Blob
+            && t.name == b"t"
+            && t.mode == EntryMode::Tree
+        {
+            Ok(false)
+        } else {
+            Err(StashError::InvalidFormat)
+        };
+    }
     let [i, p, t] = wrapper.entries.as_slice() else {
         return Err(StashError::InvalidFormat);
     };
@@ -1402,6 +1415,103 @@ mod tests {
             entry_is_scoped(&store, &entry),
             Err(StashError::InvalidFormat)
         ));
+    }
+
+    /// A stash entry whose index wrapper holds exactly `wrapper`.
+    fn entry_with_wrapper(
+        store: &ObjectStore,
+        wrapper: impl FnOnce(Hash, Hash, Hash) -> Vec<TreeEntry>,
+    ) -> StashEntry {
+        let index_blob = put_blob_data(store, b"index");
+        let scope_blob = put_blob_data(store, &[1]);
+        let staged = put_tree_entries(store, vec![]);
+        let wrapper = put_tree_entries(store, wrapper(index_blob, scope_blob, staged));
+        let index_commit = put_commit_obj(store, wrapper, vec![], 1);
+        let stash_commit = put_commit_obj(store, staged, vec![index_commit], 2);
+        StashEntry {
+            commit_hash: stash_commit,
+            parent_hash: ZERO,
+            timestamp: 2,
+            message: String::new(),
+        }
+    }
+
+    fn named(name: &[u8], mode: EntryMode, object_hash: Hash) -> TreeEntry {
+        TreeEntry {
+            name: name.to_vec(),
+            mode,
+            object_hash,
+        }
+    }
+
+    #[test]
+    fn a_wrapper_without_a_scope_marker_is_the_unscoped_0_8_form() {
+        let (_tmp, store) = fresh_store();
+        let entry = entry_with_wrapper(&store, |i, _, t| {
+            vec![
+                named(b"i", EntryMode::Blob, i),
+                named(b"t", EntryMode::Tree, t),
+            ]
+        });
+        assert!(!entry_is_scoped(&store, &entry).unwrap());
+    }
+
+    #[test]
+    fn only_the_exact_0_8_and_current_wrapper_shapes_are_read() {
+        let (_tmp, store) = fresh_store();
+        let shapes: [fn(Hash, Hash, Hash) -> Vec<TreeEntry>; 5] = [
+            // 0.8 names with a wrong mode
+            |i, _, t| {
+                vec![
+                    named(b"i", EntryMode::Tree, i),
+                    named(b"t", EntryMode::Tree, t),
+                ]
+            },
+            // a pair that is not `i`, `t`
+            |i, p, _| {
+                vec![
+                    named(b"i", EntryMode::Blob, i),
+                    named(b"p", EntryMode::Blob, p),
+                ]
+            },
+            // the current names with a missing scope entry replaced
+            |i, p, t| {
+                vec![
+                    named(b"i", EntryMode::Blob, i),
+                    named(b"p", EntryMode::Tree, p),
+                    named(b"t", EntryMode::Tree, t),
+                ]
+            },
+            // one entry
+            |i, _, _| vec![named(b"i", EntryMode::Blob, i)],
+            // an extra entry
+            |i, p, t| {
+                vec![
+                    named(b"i", EntryMode::Blob, i),
+                    named(b"p", EntryMode::Blob, p),
+                    named(b"t", EntryMode::Tree, t),
+                    named(b"x", EntryMode::Blob, p),
+                ]
+            },
+        ];
+        for (n, shape) in shapes.into_iter().enumerate() {
+            let entry = entry_with_wrapper(&store, shape);
+            assert!(
+                matches!(
+                    entry_is_scoped(&store, &entry),
+                    Err(StashError::InvalidFormat)
+                ),
+                "shape {n} must be refused"
+            );
+        }
+        let entry = entry_with_wrapper(&store, |i, p, t| {
+            vec![
+                named(b"i", EntryMode::Blob, i),
+                named(b"p", EntryMode::Blob, p),
+                named(b"t", EntryMode::Tree, t),
+            ]
+        });
+        assert!(entry_is_scoped(&store, &entry).unwrap());
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! | Staging index `KIDX` version 3, ref wire form, symbolic HEAD | `refs-index/` | here, `refs_integration.rs` |
 //! | Pack list `KPKL` version 1 | `formats/packlist-*.bin` | here |
 //! | Sparse wire `KSP1` and cache `KSPC` version 2 | `sparse/response_v2.bin`, `formats/sparse-cache.bin` | here (feature `sparse-checkout`) |
-//! | Stash manifest `KSTS` | `formats/stash-list.bin` | here |
+//! | Stash manifest `KSTS`, and a 0.8 stash entry with no scope blob | `formats/stash-list.bin`, `formats/stash-08-*` | here |
 //! | Disclosure bundle `KDPB` version 3, span `KDSP` version 2, closure manifest `KCLM` version 1 | `disclosure/`, `http-objects/`, `closure/` | `golden_disclosure.rs`, `golden_http_objects.rs`, `golden_closure.rs` |
 //! | Chunk offsets, `FastCDC` profiles 1 and 2 | `fastcdc/` | `golden_pack.rs`, `golden_chunk_offsets.rs` |
 //! | Delta stream version 1 | `pack-v2/`, inline pins | `golden_pack.rs` |
@@ -471,6 +471,72 @@ fn stash_manifest_vector_keeps_reading() {
             },
         ]
     );
+}
+
+/// A stash that kit 0.8.1 saved with `kit stash push -m wip`: a staged change
+/// to `a.txt`, an unstaged change to `b.txt`, and no `p` scope blob in the
+/// index wrapper, which 0.9 added. The manifest and the 13 loose objects of
+/// that repository are committed as `formats/stash-08-*`. Nothing in them
+/// was written by this checkout.
+#[test]
+fn stash_entry_of_0_8_keeps_applying() {
+    let manifest = format_vector(
+        "stash-08-list.bin",
+        "93cf8f1d8f028b34df0a785cc4dc1f6821fad3cf3a9ab50d1331023f2efd11df",
+    );
+    let list = stash::deserialize_list(&manifest).unwrap();
+    let head = hash::from_hex("7e50456cdc0cc3505d3f2e0d2565b68cbcd154fbdd88bfd936a0531e1d168ec0")
+        .unwrap();
+    let saved = hash::from_hex("530c4cb8538320d5f693fad8334250ea08a3989070a58f134187a801a7496c39")
+        .unwrap();
+    assert_eq!(list.entries.len(), 1);
+    assert_eq!(list.entries[0].commit_hash, saved);
+    assert_eq!(list.entries[0].parent_hash, head);
+    assert_eq!(list.entries[0].message, "On main: wip");
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    fs::create_dir_all(layout.objects_dir()).unwrap();
+    fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+    fs::write(layout.stash_file(), &manifest).unwrap();
+    let mut objects = 0;
+    for file in fs::read_dir(golden("formats")).unwrap() {
+        let name = file.unwrap().file_name().into_string().unwrap();
+        let Some(id) = name
+            .strip_prefix("stash-08-")
+            .and_then(|n| n.strip_suffix(".bin"))
+            .filter(|n| n.len() == 64)
+        else {
+            continue;
+        };
+        let loose = layout.objects_dir().join(&id[..2]);
+        fs::create_dir_all(&loose).unwrap();
+        fs::write(loose.join(&id[2..]), read(&format!("formats/{name}"))).unwrap();
+        objects += 1;
+    }
+    assert_eq!(objects, 13);
+    let store = ObjectStore::open(&layout).unwrap();
+
+    // The index wrapper has `i` and `t` only: kit 0.8 had no selected stashes,
+    // so the entry reads as a full stash.
+    assert_eq!(
+        stash::entry_restore_options(&store, &layout, 0)
+            .unwrap()
+            .sparse_patterns,
+        None
+    );
+    let staged = stash::entry_index(&store, &layout, 0).unwrap();
+    assert_eq!(staged.entries.len(), 1);
+    assert_eq!(staged.entries[0].path, "a.txt");
+
+    // The worktree as the stash left it: `HEAD`'s files.
+    fs::write(dir.path().join("a.txt"), b"one\n").unwrap();
+    fs::write(dir.path().join("b.txt"), b"keep\n").unwrap();
+    stash::apply(&store, &layout, 0).unwrap();
+    assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
+    assert_eq!(fs::read(dir.path().join("b.txt")).unwrap(), b"changed\n");
+    stash::pop(&store, &layout, 0).unwrap();
+    assert!(stash::list(&layout).unwrap().entries.is_empty());
 }
 
 #[cfg(feature = "sparse-checkout")]
