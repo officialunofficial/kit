@@ -623,6 +623,55 @@ conforming schedule. Batched mode's directory flushes carry the dirent
 ordering on metadata-journaling filesystems in ordered-data mode.
 Deployments on filesystems without that property SHOULD use per-object mode.
 
+**Shared flush points.** A command MAY write out its objects, its pack
+members, its pointer temp files (a ref, the index, `HEAD`) and its directory
+entries, and make them durable with one device flush for each ordering point
+and device, if every MUST above holds at each rename. An ordering point is a
+place where one set of writes MUST be durable before the next set becomes
+visible. A writer that touched a loose shard, or reused a pack, also writes
+out `objects/` before it names such objects, so that a shard or `pack/` that
+another process made and has not flushed is covered. A command that reports
+success has made every rename durable. The pointers `commit` and `add` write
+follow this schedule:
+
+| Step | Writes | Durable before |
+|---|---|---|
+| 1 | The bytes of the new objects and of the ref temp file | The objects are renamed |
+| 2 | The object names, the recovery-log line of an amend, the bytes of the new index, when the command changes it | Any ref or index rename |
+| 3 | The ref name and the index name, under the ref's lock | The command reports success |
+| 4 | The removal of the merge state of a commit that concludes a merge, a cherry-pick or a revert | The command reports success |
+
+Steps 1 to 3 are one flush each (`add` and `commit` make three at most), and
+step 4 is a fourth when it applies. A ref write holds its lock from its read of the
+current value until the flush of step 3 returns (SPEC-REFS §5.1.1). On Apple
+file systems a *writeout* is `fsync(2)` and a *flush* is
+`fcntl(F_FULLFSYNC)` on a directory of the device; a flush makes every earlier
+writeout on that device durable. On Linux and Windows every writeout is
+already durable and a flush makes no call, so the device operations are those
+of per-pointer writes. A failed writeout or flush ends the command: the
+writer MUST NOT retry it, since a retried `fsync` can report success for pages
+the kernel has already dropped.
+
+Crash table for a plain `commit` (a crash is a power loss after the step):
+
+| Crash after | Ref | Objects | Outcome |
+|---|---|---|---|
+| before step 1 | old | temp files only | Old state. gc removes the temp files. |
+| step 1, before step 2 | old | some renamed, bytes intact | Unreferenced objects. gc collects them. |
+| step 2, before step 3 | old or new | all durable | Either state is consistent. |
+| step 3 | new | all durable | Committed. |
+
+An amend follows the same table. A recovery-log line that is durable while the
+ref is old is harmless: it names a commit that is still live. Between step 2
+and step 3 the ref and the index of a commit that changes the index are two renames
+that survive a crash separately, so the ref may be new while the index is old
+or the reverse; each is the old or the new value, never another. A commit that
+concludes a merge, a cherry-pick or a revert clears its state after step 3, so a
+crash between the two leaves the merge state over the new commit, and never a
+merge commit that lost its second parent. That leftover state is the existing
+stale merge state: a later `--abort` of that operation moves the branch back over the
+new commit and writes no recovery entry.
+
 For each local pair, the publisher MUST enforce this order. Hold the
 shared `format` guard or its exclusive lock from staging through the
 final directory flush. This prevents the orphan sweep from removing

@@ -58,6 +58,8 @@ zeroize = "1.9.2"
 libc = "0.2.191"
 
 [dev-dependencies]
+# Counts the full flushes of a commit and an add.
+kit-core = { path = "../kit-core", features = ["fault-injection"] }
 tempfile = "3.27.0"
 # Builds pools of a chosen size for the tests of the chunk fan-out.
 rayon = "1.12.0"

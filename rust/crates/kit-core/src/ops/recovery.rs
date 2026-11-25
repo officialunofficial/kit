@@ -128,6 +128,43 @@ impl Default for RetentionPolicy {
 /// [`RecoveryError::InvalidField`] if `op`/`branch` contain a tab or
 /// newline; [`RecoveryError::Io`] on filesystem failure.
 pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
+    append(layout, entry, |file, path| {
+        // fsync the data, then the directory entry (cheap — records happen
+        // only on history rewrites, and durability is the whole point).
+        crate::durable::flush_file(file, path)?;
+        crate::durable::flush_dir(layout.common_dir())?;
+        Ok(())
+    })
+}
+
+/// [`record`] on the flushes of `group`: the appended line and the directory
+/// are written out, and the caller's next `group.flush()` makes them durable.
+/// The caller publishes the ref rewrite that the entry protects only with a
+/// token from a flush that came after this call (SPEC-GC, "Recovery log"). The
+/// lock and the cut of a torn tail are those of [`record`]; the lock is
+/// released before the flush, which is safe because the line is whole.
+///
+/// # Errors
+/// As [`record`], or the group is poisoned.
+pub fn record_in(
+    layout: &RepoLayout,
+    entry: &RecoveryEntry,
+    group: &mut crate::durable::Group,
+) -> Result<()> {
+    append(layout, entry, |_, path| {
+        group.note_file(path)?;
+        group.note_dir(layout.common_dir())?;
+        Ok(())
+    })
+}
+
+/// Append `entry` under the log lock, cutting a torn tail first, and hand the
+/// file to `make_durable` while the lock is held.
+fn append(
+    layout: &RepoLayout,
+    entry: &RecoveryEntry,
+    make_durable: impl FnOnce(&File, &std::path::Path) -> io::Result<()>,
+) -> Result<()> {
     if entry.op.contains(['\t', '\n']) {
         return Err(RecoveryError::InvalidField("op"));
     }
@@ -155,10 +192,7 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
         .open(&path)?;
     cut_unterminated_tail(&mut f)?;
     f.write_all(line.as_bytes())?;
-    // fsync the data, then the directory entry (cheap — records happen
-    // only on history rewrites, and durability is the whole point).
-    crate::durable::flush_file(&f, &path)?;
-    crate::durable::flush_dir(layout.common_dir())?;
+    make_durable(&f, &path)?;
     Ok(())
 }
 
@@ -552,5 +586,77 @@ mod tests {
         let glued = format!("100\tamend\t{a}\tmain200\tamend\t{b}\tmain\n");
         fs::write(md.recovery_log_file(), glued).unwrap();
         assert!(read_all(&md).is_err());
+    }
+
+    /// `record_in` appends the line under the lock, writes the file and its
+    /// directory out and leaves the flush to the group.
+    #[test]
+    fn record_in_writes_the_line_out_and_flushes_with_the_group() {
+        use crate::batch::Syncer;
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use crate::durable::Group;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.common_dir()).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        let mut group = Group::with_syncer(Arc::clone(&rec) as Arc<dyn Syncer>);
+        let entry = RecoveryEntry {
+            timestamp: 7,
+            op: "amend".to_owned(),
+            superseded: [9; 32],
+            branch: "main".to_owned(),
+        };
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert_eq!(read_all(&layout).unwrap(), std::slice::from_ref(&entry));
+        assert_eq!(
+            rec.events(),
+            [
+                Ev::Barrier(layout.recovery_log_file()),
+                Ev::DirBarrier(layout.common_dir().to_path_buf()),
+            ],
+            "written out, not flushed"
+        );
+        let _token = group.flush().unwrap();
+        assert_eq!(rec.events().len(), 3);
+        assert!(matches!(rec.events()[2], Ev::Full(_)));
+
+        // A torn tail is cut off before the new line, as `record` does.
+        let log = layout.recovery_log_file();
+        let mut text = fs::read_to_string(&log).unwrap();
+        text.push_str("9\tamend\tabc");
+        fs::write(&log, text).unwrap();
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert_eq!(read_all(&layout).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn record_in_refuses_a_field_with_a_tab_and_ignores_the_zero_hash() {
+        use crate::durable::Group;
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut group = Group::new();
+        let mut entry = RecoveryEntry {
+            timestamp: 7,
+            op: "am\tend".to_owned(),
+            superseded: [9; 32],
+            branch: "main".to_owned(),
+        };
+        assert!(matches!(
+            record_in(&layout, &entry, &mut group),
+            Err(RecoveryError::InvalidField("op"))
+        ));
+        entry.op = "amend".to_owned();
+        entry.branch = "ma\nin".to_owned();
+        assert!(matches!(
+            record_in(&layout, &entry, &mut group),
+            Err(RecoveryError::InvalidField("branch"))
+        ));
+        entry.branch = "main".to_owned();
+        entry.superseded = hash::ZERO;
+        record_in(&layout, &entry, &mut group).unwrap();
+        assert!(!layout.recovery_log_file().exists());
     }
 }

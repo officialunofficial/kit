@@ -26,9 +26,9 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::durable::Parents;
+use crate::durable::{Flushed, Group, Parents, Staged};
 use crate::hash::{self, HASH_LEN, Hash};
 use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
@@ -621,6 +621,62 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
         return Err(IndexError::TooLarge);
     }
     crate::durable::write_pointer(&path, &bytes, Parents::Create)?;
+    Ok(())
+}
+
+/// An index staged in a [`Group`]: its temp file is written out and invisible
+/// until [`publish_staged_index`].
+#[derive(Debug)]
+#[must_use = "a staged index is invisible until it is published"]
+pub struct StagedIndex(Staged);
+
+impl StagedIndex {
+    /// The temp file, for a check of its mtime before the publish.
+    #[must_use]
+    pub fn temp_path(&self) -> &Path {
+        self.0.temp_path()
+    }
+}
+
+/// An index of `len` bytes is over [`MAX_INDEX_BYTES`].
+fn exceeds_index_limit(len: usize) -> bool {
+    len as u64 > MAX_INDEX_BYTES
+}
+
+/// Stage the write of `idx`, as [`write_index`] makes it but in two steps, so
+/// the bytes of the index share the flush of the objects it names.
+///
+/// # Errors
+/// [`IndexError::TooLarge`], or an I/O error when the temp file cannot be
+/// written or the group is poisoned.
+pub fn stage_index(
+    group: &mut Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> IndexResult<StagedIndex> {
+    let bytes = idx.serialize();
+    if exceeds_index_limit(bytes.len()) {
+        return Err(IndexError::TooLarge);
+    }
+    Ok(StagedIndex(group.stage(
+        &layout.index_file(),
+        &bytes,
+        Parents::Create,
+    )?))
+}
+
+/// Publish a staged index. The caller flushes `group` afterwards, and reports
+/// success only when that flush returned: the rename is durable then.
+///
+/// # Errors
+/// `after` does not cover the index's bytes and the objects it names, or the
+/// rename failed.
+pub fn publish_staged_index(
+    group: &mut Group,
+    staged: StagedIndex,
+    after: &Flushed,
+) -> IndexResult<()> {
+    group.publish_sibling(staged.0, after)?;
     Ok(())
 }
 
@@ -1394,6 +1450,14 @@ mod tests {
         drop(f);
         let err = read_index(&RepoLayout::single(dir.path())).unwrap_err();
         assert!(matches!(err, IndexError::TooLarge));
+    }
+
+    #[test]
+    fn the_index_limit_is_inclusive() {
+        let limit = usize::try_from(MAX_INDEX_BYTES).unwrap();
+        assert!(!exceeds_index_limit(limit));
+        assert!(exceeds_index_limit(limit + 1));
+        assert!(!exceeds_index_limit(0));
     }
 
     #[test]
