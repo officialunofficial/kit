@@ -68,7 +68,7 @@ The prologue applies to **all seven object types**. Rationale:
 Readers MUST reject any of:
 - `object_type` not in `0x01..0x07` → `InvalidObjectType`
 - `magic` != `"KOB1"` → `InvalidMagic`
-- `schema_version` other than the version of the object's type →
+- `schema_version` that is not the version of the object's type →
   `UnsupportedObjectVersion`. The version of `chunked_blob` (`0x05`) is
   `0x02`. The version of every other type is `0x01`.
 
@@ -406,7 +406,8 @@ its own check for a verifier that holds no entries.
 An entry with `end_0 = 0` refuses as `end not increasing`. A fixed-size layout
 whose last end is off by one refuses as `fixed layout end`.
 
-A `schema_version` other than `0x02` is `UnsupportedObjectVersion` (§2),
+A `schema_version` that is not `0x02`, the only version of a chunked blob so
+far, is `UnsupportedObjectVersion` (§2),
 refused when the prologue is read, before `truncated` and the checks above.
 
 Reassembly: concatenate each `chunk_hash` blob's contents in order. A reader
@@ -515,8 +516,10 @@ both locations.
 
 ### Repository marker
 
-The common directory MUST contain a `format` file. Loose-only stores
-start with the legacy marker `bmt-v2` (canonical bytes `bmt-v2\n`).
+The common directory MUST contain a `format` file. A new store starts
+with the packed marker. A store made by an earlier kit that no later kit
+has written to keeps the legacy marker `bmt-v2` (canonical bytes
+`bmt-v2\n`) and is loose-only.
 The bytes after the canonical prefix `bmt-v2\n` are a required set of
 ASCII capability letters. Each letter occurs once. A reader MUST refuse
 the store with `IncompatibleRepoFormat` and tell the user to update kit
@@ -524,23 +527,30 @@ if the set contains a letter the reader does not know. `P` is the only
 currently defined letter. It requires support for the raw local pack
 and its index, including the full range of storable objects. The current
 packed marker is exactly `bmt-v2\nP` with no final newline.
-Bound marker reads. Accept the legacy marker under its whitespace-trimming
-rule. Treat exactly `bmt-v2\n\0` as a lost activation and open it as a
-loose store. Refuse all other marker bytes and an absent marker with
-`IncompatibleRepoFormat`. A legacy reader refuses the packed form.
-Readers check the marker under the shared lock and enable local-pack
-discovery only with `P`.
+Bound marker reads. Accept exactly three byte strings and no others:
+`bmt-v2\n` (the legacy marker, a loose store), `bmt-v2\n\0` (a lost
+activation, which opens as a loose store) and `bmt-v2\nP` (a packed
+store). Refuse every other byte string, including whitespace around the
+legacy value, and an absent marker, with `IncompatibleRepoFormat`. A
+legacy reader refuses the packed form. Readers check the marker under the
+shared lock and enable local-pack discovery only with `P`.
 
-Try activation before a fetch acquires its shared prune guard, once
-advertised work indicates the fetch may apply new data packs. An
-up-to-date fetch requires no activation. Under the exclusive `format`
+A writer of objects tries activation once per store handle, before its
+first write and before it takes a shared prune guard. That covers a
+staged batch at its first staged write, a single object write, a bulk
+write session at its first write and a fetch before its guard. A read, a
+ref write and an open do not activate. Creating a store writes the packed
+marker: write the bytes `bmt-v2\nP` to a temporary file in the common
+directory, sync it, rename it to `format`, then sync the directory.
+Under the exclusive `format`
 try-lock, validate the marker. For the canonical legacy marker or the
 exact zero-tail form, write only the ASCII byte `P` at offset 7 with a
 positional write through the locked handle, then sync the file. Preserve
-the seven-byte prefix and the inode, including on error. A noncanonical
-legacy marker continues to serve loose storage without activation. If the
-try-lock is busy and the marker still selects loose storage when the
-shared guard is acquired, use loose writes for that fetch.
+the seven-byte prefix and the inode, including on error. If the
+try-lock is busy, or the marker cannot be opened for writing because
+of permissions or a read-only filesystem, use loose writes and leave the
+marker as it is; the handle does not try again. Any other failure is
+an error.
 Lock details are in [SPEC-CONCURRENCY §3.4](SPEC-CONCURRENCY.md#34-object-refresh-versus-local-gc).
 
 An interrupted activation can leave the canonical legacy marker, the
@@ -550,7 +560,8 @@ the packed marker before publishing any pack, including on retry after
 an uncertain sync. Once activated durably, the packed marker is
 permanent even when no local packs remain. Upgrade all clients sharing
 the common directory and drain sessions opened by legacy clients before
-activation. The packed marker fences subsequent legacy opens.
+activation. The packed marker fences subsequent legacy opens, so a
+legacy kit refuses a repository that a later kit created or wrote to.
 
 ### Object lookup
 
@@ -562,11 +573,13 @@ split limits, and delta budgeting. The packed serialized size is the raw
 payload length. Physical loose-file metadata remains available for a
 loose-file sweep.
 
-With `P` set, a reader checks the version headers of live pack and index
-pairs when opening the store. An unknown local pack header or index
-version is `IncompatibleRepoFormat`, with an instruction to update kit.
-The same error applies when a reader discovers an unknown version later.
-This error stops lookup and repair on that pair. See
+With `P` set, a reader checks the versions of each live pair before
+using its layout. A pair whose pack header and index carry the same unknown
+version was written by a newer kit: that is `IncompatibleRepoFormat`, with an
+instruction to update kit, and it stops lookup and repair. One file with an
+unknown version while the other differs is damage to that pair, not a newer
+format: the reader records it, names the pair, skips it as for any other
+damage, and keeps reading the other pairs. See
 [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
 Try known published packs, then the loose path. Skip an unusable index
@@ -610,6 +623,55 @@ conforming schedule. Batched mode's directory flushes carry the dirent
 ordering on metadata-journaling filesystems in ordered-data mode.
 Deployments on filesystems without that property SHOULD use per-object mode.
 
+**Shared flush points.** A command MAY write out its objects, its pack
+members, its pointer temp files (a ref, the index, `HEAD`) and its directory
+entries, and make them durable with one device flush for each ordering point
+and device, if every MUST above holds at each rename. An ordering point is a
+place where one set of writes MUST be durable before the next set becomes
+visible. A writer that touched a loose shard, or reused a pack, also writes
+out `objects/` before it names such objects, so that a shard or `pack/` that
+another process made and has not flushed is covered. A command that reports
+success has made every rename durable. The pointers `commit` and `add` write
+follow this schedule:
+
+| Step | Writes | Durable before |
+|---|---|---|
+| 1 | The bytes of the new objects and of the ref temp file | The objects are renamed |
+| 2 | The object names, the recovery-log line of an amend, the bytes of the new index, when the command changes it | Any ref or index rename |
+| 3 | The ref name and the index name, under the ref's lock | The command reports success |
+| 4 | The removal of the merge state of a commit that concludes a merge, a cherry-pick or a revert | The command reports success |
+
+Steps 1 to 3 are one flush each (`add` and `commit` make three at most), and
+step 4 is a fourth when it applies. A ref write holds its lock from its read of the
+current value until the flush of step 3 returns (SPEC-REFS §5.1.1). On Apple
+file systems a *writeout* is `fsync(2)` and a *flush* is
+`fcntl(F_FULLFSYNC)` on a directory of the device; a flush makes every earlier
+writeout on that device durable. On Linux and Windows every writeout is
+already durable and a flush makes no call, so the device operations are those
+of per-pointer writes. A failed writeout or flush ends the command: the
+writer MUST NOT retry it, since a retried `fsync` can report success for pages
+the kernel has already dropped.
+
+Crash table for a plain `commit` (a crash is a power loss after the step):
+
+| Crash after | Ref | Objects | Outcome |
+|---|---|---|---|
+| before step 1 | old | temp files only | Old state. gc removes the temp files. |
+| step 1, before step 2 | old | some renamed, bytes intact | Unreferenced objects. gc collects them. |
+| step 2, before step 3 | old or new | all durable | Either state is consistent. |
+| step 3 | new | all durable | Committed. |
+
+An amend follows the same table. A recovery-log line that is durable while the
+ref is old is harmless: it names a commit that is still live. Between step 2
+and step 3 the ref and the index of a commit that changes the index are two renames
+that survive a crash separately, so the ref may be new while the index is old
+or the reverse; each is the old or the new value, never another. A commit that
+concludes a merge, a cherry-pick or a revert clears its state after step 3, so a
+crash between the two leaves the merge state over the new commit, and never a
+merge commit that lost its second parent. That leftover state is the existing
+stale merge state: a later `--abort` of that operation moves the branch back over the
+new commit and writes no recovery entry.
+
 For each local pair, the publisher MUST enforce this order. Hold the
 shared `format` guard or its exclusive lock from staging through the
 final directory flush. This prevents the orphan sweep from removing
@@ -639,7 +701,39 @@ A writer that found its object already visible MUST make its location
 durable before referencing it. Flush the loose shard or the pack
 directory and, if needed, the directory containing the pack directory.
 When another process can retire the selected location, follow the
-guard and re-resolution rules in SPEC-CONCURRENCY §3.4.
+guard and re-resolution rules in SPEC-CONCURRENCY §3.4. A per-object write
+that creates a loose shard directory also flushes `objects/`, which holds the
+new directory entry.
+
+Local batched and per-object writes look in loose storage and in their
+discovered pack catalog. They MAY accept a loose file or packed frame of
+the exact serialized length without reading the object body. Fetch writes
+every object in its window.
+
+A local batched write (`kit add`, `kit add -u`, `kit commit -a`,
+`kit stash`) in a store with capability `P` writes each chunk of a chunked
+file it must store into a local pack of its own, in file order. Past the
+first 64 small files of a batch whose blob the store did not already hold, it
+also packs each small file, a plain blob of at most 16,384 serialized bytes,
+into that pack. A file whose blob the store already holds does not count. It stores everything
+else loose. The batch seals its open pack at 64 MiB of
+payload or 65,536 entries, and when it commits. Before it renames a loose
+manifest, tree or commit, it publishes the pack, so no such object is
+visible before the packed chunks it names. A pack's layout is checked
+against the writer's records when it is published, and an index entry or
+ref is written only after the batch's last pack is published. Per-object writes, loose stores, and a
+writer that cannot activate the marker keep every chunk loose.
+
+**Writer limit on entries.** Every writer of local packs seals a pack before
+it would hold more than 65,536 entries. The `kit add` batch above, a fetch
+publication window ([SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch)) and
+a gc output ([SPEC-GC](SPEC-GC.md)) share this limit, and they share the
+payload limit of 64 MiB of serialized bytes, with one exception: gc gives one
+object that alone passes 64 MiB an output pack of its own. These limits are
+writer policy and bound the locators, batch paths and index workspace of one
+pack. A reader accepts any pack within the format caps of 10,000,000 entries
+and 4 GiB of payload ([SPEC-PACKFILE](SPEC-PACKFILE.md) §5 and §3.1.1), so a
+pack from a writer with other limits stays readable.
 
 Before pack publication, a crash can leave staged files. Between
 renames it can leave a pack with no index. Before the final directory
@@ -668,6 +762,12 @@ This prevents trivial amplification and prologue-replay attacks.
 |---------|----------|------------------------------------------------------------------|
 | `0x01`  | v1.0     | First kit format. See §2 for prologue.                          |
 | `0x02`  |          | `chunked_blob` only: 40-byte entries that carry end offsets (§7). |
+| marker `P` | 0.10 | Repository marker capability `P` (`bmt-v2\nP`): raw local packs and their index (§10). A reader that does not know `P` refuses the store. This reader accepts exactly the three marker byte strings of §10. |
+| local add packs chunks and small files | 0.10.x | A batched write packs the chunks of a chunked file and the small files past the first 64 new ones of the batch into local packs, as §10.1 says. It is a writer policy. It changes no byte of a pack, an index or an object, and needs no marker beyond `P`. |
+
+A new store starts with the packed marker, and a later kit's first object write activates an older loose store, so kit 0.9 and older refuse a repository that this version created or wrote to.
+
+A later marker capability is another letter after the `bmt-v2\n` prefix, and a reader that does not know it refuses the store.
 
 `schema_version` is per object type. It is `0x02` for `chunked_blob`
 (`0x05`) and `0x01` for every other type. A version bump is reserved for

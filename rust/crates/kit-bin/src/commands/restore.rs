@@ -366,10 +366,13 @@ fn restore_worktree(
             ));
         }
     };
+    // A leading slash anchors each pattern at the repository root. Without it
+    // a path with no slash would also match that name in every other
+    // directory the selection reaches.
     let patterns: Vec<SparsePattern> = to_write
         .iter()
         .map(|e| SparsePattern {
-            pattern: e.path.clone(),
+            pattern: format!("/{}", e.path),
             negated: false,
             dir_only: false,
         })
@@ -416,9 +419,9 @@ fn dirty_reason(
     path: &str,
 ) -> Option<String> {
     let staged = idx
-        .entries
-        .iter()
-        .find(|e| e.path == path && e.status != EntryStatus::Removed)?;
+        .find_entry(path)
+        .map(|i| &idx.entries[i])
+        .filter(|e| e.status != EntryStatus::Removed)?;
     let abs = root.join(path);
     let meta = abs.symlink_metadata().ok()?;
     let work_hash = if meta.file_type().is_symlink() {

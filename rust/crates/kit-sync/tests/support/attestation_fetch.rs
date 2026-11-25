@@ -144,6 +144,9 @@ mod attestation_fetch {
             kind: "memory".into(),
         };
         options.remote_url.clone_from(&descriptor.url);
+        // The gc assertion below needs to remove an individual tree.
+        let layout = kit_sync::init_clone_dir(&dir, &descriptor).unwrap();
+        kit_core::fault::keep_loose(&layout);
         let report = kit_sync::clone(&dir, &source, &descriptor, &options, &NoopObserver).unwrap();
         assert_eq!(report.pull.fetch.attestations_stored, 1);
         assert_eq!(report.pull.fetch.attestations_dropped, 1);
@@ -192,7 +195,7 @@ mod attestation_fetch {
         let hex = to_hex(&tree);
         std::fs::remove_file(layout.objects_dir().join(&hex[..2]).join(&hex[2..])).unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false).unwrap();
+        let gc = kit_core::ops::gc::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {}).unwrap();
         assert!(
             gc.skipped_state_files
                 .contains(&layout.attestations_dir().join(to_hex(&tip)))

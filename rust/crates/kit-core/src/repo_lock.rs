@@ -75,7 +75,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `rebase`, `cherry-pick`, `stash`, `sparse-checkout`).
 ///
 /// Ref-only mutations (`branch`, `tag`) and config-only mutations do not take
-/// this lock. They rely on ref compare-and-swap and atomic config writes.
+/// this lock. They rely on ref compare-and-swap, and on [`CONFIG_LOCK`] with
+/// atomic config writes.
 pub const WORKTREE_LOCK: &str = "worktree.lock";
 
 /// Basename of the shared lock that a live `kit serve` process holds for its
@@ -95,6 +96,18 @@ pub const SERVE_LOCK: &str = "serve.lock";
 /// `worktree.lock` files, then `refs-history.lock`. Another order lets two
 /// processes stall each other until the timeout.
 pub const WORKTREES_REGISTRY_LOCK: &str = "worktrees.lock";
+
+/// Basename of the common-directory lock that serialises read-modify-write of
+/// `.kit/config` (`remote add`, `config`, `branch --set-upstream-to`, the
+/// upstream a first push records). A holder takes no other lock while it holds
+/// this one, so it may be taken under any other lock.
+pub const CONFIG_LOCK: &str = "config.lock";
+
+/// Basename of the common-directory lock that serialises appends to
+/// `.kit/recovery-log`. Linked trees append under their own `worktree.lock`,
+/// so two appends can overlap, and an append may cut a torn tail off the file
+/// first. A holder takes no other lock while it holds this one.
+pub const RECOVERY_LOG_LOCK: &str = "recovery-log.lock";
 
 /// Maximum filename length for a lock name.
 const MAX_NAME_LEN: usize = 255;

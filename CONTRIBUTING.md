@@ -117,7 +117,7 @@ is a full version and equals the version in `Cargo.lock`. Do not write `=`,
 `*`, `~` or a short version such as `"1.2"`.
 
 All kit crates share one version. Each kit-* requirement is exact, such as
-`"=0.9.0"`, and has a `path`. A dependency with a `path` and no version is valid
+`"=0.10.0"`, and has a `path`. A dependency with a `path` and no version is valid
 only in `dev-dependencies` or in a crate with `publish = false`.
 
 The rules cover every manifest, including binary, fuzz and bench crates.
@@ -147,9 +147,28 @@ Clippy enforces these rules in CI, with `rustfmt`.
 
 ## Format changes
 
-A format change updates the spec and the golden vectors in the same commit. The
+A format change updates the spec and adds the golden vectors of any new version in the same commit. The
 golden vectors must pass in the Rust code and in an independent reference check.
 Never change a published tag, magic or constant to fix a style issue.
+
+## Formats stay readable
+
+Every object id and every format version that a release wrote stays readable.
+
+- A format change adds a new version marker and a reader for the new version.
+  The reader of the old version stays.
+- Readers only widen. A change never makes a reader refuse bytes that it
+  accepted before, and never gives an existing object a different id.
+- A new version brings its own vectors under `rust/tests/golden/`. The vectors
+  of the old version stay. The default test run never writes a vector. A switch that writes vectors is
+  for adding the vectors of a new version, never for following a change of
+  the code.
+- Add each new vector to `rust/crates/kit-core/tests/formats_stay_readable.rs`,
+  or to the golden test of the crate that owns the format.
+- A record that a reader may drop and rebuild, such as a cache, a cursor or a
+  checkpoint, is exempt. Its spec says that it is disposable.
+- A change that cannot follow these rules needs the maintainers' agreement
+  before it is written, and a "Breaking" line in the changelog.
 
 ## Writing
 

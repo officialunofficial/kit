@@ -13,8 +13,8 @@ pub const MAX_FRAMES_PER_CONN: u32 = 10_000;
 
 /// The reply when a session sends more than [`MAX_FRAMES_PER_CONN`] frames.
 /// It names the limit, so a client that hits it can tell why: a fetch costs
-/// one frame for the branch listing, at least two per branch and one for the
-/// tag listing, so one session fetches at most 4,999 branches
+/// one frame for each 1,000 branches of the listing, at least two per branch
+/// and one for the tag listing, so one session fetches at most 4,997 branches
 /// (SPEC-TRANSPORT §4.4).
 pub const FRAME_BUDGET_EXCEEDED: &str =
     "per-connection frame budget exceeded: at most 10000 frames per session (SPEC-TRANSPORT 4.4)";

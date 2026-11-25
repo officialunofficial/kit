@@ -31,15 +31,12 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use kit_core::ops::gc::{GcRootsError, run_gc_observed};
+use kit_core::ops::gc::{DEFAULT_GRACE_SECS, GcRootsError, run_gc};
 use kit_core::ops::recovery::{self, RetentionPolicy};
 use kit_core::store::{ObjectStore, StoreError};
 
 use crate::clap_args;
 use crate::exit;
-
-/// Default object grace window: 14 days, matching Git's `gc.pruneExpire`.
-const DEFAULT_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -147,7 +144,7 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     let progress = crate::progress::start("gc", None, crate::progress::should_report(false), false);
-    let report = match run_gc_observed(
+    let report = match run_gc(
         &store,
         &layout,
         now,
@@ -166,7 +163,29 @@ pub fn run(args: &[String]) -> u8 {
     };
 
     drop(progress);
+    if !report.dry_run && !report.skipped_pack_errors.is_empty() {
+        super::fetch_repair::note_bad_pack(&layout);
+    }
     let mut stderr = std::io::stderr().lock();
+    for error in &report.skipped_pack_errors {
+        let _ = writeln!(stderr, "warning: kept damaged local pack: {error}");
+    }
+    if let Some(error) = &report.pack_copy_error {
+        let _ = writeln!(
+            stderr,
+            "warning: kept the local packs gc meant to rewrite or merge: {error}"
+        );
+    }
+    if report.pack_retirement_cut_short {
+        let _ = writeln!(
+            stderr,
+            "warning: gc stopped retiring local packs because a fetch, push or add held the store lock; {} retired, the rest stay until the next gc",
+            report.packs_retired
+                + report.packs_rewritten
+                + report.packs_merged
+                + report.packs_retired_covered,
+        );
+    }
     for file in &report.skipped_state_files {
         if file.starts_with(layout.attestations_dir()) {
             let _ = writeln!(
@@ -206,6 +225,66 @@ pub fn run(args: &[String]) -> u8 {
         expired,
         if expired == 1 { "y" } else { "ies" },
     );
+    if report.packs_retired != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} wholly dead local pack(s)",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            report.packs_retired,
+        );
+    }
+    let copied = report.packs_rewritten + report.packs_merged + report.packs_retired_covered;
+    if copied != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {} {} rewritten, {} merged and {} covered local pack(s), copying {} survivor bytes and dropping {} bytes",
+            if report.dry_run {
+                "would retire"
+            } else {
+                "retired"
+            },
+            report.packs_rewritten,
+            report.packs_merged,
+            report.packs_retired_covered,
+            report.survivor_bytes_copied,
+            report.duplicate_bytes_reclaimed,
+        );
+    }
+    if !report.dry_run && report.retire_hold_ms != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: held the exclusive lock for at most {} ms in {} hold(s)",
+            report.retire_hold_ms, report.retire_batches,
+        );
+    }
+    if report.pack_leftovers_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} local pack leftover(s)",
+            report.pack_leftovers_pruned,
+        );
+    }
+    if report.loose_duplicates_pruned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: {prune_verb} {} loose duplicate(s)",
+            report.loose_duplicates_pruned,
+        );
+    }
+    if report.dry_run && report.packs_scanned != 0 {
+        let _ = writeln!(
+            stderr,
+            "gc: packed payload: {} wholly dead bytes, {} mixed dead bytes, {} grace-eligible dead bytes, {} predicted survivor bytes",
+            report.wholly_dead_bytes,
+            report.mixed_dead_bytes,
+            report.eligible_dead_bytes,
+            report.survivor_bytes,
+        );
+    }
     exit::OK
 }
 

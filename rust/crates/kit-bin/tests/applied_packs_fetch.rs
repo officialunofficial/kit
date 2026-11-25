@@ -39,6 +39,18 @@ fn run_result(cwd: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn kit")
 }
 
+/// [`run_result`], with the full flushes of the process logged to `log`.
+fn run_logged(cwd: &Path, args: &[&str], log: &Path) -> std::process::Output {
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    Command::new(kit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("KIT_FLUSH_LOG", log)
+        .output()
+        .expect("spawn kit")
+}
+
 fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let out = run_result(cwd, args);
     assert!(
@@ -60,18 +72,86 @@ fn commit_all(dir: &Path, msg: &str) {
 }
 
 #[test]
-fn closure_verify_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn closure_verify_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["closure", "verify", "origin/main", "--history"], true);
 }
 
 #[test]
-fn gc_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn gc_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["gc"], false);
 }
 
 #[test]
-fn restore_enables_the_next_fetch_to_repair_a_missing_chunk() {
+fn restore_enables_the_next_fetch_to_repair_a_missing_object() {
     repair_after(&["restore", "--force", "dir/large"], false);
+}
+
+#[test]
+fn full_integrity_scan_enables_a_fetch_to_replace_a_bad_packed_copy() {
+    let source = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let client = tempfile::tempdir().unwrap();
+    init_repo(source.path());
+    init_repo(remote.path());
+    let url = format!("kit+file://{}", remote.path().display());
+    run_in(source.path(), &["remote", "add", "origin", &url]);
+    fs::write(source.path().join("file"), b"packed bytes").unwrap();
+    commit_all(source.path(), "packed file");
+    run_in(source.path(), &["push", "origin"]);
+
+    let checkout = client.path().join("checkout");
+    run_in(client.path(), &["clone", "-o", "origin", &url, "checkout"]);
+    let layout = RepoLayout::single(&checkout);
+    let store = ObjectStore::open(&layout).unwrap();
+    let pack_dir = layout.objects_dir().join("pack");
+    let mut packs = fs::read_dir(&pack_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "pack"));
+    let pack = packs.next().unwrap();
+    assert!(packs.next().is_none());
+    let mut bytes = fs::read(&pack).unwrap();
+    let content = b"packed bytes";
+    let offset = bytes
+        .windows(content.len())
+        .position(|window| window == content)
+        .unwrap();
+    bytes[offset] ^= 1;
+    fs::write(&pack, bytes).unwrap();
+
+    let records = layout.applied_packs_dir();
+    let applied = records.join("origin");
+    let non_record = records.join(".sidecar");
+    let directory = records.join("other");
+    fs::write(&non_record, b"sidecar").unwrap();
+    fs::create_dir(&directory).unwrap();
+    let attestation_record = records.join(".cursors/test.attest-fetch");
+    fs::create_dir_all(attestation_record.parent().unwrap()).unwrap();
+    fs::write(&attestation_record, b"attestation record").unwrap();
+    fs::write(records.join(".cursors").join("a".repeat(64)), b"cursor").unwrap();
+
+    let diagnostic = ["closure", "verify", "origin/main", "--show-unreferenced"];
+    let guard = store.prune_guard().unwrap();
+    let blocked = run_result(&checkout, &diagnostic);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("could not clear fetch records"));
+    assert!(applied.is_file());
+    drop(guard);
+
+    let damaged = run_result(&checkout, &diagnostic);
+    assert!(!damaged.status.success());
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("invalid pack trailer"));
+    assert!(!applied.exists());
+    assert!(directory.is_dir());
+    assert_eq!(fs::read(&non_record).unwrap(), b"sidecar");
+    assert!(!records.join(".verified").exists());
+    assert!(!records.join(".heads").exists());
+    assert_eq!(fs::read_dir(records.join(".cursors")).unwrap().count(), 1);
+    assert!(attestation_record.is_file());
+
+    run_in(&checkout, &["fetch", "origin"]);
+    assert!(applied.is_file());
+    run_in(&checkout, &diagnostic);
 }
 
 fn repair_after(diagnostic: &[&str], advance: bool) {
@@ -84,7 +164,8 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
     let url = format!("kit+file://{}", remote.path().display());
     run_in(source.path(), &["remote", "add", "origin", &url]);
     fs::create_dir(source.path().join("dir")).unwrap();
-    let len = usize::try_from(kit_core::worktree::CHUNK_THRESHOLD).unwrap() + 1;
+    // A whole-file blob over the fetch packing limit stays loose in a clone.
+    let len = kit_core::chunker::MAX_SIZE + 1;
     fs::write(source.path().join("dir/large"), vec![42; len]).unwrap();
     commit_all(source.path(), "large file");
     run_in(source.path(), &["push", "origin"]);
@@ -99,9 +180,11 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         .iter_object_hashes()
         .unwrap()
         .into_iter()
-        .find_map(|id| match store.read_object(&id).unwrap() {
-            kit_core::object::Object::ChunkedBlob(manifest) => Some(manifest.chunks()[0]),
-            _ => None,
+        .find(|id| {
+            matches!(
+                store.read_object(id).unwrap(),
+                kit_core::object::Object::Blob(blob) if blob.data.len() == len
+            )
         })
         .unwrap();
     store.remove_object(&chunk).unwrap();
@@ -139,7 +222,8 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         drop(guard);
     }
 
-    let out = run_result(&client, diagnostic);
+    let flush_log = client_dir.path().join("flush-log");
+    let out = run_logged(&client, diagnostic, &flush_log);
     assert!(!out.status.success(), "diagnostic {diagnostic:?} succeeded");
     let output = format!(
         "{}{}",
@@ -147,6 +231,15 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(output.contains(&hash::to_hex(&chunk)), "{output}");
+    // The removals are durable before the command returns: the repair flushes
+    // the directory of the verified-tip records and the records directory.
+    let flushed = fs::read_to_string(&flush_log).map_or(0, |log| log.lines().count());
+    // The fetch cursors' directory, the verified-tip records' directory and
+    // the records directory.
+    #[cfg(target_os = "macos")]
+    assert_eq!(flushed, 3);
+    #[cfg(not(target_os = "macos"))]
+    assert!(flushed >= 3, "{flushed}");
     assert!(!applied.exists());
     assert!(!heads.exists());
     assert_eq!(fs::read_dir(&anchors).unwrap().count(), 0);
@@ -165,7 +258,7 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
     run_in(&client, &["fetch", "origin"]);
     assert!(
         store.contains(&chunk),
-        "fetch must restore the missing chunk"
+        "fetch must restore the missing object"
     );
     run_in(&client, &["closure", "verify", "origin/main", "--history"]);
 }
@@ -648,7 +741,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         "the failed appends must be reported once; stderr:\n{stderr}"
     );
     assert_eq!(
-        stderr.matches("/.origin.tmp").count(),
+        stderr.matches("/.kit.tmp.").count(),
         0,
         "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );

@@ -197,7 +197,7 @@ _kit_complete() {
             ;;
         closure)
             if [[ $cword -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "export verify" -- "$cur") )
+                COMPREPLY=( $(compgen -W "export verify repair-indexes" -- "$cur") )
             else
                 case "${words[2]}" in
                     export)
@@ -206,8 +206,11 @@ _kit_complete() {
                     verify)
                         COMPREPLY=( $(compgen -W "--from --history --show-unreferenced --format --help" -- "$cur") )
                         ;;
+                    repair-indexes)
+                        COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+                        ;;
                     *)
-                        COMPREPLY=( $(compgen -W "export verify --help" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "export verify repair-indexes --help" -- "$cur") )
                         ;;
                 esac
             fi

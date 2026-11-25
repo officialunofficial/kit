@@ -26,8 +26,8 @@ use kit_core::sign::{self, KeyPair};
 use kit_core::store::ObjectStore;
 use kit_core::transfer;
 use kit_sync::push::{
-    MAX_TAG_LISTING_BYTES, PushLease, PushOptions, PushTarget, TagPushOutcome, TagPushRejection,
-    TagPushResult, TagSelection,
+    PushLease, PushOptions, PushTarget, TagPushOutcome, TagPushRejection, TagPushResult,
+    TagSelection,
 };
 use kit_sync::{
     CloneRemote, FetchReport, NoopObserver, RemoteSource, SourceError, SyncOptions,
@@ -260,8 +260,6 @@ struct Wire<'a> {
     listing: Cell<RefListing>,
     limits: Cell<UploadLimits>,
     inspect: Cell<Option<u64>>,
-    /// Extra names a listing of `refs/tags/` shows.
-    padding: RefCell<Vec<Ref>>,
     /// Runs before an advance reaches the transport; an answer replaces it.
     before: RefCell<Option<Box<AdvanceHook<'a>>>>,
     /// Runs between the chain ref write and the head write of an advance;
@@ -288,7 +286,6 @@ impl<'a> Wire<'a> {
             listing: Cell::new(tx.ref_listing()),
             limits: Cell::new(tx.upload_limits()),
             inspect: Cell::new(None),
-            padding: RefCell::default(),
             before: RefCell::default(),
             between: RefCell::default(),
             on_read: RefCell::default(),
@@ -333,11 +330,7 @@ impl RemoteSource for Wire<'_> {
         self.inner.list_branches()
     }
     fn list_refs(&self, prefix: &str) -> Result<Vec<Ref>, SourceError> {
-        let mut listed = self.inner.list_refs(prefix)?;
-        if prefix == "refs/tags/" {
-            listed.extend(self.padding.borrow().iter().cloned());
-        }
-        Ok(listed)
+        self.inner.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, SourceError> {
         if let Some(hook) = self.on_read.borrow_mut().as_mut() {
@@ -1639,44 +1632,6 @@ fn a_refused_ticketed_advance_refuses_its_group() {
     }
     assert_eq!(wire.uploaded_for(), ["refs/tags/a"], "uploaded once");
     assert_eq!(wire.read("refs/tags/a"), None);
-}
-
-/// On a remote whose listing is one frame, a tag create that would take the
-/// listing past the bound is refused before any upload; a remote that pages
-/// takes it.
-#[test]
-fn a_tag_past_the_listing_bound_is_refused_where_the_listing_is_one_frame() {
-    let entry = |n: usize| Ref {
-        name: format!("pad{n:08}"),
-        hash: Some(kit_core::hash::hash(&n.to_le_bytes())),
-    };
-    let per_entry = entry(0).name.len() + 48;
-    let room = MAX_TAG_LISTING_BYTES / per_entry;
-    let (tx, _root) = transport(Kind::File);
-    assert_eq!(tx.ref_listing(), RefListing::OneFrame);
-    let wire = Wire::new(&*tx);
-    *wire.padding.borrow_mut() = (0..room).map(entry).collect();
-    let work = Work::new();
-    let c = work.commits(None, 1);
-    work.light("v1", c[0]);
-
-    let results = work.push_tags(&wire, false);
-    assert_eq!(rejection(&results, "v1"), &TagPushRejection::TooManyTags);
-    assert!(wire.packs.borrow().is_empty() && wire.nodes.borrow().is_empty());
-    let results = work.push_tag(&wire, "v1", false);
-    assert_eq!(rejection(&results, "v1"), &TagPushRejection::TooManyTags);
-
-    // Two entries less leave room.
-    wire.padding.borrow_mut().pop();
-    wire.padding.borrow_mut().pop();
-    assert_created(&work.push_tag(&wire, "v1", false), "v1");
-
-    // A listing that pages has no such bound.
-    let (tx, _root) = transport(Kind::Memory);
-    assert_eq!(tx.ref_listing(), RefListing::Ordered);
-    let wire = Wire::new(&*tx);
-    *wire.padding.borrow_mut() = (0..room + 10).map(entry).collect();
-    assert_created(&work.push_tags(&wire, false), "v1");
 }
 
 /// A name `refs/kit/tagmap/<t>` cannot hold, an annotated tag named for

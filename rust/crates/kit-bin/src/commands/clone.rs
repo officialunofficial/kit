@@ -36,8 +36,12 @@ struct CloneOpts {
     /// materialising only the matching files.
     /// Repeat the flag to add more patterns.
     #[cfg(feature = "sparse-checkout")]
-    #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
+    #[arg(long = "sparse", value_name = "PATTERN", num_args = 1.., conflicts_with = "no_checkout")]
     sparse: Vec<String>,
+    /// Fetch and set the branch and HEAD, but write no worktree files and no
+    /// index. `kit checkout <branch>` fills the worktree later.
+    #[arg(short = 'n', long = "no-checkout")]
+    no_checkout: bool,
     /// Check out `<branch>` instead of the remote's default branch. Must
     /// name a branch the remote actually advertises; unlike the default
     /// heuristic (current default branch, falling back to whatever the
@@ -201,8 +205,10 @@ pub fn run(args: &[String]) -> u8 {
                         source,
                         &origin_name,
                         opts.branch.as_deref(),
+                        !opts.no_checkout,
                         require_signed,
                         opts.tags.fetch_tags(),
+                        &merged,
                         opts.attestations.settings(&merged, url),
                         progress.terminal(),
                     )
@@ -340,9 +346,10 @@ fn clone_init_exit_code(error: &kit_sync::CloneInitError) -> u8 {
     match error {
         E::CreateDir { .. } | E::Store(_) | E::Refs(_) | E::WriteConfig(_) => exit::CANTCREAT,
         E::Discover(_) => exit::DATAERR,
-        E::AlreadyInitialized => exit::GENERAL_ERROR,
         // `validate_clone_inputs` rejects these first with the same code.
         E::InvalidRemote(_) => exit::PROTOCOL_ERROR,
+        // `AlreadyInitialized` and any later variant.
+        _ => exit::GENERAL_ERROR,
     }
 }
 

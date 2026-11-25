@@ -91,6 +91,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::durable::Parents;
 use crate::ops::bisect::BISECT_FILE;
 use crate::ops::conflict_state::{
     CHERRY_PICK_HEAD, CHERRY_PICK_MSG, CONFLICTS_FILE, MERGE_HEAD, MERGE_MSG, ORIG_HEAD,
@@ -538,7 +539,7 @@ fn read_capped_line(path: &Path) -> Result<Option<String>, DiscoverError> {
 /// Propagates filesystem errors from the atomic write.
 pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result<()> {
     let body = format!("{POINTER_PREFIX}{}\n", state_dir.display());
-    crate::atomic::write_atomic(&tree_root.join(KIT_DIR), body.as_bytes(), false)
+    crate::durable::write_pointer(&tree_root.join(KIT_DIR), body.as_bytes(), Parents::Existing)
 }
 
 /// Write the back-pointer of a state dir: the path of
@@ -548,10 +549,10 @@ pub fn write_pointer_file(tree_root: &Path, state_dir: &Path) -> std::io::Result
 /// Propagates filesystem errors from the atomic write.
 pub fn write_backpointer(state_dir: &Path, tree_root: &Path) -> std::io::Result<()> {
     let body = format!("{}\n", tree_root.join(KIT_DIR).display());
-    crate::atomic::write_atomic(
+    crate::durable::write_pointer(
         &state_dir.join(BACKPOINTER_FILE_NAME),
         body.as_bytes(),
-        false,
+        Parents::Existing,
     )
 }
 
@@ -592,7 +593,11 @@ pub fn write_lock(state_dir: &Path, reason: &str) -> std::io::Result<()> {
             "worktree is already locked",
         ));
     }
-    crate::atomic::write_atomic(&state_dir.join(LOCKED_FILE_NAME), reason.as_bytes(), false)
+    crate::durable::write_pointer(
+        &state_dir.join(LOCKED_FILE_NAME),
+        reason.as_bytes(),
+        Parents::Existing,
+    )
 }
 
 /// Unlock the tree with state dir `state_dir`.

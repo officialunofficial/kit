@@ -4,7 +4,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use kit_core::layout::{DiscoverError, RepoLayout};
-use kit_core::refs::{self, RefError};
+use kit_core::ops::gc::AUTO_MAINTENANCE_STAMP;
+use kit_core::refs::{self, BRANCH_HISTORY_DIR, RefError};
 use kit_core::store::{ObjectStore, StoreError};
 
 use crate::SyncOptions;
@@ -30,6 +31,7 @@ pub struct CloneRemote {
 
 /// Why preparing the clone destination failed.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CloneInitError {
     #[error("create {path}: {source}")]
     CreateDir {
@@ -81,6 +83,19 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
         source,
     })?;
     let layout = kit_core::layout::discover(dir)?;
+    // `ObjectStore::init` starts over in the `.kit` of a killed `init`. A
+    // clone does so only in a directory that holds nothing else, as a clone
+    // never mixes with files that were there.
+    if dir.join(kit_core::store::KIT_DIR).exists()
+        && std::fs::read_dir(dir)
+            .map_err(|source| CloneInitError::CreateDir {
+                path: dir.display().to_string(),
+                source,
+            })?
+            .any(|entry| entry.is_ok_and(|e| e.file_name() != kit_core::store::KIT_DIR))
+    {
+        return Err(CloneInitError::AlreadyInitialized);
+    }
     match ObjectStore::init(&layout) {
         Ok(_) => {}
         Err(StoreError::AlreadyInitialized) => return Err(CloneInitError::AlreadyInitialized),
@@ -92,28 +107,25 @@ pub fn init_clone_dir(dir: &Path, remote: &CloneRemote) -> Result<RepoLayout, Cl
 }
 
 /// What a clone writes before it makes a branch or lands `HEAD`,
-/// lock files (`*.lock`) aside, and [`BRANCH_HISTORY_DIR`].
+/// lock files and the maintenance stamp aside.
 const UNFINISHED_CLONE_ENTRIES: [&str; 9] = [
     "HEAD",
     "applied-packs",
     "attestations",
     "config",
     "format",
+    // A build with history records writes it beside a branch. A clone
+    // interrupted once it made its branch undoes the branch but leaves it.
     BRANCH_HISTORY_DIR,
     "objects",
     "refs",
     "tmp",
 ];
 
-/// The branch history a build with history records writes beside a branch.
-/// A clone interrupted once it made its branch undoes the branch but leaves
-/// this; a restart drops it.
-const BRANCH_HISTORY_DIR: &str = "history-v1";
-
 /// The layout of `dir` when it holds a clone of `remote` that stopped before
 /// it made a branch or landed `HEAD`, or undid both: `dir` holds only the repository
 /// directory, which holds only what such a clone writes
-/// ([`UNFINISHED_CLONE_ENTRIES`] and lock files), with the config a clone of `remote`
+/// ([`UNFINISHED_CLONE_ENTRIES`], lock files, and a maintenance stamp), with the config a clone of `remote`
 /// writes, byte for byte, the `HEAD` a new repository starts with, no branch,
 /// fetched tags and remote-tracking refs of `remote` alone (a clone publishes each
 /// branch's tracking ref as soon as that branch is in, before the next one
@@ -138,11 +150,12 @@ fn unfinished_clone(dir: &Path, remote: &CloneRemote) -> Option<RepoLayout> {
     for entry in std::fs::read_dir(&kit).ok()? {
         let entry = entry.ok()?;
         let name = entry.file_name();
-        let lock = Path::new(&name)
-            .extension()
-            .is_some_and(|ext| ext == "lock")
+        let sentinel = (name == AUTO_MAINTENANCE_STAMP
+            || Path::new(&name)
+                .extension()
+                .is_some_and(|ext| ext == "lock"))
             && entry.file_type().ok()?.is_file();
-        if !lock && !UNFINISHED_CLONE_ENTRIES.iter().any(|known| name == *known) {
+        if !sentinel && !UNFINISHED_CLONE_ENTRIES.iter().any(|known| name == *known) {
             return None;
         }
     }

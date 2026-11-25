@@ -1870,7 +1870,7 @@ struct ResetBeforeAdvance<'a> {
 impl ResetBeforeAdvance<'_> {
     fn interleave(&self) {
         if !self.fired.swap(true, Ordering::SeqCst) {
-            libkit::transfer::push_branch_with_depth(
+            common::push_branch_with_depth(
                 self.competing,
                 self.competing_store,
                 "main",
@@ -2024,7 +2024,7 @@ fn run_rebaseline_race(appending: bool) {
     local.commit_file("f.txt", b"base", "base");
     let base = head(&local);
     let store = ObjectStore::open(&RepoLayout::single(local.path())).unwrap();
-    libkit::transfer::push_branch_with_depth(
+    common::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -2035,7 +2035,7 @@ fn run_rebaseline_race(appending: bool) {
     .unwrap();
     local.commit_file("f.txt", b"remote", "remote");
     let remote = head(&local);
-    libkit::transfer::push_branch_with_depth(
+    common::push_branch_with_depth(
         &*transport,
         &store,
         "main",
@@ -2070,15 +2070,8 @@ fn run_rebaseline_race(appending: bool) {
             .count()
     };
     let before = advances(&calls);
-    libkit::transfer::push_branch_with_depth(
-        &racing,
-        &store,
-        "main",
-        target,
-        RefWriteCondition::Any,
-        64,
-    )
-    .unwrap();
+    common::push_branch_with_depth(&racing, &store, "main", target, RefWriteCondition::Any, 64)
+        .unwrap();
     assert!(racing.fired.load(Ordering::SeqCst));
     assert_eq!(
         advances(&calls) - before,

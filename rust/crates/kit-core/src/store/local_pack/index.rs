@@ -11,10 +11,10 @@ use crate::serialize;
 
 use super::super::{MAX_RAW_OBJECT_SIZE, StoreError, StoreResult, read_header_prefix};
 
-const MAGIC_INDEX: &[u8; 4] = b"KITX";
-const FANOUT_END: usize = 12 + 256 * 4;
-const INDEX_BASE_LEN: usize = FANOUT_END + 64;
-const INDEX_ROW_LEN: usize = 44;
+pub(super) const MAGIC_INDEX: &[u8; 4] = b"KITX";
+pub(super) const FANOUT_END: usize = 12 + 256 * 4;
+pub(super) const INDEX_BASE_LEN: usize = FANOUT_END + 64;
+pub(super) const INDEX_ROW_LEN: usize = 44;
 const FRAME_LEN: u64 = ENTRY_FRAME_LEN as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub(in crate::store) struct Frame {
 }
 
 impl Frame {
-    fn extent(self, trailer: u64) -> Option<(u64, u64)> {
+    pub(super) fn extent(self, trailer: u64) -> Option<(u64, u64)> {
         let start = self.offset.checked_sub(FRAME_LEN)?;
         let end = self.offset.checked_add(u64::from(self.len))?;
         (start >= HEADER_LEN as u64
@@ -59,30 +59,130 @@ impl Pair {
         Some(Self::new(dir, from_hex(key).ok()?))
     }
 
-    pub(super) fn error(&self, error: impl std::fmt::Display) -> StoreError {
-        invalid(format!("local pack {}: {error}", self.pack.display())).into()
+    pub(super) fn error(&self, reason: impl std::fmt::Display) -> StoreError {
+        StoreError::LocalPackDamaged {
+            pack: self.pack.display().to_string().into(),
+            reason: reason.to_string().into(),
+        }
     }
 
-    pub(super) fn context(&self, error: StoreError) -> StoreError {
-        match error {
-            StoreError::IncompatibleRepoFormat { found } => StoreError::IncompatibleRepoFormat {
-                found: found.map(|format| format!("{format} in {}", self.pack.display())),
+    pub(super) fn index_error(&self, reason: impl std::fmt::Display) -> StoreError {
+        self.error(format_args!(
+            "{reason}. If the index is damaged, run `kit closure repair-indexes`"
+        ))
+    }
+
+    /// Name this pair in an error from reading its index. Damage found in
+    /// the index gains the repair hint; damage already named for the pack
+    /// does not. A failed read stays a failed read.
+    pub(super) fn index_context(&self, error: impl Into<StoreError>) -> StoreError {
+        match error.into() {
+            StoreError::LocalPackDamaged { pack, reason } if pack.is_empty() => {
+                self.index_error(reason)
+            }
+            StoreError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                self.index_error("file ends early")
+            }
+            other => self.context(other),
+        }
+    }
+
+    /// Name this pair in an error from reading it. A check that failed, or a
+    /// file that ended early, is damage. A failed read stays a failed read.
+    ///
+    /// A version this kit does not read is damage too, unless both files
+    /// carry the same one: only a newer kit writes that.
+    pub(super) fn context(&self, error: impl Into<StoreError>) -> StoreError {
+        match error.into() {
+            StoreError::IncompatibleRepoFormat { found } => match self.check_versions() {
+                Err(newer) => newer,
+                Ok(()) => self.version_damage(found),
             },
+            StoreError::LocalPackDamaged { pack, reason } if pack.is_empty() => self.error(reason),
+            damaged @ StoreError::LocalPackDamaged { .. } => damaged,
+            StoreError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                self.error("file ends early")
+            }
+            io @ StoreError::Io(_) => io,
             other => self.error(other),
         }
     }
 
-    pub(super) fn check_versions(&self) -> StoreResult<()> {
-        for (path, magic, kind) in [
-            (&self.pack, *MAGIC, "local pack"),
-            (&self.index, *MAGIC_INDEX, "local index"),
-        ] {
-            if let Err(error @ StoreError::IncompatibleRepoFormat { .. }) = open_regular(path)
-                .map_err(StoreError::from)
-                .and_then(|mut file| read_version::<8>(&mut file, magic, kind))
-            {
-                return Err(self.context(error));
+    /// The file whose version differs from the other file's, as damage.
+    fn version_damage(&self, found: Option<String>) -> StoreError {
+        let [pack, index] = self.versions();
+        let reason = |kind: &str, version: u32, other: Option<u32>| {
+            if other.is_some() {
+                format!("{kind} version {version} does not match the other file of the pair")
+            } else {
+                format!("{kind} version {version} is not one this kit reads")
             }
+        };
+        match (pack, index) {
+            (_, Some(version)) if version != 1 => {
+                self.index_error(reason("local index", version, pack))
+            }
+            (Some(version), _) if version != 1 => self.error(reason("local pack", version, index)),
+            _ => self.error(found.unwrap_or_else(|| "unknown version".to_owned())),
+        }
+    }
+
+    /// The shards whose ids this pair can hold, for an index that is cut or
+    /// padded: its fanout is read once it agrees with the pack's count, and
+    /// its length is what is wrong. Any other failure, such as ids that leave
+    /// their bucket, leaves the fanout untrusted.
+    pub(super) fn shards(&self) -> Option<Box<[bool; 256]>> {
+        let mut head = [0; FANOUT_END];
+        let mut index = open_regular(&self.index).ok()?;
+        let index_len = index.metadata().ok()?.len();
+        index.read_exact(&mut head).ok()?;
+        let mut pack = open_regular(&self.pack).ok()?;
+        let len = pack.metadata().ok()?.len();
+        let (count, _, _) = read_header_sized(&mut pack, len).ok()?;
+        if head[..4] != *MAGIC_INDEX || le_u32(&head[8..12]) as usize != count {
+            return None;
+        }
+        validate_fanout_bounds(&head[12..], count).ok()?;
+        if index_len == (INDEX_BASE_LEN + INDEX_ROW_LEN * count) as u64 {
+            return None;
+        }
+        let mut shards = Box::new([false; 256]);
+        let mut before = 0;
+        for (shard, end) in head[12..].chunks_exact(4).map(le_u32).enumerate() {
+            shards[shard] = end > before;
+            before = end;
+        }
+        Some(shards)
+    }
+
+    /// The version field of the pack and of the index, where a file with the
+    /// right magic can be read.
+    fn versions(&self) -> [Option<u32>; 2] {
+        fn version(path: &Path, magic: [u8; 4]) -> Option<u32> {
+            let mut head = [0; 8];
+            open_regular(path).ok()?.read_exact(&mut head).ok()?;
+            (head[..4] == magic).then(|| le_u32(&head[4..]))
+        }
+        [
+            version(&self.pack, *MAGIC),
+            version(&self.index, *MAGIC_INDEX),
+        ]
+    }
+
+    /// Fails when both files carry the same version this kit does not read:
+    /// a newer kit wrote the pair, and this kit must not touch it. One file
+    /// that differs from the other is damage, not a newer format.
+    pub(super) fn check_versions(&self) -> StoreResult<()> {
+        if let [Some(pack), Some(index)] = self.versions()
+            && pack == index
+            && pack != 1
+        {
+            return Err(StoreError::IncompatibleRepoFormat {
+                found: Some(format!(
+                    "local pack and index version {pack} in {}",
+                    self.pack.display()
+                )),
+            });
         }
         Ok(())
     }
@@ -94,19 +194,21 @@ pub(in crate::store) struct Index {
     bytes: Vec<u8>,
     count: usize,
     trailer: u64,
-    stamp: Option<IndexStamp>,
+    stamp: Option<Stamp>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct IndexStamp {
+pub(super) struct Stamp {
     modified: std::time::SystemTime,
     len: u64,
     #[cfg(unix)]
     identity: (u64, u64),
+    #[cfg(unix)]
+    changed: (i64, i64),
 }
 
-impl IndexStamp {
-    fn get(metadata: &fs::Metadata) -> io::Result<Self> {
+impl Stamp {
+    pub(super) fn get(metadata: &fs::Metadata) -> io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
 
@@ -115,7 +217,36 @@ impl IndexStamp {
             len: metadata.len(),
             #[cfg(unix)]
             identity: (metadata.dev(), metadata.ino()),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
+    }
+
+    pub(super) fn settled(&self) -> bool {
+        #[cfg(unix)]
+        {
+            use std::time::{Duration, SystemTime};
+            let (seconds, nanos) = self.changed;
+            let Ok(seconds) = u64::try_from(seconds) else {
+                return false;
+            };
+            let Ok(nanos) = u32::try_from(nanos) else {
+                return false;
+            };
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::new(seconds, nanos))
+                .and_then(|changed| changed.elapsed().ok())
+                .is_some_and(|age| age >= Duration::from_secs(1))
+        }
+        #[cfg(not(unix))]
+        false
+    }
+
+    pub(super) fn same_file(&self, other: &Self) -> bool {
+        #[cfg(unix)]
+        return self.identity == other.identity && self.len == other.len;
+        #[cfg(not(unix))]
+        return self == other;
     }
 }
 
@@ -126,32 +257,32 @@ impl Index {
             if !matches!(error, StoreError::IncompatibleRepoFormat { .. }) {
                 pair.check_versions()?;
             }
-            Err(pair.context(error))
+            Err(pair.index_context(error))
         })
     }
 
     fn load(pair: &Pair) -> StoreResult<Self> {
         let mut pack = open_regular(&pair.pack)?;
-        let (count, trailer, _) = read_header(&mut pack)?;
+        let (count, trailer, _) = read_header(&mut pack).map_err(|e| pair.context(e))?;
         let mut file = open_regular(&pair.index)?;
         let prefix = read_version::<8>(&mut file, *MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;
         let metadata = file.metadata()?;
         if metadata.len() != size as u64 {
-            return Err(invalid("index length does not match frame count").into());
+            return Err(invalid("index length does not match frame count"));
         }
         let mut bytes = vec![0; size];
         bytes[..prefix.len()].copy_from_slice(&prefix);
         file.read_exact(&mut bytes[prefix.len()..])?;
         if file.read(&mut [0])? != 0 {
-            return Err(invalid("trailing index bytes").into());
+            return Err(invalid("trailing index bytes"));
         }
         let mut index = Self::decode(pair.clone(), bytes, count, trailer)?;
-        index.stamp = IndexStamp::get(&metadata).ok();
+        index.stamp = Stamp::get(&metadata).ok();
         Ok(index)
     }
 
-    fn decode(pair: Pair, bytes: Vec<u8>, count: usize, trailer: u64) -> io::Result<Self> {
+    fn decode(pair: Pair, bytes: Vec<u8>, count: usize, trailer: u64) -> StoreResult<Self> {
         if !frame_count_is_supported(count) || bytes.len() != INDEX_BASE_LEN + INDEX_ROW_LEN * count
         {
             return Err(invalid("index length does not match frame count"));
@@ -167,22 +298,7 @@ impl Index {
         Ok(index)
     }
 
-    pub(super) fn byte_len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub(super) fn unchanged(&self) -> bool {
-        if let Some(stamp) = &self.stamp
-            && let Ok(metadata) = fs::symlink_metadata(&self.pair.index)
-            && metadata.is_file()
-            && let Ok(current) = IndexStamp::get(&metadata)
-        {
-            return current == *stamp;
-        }
-        false
-    }
-
-    fn validate(&self) -> io::Result<()> {
+    fn validate(&self) -> StoreResult<()> {
         let bytes = &self.bytes;
         if &bytes[..4] != MAGIC_INDEX || le_u32(&bytes[4..8]) != 1 {
             return Err(invalid("invalid index magic or version"));
@@ -198,6 +314,7 @@ impl Index {
         if blake3::hash(&bytes[..checksum_at]).as_bytes() != &bytes[checksum_at..] {
             return Err(invalid("index checksum mismatch"));
         }
+        validate_fanout_bounds(&bytes[12..FANOUT_END], self.count)?;
         if (1..self.count).any(|i| self.id(i - 1) >= self.id(i)) {
             return Err(invalid("index ids must be strictly increasing"));
         }
@@ -260,10 +377,17 @@ impl Index {
         }
     }
 
-    pub(super) fn ids(&self, shard: Option<u8>) -> impl Iterator<Item = Hash> + '_ {
-        shard
-            .map_or(0..self.count, |byte| self.bucket(byte))
-            .map(|i| *self.id(i))
+    pub(super) fn entries(&self) -> impl Iterator<Item = (Hash, Frame)> + '_ {
+        (0..self.count).map(|i| (*self.id(i), self.frame(i)))
+    }
+
+    /// The rows whose id starts with `shard`, in id order.
+    pub(super) fn bucket_entries(&self, shard: u8) -> impl Iterator<Item = (Hash, Frame)> + '_ {
+        self.bucket(shard).map(|i| (*self.id(i), self.frame(i)))
+    }
+
+    pub(super) fn ids(&self) -> impl Iterator<Item = Hash> + '_ {
+        (0..self.count).map(|i| *self.id(i))
     }
 
     pub(super) fn find(&self, id: &Hash) -> Option<Frame> {
@@ -283,12 +407,12 @@ impl Index {
     pub(super) fn check_index_version(&self) -> StoreResult<()> {
         let metadata = fs::symlink_metadata(&self.pair.index)?;
         if !metadata.is_file() {
-            return Err(self.pair.error("index is not a regular file"));
+            return Err(self.pair.index_error("index is not a regular file"));
         }
-        if self.stamp.is_none() || IndexStamp::get(&metadata).ok() != self.stamp {
+        if self.stamp.is_none() || Stamp::get(&metadata).ok() != self.stamp {
             let mut file = open_regular(&self.pair.index)?;
             read_version::<8>(&mut file, *MAGIC_INDEX, "local index")
-                .map_err(|e| self.pair.context(e))?;
+                .map_err(|e| self.pair.index_context(e))?;
         }
         Ok(())
     }
@@ -303,7 +427,7 @@ impl Index {
             .extent(trailer)
             .ok_or_else(|| self.pair.error("invalid frame extent"))?;
         file.seek(SeekFrom::Start(start))?;
-        let len = read_frame_header(&mut file).map_err(|e| self.pair.error(e))?;
+        let len = read_frame_header(&mut file).map_err(|e| self.pair.context(e))?;
         if len != frame.len {
             return Err(self.pair.error("index and pack disagree on frame length"));
         }
@@ -319,18 +443,18 @@ impl Index {
     }
 }
 
-pub(super) fn open_regular(path: &Path) -> io::Result<File> {
+pub(super) fn open_regular(path: &Path) -> StoreResult<File> {
     if !fs::symlink_metadata(path)?.is_file() {
-        return Err(invalid("expected a regular file"));
+        return Err(invalid_at(path, "expected a regular file"));
     }
     let file = File::open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(invalid("expected a regular file"));
+        return Err(invalid_at(path, "expected a regular file"));
     }
     Ok(file)
 }
 
-fn read_version<const N: usize>(
+pub(super) fn read_version<const N: usize>(
     reader: &mut impl Read,
     magic: [u8; 4],
     kind: &str,
@@ -338,10 +462,10 @@ fn read_version<const N: usize>(
     let mut header = [0; N];
     let read = read_header_prefix(reader, &mut header)?;
     if read < 8 {
-        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        return Err(invalid(format_args!("{kind} header ends early")));
     }
     if header[..4] != magic {
-        return Err(invalid(format!("invalid {kind} magic")).into());
+        return Err(invalid(format!("invalid {kind} magic")));
     }
     let version = le_u32(&header[4..8]);
     if version != 1 {
@@ -350,7 +474,7 @@ fn read_version<const N: usize>(
         });
     }
     if read != N {
-        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+        return Err(invalid(format_args!("{kind} header ends early")));
     }
     Ok(header)
 }
@@ -359,41 +483,95 @@ fn frame_count_is_supported(count: usize) -> bool {
     count <= MAX_ENTRIES as usize
 }
 
-fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+pub(super) fn read_header(file: &mut File) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
+    let len = file.metadata()?.len();
+    read_header_sized(file, len)
+}
+
+/// Read a pack header from a file whose length the caller already knows.
+pub(super) fn read_header_sized(
+    file: &mut File,
+    len: u64,
+) -> StoreResult<(usize, u64, [u8; HEADER_LEN])> {
     let header = read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
     let count = le_u32(&header[8..12]);
     if !frame_count_is_supported(count as usize) {
-        return Err(invalid("local pack frame count exceeds the limit").into());
+        return Err(invalid("local pack frame count exceeds the limit"));
     }
-    let trailer = file
-        .metadata()?
-        .len()
+    let trailer = len
         .checked_sub(TRAILER_LEN as u64)
         .ok_or_else(|| invalid("local pack has no trailer"))?;
     let frames = u64::from(count) * FRAME_LEN;
     if trailer < HEADER_LEN as u64 + frames
         || trailer > HEADER_LEN as u64 + frames + MAX_TOTAL_PAYLOAD
     {
-        return Err(invalid("local pack size disagrees with frame count or payload limit").into());
+        return Err(invalid(
+            "local pack size disagrees with frame count or payload limit",
+        ));
     }
     Ok((count as usize, trailer, header))
 }
 
-fn read_frame_header(reader: &mut impl Read) -> io::Result<u32> {
+pub(super) fn read_frame_header(reader: &mut impl Read) -> StoreResult<u32> {
     let mut header = [0; ENTRY_FRAME_LEN];
     reader.read_exact(&mut header)?;
+    parse_frame_header(&header)
+}
+
+/// The length a raw frame's header gives, if its reserved byte is 0.
+pub(super) fn parse_frame_header(header: &[u8]) -> StoreResult<u32> {
     if header[0] != 0 {
         return Err(invalid("local pack frame is not raw"));
     }
     Ok(le_u32(&header[1..]))
 }
 
-fn le_u32(bytes: &[u8]) -> u32 {
+pub(super) fn validate_fanout_bounds(fanout: &[u8], count: usize) -> StoreResult<()> {
+    let mut prev = 0;
+    for bucket in fanout.chunks_exact(4) {
+        let end = le_u32(bucket) as usize;
+        if end < prev || end > count {
+            return Err(invalid("invalid index fanout"));
+        }
+        prev = end;
+    }
+    if prev != count {
+        return Err(invalid("index fanout does not reach frame count"));
+    }
+    Ok(())
+}
+
+pub(super) fn le_u32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().expect("u32 width"))
 }
 
-pub(super) fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+/// Damage found before the pair is known. [`Pair::context`] names the pack.
+pub(in crate::store) fn invalid(reason: impl std::fmt::Display) -> StoreError {
+    StoreError::LocalPackDamaged {
+        pack: Box::default(),
+        reason: reason.to_string().into(),
+    }
+}
+
+/// Name `path` in damage that does not carry a pack yet.
+pub(in crate::store) fn named(path: &Path, error: StoreError) -> StoreError {
+    match error {
+        StoreError::LocalPackDamaged { pack, reason } if pack.is_empty() => {
+            invalid_at(path, reason)
+        }
+        StoreError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            invalid_at(path, "file ends early")
+        }
+        other => other,
+    }
+}
+
+/// Damage in the file at `path`.
+pub(in crate::store) fn invalid_at(path: &Path, reason: impl std::fmt::Display) -> StoreError {
+    StoreError::LocalPackDamaged {
+        pack: path.display().to_string().into(),
+        reason: reason.to_string().into(),
+    }
 }
 
 pub(in crate::store) fn canonical_id(bytes: &[u8]) -> StoreResult<Hash> {
@@ -405,12 +583,22 @@ pub(in crate::store) fn canonical_id(bytes: &[u8]) -> StoreResult<Hash> {
     }
     let object = serialize::deserialize(bytes)?;
     if matches!(object, Object::Delta(_)) {
-        return Err(invalid("delta object in local pack").into());
+        return Err(invalid("delta object in local pack"));
     }
     Ok(id_from_object(&object, bytes))
 }
 
+/// The reference the writer's recorded rows must equal, in tests.
+#[cfg(test)]
 pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
+    scan_checked(pack, &|| Ok(()))
+}
+
+pub(super) fn scan_checked(
+    pack: &mut File,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
+    checkpoint()?;
     pack.rewind()?;
     let (count, trailer, header) = read_header(pack)?;
     let mut digest = blake3::Hasher::new();
@@ -418,6 +606,7 @@ pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
     let mut rows = Vec::with_capacity(count);
     let mut next = HEADER_LEN as u64;
     for _ in 0..count {
+        checkpoint()?;
         let len = read_frame_header(pack)?;
         let frame = Frame {
             offset: next + FRAME_LEN,
@@ -437,12 +626,12 @@ pub(super) fn scan(pack: &mut File) -> StoreResult<(Hash, Vec<(Hash, Frame)>)> {
     let mut expected = [0; TRAILER_LEN];
     pack.read_exact(&mut expected)?;
     if next != trailer || digest.finalize().as_bytes() != &expected || pack.read(&mut [0])? != 0 {
-        return Err(invalid("invalid pack trailer").into());
+        return Err(invalid("invalid pack trailer"));
     }
     digest.update(&expected);
     rows.sort_unstable_by_key(|(id, _)| *id);
     if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err(invalid("duplicate id in local pack").into());
+        return Err(invalid("duplicate id in local pack"));
     }
     Ok((*digest.finalize().as_bytes(), rows))
 }
@@ -506,9 +695,7 @@ mod tests {
     use crate::object::KitError;
     use crate::serialize;
     use crate::store::StoreError;
-    use crate::store::local_pack::LocalPacks;
     use std::path::Path;
-    use std::sync::Arc;
 
     #[test]
     fn packed_blob_identity_rejects_a_short_object_header() {
@@ -536,50 +723,6 @@ mod tests {
             super::canonical_id(&bytes),
             Err(StoreError::Decode(KitError::TrailingData))
         ));
-    }
-
-    #[test]
-    fn cache_evicts_the_oldest_index_at_its_byte_and_entry_limits() {
-        fn index(tag: u8, size: usize) -> Arc<Index> {
-            Arc::new(Index {
-                pair: Pair::new(Path::new(""), [tag; 32]),
-                bytes: vec![0; size],
-                count: 0,
-                trailer: 0,
-                stamp: None,
-            })
-        }
-
-        let cache = LocalPacks::new(true);
-        let mib = 1024 * 1024;
-        for tag in 1..=4 {
-            cache.remember(index(tag, 16 * mib));
-        }
-        assert_eq!(cache.known.lock().unwrap().len(), 4);
-        cache.remember(index(5, 32 * mib));
-        cache.remember(index(6, 64 * mib + 1));
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 3);
-            assert_eq!(known[0].pair.key, [5; 32]);
-            assert_eq!(known[1].pair.key, [4; 32]);
-            assert_eq!(known[2].pair.key, [3; 32]);
-        }
-        cache.forget(&[5; 32]);
-        {
-            let known = cache.known.lock().unwrap();
-            assert_eq!(known.len(), 2);
-            assert_eq!(known[0].pair.key, [4; 32]);
-            assert_eq!(known[1].pair.key, [3; 32]);
-        }
-
-        let cache = LocalPacks::new(true);
-        for tag in 0..65 {
-            cache.remember(index(tag, 1_100));
-        }
-        let known = cache.known.lock().unwrap();
-        assert_eq!(known.len(), 64);
-        assert_eq!(known.last().unwrap().pair.key, [1; 32]);
     }
 
     #[test]
@@ -727,5 +870,63 @@ mod tests {
         assert!(read(&mut file, 2, frames).is_ok());
         assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD).is_ok());
         assert!(read(&mut file, 2, frames + MAX_TOTAL_PAYLOAD + 1).is_err());
+    }
+}
+
+#[cfg(test)]
+mod reader_bounds_tests {
+    #[cfg(unix)]
+    use super::Stamp;
+    use super::{FANOUT_END, validate_fanout_bounds};
+
+    #[test]
+    fn locator_fanout_stays_monotonic_and_ends_at_the_row_count() {
+        let check = |buckets: &[u32], count| {
+            let mut bytes = [0; FANOUT_END - 12];
+            for (i, bucket) in bytes.chunks_exact_mut(4).enumerate() {
+                bucket.copy_from_slice(&buckets[i.min(buckets.len() - 1)].to_le_bytes());
+            }
+            validate_fanout_bounds(&bytes, count)
+        };
+        assert!(check(&[0], 0).is_ok());
+        assert!(check(&[0, 1, 1, 2], 2).is_ok());
+        assert!(check(&[0, 1, 0, 2], 2).is_err());
+        assert!(check(&[0, 3, 2], 2).is_err());
+        assert!(check(&[0, 1], 2).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_identity_distinguishes_inode_and_length_but_allows_timestamp_changes() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let first = Stamp::get(&file.metadata().unwrap()).unwrap();
+        file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        let touched = Stamp::get(&file.metadata().unwrap()).unwrap();
+        assert_ne!(first, touched);
+        assert!(first.same_file(&touched));
+        file.set_len(1).unwrap();
+        assert!(!first.same_file(&Stamp::get(&file.metadata().unwrap()).unwrap()));
+        let other = tempfile::tempfile().unwrap();
+        assert!(!first.same_file(&Stamp::get(&other.metadata().unwrap()).unwrap()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_past_directory_stamp_can_settle() {
+        use std::time::{Duration, SystemTime};
+
+        let file = tempfile::tempfile().unwrap();
+        let mut stamp = Stamp::get(&file.metadata().unwrap()).unwrap();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let future = now + Duration::from_secs(15);
+        stamp.changed = (i64::try_from(future.as_secs()).unwrap(), 0);
+        assert!(!stamp.settled());
+        stamp.changed = (i64::try_from(now.as_secs() - 15).unwrap(), 0);
+        assert!(stamp.settled());
     }
 }

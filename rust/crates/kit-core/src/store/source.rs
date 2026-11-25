@@ -17,8 +17,10 @@ use crate::hash::Hash;
 use crate::object::{Object, object_id_from_parts};
 use crate::serialize;
 
+use super::local_pack::Currency;
 use super::{
-    ChunkOrigin, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, StoreError, StoreResult, check_hash,
+    ChunkOrigin, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore, PruneGuard, StoreError, StoreResult,
+    check_hash,
 };
 
 /// Read source shared by [`ObjectStore`] and snapshot overlays, so
@@ -83,6 +85,98 @@ impl ObjectSource for ObjectStore {
     /// double decode the inherent method was written to avoid.
     fn read_object(&self, h: &Hash) -> StoreResult<Object> {
         ObjectStore::read_object(self, h)
+    }
+}
+
+/// Extensions for the closure walker, whose durable source can read only
+/// the prologue of a leaf. An overlay can prove the same facts from its bytes.
+#[doc(hidden)]
+pub trait ClosureSource: ObjectSource + Sync {
+    /// Read the object's type. The durable store can inspect only its header.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        Ok(self.read_object(h)?.object_type())
+    }
+
+    /// Read the object's type and the content length of a blob.
+    ///
+    /// # Errors
+    /// The errors of `read_object`.
+    #[doc(hidden)]
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        let object = self.read_object(h)?;
+        let len = match &object {
+            Object::Blob(blob) => Some(blob.data.len() as u64),
+            _ => None,
+        };
+        Ok((object.object_type(), len))
+    }
+}
+impl ClosureSource for ObjectStore {
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        ObjectStore::object_type(self, h)
+    }
+
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        ObjectStore::object_head(self, h)
+    }
+}
+
+/// The durable store, read by a walk that holds a [`PruneGuard`].
+///
+/// The guard keeps gc, index repair and every other unlink of a pack, an
+/// index or a loose object from running, so a pair that a read found current
+/// stays so for the rest of the walk. The view checks each pair once and not
+/// at every read. A pair that fails a read is checked again at its next one,
+/// and a catalog refreshed in the middle of the walk gives new pairs, which
+/// are checked on their own first read.
+///
+/// Build the view before the walk's first read and keep the guard until the
+/// walk ends.
+#[derive(Debug)]
+pub struct GuardedStore<'a> {
+    store: &'a ObjectStore,
+    currency: Currency,
+}
+
+impl ObjectStore {
+    /// A view of this store for a walk that holds `guard`.
+    ///
+    /// # Errors
+    /// The guard belongs to a different store.
+    pub fn guarded<'a>(&'a self, guard: &'a PruneGuard) -> StoreResult<GuardedStore<'a>> {
+        self.check_prune_guard(guard)?;
+        Ok(GuardedStore {
+            store: self,
+            currency: Currency::default(),
+        })
+    }
+}
+
+impl ObjectSource for GuardedStore<'_> {
+    fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.store.read_in(h, Some(&self.currency))
+    }
+
+    fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
+        self.store.read_unverified_in(h, Some(&self.currency))
+    }
+
+    fn read_object(&self, h: &Hash) -> StoreResult<Object> {
+        self.store.read_object_in(h, Some(&self.currency))
+    }
+}
+
+impl ClosureSource for GuardedStore<'_> {
+    fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.store.object_type_in(h, Some(&self.currency))
+    }
+
+    fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        self.store.object_head_in(h, Some(&self.currency))
     }
 }
 
@@ -471,10 +565,52 @@ mod tests {
     use std::io::{self, Seek, Write};
     use tempfile::TempDir;
 
+    impl ClosureSource for crate::store::MemorySource {}
+
     fn fresh_store() -> (TempDir, ObjectStore) {
         let dir = TempDir::new().expect("tempdir");
         let store = ObjectStore::init(&RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    #[test]
+    fn closure_source_reads_blob_lengths_and_non_blob_types() {
+        use crate::object::{Blob, ObjectType, Tree};
+        use crate::store::MemorySource;
+
+        let mut source = MemorySource::default();
+        for (object, kind, length) in [
+            (
+                Object::Blob(Blob {
+                    data: b"contents".to_vec(),
+                }),
+                ObjectType::Blob,
+                Some(8),
+            ),
+            (
+                Object::Tree(Tree {
+                    entries: Vec::new(),
+                }),
+                ObjectType::Tree,
+                None,
+            ),
+        ] {
+            let id = object.id().unwrap();
+            source
+                .insert(id, serialize::serialize(&object).unwrap())
+                .unwrap();
+            assert_eq!(source.object_type(&id).unwrap(), kind);
+            assert_eq!(source.object_head(&id).unwrap(), (kind, length));
+        }
+        let missing = crate::hash::hash(b"missing");
+        assert!(matches!(
+            source.object_type(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+        assert!(matches!(
+            source.object_head(&missing),
+            Err(StoreError::ObjectNotFound(_))
+        ));
     }
 
     #[test]

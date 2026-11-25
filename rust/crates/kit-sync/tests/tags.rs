@@ -536,10 +536,10 @@ fn an_unsigned_annotated_tag_is_refused_when_signatures_are_required() {
     }
 }
 
-/// A refused tag's objects stay in the store. A tag the remote then points
-/// at them is refused too, and nothing is downloaded for it.
+/// A tag pointing at an unsigned commit already in the store is refused
+/// without downloading a pack.
 #[test]
-fn a_tag_repointed_at_objects_a_refused_fetch_left_is_refused_with_no_download() {
+fn a_tag_pointing_at_local_unsigned_objects_is_refused_with_no_download() {
     for kind in KINDS {
         let remote = Remote::new(kind);
         let (c1, main) = remote.grow("main", true);
@@ -549,7 +549,12 @@ fn a_tag_repointed_at_objects_a_refused_fetch_left_is_refused_with_no_download()
         let report = clone_from(&remote, &target);
         assert_eq!(report.tags_rejected.len(), 1, "{kind:?}");
         let store = ObjectStore::open(&RepoLayout::single(&target)).unwrap();
-        assert!(store.contains(&forged), "the refused objects stay");
+        assert!(!store.contains(&forged), "a refused pack stays private");
+        for object in objects {
+            store
+                .write(&kit_core::serialize::serialize(&object).unwrap())
+                .unwrap();
+        }
 
         remote.set("refs/kit/tagmap/t2", map);
         remote.set("refs/tags/t2", forged);
@@ -730,6 +735,7 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
             let ours = match step {
                 SyncStep::DirBarrier(dir) => dir.starts_with(&root),
                 SyncStep::DeviceFlush(at) => *at == root,
+                SyncStep::Writeout(_) | SyncStep::Flush(_) => false,
             };
             if ours {
                 let tag = local_tag(&target, "v2");
@@ -751,12 +757,13 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
         .iter()
         .filter_map(|(step, _)| match step {
             SyncStep::DirBarrier(dir) => Some(dir.clone()),
-            SyncStep::DeviceFlush(_) => None,
+            SyncStep::DeviceFlush(_) | SyncStep::Writeout(_) | SyncStep::Flush(_) => None,
         })
         .collect();
     assert!(shards.is_subset(&barriered), "{steps:?}");
-    // Chunks are checked but not listed, so every shard is flushed.
-    assert_eq!(barriered.len(), 256);
+    // The flush covers every loose shard and the pack directory.
+    assert!(barriered.contains(&root.join("pack")));
+    assert_eq!(barriered.len(), 257);
     assert!(
         steps[..=flush].iter().all(|(_, tag)| tag.is_none()),
         "the tag ref was written before the flush: {steps:?}"
@@ -928,11 +935,14 @@ fn a_deleted_and_collected_tag_is_restored_through_self_heal() {
         let (tag, v1) = remote.tag_object("v1", c1, true);
         remote.push_tag("v1", std::slice::from_ref(&tag), v1, Some(main));
         let (_dir, target) = work();
+        let layout = kit_sync::init_clone_dir(&target, &default_remote()).unwrap();
+        kit_core::fault::keep_loose(&layout);
         clone_from(&remote, &target);
         let layout = RepoLayout::single(&target);
         refs::delete_tag(&layout, "v1").unwrap();
         let store = ObjectStore::open(&layout).unwrap();
-        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false).unwrap();
+        kit_core::ops::gc::run_gc(&store, &layout, u64::MAX / 2, 0, false, &mut |_, _, _| {})
+            .unwrap();
         assert!(!store.contains(&v1), "gc removed the tag object");
 
         let report = fetch_from(&remote, &target);
@@ -1205,10 +1215,7 @@ fn a_failed_tag_listing_stops_only_the_tag_phase() {
     let report = clone_with(&failing, &target, &SyncOptions::default());
 
     let failure = report.tag_listing_failed.as_deref().unwrap();
-    assert!(
-        failure.starts_with("tag listing failed (possibly too many tags): "),
-        "{failure}"
-    );
+    assert!(failure.starts_with("tag listing failed: "), "{failure}");
     assert_eq!(
         refs::read_remote_ref(&RepoLayout::single(&target), "default", "main").unwrap(),
         Some(c1)

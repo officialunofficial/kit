@@ -1,11 +1,10 @@
 //! Fetching: reconstruct every remote branch from its packmap chain and
 //! publish remote-tracking refs.
 //!
-//! A fetch holds no repository lock while it downloads and applies packs.
-//! Each pack is downloaded, checked, unpacked and recorded as it arrives, in
-//! chain order, so `add`, `commit` and `checkout` run during a clone of any
-//! size. The lock a fetch takes is `worktree.lock`, and only around the
-//! tracking-ref write and the checkpoint.
+//! Fetch downloads and authenticates packs in chain order. It records
+//! completed packs as publication windows seal. Fetch takes the worktree
+//! lock only around the tracking-ref write and the checkpoint, so add,
+//! commit, and checkout can run during the transfer.
 //!
 //! What keeps gc away from the objects a fetch has written but not yet
 //! published is the [`kit_core::store::PruneGuard`] that [`fetch_objects`]
@@ -17,8 +16,9 @@
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
+use kit_core::object::ObjectType;
 use kit_core::refs;
-use kit_core::store::ObjectStore;
+use kit_core::store::{ClosureSource, ObjectStore, PruneGuard};
 
 use crate::applied_packs::AppliedPacks;
 use crate::checkpoint::{self, Checkpoint};
@@ -37,10 +37,35 @@ use crate::source::RemoteSource;
 use crate::tags::{StopSet, TagPhase, TagRejection, TagWarning};
 use crate::verify::{VerifiedHistory, verify_history_signatures};
 
+/// Download work a fetch did not repeat.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DownloadSavings {
+    /// Bytes an interrupted download did not fetch again, because the
+    /// transport asked the remote for the rest of the pack.
+    pub bytes_resumed: u64,
+    /// Interrupted downloads whose remote could not continue, so the pack
+    /// was read again from its start.
+    pub resumes_restarted: usize,
+    /// Bytes of verified packs that came from disk, kept after a failed
+    /// apply, instead of from the remote.
+    pub bytes_reused: u64,
+}
+
+impl DownloadSavings {
+    pub(crate) fn add(&mut self, other: &Self) {
+        self.bytes_resumed += other.bytes_resumed;
+        self.resumes_restarted += other.resumes_restarted;
+        self.bytes_reused += other.bytes_reused;
+    }
+}
+
 /// What a fetch did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FetchReport {
+    /// Best-effort maintenance after publishing the fetch.
+    pub maintenance: Option<crate::MaintenanceReport>,
     /// Branches whose remote-tracking ref was published.
     pub branches_fetched: usize,
     /// Envelopes saved after validating their pack and local subject.
@@ -65,6 +90,9 @@ pub struct FetchReport {
     pub packs_already_applied: usize,
     /// Objects written to the object store.
     pub objects_unpacked: usize,
+    /// Download work the fetch did not repeat after an interruption or a
+    /// failed apply.
+    pub savings: DownloadSavings,
     /// The remote's cursor equalled the one the last complete fetch saw,
     /// and the remote-tracking refs and local tags were as that fetch left
     /// them, so the fetch made no other request (SPEC-TRANSPORT §1.2).
@@ -155,6 +183,7 @@ pub(crate) struct Applied {
     pub(crate) packs_downloaded: usize,
     pub(crate) packs_skipped: usize,
     pub(crate) objects_unpacked: usize,
+    pub(crate) savings: DownloadSavings,
 }
 
 /// Step 2 of a branch fetch: download and unpack each pack of `resolved`
@@ -202,6 +231,8 @@ pub(crate) fn apply_and_verify_chain(
     applied: &mut AppliedPacks,
     require_signed: bool,
     anchors: &Anchors,
+    guard: &PruneGuard,
+    verified: &mut VerifiedHistory,
 ) -> Result<Applied, SyncError> {
     let ResolvedChain {
         mut chain,
@@ -220,15 +251,15 @@ pub(crate) fn apply_and_verify_chain(
         applied,
         require_signed,
         &mut done,
-    )
-    // Closure completeness. With skips this is the sole guarantee the store
-    // is whole.
-    .and_then(|()| verify_closure_above(store, observer, &tip, anchors));
+        guard,
+        |view| check_tip(view, observer, &tip, anchors, require_signed, verified),
+    );
     let skipped = done.skipped + prefix_packs;
     let stats = Applied {
         packs_downloaded: done.packs,
         packs_skipped: skipped,
         objects_unpacked: done.objects,
+        savings: done.savings,
     };
     let stale = match first {
         Ok(()) => return Ok(stats),
@@ -267,13 +298,63 @@ pub(crate) fn apply_and_verify_chain(
         applied,
         require_signed,
         &mut retry,
+        guard,
+        |view| {
+            check_tip(
+                view,
+                observer,
+                &tip,
+                &Anchors::default(),
+                require_signed,
+                verified,
+            )
+        },
     )?;
-    verify_closure_above(store, observer, &tip, &Anchors::default())?;
-    // The report covers the attempt that published.
+    // The report covers the attempt that published. Savings count both
+    // attempts: the first one's downloads, resumed or kept, are the reason the
+    // retry reads less.
+    let mut savings = stats.savings;
+    savings.add(&retry.savings);
     Ok(Applied {
         packs_downloaded: retry.packs,
         packs_skipped: retry.skipped,
         objects_unpacked: retry.objects,
+        savings,
+    })
+}
+
+fn check_tip(
+    view: &dyn ClosureSource,
+    observer: &dyn Observer<SyncEvent>,
+    tip: &Hash,
+    anchors: &Anchors,
+    require_signed: bool,
+    verified: &mut VerifiedHistory,
+) -> Result<(), SyncError> {
+    verify_closure_above(view, observer, tip, anchors)?;
+    if require_signed {
+        verify_history_signatures(view, observer, tip, verified)?;
+    }
+    Ok(())
+}
+
+/// Refuse to publish a tracking ref for a branch whose fetched tip is not a
+/// commit or a remix. The closure check and the signature walk treat a tree
+/// or a blob as a leaf and pass it, so a remote could otherwise make a tree
+/// the tip of `origin/main`, and the commands that read the branch later
+/// would fail on it one by one.
+fn ensure_commit_tip(store: &ObjectStore, branch: &str, tip: &Hash) -> Result<(), SyncError> {
+    let found = match store.object_type(tip)? {
+        ObjectType::Commit | ObjectType::Remix => return Ok(()),
+        ObjectType::Blob => "blob",
+        ObjectType::Tree => "tree",
+        ObjectType::ChunkedBlob => "chunked blob",
+        ObjectType::Delta => "delta",
+        ObjectType::Tag => "tag",
+    };
+    Err(SyncError::BranchTipNotCommit {
+        branch: branch.to_owned(),
+        found,
     })
 }
 
@@ -297,7 +378,7 @@ pub(crate) fn persist_record(
 /// Check presence down to `anchors`, or in full when there are
 /// none.
 fn verify_closure_above(
-    store: &ObjectStore,
+    store: &dyn ClosureSource,
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     anchors: &Anchors,
@@ -313,10 +394,11 @@ fn verify_closure_above(
         observer.cancelled()
     };
     if anchors.is_empty() {
-        let result = kit_core::ops::graph::check_closure_present_observed(store, tip, &|count| {
-            done.set(count);
-            poll();
-        });
+        let result =
+            kit_core::ops::graph::check_closure_present_observed_from(store, tip, &|count| {
+                done.set(count);
+                poll();
+            });
         observer.event(&SyncEvent::ClosureProgress { done: done.get() });
         return match result {
             Ok(false) => Ok(()),
@@ -432,11 +514,52 @@ pub(crate) fn fetch_objects(
     options: &SyncOptions,
     lock_wait: &LockWait,
 ) -> Result<FetchReport, SyncError> {
-    let _prune_guard = store.prune_guard()?;
+    // The cursor must predate the listing so a write the listing misses
+    // changes a later cursor.
+    let cursor = source
+        .repo_cursor()
+        .map_err(|error| source.repository_error(error))?;
+    let cursor_path = crate::cursor::path(layout, source, remote);
+    // A pruning fetch lists the remote even when its cursor is unchanged: a
+    // tracking ref can outlive its branch from an earlier fetch that did not
+    // prune.
+    if !options.prune
+        && let Some(cursor) = &cursor
+        && remote_unchanged(store, layout, source, &cursor_path, cursor, remote, options)?
+    {
+        return Ok(FetchReport {
+            remote_unchanged: true,
+            ..FetchReport::default()
+        });
+    }
+    // Take the attestation head before the branch listing so a later head
+    // cannot be mistaken for one covered by the ref snapshot.
+    let _ = std::fs::remove_file(&cursor_path);
+    let mut report = FetchReport::default();
+    let snapshot = crate::fetch_attestations::snapshot(source, options, &mut report);
+    let mut remote_refs = source
+        .list_branches()
+        .map_err(|error| source.repository_error(error))?;
+    if let Some(branch) = options.target_branch.as_deref()
+        && !remote_refs.iter().any(|r| r.name == branch)
+    {
+        // The listing may be stale (eventual): a strong read by name decides
+        // whether the branch exists. A transport error here propagates; only
+        // `Ok(None)` is the "no such branch" verdict.
+        match source.read_ref(&format!("refs/heads/{branch}"))? {
+            Some(hash) => remote_refs.push(refs::Ref {
+                name: branch.to_owned(),
+                hash: Some(hash),
+            }),
+            None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
+        }
+    }
+    // The activation try comes before this process takes its own shared guard,
+    // which would make it miss.
+    store.ensure_packed_once()?;
+    let guard = store.prune_guard()?;
     kit_core::pack::sweep_spool_dir(&store.spool_dir());
     let mut applied = AppliedPacks::load_or_empty(layout, remote, observer);
-    let mut report = FetchReport::default();
-    let mut verified = VerifiedHistory::default();
     let result = fetch_objects_inner(
         store,
         layout,
@@ -445,9 +568,13 @@ pub(crate) fn fetch_objects(
         remote,
         options,
         lock_wait,
+        &guard,
         &mut applied,
         &mut report,
-        &mut verified,
+        cursor,
+        &cursor_path,
+        remote_refs,
+        snapshot,
     );
     persist_record(&mut applied, observer, remote);
     result.map(|()| report)
@@ -462,53 +589,20 @@ fn fetch_objects_inner(
     remote: &str,
     options: &SyncOptions,
     lock_wait: &LockWait,
+    guard: &PruneGuard,
     applied: &mut AppliedPacks,
     report: &mut FetchReport,
-    verified: &mut VerifiedHistory,
+    cursor: Option<kit_core::protocol::RepoCursor>,
+    cursor_path: &std::path::Path,
+    remote_refs: Vec<refs::Ref>,
+    snapshot: crate::fetch_attestations::Snapshot,
 ) -> Result<(), SyncError> {
-    let target_branch = options.target_branch.as_deref();
     let require_signed = options.verify_signatures;
-    // The cursor is read before the listing, so a write the listing misses
-    // changes a later cursor.
-    let cursor = source
-        .repo_cursor()
-        .map_err(|error| source.repository_error(error))?;
-    let cursor_path = crate::cursor::path(layout, source, remote);
-    // A pruning fetch lists the remote even when its cursor is unchanged: a
-    // tracking ref can outlive its branch from an earlier fetch that did not
-    // prune.
-    if !options.prune
-        && let Some(cursor) = &cursor
-        && remote_unchanged(store, layout, source, &cursor_path, cursor, remote, options)?
-    {
-        report.remote_unchanged = true;
-        return Ok(());
-    }
-    // A failed full attempt must not leave a previous no-op proof usable.
-    let _ = std::fs::remove_file(&cursor_path);
-    // A cursor hit checks the tracked tips' anchors itself. Load the full
-    // set only when a history walk may need it, including other remotes.
-    if require_signed {
-        *verified = crate::anchor::load_all(layout);
-    }
-    let snapshot = crate::fetch_attestations::snapshot(source, options, report);
-    let mut remote_refs = source
-        .list_branches()
-        .map_err(|error| source.repository_error(error))?;
-    if let Some(branch) = target_branch
-        && !remote_refs.iter().any(|r| r.name == branch)
-    {
-        // The listing may be stale (eventual): a strong read by name decides
-        // whether the branch exists. A transport error here propagates; only
-        // `Ok(None)` is the "no such branch" verdict.
-        match source.read_ref(&format!("refs/heads/{branch}"))? {
-            Some(hash) => remote_refs.push(refs::Ref {
-                name: branch.to_owned(),
-                hash: Some(hash),
-            }),
-            None => return Err(SyncError::RemoteBranchMissing(branch.to_owned())),
-        }
-    }
+    let mut verified = if require_signed {
+        crate::anchor::load_all(layout)
+    } else {
+        VerifiedHistory::default()
+    };
     let listed: std::collections::HashSet<String> =
         remote_refs.iter().map(|r| r.name.clone()).collect();
     // Unidentified sources retain batched tracking writes. Checkpoints need
@@ -569,10 +663,8 @@ fn fetch_objects_inner(
                 nodes: resolved.nodes,
             };
 
-            // Step 2: download, unpack and record each pack as it arrives,
-            // then verify the closure. No repo lock is held. The prune guard
-            // that `fetch_objects` holds keeps gc from deleting the objects
-            // that no ref names yet.
+            // Apply the branch's chain, check the tip, and finish sealing
+            // its windows before taking the worktree lock.
             let (completed, applied_stats) = match apply_and_verify_chain(
                 store,
                 source,
@@ -584,6 +676,8 @@ fn fetch_objects_inner(
                 applied,
                 require_signed,
                 &anchors,
+                guard,
+                &mut verified,
             ) {
                 Ok(stats) => (completed, stats),
                 Err(e @ SyncError::RemoteMissingObject(_)) => {
@@ -616,22 +710,18 @@ fn fetch_objects_inner(
                         applied,
                         require_signed,
                         &anchors,
+                        guard,
+                        &mut verified,
                     )?;
                     (completed, stats)
                 }
                 Err(e) => return Err(e),
             };
 
-            // Step 3: the signatures checked so far cover only the packs this
-            // run applied. The tip can name history no such pack carried, for
-            // example objects a refused pack left in the store, so its
-            // history is checked here, whatever path it took into the store.
-            if require_signed {
-                verify_history_signatures(store, observer, &completed.tip, verified)?;
-            }
             stop.extend(keys);
+            ensure_commit_tip(store, &r.name, &completed.tip)?;
 
-            // Step 4: publish under a repo lock acquired fresh for this
+            // Publish under a worktree lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait
             // has a deadline only when `lock_wait` sets one: the work above
             // is done, and an interrupt ends it. The fetch holds only the shared lock of the prune
@@ -663,6 +753,7 @@ fn fetch_objects_inner(
             report.packs_downloaded += applied_stats.packs_downloaded;
             report.packs_already_applied += applied_stats.packs_skipped;
             report.objects_unpacked += applied_stats.objects_unpacked;
+            report.savings.add(&applied_stats.savings);
         }
         Ok(())
     })();
@@ -688,12 +779,12 @@ fn fetch_objects_inner(
             remote,
             require_signed,
             lock_wait,
+            guard,
             applied: &mut *applied,
-            verified: &mut *verified,
+            verified: &mut verified,
             stop,
             report: &mut *report,
             published: &mut matched_tags,
-            packs_since_refresh: 0,
         }
         .run()?;
     }
@@ -729,7 +820,7 @@ fn fetch_objects_inner(
                 attestations: options.attestations && source.supports_attestations(),
                 attestmap_head: snapshot.head(),
             };
-            let _ = record.persist(&cursor_path);
+            let _ = record.persist(cursor_path);
         }
     }
     Ok(())

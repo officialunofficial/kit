@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use crate::hash::{self, Hash};
 use crate::object::{EntryMode, Identity, Object};
+use crate::ops::graph::read_history_commit;
 use crate::store::ObjectStore;
 
 mod move_copy;
@@ -287,7 +288,8 @@ pub enum BlameError {
     #[error("reverse blame: '{start}' is not a first-parent ancestor of '{end}'")]
     ReverseRange { start: String, end: String },
     /// A loaded file or matcher input exceeded [`BLAME_MAX_LINES`].
-    /// Reassembly and splitting precede the check; attribution follows it.
+    /// Reassembly precedes the check, which counts newlines before the split;
+    /// attribution follows it.
     #[error("file has too many lines for blame ({lines} > {max})", max = BLAME_MAX_LINES)]
     FileTooLarge { lines: usize },
     /// A stored file is larger than
@@ -299,9 +301,9 @@ pub enum BlameError {
     Object(#[from] crate::object::KitError),
     #[error(transparent)]
     Store(#[from] crate::store::StoreError),
-    /// A commit of the ancestry walk of the copy tie-break cannot be read or
-    /// is not a commit, or that walk or the first-parent chain of a reverse
-    /// blame reached its cap. The error names the commit or the limit.
+    /// The reverse blame walk or the copy tie-break cannot read a commit,
+    /// finds another object type, or reaches its cap. The error names the
+    /// commit or the limit.
     #[error(transparent)]
     History(#[from] crate::ops::graph::AncestorError),
 }
@@ -445,9 +447,8 @@ impl From<&ReverseEntry> for Attribution {
 ///
 /// # Errors
 /// [`BlameError::ReverseRange`] if `start` is not reached on `end`'s
-/// first-parent chain. [`BlameError::History`] naming [`REVERSE_LIMIT`] if
-/// the walk would hold more than [`BLAME_MAX_REVERSE_COMMITS`] commits; it
-/// never returns part of the chain.
+/// first-parent chain. [`BlameError::History`] names the object that failed
+/// a commit read or [`REVERSE_LIMIT`] when the walk reaches its cap.
 fn collect_reverse_chain(
     store: &ObjectStore,
     start_hash: Hash,
@@ -482,9 +483,7 @@ fn collect_reverse_chain_with_cap(
                 ),
             ));
         }
-        let Object::Commit(commit) = store.read_object(&commit_hash)? else {
-            return Err(BlameError::NotACommit);
-        };
+        let commit = read_history_commit(store, commit_hash)?;
         let blob = find_blob_in_tree(store, commit.tree_hash, file_path)?;
         chain.push(ReverseEntry {
             commit_hash,
@@ -538,11 +537,10 @@ fn collect_reverse_chain_with_cap(
 /// - [`BlameError::ReverseRange`] if `<start>` is not a first-parent
 ///   ancestor of `<end>`.
 /// - [`BlameError::FileNotFound`] if `file_path` does not exist at `<start>`.
-/// - [`BlameError::NotACommit`] if either endpoint is not a commit.
 /// - [`BlameError::FileTooLarge`] if any blob on the chain exceeds
-///   [`BLAME_MAX_LINES`].
-/// - [`BlameError::History`] naming the limit if the first-parent walk from
-///   `<end>` holds more than [`BLAME_MAX_REVERSE_COMMITS`] commits.
+///   [`BLAME_MAX_LINES`] lines.
+/// - [`BlameError::History`] if the first-parent walk cannot read a commit,
+///   finds another object type, or exceeds [`BLAME_MAX_REVERSE_COMMITS`].
 pub fn blame_file_reverse(
     store: &ObjectStore,
     start_hash: Hash,
@@ -736,6 +734,8 @@ fn load_blob_lines(store: &ObjectStore, blob_hash: Hash) -> BlameOutcome<Vec<Vec
         }
         _ => return Err(BlameError::NotABlob),
     };
+    // Count the lines before the split allocates a `Vec` per line.
+    check_line_count(crate::ops::diff::newline_count(&data))?;
     let lines = split_lines(&data);
     check_line_count(lines.len())?;
     Ok(lines)
@@ -2585,6 +2585,35 @@ mod tests {
             matches!(err, BlameError::ReverseRange { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn reverse_blame_reports_the_bad_commit_in_its_chain() {
+        use crate::ops::graph::AncestorError;
+
+        let (_d, store) = fresh_store();
+        let path = "f.txt";
+        let start = put_file_commit(&store, path, b"a\n", vec![], 1, 100);
+        let missing = hash::hash(b"missing intermediate commit");
+        let blob = put_blob(&store, b"not a commit");
+        let blame_over = |parent| {
+            let end = put_file_commit(&store, path, b"a\nb\n", vec![parent], 2, 200);
+            blame_file_reverse(&store, start, end, path, &BlameOptions::default()).unwrap_err()
+        };
+        let unreadable = blame_over(missing);
+        assert!(
+            matches!(
+                &unreadable,
+                BlameError::History(AncestorError::Unreadable { hash, .. }) if *hash == missing
+            ),
+            "{unreadable:?}"
+        );
+        let wrong_kind = blame_over(blob);
+        assert!(
+            matches!(&wrong_kind, BlameError::History(AncestorError::NotACommit(hash)) if *hash == blob),
+            "{wrong_kind:?}"
+        );
+        assert!(wrong_kind.to_string().contains(&hash::to_hex(&blob)));
     }
 
     #[test]

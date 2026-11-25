@@ -1,39 +1,209 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::hash::{Hash, to_hex};
 
 use super::{ObjectStore, StoreError, StoreResult, format};
 
+mod copy;
+mod gc;
 mod index;
-pub(super) use index::canonical_id;
 #[cfg(feature = "fuzzing")]
 pub(super) use index::fuzz_index;
 use index::{Frame, Index, Pair, open_regular};
+pub(super) use index::{canonical_id, invalid_at, named};
 
+#[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
+mod guarded_tests;
+mod reader;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
 mod writer;
+#[cfg(test)]
+pub(crate) use copy::set_test_output_entries;
+pub(crate) use gc::{PackSweep, Verify};
+pub(crate) use reader::Currency;
+use reader::{
+    Handles, LAZY_PAIR_LIMIT, Locator, Member, ROUTE_CACHE_BYTES, ROW_CACHE_BYTES, Route, prefix,
+};
+pub use writer::LocalPackWriter;
+pub use writer::SealJob;
 
-const CACHE_BYTES: usize = 64 * 1024 * 1024;
-const CACHE_ENTRIES: usize = 64;
+/// Payload bytes at which a local pack is sealed and a new one begins.
+pub const PACK_SEAL_BYTES: usize = 64 << 20;
+
+/// Entries at which a local pack is sealed and a new one begins. A
+/// minimum-size blob is ten bytes, so the byte limit alone would allow more
+/// than six million tiny objects. This bounds the locators, batch paths and
+/// index workspace of one pack to the same entry count as the decoder's
+/// normal window.
+pub const PACK_SEAL_ENTRIES: usize = 1 << 16;
+
+/// Lookups that probe a pair's index file one at a time are cheaper than
+/// loading every row, until about this many pair probes. Then the catalog
+/// loads its rows.
+const LAZY_PROBE_BUDGET: usize = 2048;
+
+/// A pair that failed to open, and the shards its ids can be in.
+#[derive(Debug)]
+struct PairError {
+    error: StoreError,
+    /// Read from the pair's fanout. `None` when the fanout cannot be trusted:
+    /// the pair may then hold any shard.
+    shards: Option<Box<[bool; 256]>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Catalog {
+    /// Every pair that failed to open, in pair order.
+    errors: Vec<PairError>,
+    packs: Vec<Arc<Locator>>,
+    routes: Vec<Route>,
+    on_disk: Vec<usize>,
+    /// No pair loaded its rows: every lookup probes the index files.
+    lazy: bool,
+}
+
+impl Catalog {
+    fn from_packs(packs: Vec<Arc<Locator>>, errors: Vec<PairError>, lazy: bool) -> Self {
+        let on_disk = (0..packs.len())
+            .filter(|&number| packs[number].route_count() == 0)
+            .collect();
+        Self {
+            errors,
+            routes: sorted_routes(&packs),
+            packs,
+            on_disk,
+            lazy,
+        }
+    }
+
+    /// The error of a pair that failed to open and may hold `shard`.
+    fn error_for(&self, shard: u8) -> Option<StoreError> {
+        self.errors
+            .iter()
+            .find(|failed| {
+                failed
+                    .shards
+                    .as_ref()
+                    .is_none_or(|shards| shards[usize::from(shard)])
+            })
+            .map(|failed| replay(&failed.error))
+    }
+
+    pub(crate) fn may_contain(&self, id: &Hash) -> bool {
+        self.candidates(id).next().is_some()
+    }
+
+    fn candidates(&self, id: &Hash) -> impl Iterator<Item = (&Arc<Locator>, Option<usize>)> {
+        let prefix = prefix(id);
+        let start = self.routes.partition_point(|route| route.prefix < prefix);
+        self.routes[start..]
+            .iter()
+            .take_while(move |route| route.prefix == prefix)
+            .map(|route| (&self.packs[route.pack as usize], Some(route.row as usize)))
+            .chain(self.on_disk.iter().map(|&pack| (&self.packs[pack], None)))
+    }
+}
+
+/// The routes of every pair, in (prefix, pair) order. Distribute them by the
+/// leading bits of the prefix straight from the rows, which needs no copy and
+/// no comparison sort of the whole list, then order each small bucket.
+fn sorted_routes(packs: &[Arc<Locator>]) -> Vec<Route> {
+    let total: usize = packs.iter().map(|pack| pack.route_count()).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let bits = total.bit_width().clamp(1, 16);
+    let bucket = |prefix: u32| (prefix >> (32 - bits)) as usize;
+    let mut ends = vec![0_usize; (1 << bits) + 1];
+    for pack in packs {
+        for prefix in pack.prefixes() {
+            ends[bucket(prefix) + 1] += 1;
+        }
+    }
+    for at in 1..ends.len() {
+        ends[at] += ends[at - 1];
+    }
+    // `ends[b]` starts as the first slot of bucket `b` and finishes as its end.
+    let mut routes = vec![
+        Route {
+            prefix: 0,
+            pack: 0,
+            row: 0,
+        };
+        total
+    ];
+    for (number, locator) in packs.iter().enumerate() {
+        let pack = u32::try_from(number).expect("bounded pack number");
+        for (row, prefix) in locator.prefixes().enumerate() {
+            let slot = &mut ends[bucket(prefix)];
+            routes[*slot] = Route {
+                prefix,
+                pack,
+                row: u32::try_from(row).expect("bounded index row"),
+            };
+            *slot += 1;
+        }
+    }
+    let mut start = 0;
+    // The last entry is the total, so its bucket is empty.
+    for &end in &ends {
+        routes[start..end].sort_unstable_by_key(|route| (route.prefix, route.pack));
+        start = end;
+    }
+    routes
+}
+
+#[derive(Debug, Default)]
+struct Discovery {
+    catalog: Arc<Catalog>,
+    latest: Option<Arc<Locator>>,
+    dir: Option<index::Stamp>,
+    scanned: bool,
+    /// Set once, for the rest of the process: every pair loads its rows.
+    full: bool,
+    #[cfg(test)]
+    budgets: Option<(usize, usize)>,
+    #[cfg(test)]
+    retire_after_listing: Option<PathBuf>,
+}
 
 #[derive(Debug)]
 pub(super) struct LocalPacks {
     enabled: AtomicBool,
-    known: Mutex<Vec<Arc<Index>>>,
+    discovery: Mutex<Discovery>,
+    handles: Handles,
+    /// Pair probes made against index files by a catalog with no rows.
+    lazy_probes: AtomicUsize,
+    #[cfg(test)]
+    index_loads: std::sync::atomic::AtomicUsize,
 }
 
 impl LocalPacks {
     pub(super) fn new(enabled: bool) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
-            known: Mutex::new(Vec::new()),
+            discovery: Mutex::default(),
+            handles: Handles::default(),
+            lazy_probes: AtomicUsize::new(0),
+            #[cfg(test)]
+            index_loads: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn mark_enabled(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
     }
 
     fn refresh_enabled(&self, store: &ObjectStore) -> StoreResult<bool> {
@@ -47,39 +217,210 @@ impl LocalPacks {
         Ok(true)
     }
 
-    fn remember(&self, index: Arc<Index>) {
-        if index.byte_len() > CACHE_BYTES {
-            return;
-        }
-        let mut known = self.known.lock().expect("local pack cache mutex");
-        known.retain(|old| old.pair.key != index.pair.key);
-        let mut bytes = index.byte_len() + known.iter().map(|i| i.byte_len()).sum::<usize>();
-        while bytes > CACHE_BYTES || known.len() >= CACHE_ENTRIES {
-            bytes -= known.pop().expect("cache exceeds capacity").byte_len();
-        }
-        known.insert(0, index);
-    }
-
     fn forget(&self, key: &Hash) {
-        self.known
-            .lock()
-            .expect("local pack cache mutex")
-            .retain(|i| i.pair.key != *key);
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        discovery.scanned = false;
+        if discovery
+            .latest
+            .as_ref()
+            .is_some_and(|pack| pack.pair.key == *key)
+        {
+            discovery.latest = None;
+        }
+        self.handles.retain(|locator| locator.pair.key != *key);
     }
 
-    pub(super) fn collect(
-        &self,
-        store: &ObjectStore,
-        shard: Option<u8>,
-        out: &mut Vec<Hash>,
-    ) -> StoreResult<()> {
+    fn remember_publication(&self, pair: &Pair) {
+        // A writer frequently reads back the pair it just sealed. Keep
+        // its locator until discovery sees it without rebuilding on hits.
+        if let Ok(locator) = Locator::open(pair, 0, 0) {
+            let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+            discovery.latest = Some(Arc::new(locator));
+            discovery.scanned = false;
+        }
+    }
+
+    fn discover(&self, dir: &Path, force: bool) -> StoreResult<Arc<Catalog>> {
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        let stamp = match fs::symlink_metadata(dir) {
+            Ok(meta) if meta.is_dir() => Some(index::Stamp::get(&meta)?),
+            Ok(_) => return Err(index::invalid_at(dir, "not a directory")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        // A publication changes ctime even when mtime is restored. A
+        // recent ctime may share its filesystem tick with a later publish.
+        if !force && discovery.scanned && discovery.dir == stamp {
+            return Ok(Arc::clone(&discovery.catalog));
+        }
+        let settled = stamp.as_ref().is_none_or(index::Stamp::settled);
+        #[cfg(test)]
+        let retired = discovery.retire_after_listing.take();
+        let mut pairs = list_pairs(dir)?;
+        pairs.sort_unstable_by_key(|pair| pair.key);
+        let lazy = !discovery.full && pairs.len() <= LAZY_PAIR_LIMIT;
+        #[cfg(test)]
+        let lazy = lazy && discovery.budgets.is_none();
+        discovery.full |= !lazy;
+        // Locators that loaded no rows stay valid only in a lazy catalog.
+        let reuse = discovery.catalog.lazy == lazy;
+        let old: BTreeMap<_, _> = discovery
+            .catalog
+            .packs
+            .iter()
+            .filter(|_| reuse)
+            .map(|p| (p.pair.key, p))
+            .collect();
+        #[cfg(test)]
+        if let Some(pack) = retired {
+            fs::remove_file(pack)?;
+        }
+
+        let mut row_budget = ROW_CACHE_BYTES;
+        let mut route_budget = ROUTE_CACHE_BYTES;
+        #[cfg(test)]
+        if let Some((rows, routes)) = discovery.budgets {
+            row_budget = rows;
+            route_budget = routes;
+        }
+        if lazy {
+            row_budget = 0;
+            route_budget = 0;
+        }
+        for locator in pairs.iter().filter_map(|pair| old.get(&pair.key)) {
+            row_budget -= locator.row_charge();
+            route_budget -= locator.route_charge();
+        }
+        let mut packs = Vec::with_capacity(pairs.len());
+        let mut errors = Vec::new();
+        for pair in pairs {
+            let retained = old.get(&pair.key);
+            let locator = if let Some(locator) = retained.filter(|p| p.check_current().is_ok()) {
+                Arc::clone(locator)
+            } else {
+                if let Some(locator) = retained {
+                    row_budget += locator.row_charge();
+                    route_budget += locator.route_charge();
+                }
+                #[cfg(test)]
+                self.index_loads.fetch_add(1, Ordering::Relaxed);
+                match Locator::open(&pair, row_budget, route_budget) {
+                    Ok(locator) => {
+                        row_budget -= locator.row_charge();
+                        route_budget -= locator.route_charge();
+                        Arc::new(locator)
+                    }
+                    Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
+                    Err(e) if is_disappeared(&e) => continue,
+                    Err(e) => {
+                        errors.push(PairError {
+                            shards: pair.shards(),
+                            error: e,
+                        });
+                        continue;
+                    }
+                }
+            };
+            packs.push(locator);
+        }
+        discovery.scanned = settled;
+        discovery.dir = stamp;
+        if packs.len() == discovery.catalog.packs.len()
+            && packs
+                .iter()
+                .zip(&discovery.catalog.packs)
+                .all(|(new, old)| Arc::ptr_eq(new, old))
+            && errors.is_empty()
+            && discovery.catalog.errors.is_empty()
+        {
+            return Ok(Arc::clone(&discovery.catalog));
+        }
+        self.handles.retain(|locator| {
+            packs
+                .binary_search_by_key(&locator.pair.key, |p| p.pair.key)
+                .is_ok_and(|i| Arc::ptr_eq(&packs[i], locator))
+        });
+        discovery.latest = None;
+        discovery.catalog = Arc::new(Catalog::from_packs(packs, errors, lazy));
+        Ok(Arc::clone(&discovery.catalog))
+    }
+
+    // Freeze the set of candidates for one local write session. A later
+    // reader can discover more packs without changing that session's view.
+    // A write session asks about every object it adds, so it needs the routes.
+    pub(super) fn write_catalog(&self, store: &ObjectStore) -> StoreResult<Arc<Catalog>> {
+        self.promote();
+        self.discover(&store.pack_dir(), false)
+    }
+
+    /// Load every pair's rows from the next discovery on.
+    fn promote(&self) {
+        let mut discovery = self.discovery.lock().expect("local pack catalog mutex");
+        if !discovery.full {
+            discovery.full = true;
+            discovery.scanned = false;
+        }
+    }
+
+    // Probing index files is cheaper than loading rows for a few lookups.
+    // Past the probe budget, loading the rows is cheaper.
+    fn promote_when_spent(&self, store: &ObjectStore) {
+        if self.lazy_probes.load(Ordering::Relaxed) >= LAZY_PROBE_BUDGET
+            && self.lazy_probes.swap(0, Ordering::Relaxed) >= LAZY_PROBE_BUDGET
+        {
+            self.promote();
+            // A failure here belongs to the refresh after a miss, which
+            // reports it in the usual order.
+            let _ = self.discover(&store.pack_dir(), false);
+        }
+    }
+
+    pub(super) fn has_packed_size(&self, catalog: &Catalog, id: &Hash, size: u64) -> bool {
+        self.try_catalog(
+            catalog,
+            id,
+            None,
+            None,
+            &mut LookupErrors::default(),
+            &mut |location| {
+                if location.size()? == size {
+                    Ok(())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound).into())
+                }
+            },
+        )
+        .is_ok_and(|hit| hit.is_some())
+    }
+
+    pub(super) fn collect(&self, store: &ObjectStore, out: &mut Vec<Hash>) -> StoreResult<()> {
         if self.refresh_enabled(store)? {
             visit_pairs(&store.pack_dir(), |pair| {
-                let index = Arc::new(Index::open(&pair)?);
-                out.extend(index.ids(shard));
-                self.remember(index);
+                let index = Index::open(&pair)?;
+                out.extend(index.ids());
                 Ok(())
             })?;
+        }
+        Ok(())
+    }
+
+    /// List the packed ids of one shard. A listing is not an integrity scan:
+    /// each index passes the checks of an ordinary lookup, not a checksum.
+    pub(super) fn list_shard(
+        &self,
+        store: &ObjectStore,
+        shard: u8,
+        out: &mut Vec<Hash>,
+    ) -> StoreResult<()> {
+        if !self.refresh_enabled(store)? {
+            return Ok(());
+        }
+        let catalog = self.discover(&store.pack_dir(), true)?;
+        if let Some(error) = catalog.error_for(shard) {
+            return Err(error);
+        }
+        for locator in &catalog.packs {
+            locator.shard_ids(&self.handles, shard, out)?;
         }
         Ok(())
     }
@@ -91,69 +432,169 @@ impl LocalPacks {
         store: &ObjectStore,
         id: &Hash,
         refresh: bool,
+        use_location: impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
+        self.lookup_in(store, id, refresh, None, use_location)
+    }
+
+    /// [`Self::lookup`] with `currency`, when a guarded walk keeps one: a
+    /// locator it found current is not checked again.
+    pub(super) fn lookup_in<T>(
+        &self,
+        store: &ObjectStore,
+        id: &Hash,
+        refresh: bool,
+        currency: Option<&Currency>,
         mut use_location: impl FnMut(Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
-        let mut error = None;
-        let mut mismatch = None;
-        let mut attempt = |location| match use_location(location) {
+        self.promote_when_spent(store);
+        let (known, latest) = {
+            let discovery = self.discovery.lock().expect("local pack catalog mutex");
+            (Arc::clone(&discovery.catalog), discovery.latest.clone())
+        };
+        let mut errors = LookupErrors::default();
+        if let Some(pack) = latest
+            && let Some(value) =
+                self.try_pack(&pack, id, None, currency, &mut errors, &mut use_location)?
+        {
+            return Ok(value);
+        }
+        if let Some(value) =
+            self.try_catalog(&known, id, None, currency, &mut errors, &mut use_location)?
+        {
+            return Ok(value);
+        }
+        if let Some(value) = errors.attempt(use_location(Location::Loose(store.path_for(id))))? {
+            return Ok(value);
+        }
+        let mut pair_error = None;
+        if refresh && self.refresh_enabled(store)? {
+            let fresh = self.discover(&store.pack_dir(), errors.stale)?;
+            pair_error = fresh.error_for(id[0]);
+            if !Arc::ptr_eq(&known, &fresh)
+                && let Some(value) = self.try_catalog(
+                    &fresh,
+                    id,
+                    Some(&known),
+                    currency,
+                    &mut errors,
+                    &mut use_location,
+                )?
+            {
+                return Ok(value);
+            }
+        }
+        Err(errors
+            .mismatch
+            .or(errors.error)
+            .or(pair_error)
+            .unwrap_or_else(|| StoreError::ObjectNotFound(to_hex(id))))
+    }
+
+    fn try_catalog<T>(
+        &self,
+        catalog: &Catalog,
+        id: &Hash,
+        checked: Option<&Catalog>,
+        currency: Option<&Currency>,
+        errors: &mut LookupErrors,
+        use_location: &mut impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<Option<T>> {
+        for (locator, row) in catalog.candidates(id) {
+            if checked.is_some_and(|old| old.candidates(id).any(|(p, _)| Arc::ptr_eq(p, locator))) {
+                continue;
+            }
+            if catalog.lazy {
+                self.lazy_probes.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(value) = self.try_pack(locator, id, row, currency, errors, use_location)? {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
+    }
+
+    fn try_pack<T>(
+        &self,
+        locator: &Arc<Locator>,
+        id: &Hash,
+        row: Option<usize>,
+        currency: Option<&Currency>,
+        errors: &mut LookupErrors,
+        use_location: &mut impl FnMut(Location) -> StoreResult<T>,
+    ) -> StoreResult<Option<T>> {
+        let value = (|| {
+            let Some(frame) = locator.find(&self.handles, id, row, currency)? else {
+                return Ok(None);
+            };
+            let file = self.handles.get(locator, Member::Pack)?;
+            // The locator is checked here, once, so that the location can say
+            // so. A failed check is a failed read of this pair.
+            let checked = match currency {
+                Some(_) => locator
+                    .check_current_once(currency)
+                    .map_err(|e| named(&locator.pair.pack, e))?,
+                None => false,
+            };
+            // A pack cut short after its handle was cached ends a read early.
+            use_location(Location::Cached(Arc::clone(locator), frame, file, checked))
+                .map(Some)
+                .map_err(|e| named(&locator.pair.pack, e))
+        })();
+        let value = match (value, currency) {
+            (Err(error), Some(currency)) => {
+                // A damaged copy may have been replaced by a verified one under
+                // the same key. The pair is checked again, as every read of it
+                // would have done, and a change takes the refresh path.
+                currency.forget(locator);
+                match locator.check_current() {
+                    Err(changed) => Err(named(&locator.pair.pack, changed)),
+                    Ok(_) => Err(error),
+                }
+            }
+            (value, _) => value,
+        };
+        if value.as_ref().is_err_and(is_disappeared) {
+            errors.stale = true;
+        }
+        Ok(errors.attempt(value)?.flatten())
+    }
+}
+
+#[derive(Default)]
+struct LookupErrors {
+    mismatch: Option<StoreError>,
+    error: Option<StoreError>,
+    stale: bool,
+}
+
+impl LookupErrors {
+    fn attempt<T>(&mut self, value: StoreResult<T>) -> StoreResult<Option<T>> {
+        match value {
             Ok(value) => Ok(Some(value)),
             Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
             Err(e) if is_disappeared(&e) => Ok(None),
             Err(e @ StoreError::HashMismatch { .. }) => {
-                mismatch.get_or_insert(e);
+                self.mismatch.get_or_insert(e);
                 Ok(None)
             }
             Err(e) => {
-                error.get_or_insert(e);
+                self.error.get_or_insert(e);
                 Ok(None)
             }
-        };
-        let known = self.known.lock().expect("local pack cache mutex").clone();
-        for index in &known {
-            let Some(frame) = index.find(id) else {
-                continue;
-            };
-            if let Some(value) = attempt(Location::Packed(Arc::clone(index), frame))? {
-                return Ok(value);
-            }
         }
-        let loose = store.path_for(id);
-        if let Some(value) = attempt(Location::Loose(loose))? {
-            return Ok(value);
-        }
-        let mut found = None;
-        let mut pair_error = None;
-        if refresh && self.refresh_enabled(store)? {
-            let dir = store.pack_dir();
-            visit_pairs_until(&dir, |pair| {
-                if known
-                    .iter()
-                    .any(|index| index.pair.key == pair.key && index.unchanged())
-                {
-                    return Ok(false);
-                }
-                let index = match Index::open(&pair) {
-                    Ok(index) => Arc::new(index),
-                    Err(e @ StoreError::IncompatibleRepoFormat { .. }) => return Err(e),
-                    Err(e) => {
-                        pair_error.get_or_insert(e);
-                        return Ok(false);
-                    }
-                };
-                let frame = index.find(id);
-                self.remember(Arc::clone(&index));
-                if let Some(frame) = frame {
-                    found = attempt(Location::Packed(index, frame))?;
-                }
-                Ok(found.is_some())
-            })?;
-        }
-        found.ok_or_else(|| {
-            mismatch
-                .or(error)
-                .or(pair_error)
-                .unwrap_or_else(|| StoreError::ObjectNotFound(to_hex(id)))
-        })
+    }
+}
+
+// A catalog keeps the errors it met. Give each lookup its own copy.
+fn replay(error: &StoreError) -> StoreError {
+    match error {
+        StoreError::LocalPackDamaged { pack, reason } => StoreError::LocalPackDamaged {
+            pack: pack.clone(),
+            reason: reason.clone(),
+        },
+        StoreError::Io(error) => StoreError::Io(io::Error::new(error.kind(), error.to_string())),
+        other => StoreError::Io(io::Error::other(other.to_string())),
     }
 }
 
@@ -165,6 +606,8 @@ fn is_disappeared(err: &StoreError) -> bool {
 pub(super) enum Location {
     Loose(PathBuf),
     Packed(Arc<Index>, Frame),
+    /// A pair's frame. The flag says a guarded walk found the pair current.
+    Cached(Arc<Locator>, Frame, Arc<File>, bool),
 }
 
 impl Location {
@@ -172,11 +615,12 @@ impl Location {
         match self {
             Self::Loose(path) => path,
             Self::Packed(index, _) => &index.pair.pack,
+            Self::Cached(index, ..) => &index.pair.pack,
         }
     }
 
     pub(super) fn is_packed(&self) -> bool {
-        matches!(self, Self::Packed(..))
+        matches!(self, Self::Packed(..) | Self::Cached(..))
     }
 
     pub(super) fn open(&self) -> StoreResult<Contents> {
@@ -185,29 +629,47 @@ impl Location {
                 let file = File::open(path)?;
                 let len = file.metadata()?.len();
                 Ok(Contents {
-                    file,
-                    packed_len: None,
+                    source: Source::Loose(file),
                     len,
                 })
             }
             Self::Packed(index, frame) => {
-                // A disappeared member invalidates the cached location.
                 index.check_index_version()?;
-                let file = index.open_frame(*frame)?;
-                let len = u64::from(frame.len);
-                Ok(Contents {
-                    file,
-                    packed_len: Some(len),
-                    len,
-                })
+                let file = Arc::new(index.open_frame(*frame)?);
+                Ok(Contents::packed(file, *frame))
             }
+            Self::Cached(index, frame, file, checked) => {
+                index.open_frame(file, *frame, *checked)?;
+                Ok(Contents::packed(Arc::clone(file), *frame))
+            }
+        }
+    }
+
+    /// The first bytes of the object, up to `head.len()`: how many came, or the
+    /// error of the payload read. A packed copy gives its frame header and
+    /// these bytes in one read when it can.
+    pub(super) fn read_head(&self, head: &mut [u8]) -> StoreResult<io::Result<usize>> {
+        if let Self::Cached(index, frame, file, checked) = self
+            && let Some(len) = index.read_head(file, *frame, *checked, head)?
+        {
+            return Ok(Ok(len));
+        }
+        let mut contents = self.open()?;
+        Ok(crate::store::read_header_prefix(&mut contents, head))
+    }
+
+    /// The length of the frame a packed copy occupies. `None` for a loose file.
+    pub(super) fn frame_len(&self) -> Option<u32> {
+        match self {
+            Self::Loose(_) => None,
+            Self::Packed(_, frame) | Self::Cached(_, frame, ..) => Some(frame.len),
         }
     }
 
     pub(super) fn size(&self) -> StoreResult<u64> {
         match self {
             Self::Loose(path) => Ok(fs::metadata(path)?.len()),
-            Self::Packed(..) => Ok(self.open()?.len),
+            Self::Packed(..) | Self::Cached(..) => Ok(self.open()?.len),
         }
     }
 
@@ -224,22 +686,48 @@ impl Location {
 }
 
 pub(super) struct Contents {
-    file: File,
-    packed_len: Option<u64>,
+    source: Source,
     pub(super) len: u64,
+}
+
+impl Contents {
+    fn packed(file: Arc<File>, frame: Frame) -> Self {
+        Self {
+            source: Source::Packed {
+                file,
+                offset: frame.offset,
+                remaining: usize::try_from(frame.len).expect("bounded frame length"),
+            },
+            len: u64::from(frame.len),
+        }
+    }
+}
+
+enum Source {
+    Loose(File),
+    Packed {
+        file: Arc<File>,
+        offset: u64,
+        remaining: usize,
+    },
 }
 
 impl Read for Contents {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        let Some(remaining) = &mut self.packed_len else {
-            return self.file.read(bytes);
-        };
-        let limit = (*remaining).min(bytes.len() as u64);
-        let read = self
-            .file
-            .read(&mut bytes[..usize::try_from(limit).expect("limited to slice length")])?;
-        *remaining -= read as u64;
-        Ok(read)
+        match &mut self.source {
+            Source::Loose(file) => file.read(bytes),
+            Source::Packed {
+                file,
+                offset,
+                remaining,
+            } => {
+                let len = (*remaining).min(bytes.len());
+                crate::pack::read_spooled(file, *offset, &mut bytes[..len])?;
+                *offset += len as u64;
+                *remaining -= len;
+                Ok(len)
+            }
+        }
     }
 }
 
@@ -258,21 +746,55 @@ fn regular(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Every pair named in the directory. A pair whose members are not both
+/// regular files fails to open as absent, which discovery skips.
+fn list_pairs(dir: &Path) -> StoreResult<Vec<Pair>> {
+    let Some(entries) = read_pack_dir(dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut pairs = Vec::new();
+    for entry in entries {
+        let name = entry?.file_name();
+        if let Some(pair) = name
+            .to_str()
+            .and_then(|name| Pair::from_pack_name(dir, name))
+        {
+            pairs.push(pair);
+        }
+    }
+    Ok(pairs)
+}
+
 fn pair_is_live(pair: &Pair) -> io::Result<bool> {
     Ok(regular(&pair.pack)? && regular(&pair.index)?)
+}
+
+/// A regular pack file whose index name is absent.
+fn lacks_index(pair: &Pair) -> io::Result<bool> {
+    Ok(regular(&pair.pack)?
+        && matches!(
+            fs::symlink_metadata(&pair.index),
+            Err(e) if e.kind() == io::ErrorKind::NotFound
+        ))
+}
+
+fn read_pack_dir(dir: &Path) -> StoreResult<Option<fs::ReadDir>> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() => Ok(Some(fs::read_dir(dir)?)),
+        Ok(_) => Err(index::invalid_at(dir, "not a directory")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn visit_pairs_until(
     dir: &Path,
     mut visit: impl FnMut(Pair) -> StoreResult<bool>,
 ) -> StoreResult<()> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(index::invalid("local pack directory is not a directory").into()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    }
-    for entry in fs::read_dir(dir)? {
+    let Some(entries) = read_pack_dir(dir)? else {
+        return Ok(());
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let Some(pair) = name
@@ -288,20 +810,27 @@ fn visit_pairs_until(
     Ok(())
 }
 
-pub(super) fn check_live_pack_versions(objects: &Path) -> StoreResult<()> {
-    visit_pairs(&objects.join("pack"), |pair| pair.check_versions())
-}
-
 fn matching_index(pair: &Pair, rows: &[(Hash, Frame)]) -> StoreResult<bool> {
     match Index::open(pair) {
         Ok(index) => Ok(index.matches(rows)),
-        Err(e @ StoreError::IncompatibleRepoFormat { .. }) => Err(e),
-        Err(_) => Ok(false),
+        Err(StoreError::LocalPackDamaged { .. }) => Ok(false),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
 fn scan_pair(pair: &Pair) -> StoreResult<Vec<(Hash, Frame)>> {
-    let (key, rows) = index::scan(&mut open_regular(&pair.pack)?).map_err(|e| pair.context(e))?;
+    scan_pair_checked(pair, &|| Ok(()))
+}
+
+fn scan_pair_checked(
+    pair: &Pair,
+    checkpoint: &dyn Fn() -> StoreResult<()>,
+) -> StoreResult<Vec<(Hash, Frame)>> {
+    #[cfg(test)]
+    tests::pack_scan_error(pair.key)?;
+    let (key, rows) = index::scan_checked(&mut open_regular(&pair.pack)?, checkpoint)
+        .map_err(|error| pair.context(error))?;
     if key != pair.key {
         return Err(pair.error("pack key does not match filename"));
     }
@@ -316,7 +845,7 @@ fn stage_index(
 ) -> StoreResult<tempfile::NamedTempFile> {
     let mut tmp = stage_file(dir, ".tmp.idx")?;
     tmp.write_all(&index::encode(pair.key, rows))?;
-    tmp.as_file().sync_all()?;
+    crate::durable::flush_file(tmp.as_file(), tmp.path())?;
     let staged = Pair {
         key: pair.key,
         pack: pack.to_path_buf(),
@@ -369,7 +898,77 @@ impl ObjectStore {
         self.objects_root.with_file_name(super::FORMAT_FILE)
     }
 
-    fn pack_dir(&self) -> PathBuf {
+    /// Try the one-way local-pack activation before taking a prune guard.
+    /// Contention leaves it loose.
+    ///
+    /// # Errors
+    /// An unreadable, incompatible or unwritable format marker.
+    #[doc(hidden)]
+    pub fn try_activate_local_packs(&self) -> StoreResult<()> {
+        if format::try_activate(&self.format_path())? {
+            self.packs.mark_enabled();
+        }
+        Ok(())
+    }
+
+    /// Make this handle's one try at the activation, unless the store is
+    /// already packed. Call it before any write and before this process takes
+    /// a prune guard, which would make the try miss. Never blocks and never
+    /// retries: a miss leaves this handle's writes loose.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible marker, or a failed sync of the byte.
+    #[doc(hidden)]
+    pub fn ensure_packed_once(&self) -> StoreResult<()> {
+        if self.packs.is_enabled() {
+            return Ok(());
+        }
+        let mut tried = self
+            .pack_writes
+            .activation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !*tried {
+            if format::try_activate(&self.format_path())? {
+                self.packs.mark_enabled();
+            } else {
+                *tried = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Check whether the current marker selects packed storage.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible marker.
+    #[doc(hidden)]
+    pub fn local_packs_enabled(&self) -> StoreResult<bool> {
+        self.packs.refresh_enabled(self)
+    }
+
+    /// Check the marker on the handle that holds the shared prune guard.
+    ///
+    /// # Errors
+    /// An unreadable or incompatible format marker.
+    #[doc(hidden)]
+    pub fn local_packs_active(&self, guard: &super::PruneGuard) -> StoreResult<bool> {
+        self.check_prune_guard(guard)?;
+        format::packed_under_guard(guard)
+    }
+
+    pub(super) fn check_prune_guard(&self, guard: &super::PruneGuard) -> StoreResult<()> {
+        if guard.objects_root != self.objects_root {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prune guard belongs to a different object store",
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pack_dir(&self) -> PathBuf {
         self.objects_root.join("pack")
     }
 
@@ -386,6 +985,23 @@ impl ObjectStore {
         }
         let dir = self.pack_dir();
         let mut rebuilt = 0;
+        let mut first_error = None;
+        if repair {
+            // A pack that lost its index is invisible. Verify it whole, then
+            // give it back its index. This goes first, so that a damaged live
+            // pair does not leave a lone pack without its index; a failed lone
+            // pack does not stop the other lone packs either.
+            for pair in list_pairs(&dir)? {
+                if lacks_index(&pair)? {
+                    match self.rebuild_index(&dir, &pair, true) {
+                        Ok(done) => rebuilt += usize::from(done),
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+            }
+        }
         visit_pairs(&dir, |pair| {
             pair.check_versions()?;
             let rows = scan_pair(&pair)?;
@@ -393,33 +1009,47 @@ impl ObjectStore {
                 return Ok(());
             }
             if !repair {
-                return Err(pair.error("index does not match verified pack"));
+                return Err(pair.index_error("index does not match verified pack"));
             }
 
             drop(rows);
-            let lock = fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(self.format_path())?;
-            lock.try_lock().map_err(io::Error::from)?;
-            // Reopen under the lock so a retired pack cannot be resurrected.
-            if !pair_is_live(&pair)? {
-                return Ok(());
-            }
-            pair.check_versions()?;
-            let rows = scan_pair(&pair)?;
-            if matching_index(&pair, &rows)? {
-                return Ok(());
-            }
-            let tmp = stage_index(&dir, &pair, &pair.pack, &rows)?;
-            super::sync_reused_file(&pair.pack)?;
-            crate::atomic::sync_dir(&dir)?;
-            tmp.persist(&pair.index).map_err(|e| e.error)?;
-            crate::atomic::sync_dir(&dir)?;
-            self.packs.forget(&pair.key);
-            rebuilt += 1;
+            rebuilt += usize::from(self.rebuild_index(&dir, &pair, false)?);
             Ok(())
         })?;
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(rebuilt)
+    }
+
+    /// Write the index of `pair` from its verified pack. `lone` says the pack
+    /// has no index yet. Under the exclusive `format` lock, the pair is looked
+    /// at again, so a retired or republished pair is not resurrected.
+    fn rebuild_index(&self, dir: &Path, pair: &Pair, lone: bool) -> StoreResult<bool> {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.format_path())?;
+        lock.try_lock().map_err(io::Error::from)?;
+        let present = if lone {
+            lacks_index(pair)?
+        } else {
+            pair_is_live(pair)?
+        };
+        if !present {
+            return Ok(false);
+        }
+        pair.check_versions()?;
+        let rows = scan_pair(pair)?;
+        if matching_index(pair, &rows)? {
+            return Ok(false);
+        }
+        let tmp = stage_index(dir, pair, &pair.pack, &rows)?;
+        super::sync_reused_file(&pair.pack)?;
+        crate::durable::flush_dir(dir)?;
+        tmp.persist(&pair.index).map_err(|e| e.error)?;
+        crate::durable::flush_dir(dir)?;
+        self.packs.forget(&pair.key);
+        Ok(true)
     }
 }

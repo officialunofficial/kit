@@ -645,3 +645,33 @@ fn unsigned_admission_recovery_matches_both_backends_without_synthetic_signer() 
     }
     assert_eq!(bodies[0], bodies[1]);
 }
+
+/// A hosted remote admits full manifests only, so no Connect source says it
+/// takes a manifest delta, and a push to one plans every manifest in full.
+#[test]
+fn no_connect_source_takes_a_manifest_delta() {
+    for backend in 0..3 {
+        let server = FaultServer::new(0, |_, _| unreachable!("the check sends no request"));
+        let check = |source: &dyn RemoteSource| assert!(!source.accepts_manifest_deltas());
+        if backend == 0 {
+            let http = NativeHttp::new().unwrap();
+            let signer = Dalek::new(WRITER_SEED);
+            let client = kit_client::Client::signed(
+                &http,
+                destination(&server.origin, "default"),
+                &signer,
+                &NativeClock,
+            );
+            check(&ClientSource::new(&client, &http));
+        } else {
+            let tx = transport(&server.origin, "default", WRITER_SEED);
+            assert!(!kit_core::protocol::Transport::accepts_manifest_deltas(&tx));
+            if backend == 1 {
+                check(&TransportSource::new(&tx));
+            } else {
+                tx.with_source(check).unwrap();
+            }
+        }
+        assert!(server.requests.lock().unwrap().is_empty());
+    }
+}

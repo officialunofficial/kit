@@ -1,27 +1,328 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 
-use crate::pack::{HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
+use crate::pack::{ENTRY_FRAME_LEN, HEADER_LEN, MAGIC, MAX_ENTRIES, MAX_TOTAL_PAYLOAD};
 
 use super::{
-    Arc, Hash, Index, ObjectStore, Pair, StoreResult, format, index, open_regular, regular,
-    scan_pair, stage_file, stage_index,
+    Frame, Hash, Index, ObjectStore, Pair, StoreResult, format, index, matching_index,
+    open_regular, scan_pair, stage_file, stage_index,
 };
 use crate::store::{MAX_RAW_OBJECT_SIZE, PruneGuard, StoreError};
 
-/// The store's wide test writer. Fetch has its own selection and window rules.
-pub(super) struct Writer<'a> {
+/// Where each frame of a pack under construction sits, in write order.
+#[derive(Debug)]
+struct Frames {
+    rows: Vec<(Hash, Frame)>,
+    /// The offset one past the last frame, where the trailer will start.
+    end: u64,
+}
+
+impl Frames {
+    fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            end: HEADER_LEN as u64,
+        }
+    }
+
+    fn record(&mut self, id: Hash, len: u32) {
+        self.rows.push((
+            id,
+            Frame {
+                offset: self.end + ENTRY_FRAME_LEN as u64,
+                len,
+            },
+        ));
+        self.end += ENTRY_FRAME_LEN as u64 + u64::from(len);
+    }
+}
+
+/// The most a pack and each object in it may hold.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    object: usize,
+    entries: usize,
+    payload: u64,
+}
+
+impl Limits {
+    const PACK: Self = Self {
+        object: MAX_RAW_OBJECT_SIZE,
+        entries: MAX_ENTRIES as usize,
+        payload: MAX_TOTAL_PAYLOAD,
+    };
+}
+
+/// Write a private local pack, then make it durable and discoverable.
+///
+/// Any error inside a write leaves the writer unusable: the staging file may
+/// hold half a frame, so [`Self::publish`] of a failed writer publishes
+/// nothing and returns an error.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct LocalPackWriter<'a> {
+    store: &'a ObjectStore,
+    /// Ties a writer built by [`Self::new`] to its guard. A batch checks the
+    /// guard once and holds it itself, so its writer keeps no borrow.
+    _guard: Option<&'a PruneGuard>,
+    pack: BufWriter<tempfile::NamedTempFile>,
+    ids: HashSet<Hash>,
+    frames: Frames,
+    payload: u64,
+    limits: Limits,
+    failed: bool,
+}
+
+impl<'a> LocalPackWriter<'a> {
+    /// Open one pack under the store's existing shared guard.
+    ///
+    /// # Errors
+    /// The packed marker could not be validated or synced, or staging failed.
+    pub fn new(store: &'a ObjectStore, guard: &'a PruneGuard) -> StoreResult<Self> {
+        Ok(Self {
+            _guard: Some(guard),
+            ..Self::for_batch(store, guard)?
+        })
+    }
+
+    /// [`Self::new`] for a writer that lives beside its guard in one struct.
+    /// It checks the guard once and keeps no borrow of it, so the owner must
+    /// hold the guard until this writer is published or dropped, and must drop
+    /// the writer first.
+    pub(crate) fn for_batch(store: &'a ObjectStore, guard: &PruneGuard) -> StoreResult<Self> {
+        store.check_prune_guard(guard)?;
+        prepare_dir(store, guard)?;
+        Ok(Self {
+            store,
+            _guard: None,
+            pack: BufWriter::with_capacity(256 << 10, new_pack(store)?),
+            ids: HashSet::new(),
+            frames: Frames::new(),
+            payload: 0,
+            limits: Limits::PACK,
+            failed: false,
+        })
+    }
+
+    /// True when this pack already holds `id`.
+    pub(crate) fn holds(&self, id: &Hash) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Whether appending one new object of `len` bytes stays inside the
+    /// seal limits. An empty pack always has room.
+    pub(crate) fn has_room(&self, len: usize) -> bool {
+        self.has_room_within(
+            len,
+            crate::store::PACK_SEAL_ENTRIES,
+            crate::store::PACK_SEAL_BYTES as u64,
+        )
+    }
+
+    /// [`Self::has_room`] for a caller that seals at its own, lower limits.
+    pub(crate) fn has_room_within(&self, len: usize, entries: usize, payload: u64) -> bool {
+        self.ids.is_empty() || (self.ids.len() < entries && self.payload + len as u64 <= payload)
+    }
+
+    /// Stage one canonical object, deduplicating only within this pack.
+    ///
+    /// # Errors
+    /// Invalid bytes, a full pack, or a staging write error.
+    pub fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
+        self.guarded(|writer| {
+            let id = checked_id(bytes)?;
+            writer.append(id, &[bytes])
+        })
+    }
+
+    /// Stage one object under an id the caller already proved, with its bytes
+    /// in order as `parts`. It does not hash them again, so a caller outside
+    /// kit-core must not reach it: in debug builds a wrong id panics.
+    ///
+    /// # Errors
+    /// An oversized object, a full pack, or a staging write error.
+    pub(crate) fn write_hashed(&mut self, id: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
+        debug_assert_eq!(
+            index::canonical_id(&parts.concat()).ok(),
+            Some(id),
+            "a prehashed object must carry its own id"
+        );
+        self.guarded(|writer| writer.append(id, parts))
+    }
+
+    /// Run one step. Any error leaves the staging file in an unknown state.
+    fn guarded<T>(&mut self, step: impl FnOnce(&mut Self) -> StoreResult<T>) -> StoreResult<T> {
+        if self.failed {
+            return Err(failed_writer());
+        }
+        let result = step(self);
+        self.failed |= result.is_err();
+        result
+    }
+
+    fn append(&mut self, id: Hash, parts: &[&[u8]]) -> StoreResult<Hash> {
+        let len = parts.iter().map(|part| part.len()).sum::<usize>();
+        if len > self.limits.object {
+            return Err(StoreError::ObjectTooLarge);
+        }
+        if !self.ids.contains(&id) {
+            if self.ids.len() == self.limits.entries
+                || self.payload + len as u64 > self.limits.payload
+            {
+                return Err(StoreError::ObjectTooLarge);
+            }
+            #[cfg(feature = "fault-injection")]
+            crate::fault::check(crate::fault::Site::Store)?;
+            write_frame(&mut self.pack, len, parts)?;
+            self.payload += len as u64;
+            self.ids.insert(id);
+            self.frames
+                .record(id, u32::try_from(len).expect("bounded object length"));
+        }
+        Ok(id)
+    }
+
+    /// Sync and publish the pack and index. An empty pack needs no pair.
+    ///
+    /// # Errors
+    /// An earlier write failed, or a staging or publication failure.
+    pub fn publish(self) -> StoreResult<()> {
+        self.publish_pair().map(|_| ())
+    }
+
+    /// [`publish`](Self::publish), naming the published pair. An empty pack
+    /// publishes nothing.
+    pub(super) fn publish_pair(self) -> StoreResult<Option<Pair>> {
+        self.detach().publish_pair()
+    }
+
+    /// Take the writer's pack and rows as a [`SealJob`], which owns what it
+    /// needs and can run on another thread. The caller keeps the guard this
+    /// writer was checked against until the job finishes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn detach(self) -> SealJob {
+        SealJob {
+            store: self.store.clone(),
+            pack: self.pack,
+            frames: self.frames,
+            empty: self.ids.is_empty(),
+            failed: self.failed,
+        }
+    }
+}
+
+/// A full pack on its way to publication: everything [`LocalPackWriter`] knew
+/// that sealing needs, without its borrow of the store.
+#[derive(Debug)]
+#[doc(hidden)]
+pub struct SealJob {
+    store: ObjectStore,
+    pack: BufWriter<tempfile::NamedTempFile>,
+    frames: Frames,
+    empty: bool,
+    failed: bool,
+}
+
+impl SealJob {
+    /// Sync and publish the pack and index, as [`LocalPackWriter::publish`].
+    ///
+    /// # Errors
+    /// An earlier write failed, or a staging or publication failure.
+    pub fn publish(self) -> StoreResult<()> {
+        self.publish_pair().map(|_| ())
+    }
+
+    fn publish_pair(self) -> StoreResult<Option<Pair>> {
+        if self.failed {
+            return Err(failed_writer());
+        }
+        if self.empty {
+            return Ok(None);
+        }
+        let pack = self
+            .pack
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
+        let staged = Staged::seal(&self.store, pack, self.frames)?;
+        let pair = staged.pair.clone();
+        staged.publish(&self.store)?;
+        Ok(Some(pair))
+    }
+}
+
+fn failed_writer() -> StoreError {
+    io::Error::other("an earlier write to this local pack failed").into()
+}
+
+/// Make the marker and the parents of `pack/` durable once per store, then
+/// only check capability `P` under this writer's own guard.
+fn prepare_dir(store: &ObjectStore, guard: &PruneGuard) -> StoreResult<()> {
+    use std::sync::atomic::Ordering;
+
+    let prepared = &store.pack_writes.pack_dir_prepared;
+    if prepared.load(Ordering::Acquire) {
+        return format::require_packed(guard);
+    }
+    format::sync_packed(&store.format_path(), guard)?;
+    let dir = store.pack_dir();
+    fs::create_dir_all(&dir)?;
+    if !fs::symlink_metadata(&dir)?.is_dir() {
+        return Err(index::invalid_at(&dir, "not a directory"));
+    }
+    crate::durable::flush_dir(store.objects_root())?;
+    prepared.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn checked_id(bytes: &[u8]) -> StoreResult<Hash> {
+    if bytes.len() > MAX_RAW_OBJECT_SIZE {
+        return Err(StoreError::ObjectTooLarge);
+    }
+    // Bytes handed to a writer are input. Rejecting them is not damage.
+    index::canonical_id(bytes).map_err(|error| match error {
+        StoreError::LocalPackDamaged { reason, .. } => {
+            io::Error::new(io::ErrorKind::InvalidData, reason.into_string()).into()
+        }
+        other => other,
+    })
+}
+
+fn write_frame(mut writer: impl Write, len: usize, parts: &[&[u8]]) -> StoreResult<()> {
+    let mut frame = [0; ENTRY_FRAME_LEN];
+    frame[1..].copy_from_slice(
+        &u32::try_from(len)
+            .expect("bounded object length")
+            .to_le_bytes(),
+    );
+    writer.write_all(&frame)?;
+    #[cfg(test)]
+    tests::after_frame_header()?;
+    for part in parts {
+        writer.write_all(part)?;
+    }
+    Ok(())
+}
+
+/// A test builder of local packs. Unlike [`LocalPackWriter`], which refuses an
+/// object that does not fit and leaves the rollover to its owner (the batch
+/// and gc each have one), it seals the open pack and starts the next at the
+/// caps it is given, so a test can build many packs or tiny ones.
+#[cfg(test)]
+pub(super) struct PackFixture<'a> {
     store: &'a ObjectStore,
     guard: PruneGuard,
     pack: tempfile::NamedTempFile,
     ids: HashSet<Hash>,
+    frames: Frames,
     payload: u64,
     max_entries: u32,
     max_payload: u64,
 }
 
-impl<'a> Writer<'a> {
+#[cfg(test)]
+impl<'a> PackFixture<'a> {
     pub(super) fn new(
         store: &'a ObjectStore,
         max_entries: u32,
@@ -29,27 +330,15 @@ impl<'a> Writer<'a> {
     ) -> StoreResult<Self> {
         assert!((1..=MAX_ENTRIES).contains(&max_entries));
         assert!((1..=MAX_TOTAL_PAYLOAD).contains(&max_payload));
-        if !format::check(&store.format_path())? {
-            // A publisher racing the first activation can try again once the
-            // other publisher releases the exclusive lock.
-            format::activate(&store.format_path())?;
-        }
+        store.try_activate_local_packs()?;
         let guard = store.prune_guard()?;
-        format::sync_packed(&store.format_path(), &guard)?;
-        let dir = store.pack_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        if !fs::symlink_metadata(&dir)?.is_dir() {
-            return Err(index::invalid("local pack directory is not a directory").into());
-        }
-        crate::atomic::sync_dir(store.objects_root())?;
-        let pack = new_pack(store)?;
+        prepare_dir(store, &guard)?;
         Ok(Self {
             store,
             guard,
-            pack,
+            pack: new_pack(store)?,
             ids: HashSet::new(),
+            frames: Frames::new(),
             payload: 0,
             max_entries,
             max_payload,
@@ -57,10 +346,10 @@ impl<'a> Writer<'a> {
     }
 
     pub(super) fn write(&mut self, bytes: &[u8]) -> StoreResult<Hash> {
-        if bytes.len() > MAX_RAW_OBJECT_SIZE || bytes.len() as u64 > self.max_payload {
+        if bytes.len() as u64 > self.max_payload {
             return Err(StoreError::ObjectTooLarge);
         }
-        let id = index::canonical_id(bytes)?;
+        let id = checked_id(bytes)?;
         if self.ids.contains(&id) {
             return Ok(id);
         }
@@ -69,25 +358,24 @@ impl<'a> Writer<'a> {
         {
             let next = new_pack(self.store)?;
             let pack = std::mem::replace(&mut self.pack, next);
-            Staged::seal(self.store, pack, self.ids.len())?.publish(self.store)?;
+            let frames = std::mem::replace(&mut self.frames, Frames::new());
+            Staged::seal(self.store, pack, frames)?.publish(self.store)?;
             self.payload = 0;
             self.ids.clear();
         }
-        self.pack.write_all(&[0])?;
-        self.pack.write_all(
-            &u32::try_from(bytes.len())
-                .expect("bounded object length")
-                .to_le_bytes(),
-        )?;
-        self.pack.write_all(bytes)?;
+        write_frame(&mut self.pack, bytes.len(), &[bytes])?;
         self.payload += bytes.len() as u64;
         self.ids.insert(id);
+        self.frames.record(
+            id,
+            u32::try_from(bytes.len()).expect("bounded object length"),
+        );
         Ok(id)
     }
 
     pub(super) fn stage(self) -> StoreResult<(Staged, PruneGuard)> {
         Ok((
-            Staged::seal(self.store, self.pack, self.ids.len())?,
+            Staged::seal(self.store, self.pack, self.frames)?,
             self.guard,
         ))
     }
@@ -117,32 +405,38 @@ pub(super) struct Staged {
 }
 
 impl Staged {
+    /// Seal a finished pack file whose frames are `frames`: write the count,
+    /// check the file against the rows in one read pass that also digests it,
+    /// append the trailer, and stage the index from the rows. The file is
+    /// never scanned again, so nothing is hashed twice.
     fn seal(
         store: &ObjectStore,
         mut pack: tempfile::NamedTempFile,
-        count: usize,
+        frames: Frames,
     ) -> StoreResult<Self> {
+        let Frames { mut rows, end } = frames;
         pack.seek(SeekFrom::Start(HEADER_LEN as u64 - 4))?;
         pack.write_all(
-            &u32::try_from(count)
+            &u32::try_from(rows.len())
                 .expect("bounded frame count")
                 .to_le_bytes(),
         )?;
         pack.rewind()?;
-        let mut digest = blake3::Hasher::new();
-        let mut buffer = [0; 16 * 1024];
-        loop {
-            let read = pack.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
+        let mut digest = check_frames(pack.as_file_mut(), &rows, end)
+            .map_err(|error| index::named(pack.path(), error))?;
+        let trailer = *digest.finalize().as_bytes();
+        pack.seek(SeekFrom::End(0))?;
+        pack.write_all(&trailer)?;
+        // The key continues the same hasher over the trailer, as `scan` does.
+        digest.update(&trailer);
+        let key = *digest.finalize().as_bytes();
+        rows.sort_unstable_by_key(|(id, _)| *id);
+        if rows.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(index::invalid_at(pack.path(), "duplicate id in local pack"));
         }
-        pack.write_all(digest.finalize().as_bytes())?;
-        let (key, rows) = index::scan(pack.as_file_mut())?;
         let dir = store.pack_dir();
         let pair = Pair::new(&dir, key);
-        pack.as_file().sync_all()?;
+        crate::durable::flush_file(pack.as_file(), pack.path())?;
         let idx = stage_index(&dir, &pair, pack.path(), &rows)?;
         Ok(Self { pair, pack, idx })
     }
@@ -160,36 +454,805 @@ impl Staged {
         let dir = store.pack_dir();
         // A publisher may leave a valid pack without its index. A later
         // writer of the same key can complete the pair under the guard.
-        let existing_pack = persist_unique(pack, &pair.pack)?;
-        if existing_pack {
-            scan_pair(&pair)?;
-            open_regular(&pair.pack)?.sync_all()?;
-        }
-        crate::atomic::sync_dir(&dir)?;
-        after_pack_sync()?;
-        let existing_index = persist_unique(idx, &pair.index)?;
-        let checked = Index::open(&pair)?;
-        if existing_pack || existing_index {
-            let rows = scan_pair(&pair)?;
-            if !checked.matches(&rows) || !regular(&pair.pack)? || !regular(&pair.index)? {
-                return Err(pair.error("existing pack and index disagree"));
+        if let Some(staged) = persist_unique(pack, &pair.pack)? {
+            let existing = open_regular(&pair.pack)?;
+            pair.check_versions()?;
+            match scan_pair(&pair) {
+                Ok(_) => {
+                    crate::store::refresh_mtime(&pair.pack)?;
+                    crate::durable::flush_file(&existing, &pair.pack)?;
+                }
+                // The staged copy's layout was checked against the writer's
+                // rows and it has this exact key. Replace a damaged member
+                // without making the pair disappear.
+                Err(StoreError::LocalPackDamaged { .. }) => {
+                    staged.persist(&pair.pack).map_err(|e| e.error)?;
+                }
+                Err(e) => return Err(e),
             }
-            open_regular(&pair.index)?.sync_all()?;
         }
-        crate::atomic::sync_dir(&dir)?;
+        crate::durable::flush_dir(&dir)?;
+        after_pack_sync()?;
+        if let Some(staged) = persist_unique(idx, &pair.index)? {
+            let existing = open_regular(&pair.index)?;
+            let rows = scan_pair(&pair)?;
+            if matching_index(&pair, &rows)? {
+                crate::durable::flush_file(&existing, &pair.index)?;
+            } else {
+                staged.persist(&pair.index).map_err(|e| e.error)?;
+            }
+        }
+        Index::open(&pair)?;
+        crate::durable::flush_dir(&dir)?;
         store
             .packs
             .enabled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        store.packs.remember(Arc::new(checked));
+        store.packs.remember_publication(&pair);
         Ok(())
     }
 }
 
-fn persist_unique(tmp: tempfile::NamedTempFile, path: &std::path::Path) -> StoreResult<bool> {
+/// How many bytes of whole frames [`check_frames`] reads and digests at a
+/// time. It is the only buffer the check holds, and a frame above it is read
+/// in pieces of this size.
+const SEGMENT: usize = 8 << 20;
+
+/// Read the pack once, from its header to the end of its last frame, and
+/// check it against the rows the writer recorded: the magic, version and
+/// count, each frame's reserved byte, offset and length, that the frames end
+/// where the trailer will start, and that nothing follows. Returns the digest
+/// of those bytes. The ids come from the writer, so this is the one check of
+/// everything `scan` verifies except the id hash of each object.
+///
+/// The digest is BLAKE3 of the file's bytes up to `end`: a raw frame is its
+/// reserved byte 0, its little-endian length and its body. The check reads
+/// whole frames into one buffer, validates every header in that buffer, and
+/// digests the same buffer on several threads, so the bytes digested are the
+/// bytes checked and the file is read once.
+fn check_frames(
+    file: &mut fs::File,
+    rows: &[(Hash, Frame)],
+    end: u64,
+) -> StoreResult<blake3::Hasher> {
+    check_frames_in(file, rows, end, SEGMENT)
+}
+
+fn check_frames_in(
+    file: &mut fs::File,
+    rows: &[(Hash, Frame)],
+    end: u64,
+    segment: usize,
+) -> StoreResult<blake3::Hasher> {
+    let header = index::read_version::<HEADER_LEN>(file, *MAGIC, "local pack")?;
+    if index::le_u32(&header[8..12]) as usize != rows.len() {
+        return Err(index::invalid("local pack frame count disagrees with rows"));
+    }
+    let mut digest = blake3::Hasher::new();
+    digest.update(&header);
+    let mut checked = FrameChecker {
+        next: HEADER_LEN as u64,
+        end,
+    };
+    // One buffer for the whole check, never grown, and no larger than the
+    // frames: a small pack must not pay for a full segment.
+    let frames_total = usize::try_from(end.saturating_sub(HEADER_LEN as u64)).unwrap_or(usize::MAX);
+    let cap = segment.min(frames_total).max(ENTRY_FRAME_LEN);
+    let mut scratch = Scratch::take(&SPARE_BUFFER, cap);
+    let buf = &mut scratch.buf[..cap];
+    let mut rows = rows.iter().peekable();
+    while let Some((_, first)) = rows.peek() {
+        let first_len = ENTRY_FRAME_LEN + first.len as usize;
+        if first_len > cap {
+            // One frame larger than the buffer: check its header from the
+            // first piece, then digest the rest piece by piece.
+            let (_, row) = rows.next().expect("peeked");
+            file.read_exact(buf)?;
+            checked.frame(buf, row)?;
+            update(&mut digest, buf);
+            let mut left = first_len - cap;
+            while left > 0 {
+                let piece = left.min(cap);
+                file.read_exact(&mut buf[..piece])?;
+                update(&mut digest, &buf[..piece]);
+                left -= piece;
+            }
+            continue;
+        }
+        // The rows that fit the buffer whole: read them in one go.
+        let mut group = Vec::new();
+        let mut len = 0;
+        while let Some((_, row)) = rows.peek() {
+            let size = ENTRY_FRAME_LEN + row.len as usize;
+            if len + size > cap {
+                break;
+            }
+            len += size;
+            group.push(&rows.next().expect("peeked").1);
+        }
+        file.read_exact(&mut buf[..len])?;
+        let mut at = 0;
+        for row in group {
+            at += checked.frame(&buf[at..len], row)?;
+        }
+        update(&mut digest, &buf[..len]);
+    }
+    if checked.next != end || file.read(&mut [0])? != 0 {
+        return Err(index::invalid("local pack does not end at its last frame"));
+    }
+    Ok(digest)
+}
+
+/// The buffer a finished check leaves for the next one, so each check does
+/// not allocate its own segment. Seals run on many threads, and a buffer
+/// freed on a thread can stay resident in that thread's malloc arena, so one
+/// fresh buffer per seal added up to a segment of resident memory per seal.
+/// The buffer is taken for the length of a check and put back, so a process
+/// keeps one segment, plus one more for each check that runs at the same time.
+static SPARE_BUFFER: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// A check's buffer, returned to its spare slot when the check ends.
+struct Scratch<'a> {
+    buf: Vec<u8>,
+    spare: &'a std::sync::Mutex<Vec<u8>>,
+}
+
+impl<'a> Scratch<'a> {
+    /// A buffer of at least `len` bytes, the spare one if it is big enough.
+    fn take(spare: &'a std::sync::Mutex<Vec<u8>>, len: usize) -> Self {
+        let held = std::mem::take(
+            &mut *spare
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let buf = if held.len() >= len {
+            held
+        } else {
+            vec![0; len]
+        };
+        Self { buf, spare }
+    }
+}
+
+impl Drop for Scratch<'_> {
+    fn drop(&mut self) {
+        let mut spare = self
+            .spare
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.buf.len() > spare.len() {
+            *spare = std::mem::take(&mut self.buf);
+        }
+    }
+}
+
+/// Whether `len` bytes are worth a hand-off to the digest pool.
+#[cfg(not(target_arch = "wasm32"))]
+fn worth_the_pool(len: usize) -> bool {
+    len >= 128 << 10
+}
+
+/// Digest `bytes` on a few threads, as one hasher would serially.
+fn update(digest: &mut blake3::Hasher, bytes: &[u8]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if worth_the_pool(bytes.len())
+        && let Some(pool) = digest_pool()
+    {
+        pool.install(|| digest.update_rayon(bytes));
+        return;
+    }
+    digest.update(bytes);
+}
+
+/// The threads that digest a pack, apart from the global rayon pool: BLAKE3's
+/// split into 4 KiB leaves wastes more CPU the more threads it spreads over,
+/// and the seal gains little past a handful. `None` when threads cannot start.
+#[cfg(not(target_arch = "wasm32"))]
+fn digest_pool() -> Option<&'static rayon::ThreadPool> {
+    const DIGEST_THREADS: usize = 8;
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        (threads > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads.min(DIGEST_THREADS))
+                    .thread_name(|n| format!("kit-digest-{n}"))
+                    .build()
+                    .ok()
+            })
+            .flatten()
+    })
+    .as_ref()
+}
+
+/// Where the next frame must start, and where the frames must end.
+struct FrameChecker {
+    next: u64,
+    end: u64,
+}
+
+impl FrameChecker {
+    /// Check the frame at the start of `bytes` against its row and step to
+    /// the next one. Returns the frame's length in bytes, header included.
+    fn frame(&mut self, bytes: &[u8], row: &Frame) -> StoreResult<usize> {
+        let len = index::parse_frame_header(&bytes[..ENTRY_FRAME_LEN])?;
+        let frame = Frame {
+            offset: self.next + ENTRY_FRAME_LEN as u64,
+            len,
+        };
+        let (_, frame_end) = frame
+            .extent(self.end)
+            .ok_or_else(|| index::invalid("invalid raw frame extent"))?;
+        if frame != *row {
+            return Err(index::invalid("local pack frame disagrees with its row"));
+        }
+        self.next = frame_end;
+        Ok(ENTRY_FRAME_LEN + len as usize)
+    }
+}
+
+// Return the staged copy on collision so the caller can compare it with the
+// existing member or replace a damaged copy of the same content.
+fn persist_unique(
+    tmp: tempfile::NamedTempFile,
+    path: &std::path::Path,
+) -> StoreResult<Option<tempfile::NamedTempFile>> {
     match tmp.persist_noclobber(path) {
-        Ok(_) => Ok(false),
-        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(true),
+        Ok(_) => Ok(None),
+        Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(Some(e.file)),
         Err(e) => Err(e.error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::RepoLayout;
+    use crate::object::{Blob, ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
+    use crate::serialize::serialize;
+    use proptest::prelude::*;
+    use std::cell::Cell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static FAIL_AFTER_HEADER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Fails the frame being written after its header and before its body,
+    /// as a full disk can, when this thread asked for it.
+    pub(super) fn after_frame_header() -> StoreResult<()> {
+        if FAIL_AFTER_HEADER.with(Cell::get) {
+            return Err(io::Error::from(io::ErrorKind::StorageFull).into());
+        }
+        Ok(())
+    }
+
+    fn packed_store() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        store.try_activate_local_packs().unwrap();
+        (dir, layout, store)
+    }
+
+    fn blob(data: &[u8]) -> Vec<u8> {
+        serialize(&Object::Blob(Blob {
+            data: data.to_vec(),
+        }))
+        .unwrap()
+    }
+
+    fn tree(entries: usize, seed: u8) -> Vec<u8> {
+        let target = index::canonical_id(&blob(&[seed])).unwrap();
+        serialize(&Object::Tree(Tree {
+            entries: (0..entries)
+                .map(|i| TreeEntry {
+                    name: format!("file-{i:05}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: target,
+                })
+                .collect(),
+        }))
+        .unwrap()
+    }
+
+    fn manifest(chunks: usize, seed: u8) -> Vec<u8> {
+        let chunk = index::canonical_id(&blob(&[seed; 64])).unwrap();
+        serialize(&Object::ChunkedBlob(
+            ChunkedBlob::new(
+                (chunks * 16_384) as u64,
+                16_384,
+                (1..=chunks).map(|i| (chunk, (i * 16_384) as u64)),
+            )
+            .unwrap(),
+        ))
+        .unwrap()
+    }
+
+    /// The pack and index files of every published pair.
+    fn pairs(store: &ObjectStore) -> Vec<(PathBuf, PathBuf)> {
+        let mut packs: Vec<_> = fs::read_dir(store.pack_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .collect();
+        packs.sort();
+        packs
+            .into_iter()
+            .map(|pack| {
+                let idx = pack.with_extension("idx");
+                (pack, idx)
+            })
+            .collect()
+    }
+
+    /// What the scan of the finished pack file derives, which is what the
+    /// writer derived before it recorded rows: the key and the index bytes.
+    fn scanned(pack: &std::path::Path) -> (Hash, Vec<u8>) {
+        let (key, rows) = index::scan(&mut fs::File::open(pack).unwrap()).unwrap();
+        (key, index::encode(key, &rows))
+    }
+
+    fn object(kind: u8, size: usize, seed: u8) -> Vec<u8> {
+        match kind % 4 {
+            0 => blob(&vec![seed; size]),
+            1 => blob(
+                &(0..size)
+                    .map(|i| u8::try_from(i % 251).unwrap().wrapping_mul(seed | 1))
+                    .collect::<Vec<_>>(),
+            ),
+            2 => tree(size % 300 + 1, seed),
+            _ => manifest(size % 300 + 2, seed),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn recorded_rows_give_the_pack_key_and_index_that_a_scan_does(
+            specs in proptest::collection::vec((any::<u8>(), 0_usize..70_000, any::<u8>()), 1..14),
+        ) {
+            let (_dir, _layout, store) = packed_store();
+            let guard = store.prune_guard().unwrap();
+            let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+            for (n, (kind, size, seed)) in specs.iter().enumerate() {
+                let bytes = object(*kind, *size, *seed);
+                let id = if n % 2 == 0 {
+                    writer.write(&bytes).unwrap()
+                } else {
+                    let id = index::canonical_id(&bytes).unwrap();
+                    let (head, tail) = bytes.split_at(bytes.len() / 2);
+                    writer.write_hashed(id, &[head, tail]).unwrap()
+                };
+                prop_assert_eq!(id, index::canonical_id(&bytes).unwrap());
+            }
+            writer.publish().unwrap();
+            let published = pairs(&store);
+            prop_assert_eq!(published.len(), 1);
+            let (pack, idx) = &published[0];
+            let (key, bytes) = scanned(pack);
+            prop_assert_eq!(pack.file_stem().unwrap().to_str().unwrap(), crate::hash::to_hex(&key));
+            prop_assert_eq!(fs::read(idx).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_pack_of_chunks_small_blobs_trees_and_manifests_keeps_the_scan_bytes() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        for bytes in [
+            blob(&[7; 16_384]),
+            blob(b"small"),
+            blob(b""),
+            tree(40, 1),
+            manifest(40, 2),
+            blob(&[7; 16_384]),
+        ] {
+            writer.write(&bytes).unwrap();
+        }
+        writer.publish().unwrap();
+        let published = pairs(&store);
+        assert_eq!(published.len(), 1);
+        let (key, bytes) = scanned(&published[0].0);
+        assert_eq!(fs::read(&published[0].1).unwrap(), bytes);
+        assert_eq!(
+            published[0].0.file_stem().unwrap().to_str().unwrap(),
+            crate::hash::to_hex(&key)
+        );
+    }
+
+    #[test]
+    fn later_packs_of_a_store_skip_the_marker_and_parent_syncs() {
+        let (_dir, layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        crate::durable::testing::reset_dir_sync_calls();
+        let mut first = LocalPackWriter::new(&store, &guard).unwrap();
+        first.write(&blob(b"first")).unwrap();
+        first.publish().unwrap();
+        // The marker's directory, the objects root, then the pack directory
+        // after the pack and again after the index.
+        assert_eq!(crate::durable::testing::dir_sync_calls(), 4);
+
+        crate::durable::testing::reset_dir_sync_calls();
+        let mut second = LocalPackWriter::new(&store, &guard).unwrap();
+        second.write(&blob(b"second")).unwrap();
+        second.publish().unwrap();
+        assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
+        assert_eq!(pairs(&store).len(), 2);
+        drop(guard);
+
+        // Every writer still reads the marker under its own guard.
+        fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+        let guard = store.prune_guard().unwrap();
+        assert!(matches!(
+            LocalPackWriter::new(&store, &guard),
+            Err(StoreError::IncompatibleRepoFormat { .. })
+        ));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a prehashed object must carry its own id")]
+    fn a_wrong_prehashed_id_panics_in_debug_builds() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        let wrong = index::canonical_id(&blob(b"other")).unwrap();
+        let _ = writer.write_hashed(wrong, &[&blob(b"this")]);
+    }
+
+    #[test]
+    fn a_failed_frame_poisons_the_writer_and_publishes_nothing() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        writer.write(&blob(b"kept")).unwrap();
+        FAIL_AFTER_HEADER.with(|fail| fail.set(true));
+        let failed = writer.write(&blob(b"torn"));
+        FAIL_AFTER_HEADER.with(|fail| fail.set(false));
+        assert!(matches!(failed, Err(StoreError::Io(_))));
+
+        // Nothing more is accepted, not even an object that fits.
+        assert!(writer.write(&blob(b"after")).is_err());
+        assert!(writer.publish().is_err());
+        assert!(pairs(&store).is_empty());
+        let leftovers = fs::read_dir(store.pack_dir()).unwrap().count();
+        assert_eq!(leftovers, 0, "the staging file is gone");
+    }
+
+    #[test]
+    fn any_rejected_write_poisons_the_writer() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        assert!(writer.write(b"not an object").is_err());
+        assert!(writer.write(&blob(b"fine")).is_err());
+        assert!(writer.publish().is_err());
+        assert!(pairs(&store).is_empty());
+    }
+
+    fn small_writer<'a>(
+        store: &'a ObjectStore,
+        guard: &'a PruneGuard,
+        limits: Limits,
+    ) -> LocalPackWriter<'a> {
+        let mut writer = LocalPackWriter::new(store, guard).unwrap();
+        writer.limits = limits;
+        writer
+    }
+
+    #[test]
+    fn a_pack_takes_objects_up_to_its_limits_and_no_more() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let (a, b, c) = (blob(&[1; 40]), blob(&[2; 40]), blob(&[3; 40]));
+        let object = a.len();
+        let limits = Limits {
+            object,
+            entries: 2,
+            payload: 2 * object as u64,
+        };
+
+        // Exactly at every limit is accepted, and a duplicate costs nothing.
+        let mut writer = small_writer(&store, &guard, limits);
+        writer.write(&a).unwrap();
+        writer.write(&b).unwrap();
+        writer.write(&a).unwrap();
+        writer.publish().unwrap();
+        assert_eq!(pairs(&store).len(), 1);
+
+        // A third distinct object passes neither the entry nor payload limit.
+        for limits in [
+            Limits {
+                payload: u64::MAX / 2,
+                ..limits
+            },
+            Limits {
+                entries: 9,
+                ..limits
+            },
+        ] {
+            let mut writer = small_writer(&store, &guard, limits);
+            writer.write(&a).unwrap();
+            writer.write(&b).unwrap();
+            assert!(matches!(writer.write(&c), Err(StoreError::ObjectTooLarge)));
+            assert!(writer.publish().is_err());
+        }
+
+        // One byte over the payload limit with entries to spare.
+        let mut writer = small_writer(
+            &store,
+            &guard,
+            Limits {
+                payload: 2 * object as u64 - 1,
+                ..limits
+            },
+        );
+        writer.write(&a).unwrap();
+        assert!(matches!(writer.write(&b), Err(StoreError::ObjectTooLarge)));
+
+        // One byte over the object limit, through the prehashed entry.
+        let mut writer = small_writer(
+            &store,
+            &guard,
+            Limits {
+                object: object - 1,
+                ..limits
+            },
+        );
+        let id = index::canonical_id(&a).unwrap();
+        assert!(matches!(
+            writer.write_hashed(id, &[&a]),
+            Err(StoreError::ObjectTooLarge)
+        ));
+        let mut writer = small_writer(&store, &guard, limits);
+        let id = index::canonical_id(&a).unwrap();
+        writer.write_hashed(id, &[&a]).unwrap();
+    }
+
+    #[test]
+    fn a_pack_damaged_between_its_last_write_and_the_seal_fails_the_seal() {
+        for corrupt in [Corruption::FrameLength, Corruption::Trailing] {
+            let (_dir, _layout, store) = packed_store();
+            let guard = store.prune_guard().unwrap();
+            let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+            writer.write(&blob(&[1; 500])).unwrap();
+            writer.write(&blob(&[2; 600])).unwrap();
+            writer.pack.flush().unwrap();
+            let path = writer.pack.get_ref().path().to_path_buf();
+            let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+            match corrupt {
+                // The first frame's length, after its reserved byte.
+                Corruption::FrameLength => {
+                    file.seek(SeekFrom::Start(HEADER_LEN as u64 + 1)).unwrap();
+                    file.write_all(&501_u32.to_le_bytes()).unwrap();
+                }
+                Corruption::Trailing => {
+                    file.seek(SeekFrom::End(0)).unwrap();
+                    file.write_all(b"x").unwrap();
+                }
+            }
+            assert!(matches!(
+                writer.publish(),
+                Err(StoreError::LocalPackDamaged { .. })
+            ));
+            assert!(pairs(&store).is_empty());
+            assert_eq!(fs::read_dir(store.pack_dir()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn the_layout_check_refuses_bytes_after_the_last_frame_and_missing_frames() {
+        let (_dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        writer.write(&blob(&[1; 500])).unwrap();
+        writer.write(&blob(&[2; 600])).unwrap();
+        writer.pack.flush().unwrap();
+        let count = u32::try_from(writer.frames.rows.len()).unwrap();
+        let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
+        let path = writer.pack.get_ref().path().to_path_buf();
+        // The count is written at seal time, before the check.
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
+        file.write_all(&count.to_le_bytes()).unwrap();
+
+        file.rewind().unwrap();
+        check_frames(&mut file, &rows, end).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"x").unwrap();
+        file.rewind().unwrap();
+        assert!(matches!(
+            check_frames(&mut file, &rows, end),
+            Err(StoreError::LocalPackDamaged { .. })
+        ));
+
+        // A row for a frame that is not in the file.
+        file.set_len(end).unwrap();
+        file.rewind().unwrap();
+        let mut missing = rows.clone();
+        missing.push((rows[0].0, rows[1].1));
+        assert!(check_frames(&mut file, &missing, end).is_err());
+        // The recorded end beyond the last frame.
+        file.rewind().unwrap();
+        assert!(check_frames(&mut file, &rows, end + 1).is_err());
+    }
+
+    /// A finished pack file with one distinct blob per size, its count
+    /// written as the seal does, with the rows and end the writer recorded.
+    fn unsealed(
+        sizes: &[usize],
+    ) -> (
+        tempfile::TempDir,
+        fs::File,
+        Vec<(Hash, Frame)>,
+        u64,
+        Vec<u8>,
+    ) {
+        let (dir, _layout, store) = packed_store();
+        let guard = store.prune_guard().unwrap();
+        let mut writer = LocalPackWriter::new(&store, &guard).unwrap();
+        for (n, size) in sizes.iter().enumerate() {
+            let data = (0..*size)
+                .map(|i| u8::try_from((i * 7 + n) % 251).unwrap())
+                .collect::<Vec<_>>();
+            writer
+                .write(&blob(&[&n.to_le_bytes()[..], &data].concat()))
+                .unwrap();
+        }
+        writer.pack.flush().unwrap();
+        let (rows, end) = (writer.frames.rows.clone(), writer.frames.end);
+        let path = writer.pack.get_ref().path().to_path_buf();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(HEADER_LEN as u64 - 4)).unwrap();
+        file.write_all(&u32::try_from(rows.len()).unwrap().to_le_bytes())
+            .unwrap();
+        file.rewind().unwrap();
+        let bytes = fs::read(&path).unwrap();
+        (dir, file, rows, end, bytes)
+    }
+
+    #[test]
+    fn the_digest_is_the_serial_digest_across_chunk_and_subtree_boundaries() {
+        // Frame sizes around BLAKE3's 1 KiB chunks and power-of-two subtrees,
+        // and a frame of several subtrees, with the default buffer and with
+        // buffers that cut groups and frames at every size.
+        let sizes = [
+            1, 1000, 1018, 1019, 1020, 2043, 2044, 4091, 8185, 65_530, 131_072, 300_000, 7,
+        ];
+        let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
+        let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+        for segment in [16, 17, 1024, 1029, 4096, 70_000, 131_072, 1 << 20, SEGMENT] {
+            file.rewind().unwrap();
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            assert_eq!(digest.finalize(), serial, "segment {segment}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn the_checked_digest_equals_the_serial_digest_for_any_sizes_and_buffer(
+            sizes in proptest::collection::vec(
+                prop_oneof![0_usize..3000, 1015..1030_usize, 2040..2055_usize, 0..200_000_usize],
+                0..20,
+            ),
+            segment in 16_usize..300_000,
+        ) {
+            let (_dir, mut file, rows, end, bytes) = unsealed(&sizes);
+            let serial = blake3::hash(&bytes[..usize::try_from(end).unwrap()]);
+            let digest = check_frames_in(&mut file, &rows, end, segment).unwrap();
+            prop_assert_eq!(digest.finalize(), serial);
+        }
+    }
+
+    #[test]
+    fn a_bad_frame_in_any_position_of_any_group_fails_the_check() {
+        let sizes = [500, 900, 1300, 100, 40_000, 700, 800];
+        let (_dir, file, rows, end, bytes) = unsealed(&sizes);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            for (n, (_, row)) in rows.iter().enumerate() {
+                let start = usize::try_from(row.offset).unwrap() - ENTRY_FRAME_LEN;
+                for (offset, value) in [(0, 1_u8), (1, bytes[start + 1] ^ 1), (4, 0x7f)] {
+                    let mut damaged = bytes.clone();
+                    damaged[start + offset] = value;
+                    path.as_file_mut().set_len(0).unwrap();
+                    path.rewind().unwrap();
+                    path.write_all(&damaged).unwrap();
+                    path.rewind().unwrap();
+                    assert!(
+                        check_frames_in(path.as_file_mut(), &rows, end, segment).is_err(),
+                        "segment {segment}, frame {n}, byte {offset}"
+                    );
+                }
+            }
+        }
+        // The undamaged file passes every buffer.
+        drop(file);
+        for segment in [16, 700, 2000, 50_000, SEGMENT] {
+            path.as_file_mut().set_len(0).unwrap();
+            path.rewind().unwrap();
+            path.write_all(&bytes).unwrap();
+            path.rewind().unwrap();
+            check_frames_in(path.as_file_mut(), &rows, end, segment).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_short_or_long_pack_fails_the_check_with_any_buffer() {
+        let (_dir, _file, rows, end, bytes) = unsealed(&[500, 900, 1300]);
+        let mut path = tempfile::NamedTempFile::new().unwrap();
+        let len = usize::try_from(end).unwrap();
+        for segment in [16, 600, SEGMENT] {
+            for damaged in [&bytes[..len - 1], &[&bytes[..], b"x"].concat()[..]] {
+                path.as_file_mut().set_len(0).unwrap();
+                path.rewind().unwrap();
+                path.write_all(damaged).unwrap();
+                path.rewind().unwrap();
+                assert!(check_frames_in(path.as_file_mut(), &rows, end, segment).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn the_check_buffer_is_reused_and_only_ever_grows() {
+        let spare = std::sync::Mutex::new(Vec::new());
+        drop(Scratch::take(&spare, 100));
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A smaller request takes the spare buffer and gives it back whole.
+        let small = Scratch::take(&spare, 40);
+        assert_eq!(small.buf.len(), 100);
+        assert!(spare.lock().unwrap().is_empty());
+        drop(small);
+        assert_eq!(spare.lock().unwrap().len(), 100);
+        // A larger one replaces it, and a concurrent smaller one does not.
+        let (big, other) = (Scratch::take(&spare, 300), Scratch::take(&spare, 200));
+        drop(big);
+        drop(other);
+        assert_eq!(spare.lock().unwrap().len(), 300);
+    }
+
+    #[test]
+    fn the_default_segment_holds_many_frames_and_the_pool_takes_only_big_inputs() {
+        const { assert!(SEGMENT >= 1 << 20) };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            assert!(!worth_the_pool((128 << 10) - 1));
+            assert!(worth_the_pool(128 << 10));
+            let threads = std::thread::available_parallelism().map_or(1, usize::from);
+            assert_eq!(digest_pool().is_some(), threads > 1);
+            if let Some(pool) = digest_pool() {
+                assert_eq!(pool.current_num_threads(), threads.min(8));
+            }
+        }
+    }
+
+    enum Corruption {
+        FrameLength,
+        Trailing,
+    }
+
+    #[test]
+    fn publishing_to_a_missing_directory_is_not_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let staged = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let target = dir.path().join("missing").join("pack");
+        assert!(matches!(
+            persist_unique(staged, &target),
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
     }
 }

@@ -341,7 +341,7 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** Commonware requirements use the same lower bound (`2026.10.0`)
+**Always:** Commonware requirements use the same lower bound (`2026.11.0`)
 across manifests. Committed lockfiles select the same release. A move to a
 new release changes every manifest and lockfile in one commit.
 
@@ -451,7 +451,7 @@ of `rust/tests/golden/pack-v2/`. The `boundary_` packs there hold no zstd frame.
 **Always:** `kit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
 varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
 already-proven-sibling-omitting selection rule are byte-identical to
-`commonware_storage::bmt::Proof` at the pinned `2026.10.0` train, for
+`commonware_storage::bmt::Proof` at the pinned `2026.11.0` train, for
 single, range, and multi-leaf proofs alike — both directions: kit
 decodes and accepts upstream's proof bytes, and upstream decodes and
 accepts kit's.
@@ -1040,16 +1040,18 @@ after every gc.
 
 ## A fetch holds a prune guard, not the repository lock
 
-**Always:** a fetch downloads, authenticates, unpacks and records each pack as
-it arrives, in chain order, with no `worktree.lock` held and one spool file in
-`.kit/tmp/` at a time. It takes `ObjectStore::prune_guard` first, before it
-reads the applied-packs record, and holds it until after its last ref publish,
-on every return path. While any guard is held, gc deletes no object at any grace period.
+**Always:** a fetch downloads and authenticates one wire pack at a time in chain
+order. It decodes to private storage and checks required signatures before
+any of that pack's objects can publish. A publication window can hold objects
+from several accepted packs. The final closure and history checks can read
+both the durable store and that window. The fetch tries activation before
+`ObjectStore::prune_guard`. It reads the applied-packs record under the guard
+and holds it until after its last ref publish. While any guard is held, gc deletes no object at any grace period.
 `worktree.lock` is taken only around the tracking-ref write and the checkpoint.
 That wait has no deadline, reports itself once, and ends on an interrupt. No
 process ever blocks on the exclusive lock of the `format` file: gc only tries it.
-A pack is recorded as applied only after its objects are committed and its
-signatures are checked, and the record is appended as each pack lands. When a
+A wire pack is recorded as applied after the window that completes it is
+durable. A later fetch can skip the completed packs of an interrupted clone. When a
 run that skipped a recorded pack finds a delta base or a closure object
 missing, it clears the record and applies the whole chain again, once.
 A push holds the same guard from before it plans until after its last
@@ -1057,11 +1059,9 @@ remote-tracking ref write, and writes each of those refs under
 `worktree.lock`.
 
 **Because:** one large file is many packs, so a clone can take hours. A lock
-held that long stops `add`, `commit` and `checkout`. Staging the packs first
-makes the disk a clone needs grow with the file. The lock was only there to keep
-gc away from objects no ref names yet, and a dedup hit leaves an old object's
-modification time, so the grace period does not protect an object a fetch
-reuses. A guard keeps gc away without any wait. The guard relies on a local
+held that long stops `add`, `commit` and `checkout`. The prune guard protects
+the objects of every reused and newly applied pack until the ref names them,
+including old objects past the grace period. The guard relies on a local
 filesystem, as every lock does (SPEC-CONCURRENCY §3.4).
 
 **If violated:** commands fail as busy during a clone, or gc deletes an object

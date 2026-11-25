@@ -1,6 +1,6 @@
 //! Multi-pack push integration tests.
 //!
-//! `push_branch`/`push_branch_with_depth` build the whole push plan into a
+//! `push_branch` builds the whole push plan into a
 //! single pack, capped at 256 MiB by default and at most
 //! `pack::MAX_TOTAL_PAYLOAD` (4 GiB). A push whose plan exceeds that in one pack splits
 //! across multiple packs — sealed and uploaded as they fill — recorded
@@ -17,7 +17,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::Repo;
+use common::{Repo, push_branch_with_limits};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::pack::{self, ENTRY_FRAME_LEN, HEADER_LEN, TRAILER_LEN};
@@ -26,7 +26,7 @@ use kit_core::refs;
 use kit_core::store::ObjectStore;
 use kit_core::transfer::{self, PackListNode};
 use kit_transport_memory::MemoryTransport;
-use libkit::transfer::{pull_all, push_all, push_branch_with_limits};
+use libkit::transfer::{pull_all, push_all};
 
 /// Tiny cap that a handful of KiB-sized files reliably exceeds, forcing a
 /// split without moving gigabytes through the test harness.

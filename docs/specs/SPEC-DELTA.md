@@ -41,8 +41,8 @@ object (§8) supplies a `result_size` field; pack entries do not.
 The `stream_version` byte is required: readers use it to reject any
 future format they don't recognize.
 
-Readers MUST reject `stream_version != 0x01` with
-`UnsupportedDeltaVersion`. The Rust API surfaces this as
+Readers MUST reject a `stream_version` they do not read with
+`UnsupportedDeltaVersion`; `0x01` is the only version so far. The Rust API surfaces this as
 `KitError::UnsupportedObjectVersion`; the SPEC-level name refers to
 the same condition.
 
@@ -278,7 +278,7 @@ refuse unknown versions.
 
 | Invariant | Enforced by |
 |---|---|
-| A reader executes only streams it understands | `stream_version` byte; `!= 0x01` → `UnsupportedDeltaVersion` (§2) |
+| A reader executes only streams it understands | `stream_version` byte; an unknown version → `UnsupportedDeltaVersion` (§2) |
 | The stream is applied only to the base it was written against | `base_len` MUST equal the supplied base length, checked before any opcode executes (§2, §4) |
 | COPY never reads outside the base | `offset + length <= base_len` → `DeltaCorrupt` (§2, §4) |
 | Output never exceeds the declared size, even mid-stream | per-opcode `out.len() + length <= result_len` check (§2, §4) |

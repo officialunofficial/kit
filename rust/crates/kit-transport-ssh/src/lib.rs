@@ -53,6 +53,7 @@ use kit_core::hash::Hash;
 use kit_core::protocol::{
     BackoffIterator, PackKey, RepoCursor, Transport, TransportError, TransportResult,
 };
+use kit_core::ref_listing::{MAX_PAGES, RefListing};
 use kit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use kit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor, SshFrame,
@@ -79,6 +80,10 @@ const CLIENT_ID: &str = concat!("kit ", env!("CARGO_PKG_VERSION"));
 const SESSION_FRAMES: u32 = 10_000;
 const SESSION_BYTES: u64 = 1 << 30;
 const CONTROL_REQUEST_BYTES: u64 = 64;
+
+/// The refs one `ListRefs` request asks for: the most a `kit serve` page
+/// holds. A server that holds fewer answers fewer.
+const LIST_PAGE_REFS: u32 = 1000;
 
 /// Default timeout for SSH handshake replies, verb responses, and child shutdown.
 pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -323,6 +328,11 @@ impl Drop for SshTransport {
 }
 
 impl Transport for SshTransport {
+    /// A `kit serve` remote ingests and serves packs with this crate's pack reader, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }
@@ -577,11 +587,9 @@ impl Transport for SshTransport {
         })
     }
 
-    /// `kit serve` answers a listing in one frame.
-    fn ref_listing(&self) -> kit_core::protocol::RefListing {
-        kit_core::protocol::RefListing::OneFrame
-    }
-
+    /// Every page of the listing, in name order. Each page is one request, so
+    /// a listing may carry on across a reconnect: the page token is the last
+    /// name of the page before, and it names no state of the old session.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !prefix.is_empty() && !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.into()));
@@ -589,21 +597,39 @@ impl Transport for SshTransport {
         if prefix.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref prefix too long".into()));
         }
-        self.with_retry(|io| {
-            let req = SshFrame {
-                body: Some(ssh_frame::Body::ListRefs(Box::new(
-                    ListRefs::default().with_prefix(prefix),
-                ))),
-                ..Default::default()
-            };
-            self.write_request(io, req)?;
-            let resp = read_child_frame_or_err(io)?;
-            match resp.body {
-                Some(ssh_frame::Body::ListRefsResponse(r)) => list_response_refs(prefix, r.refs),
-                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
-                other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
+        let mut listing = RefListing::<Ref>::new(MAX_PAGES);
+        while listing.can_request() {
+            let token = listing.cursor().to_owned();
+            let (refs, next) = self.with_retry(|io| {
+                let mut request = ListRefs::default().with_prefix(prefix);
+                request.page_size = Some(LIST_PAGE_REFS);
+                request.page_token = (!token.is_empty()).then(|| token.clone());
+                let req = SshFrame {
+                    body: Some(ssh_frame::Body::ListRefs(Box::new(request))),
+                    ..Default::default()
+                };
+                self.write_request(io, req)?;
+                let resp = read_child_frame_or_err(io)?;
+                match resp.body {
+                    Some(ssh_frame::Body::ListRefsResponse(r)) => {
+                        Ok((list_response_refs(prefix, r.refs)?, r.next_page_token))
+                    }
+                    Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                    other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
+                }
+            })?;
+            // `kit serve` sets a token only when refs follow the page, so an
+            // empty page with a token is a server that never ends the listing.
+            if refs.is_empty() && next.as_deref().is_some_and(|token| !token.is_empty()) {
+                return Err(TransportError::InvalidResponse);
             }
-        })
+            listing
+                .push(refs, next, |r| &mut r.name)
+                .map_err(|_| TransportError::InvalidResponse)?;
+        }
+        listing
+            .finish()
+            .map_err(|_| TransportError::InvalidResponse)
     }
 }
 

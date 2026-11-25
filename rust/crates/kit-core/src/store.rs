@@ -41,9 +41,9 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::batch::{RealSyncer, Syncer};
 pub use crate::batch::{SyncPolicy, WriteBatch};
@@ -57,9 +57,19 @@ mod local_pack;
 mod memory;
 mod memory_overlay;
 mod source;
+mod tree_budget;
+pub(crate) use local_pack::Catalog as PackCatalog;
+#[cfg(test)]
+pub(crate) use local_pack::set_test_output_entries;
+pub use local_pack::{LocalPackWriter, PACK_SEAL_BYTES, PACK_SEAL_ENTRIES, SealJob};
+pub(crate) use local_pack::{PackSweep, Verify};
 pub use memory::MemorySource;
 pub use memory_overlay::{MemoryOverlay, MemoryOverlayLimits};
-pub use source::{DisplaySource, EphemeralSink, HashOnlySink, ObjectSource};
+pub use source::{
+    ClosureSource, DisplaySource, EphemeralSink, GuardedStore, HashOnlySink, ObjectSource,
+};
+pub(crate) use tree_budget::WalkBudget;
+pub use tree_budget::{MAX_TREE_LEAVES, check_tree_leaves};
 
 /// Where a blob's bytes sit in a worktree file. An inline blob starts at
 /// offset zero.
@@ -69,6 +79,77 @@ pub struct ChunkOrigin<'a> {
     pub path: &'a Path,
     /// The offset of the blob's first byte in that file.
     pub offset: u64,
+}
+
+/// A canonical blob chunk whose id is already computed, with its prologue and
+/// payload in order.
+///
+/// The fields are private and [`Self::new`] hashes the bytes, so code outside
+/// kit-core can make a chunk only by hashing it, and a sink may trust the id.
+/// The bytes are an owned buffer or a borrow of a reader window, never a
+/// mapping, so they cannot change between the hash and the write.
+#[derive(Debug, Clone, Copy)]
+pub struct HashedChunk<'a> {
+    id: Hash,
+    prologue: [u8; serialize::BLOB_PROLOGUE_LEN],
+    data: &'a [u8],
+    origin: Option<ChunkOrigin<'a>>,
+}
+
+impl<'a> HashedChunk<'a> {
+    /// Build the canonical blob of `data` and hash it, with the same id
+    /// dispatch as [`WriteBatch::write_parts`].
+    ///
+    /// # Errors
+    /// [`KitError`] when `data` is longer than a blob may be.
+    pub fn new(data: &'a [u8]) -> Result<Self, KitError> {
+        let prologue = serialize::blob_prologue(data.len())?;
+        let id = crate::object::object_id_from_parts(&[&prologue, data]);
+        Ok(Self {
+            id,
+            prologue,
+            data,
+            origin: None,
+        })
+    }
+
+    /// Record where the chunk sits in a worktree file, for a sink that keeps
+    /// the location instead of the bytes.
+    #[must_use]
+    pub fn at(mut self, origin: ChunkOrigin<'a>) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    /// The content address of the blob.
+    #[must_use]
+    pub fn id(&self) -> Hash {
+        self.id
+    }
+
+    /// The prologue and the payload, in order.
+    #[must_use]
+    pub fn parts(&self) -> [&[u8]; 2] {
+        [&self.prologue, self.data]
+    }
+
+    /// The serialized length of the blob.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.prologue.len() + self.data.len()
+    }
+
+    /// Never true: a blob has a prologue.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Where the chunk sits in its worktree file, if the caller said.
+    #[must_use]
+    pub fn origin(&self) -> Option<ChunkOrigin<'a>> {
+        self.origin
+    }
 }
 
 /// Top-level repository directory name.
@@ -86,6 +167,11 @@ pub const FORMAT_VALUE: &str = "bmt-v2";
 
 /// Longest format marker that kit reads. The real value is a few bytes.
 const FORMAT_MAX_BYTES: u64 = 64;
+
+/// The largest packed frame the mark's probe reads whole in one call, to hash
+/// it. A larger one streams, so the probe never holds more than this.
+const GC_SMALL_FRAME: usize = 16 * 1024;
+
 /// Hard cap on raw object size, enforced on both [`ObjectStore::write`]
 /// and [`ObjectStore::read`].
 pub const MAX_RAW_OBJECT_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
@@ -111,6 +197,7 @@ pub const MAX_TREE_DEPTH: usize = 128;
 /// [`KitError`] so callers can pattern-match on filesystem failures
 /// without losing the structured-decode-error variants.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoreError {
     #[error("path is not a kit repository (missing .kit/objects)")]
     NotAKitRepository,
@@ -127,11 +214,24 @@ pub enum StoreError {
     ObjectTooLarge,
     #[error("tree nesting exceeds {} levels", MAX_TREE_DEPTH)]
     TreeTooDeep,
+    /// A tree expands to more than [`MAX_TREE_LEAVES`] files, or to paths an
+    /// index file could not hold.
+    #[error("tree expands to more files, or longer paths, than a repository holds")]
+    TreeTooLarge,
     /// A caller-selected in-memory operation budget was exhausted.
     #[error("object operation exceeded {0} limit")]
     OperationLimitExceeded(&'static str),
     #[error("on-disk bytes hash to {actual}, expected {expected}")]
     HashMismatch { expected: String, actual: String },
+    /// A local pack or its index failed a check: a bad header, size,
+    /// checksum, frame, extent or key. A failed read stays [`Self::Io`].
+    #[error("local pack {pack}: {reason}")]
+    LocalPackDamaged {
+        /// The path of the damaged pack or index file.
+        pack: Box<str>,
+        /// What the check found.
+        reason: Box<str>,
+    },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -177,6 +277,8 @@ impl BulkWriter<'_> {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
+        // Before this writer's own shared guard, which would make the try miss.
+        self.store.ensure_packed_once()?;
         let _guard = self.store.lock_writer()?;
         let h = object_id_from_bytes(bytes);
         let final_path = self.store.path_for(&h);
@@ -220,7 +322,7 @@ impl BulkWriter<'_> {
         // Content fsync happens BEFORE the rename, so the object is
         // durable the instant it becomes visible. Only the rename's
         // durability (the shard dir fsync) is deferred to commit.
-        crate::atomic::write_content_synced(&final_path, bytes)?;
+        crate::durable::write_content_synced(&final_path, bytes)?;
         self.dirs.insert(shard_dir.to_path_buf());
         self.refreshed.insert(h);
         Ok(h)
@@ -278,7 +380,7 @@ impl BulkWriter<'_> {
             sync_reused_file(file)?;
         }
         for dir in &self.dirs {
-            crate::atomic::sync_dir(dir)?;
+            crate::durable::flush_dir(dir)?;
         }
         Ok(())
     }
@@ -289,12 +391,28 @@ impl BulkWriter<'_> {
 #[must_use = "the guard protects the store only while it is alive"]
 #[derive(Debug)]
 pub struct PruneGuard {
-    #[cfg_attr(not(test), allow(dead_code))] // Owns the lock until drop.
     format: File,
+    objects_root: PathBuf,
 }
 
 /// Result alias used throughout this module.
 pub type StoreResult<T> = Result<T, StoreError>;
+
+#[derive(Debug, Default)]
+struct PackWrites {
+    direct_catalog: OnceLock<Option<Arc<PackCatalog>>>,
+    direct_synced: Mutex<bool>,
+    root_synced: std::sync::atomic::AtomicBool,
+    /// Set once this handle's one try at the activation has missed. A try that
+    /// activates the store is recorded as enabled, and a failed try is not
+    /// recorded, so it is returned again. Other
+    /// threads wait on the lock, so none takes a shared guard that would make
+    /// the first try miss.
+    activation: Mutex<bool>,
+    /// The marker and the parents of `pack/` were synced and `pack/` exists,
+    /// so a later pack writer only checks the marker under its own guard.
+    pack_dir_prepared: std::sync::atomic::AtomicBool,
+}
 
 /// Local content-addressed object store backed by the filesystem.
 #[derive(Debug, Clone)]
@@ -302,6 +420,7 @@ pub struct ObjectStore {
     /// Absolute path to `<root>/.kit/objects`.
     objects_root: PathBuf,
     packs: Arc<local_pack::LocalPacks>,
+    pack_writes: Arc<PackWrites>,
     /// Flush/rename primitive seam. Production code always uses
     /// [`RealSyncer`]; unit tests inject a recording double to assert
     /// flush ordering and counts (the O(1)-flushes-per-batch contract).
@@ -319,6 +438,16 @@ pub struct ObjectStore {
     /// object rather than once per reference to it.
     #[cfg(test)]
     read_calls: Arc<AtomicU64>,
+    /// Test-only: bytes of packed blobs that a gc type probe hashed.
+    #[cfg(test)]
+    gc_hashed_bytes: Arc<AtomicU64>,
+    /// Test-only: gc type probes that the one-read path answered.
+    #[cfg(test)]
+    gc_one_read_probes: Arc<AtomicU64>,
+    /// Test-only: set to send every gc type probe down the streaming path,
+    /// to compare it with the one-read path.
+    #[cfg(test)]
+    gc_stream_only: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ObjectStore {
@@ -332,39 +461,67 @@ impl ObjectStore {
             return Err(StoreError::NotAKitRepository);
         }
         let packed = format::check(&layout.format_file())?;
-        if packed {
-            local_pack::check_live_pack_versions(&objects_root)?;
-        }
         Ok(Self {
             objects_root,
             packs: Arc::new(local_pack::LocalPacks::new(packed)),
+            pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
     }
 
     /// Initialise a fresh common dir for the repository described by
     /// `layout`. Returns [`StoreError::AlreadyInitialized`] if the
-    /// common dir already exists.
+    /// common dir already exists, unless a killed `init` made it: a common
+    /// dir with no format marker and no objects holds nothing and is
+    /// initialised again, as `git init` does.
     pub fn init(layout: &RepoLayout) -> StoreResult<Self> {
-        if layout.common_dir().exists() {
+        if layout.common_dir().exists() && !is_unfinished_init(layout)? {
             return Err(StoreError::AlreadyInitialized);
         }
         let objects_root = layout.objects_dir();
         fs::create_dir_all(&objects_root)?;
-        // Declare the object-addressing format so a future open by an
-        // different kit fails loudly (SPEC-MERKLE-OBJECTS §7).
-        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
+        // Declare the object-addressing format, with the packed capability,
+        // so a different kit fails loudly (SPEC-OBJECTS §7). The marker is
+        // synced before `init` returns, so a crash leaves no marker or the
+        // whole one.
+        let marker = format::init_marker(&layout.format_file());
+        crate::durable::write_pointer(
+            &layout.format_file(),
+            marker,
+            crate::durable::Parents::Existing,
+        )?;
         Ok(Self {
             objects_root,
-            packs: Arc::new(local_pack::LocalPacks::new(false)),
+            packs: Arc::new(local_pack::LocalPacks::new(marker == format::PACKED)),
+            pack_writes: Arc::default(),
             syncer: Arc::new(RealSyncer),
             default_policy: SyncPolicy::Batch,
             #[cfg(test)]
             read_calls: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_hashed_bytes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_one_read_probes: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            gc_stream_only: Arc::default(),
         })
+    }
+
+    /// Test-only: a new store with the legacy marker, as an earlier kit made it.
+    #[cfg(test)]
+    pub(crate) fn init_loose(layout: &RepoLayout) -> StoreResult<Self> {
+        Self::init(layout)?;
+        fs::write(layout.format_file(), format!("{FORMAT_VALUE}\n").as_bytes())?;
+        Self::open(layout)
     }
 
     /// Select the [`SyncPolicy`] that [`Self::batch`] hands out. The
@@ -397,6 +554,24 @@ impl ObjectStore {
         self.read_calls.load(Ordering::Relaxed)
     }
 
+    /// Test-only: bytes of packed blobs hashed by gc type probes so far.
+    #[cfg(test)]
+    pub(crate) fn gc_hashed_byte_count(&self) -> u64 {
+        self.gc_hashed_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: gc type probes that the one-read path answered so far.
+    #[cfg(test)]
+    pub(crate) fn gc_one_read_probe_count(&self) -> u64 {
+        self.gc_one_read_probes.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: probe every packed object through the streaming path.
+    #[cfg(test)]
+    pub(crate) fn gc_probe_streaming_only(&self) {
+        self.gc_stream_only.store(true, Ordering::Relaxed);
+    }
+
     /// Start a batched write with the store's configured policy
     /// (default [`SyncPolicy::Batch`]): objects staged by the batch
     /// become durable and visible together at [`WriteBatch::commit`],
@@ -404,6 +579,15 @@ impl ObjectStore {
     #[must_use]
     pub fn batch(&self) -> WriteBatch<'_> {
         self.batch_with_policy(self.default_policy)
+    }
+
+    /// A group of writes that share flushes, on this store's device calls, so
+    /// a test double of the store sees them too. See [`crate::durable`] and
+    /// [`WriteBatch::commit_in`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn group(&self) -> crate::durable::Group {
+        crate::durable::Group::with_syncer(Arc::clone(self.syncer()))
     }
 
     /// Start a batched write with an explicit [`SyncPolicy`].
@@ -480,6 +664,7 @@ impl ObjectStore {
         if bytes.len() > MAX_RAW_OBJECT_SIZE {
             return Err(StoreError::ObjectTooLarge);
         }
+        self.ensure_packed_once()?;
         let h = object_id_from_bytes(bytes);
         let final_path = self.path_for(&h);
         if final_path.exists() {
@@ -495,12 +680,88 @@ impl ObjectStore {
                 .dir_sync(final_path.parent().expect("object path has parent"))?;
             return Ok(h);
         }
+        if self.reuse_direct_pack(&h, bytes.len() as u64)? {
+            return Ok(h);
+        }
         let shard_dir = final_path
             .parent()
             .expect("object path always has a 2-hex parent");
+        // A shard that this call creates is an entry of `objects/`, which the
+        // shard flush of the pointer write does not cover.
+        let new_shard = fs::create_dir(shard_dir).is_ok();
+        // A no-op when the shard exists; otherwise it makes `objects/` or names
+        // why the shard cannot be made.
         fs::create_dir_all(shard_dir)?;
-        write_atomic(&final_path, bytes, &**self.syncer())?;
+        #[cfg(feature = "fault-injection")]
+        crate::fault::check(crate::fault::Site::Store)?;
+        // Per-object schedule: the pointer write on the store's own seam.
+        crate::durable::pointer_via(
+            &**self.syncer(),
+            &final_path,
+            crate::durable::Parents::Existing,
+            |file| file.write_all(bytes),
+        )?;
+        if new_shard {
+            self.syncer().dir_sync(&self.objects_root)?;
+        }
         Ok(h)
+    }
+
+    fn reuse_direct_pack(&self, h: &Hash, size: u64) -> StoreResult<bool> {
+        let Some(catalog) = self
+            .pack_writes
+            .direct_catalog
+            .get_or_init(|| self.discover_write_packs().map(|(_, catalog)| catalog))
+        else {
+            return Ok(false);
+        };
+        if !catalog.may_contain(h) {
+            return Ok(false);
+        }
+        let _guard = self.prune_guard()?;
+        if !self.has_packed_size(catalog, h, size) {
+            return Ok(false);
+        }
+        let mut synced = self
+            .pack_writes
+            .direct_synced
+            .lock()
+            .expect("pack sync mutex");
+        if !*synced {
+            self.syncer().dir_sync(&self.pack_dir())?;
+            if self.pack_parent_needs_sync() {
+                self.syncer().dir_sync(self.objects_root())?;
+                self.mark_pack_parent_synced();
+            }
+            *synced = true;
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn discover_write_packs(&self) -> Option<(PruneGuard, Arc<PackCatalog>)> {
+        if !self.local_packs_enabled().unwrap_or(false) {
+            return None;
+        }
+        let guard = self.prune_guard().ok()?;
+        let catalog = self.packs.write_catalog(self).ok()?;
+        Some((guard, catalog))
+    }
+
+    pub(crate) fn has_packed_size(&self, catalog: &PackCatalog, h: &Hash, size: u64) -> bool {
+        self.packs.has_packed_size(catalog, h, size)
+    }
+
+    pub(crate) fn pack_parent_needs_sync(&self) -> bool {
+        !self
+            .pack_writes
+            .root_synced
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_pack_parent_synced(&self) {
+        self.pack_writes
+            .root_synced
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Begin a bulk-write session: each new object is written
@@ -581,9 +842,18 @@ impl ObjectStore {
         h: &Hash,
         use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
     ) -> StoreResult<T> {
+        self.read_with_in(h, None, use_location)
+    }
+
+    fn read_with_in<T>(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+        use_location: impl FnMut(local_pack::Location) -> StoreResult<T>,
+    ) -> StoreResult<T> {
         #[cfg(test)]
         self.read_calls.fetch_add(1, Ordering::Relaxed);
-        self.packs.lookup(self, h, true, use_location)
+        self.packs.lookup_in(self, h, true, currency, use_location)
     }
 
     fn verify_at(location: &local_pack::Location, h: &Hash, bytes: &[u8]) -> StoreResult<()> {
@@ -592,7 +862,7 @@ impl ObjectStore {
                 Ok(id) => id,
                 Err(e) => {
                     check_hash(h, blake3::hash(bytes).as_bytes())?;
-                    return Err(e);
+                    return Err(local_pack::named(location.path(), e));
                 }
             }
         } else {
@@ -603,7 +873,11 @@ impl ObjectStore {
 
     /// Read and verify the contents of the requested object.
     pub fn read(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_in(h, None)
+    }
+
+    fn read_in(&self, h: &Hash, currency: Option<&local_pack::Currency>) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             Self::verify_at(&location, h, &bytes)?;
             Ok(bytes)
@@ -671,7 +945,15 @@ impl ObjectStore {
     /// no-verify choice at the boundary instead of threading a flag
     /// through render code.
     pub fn read_unverified(&self, h: &Hash) -> StoreResult<Vec<u8>> {
-        self.read_with(h, |location| {
+        self.read_unverified_in(h, None)
+    }
+
+    fn read_unverified_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Vec<u8>> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             if location.is_packed() {
                 Self::verify_at(&location, h, &bytes)?;
@@ -690,14 +972,155 @@ impl ObjectStore {
     /// [`StoreError::ObjectNotFound`] if absent; [`StoreError::Decode`]
     /// for a short file, bad magic/version, or unknown tag.
     pub fn object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
-        self.packs.lookup(self, h, true, |location| {
+        self.object_type_in(h, None)
+    }
+
+    fn object_type_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<crate::object::ObjectType> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
             let mut prologue = [0; 6];
-            location
-                .open()?
-                .read_exact(&mut prologue)
-                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
-            parse_type(&prologue)
+            match location.read_head(&mut prologue)? {
+                Ok(6) => parse_type(&prologue),
+                _ => Err(StoreError::Decode(KitError::EmptyData)),
+            }
         })
+    }
+
+    /// Verify a packed leaf before letting its type end a retention walk.
+    /// An index can locate bytes of a different object. Non-leaf types are
+    /// followed by a verified read of the object before their edges are used.
+    pub(crate) fn gc_object_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.gc_probe(h, true)
+    }
+
+    /// The type of an id that a manifest lists, for the mark's chunk pass.
+    ///
+    /// A chunk is a leaf by rule: gc follows no edge from it, so what a copy
+    /// holds past its head cannot change what the mark keeps. For a packed
+    /// copy this reads the 10-byte head and checks that a blob's prologue
+    /// names the frame length. It does not read or hash the payload. Every
+    /// step that deletes or replaces a copy in reliance on a packed copy
+    /// verifies that copy itself, and an integrity scan reports a bad
+    /// payload. The local writer's reuse of a packed copy by id and length
+    /// does not verify it either. An id that the walk reaches as a file goes
+    /// through [`Self::gc_object_type`] instead.
+    pub(crate) fn gc_chunk_type(&self, h: &Hash) -> StoreResult<crate::object::ObjectType> {
+        self.gc_probe(h, false)
+    }
+
+    fn gc_probe(&self, h: &Hash, verify: bool) -> StoreResult<crate::object::ObjectType> {
+        use crate::object::ObjectType;
+
+        self.packs.lookup(self, h, true, |location| {
+            if let Some(ty) = self.gc_probe_in_one_read(&location, h, verify)? {
+                #[cfg(test)]
+                self.gc_one_read_probes.fetch_add(1, Ordering::Relaxed);
+                return Ok(ty);
+            }
+            let mut contents = location.open()?;
+            let mut header = [0; serialize::BLOB_PROLOGUE_LEN];
+            contents
+                .read_exact(&mut header[..6])
+                .map_err(|_| StoreError::Decode(KitError::EmptyData))?;
+            let ty = parse_type(&header[..6])?;
+            if !location.is_packed() {
+                return Ok(ty);
+            }
+            match ty {
+                ObjectType::Blob => {
+                    contents.read_exact(&mut header[6..])?;
+                    let payload_len = raw_capacity(contents.len)? - header.len();
+                    if header != serialize::blob_prologue(payload_len)? {
+                        return Err(local_pack::invalid_at(
+                            location.path(),
+                            "invalid packed blob header",
+                        ));
+                    }
+                    if verify {
+                        #[cfg(test)]
+                        self.gc_hashed_bytes
+                            .fetch_add(contents.len, Ordering::Relaxed);
+                        let mut hash = blake3::Hasher::new();
+                        hash.update(&header);
+                        hash.update_reader(contents)?;
+                        check_hash(h, hash.finalize().as_bytes())?;
+                    }
+                    Ok(ty)
+                }
+                ObjectType::Delta => Err(local_pack::invalid_at(
+                    location.path(),
+                    "delta object in local pack",
+                )),
+                _ => Ok(ty),
+            }
+        })
+    }
+
+    /// [`Self::gc_probe`] of a packed copy whose probe one read answers: the
+    /// head of any frame when `verify` is false, and the whole frame when
+    /// `verify` is true and the frame is at most [`GC_SMALL_FRAME`] bytes.
+    /// The read checks the frame header against the index first, as opening
+    /// the frame does. Each check below is the one the streaming path makes.
+    /// `None` leaves the probe to that path: a loose copy, a frame too short
+    /// for a blob head, a frame too large to hold in memory, or a failed read,
+    /// so that a damaged pack gives the same error.
+    #[cfg_attr(not(test), allow(clippy::unused_self))] // the counters exist only in tests
+    fn gc_probe_in_one_read(
+        &self,
+        location: &local_pack::Location,
+        h: &Hash,
+        verify: bool,
+    ) -> StoreResult<Option<crate::object::ObjectType>> {
+        use crate::object::ObjectType;
+
+        #[cfg(test)]
+        if self.gc_stream_only.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(raw_len) = location.frame_len() else {
+            return Ok(None);
+        };
+        let frame_len = raw_len as usize;
+        let whole = verify && frame_len <= GC_SMALL_FRAME;
+        if frame_len < serialize::BLOB_PROLOGUE_LEN || (verify && !whole) {
+            return Ok(None);
+        }
+        let want = if whole {
+            frame_len
+        } else {
+            serialize::BLOB_PROLOGUE_LEN
+        };
+        let mut bytes = vec![0; want];
+        if !matches!(location.read_head(&mut bytes)?, Ok(len) if len == bytes.len()) {
+            return Ok(None);
+        }
+        let ty = parse_type(&bytes[..6])?;
+        match ty {
+            ObjectType::Blob => {
+                let payload_len = raw_capacity(u64::from(raw_len))? - serialize::BLOB_PROLOGUE_LEN;
+                if bytes[..serialize::BLOB_PROLOGUE_LEN] != serialize::blob_prologue(payload_len)? {
+                    return Err(local_pack::invalid_at(
+                        location.path(),
+                        "invalid packed blob header",
+                    ));
+                }
+                if whole {
+                    #[cfg(test)]
+                    self.gc_hashed_bytes
+                        .fetch_add(frame_len as u64, Ordering::Relaxed);
+                    check_hash(h, blake3::hash(&bytes).as_bytes())?;
+                }
+                Ok(Some(ty))
+            }
+            ObjectType::Delta => Err(local_pack::invalid_at(
+                location.path(),
+                "delta object in local pack",
+            )),
+            _ => Ok(Some(ty)),
+        }
     }
 
     /// The object's type tag and, for a `Blob`, its content length, from the
@@ -709,9 +1132,18 @@ impl ObjectStore {
     /// As [`Self::object_type`], and [`StoreError::Decode`] for a `Blob`
     /// shorter than its 10-byte prologue.
     pub fn object_head(&self, h: &Hash) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
-        self.packs.lookup(self, h, true, |location| {
-            let mut contents = location.open()?;
-            head_at(&mut contents)
+        self.object_head_in(h, None)
+    }
+
+    fn object_head_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+        self.packs.lookup_in(self, h, true, currency, |location| {
+            let mut head = [0; 10];
+            let len = location.read_head(&mut head)??;
+            head_of(&head[..len])
         })
     }
 
@@ -732,7 +1164,15 @@ impl ObjectStore {
     /// payload's length goes to [`serialize::deserialize`], so every
     /// outcome, object or error, matches the generic decoder.
     pub fn read_object(&self, h: &Hash) -> StoreResult<Object> {
-        self.read_with(h, |location| {
+        self.read_object_in(h, None)
+    }
+
+    fn read_object_in(
+        &self,
+        h: &Hash,
+        currency: Option<&local_pack::Currency>,
+    ) -> StoreResult<Object> {
+        self.read_with_in(h, currency, |location| {
             let bytes = Self::raw_at(&location)?;
             let (actual, decoded) = verified_id_and_object(&bytes);
             check_hash(h, &actual)?;
@@ -741,11 +1181,10 @@ impl ObjectStore {
                 None => serialize::deserialize_owned(bytes)?,
             };
             if location.is_packed() && matches!(object, Object::Delta(_)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                return Err(local_pack::invalid_at(
+                    location.path(),
                     "delta object in local pack",
-                )
-                .into());
+                ));
             }
             Ok(object)
         })
@@ -797,7 +1236,7 @@ impl ObjectStore {
             }
             read_shard_dir(&shard.path(), dir, &mut out)?;
         }
-        self.packs.collect(self, None, &mut out)?;
+        self.packs.collect(self, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -813,7 +1252,7 @@ impl ObjectStore {
     /// [`StoreError::Io`] if the directory cannot be read.
     pub fn list_shard(&self, shard: u8) -> StoreResult<Vec<Hash>> {
         let mut out = self.list_loose_shard(shard)?;
-        self.packs.collect(self, Some(shard), &mut out)?;
+        self.packs.list_shard(self, shard, &mut out)?;
         out.sort_unstable();
         out.dedup();
         Ok(out)
@@ -860,8 +1299,9 @@ impl ObjectStore {
 
     /// Make durable the directory entries of the shard directories
     /// `objects/<2-hex>/` named by `shards`, each the first byte of the ids
-    /// it holds: one barrier per shard, then one device flush. Nothing for
-    /// no shards.
+    /// it holds and of the pack directory in a packed store. Issue a
+    /// barrier per directory and one device flush. With no shards, skip
+    /// the barriers and the flush.
     ///
     /// Call it before a ref names objects this process found in the store
     /// rather than wrote. A visible object's bytes are durable, but another
@@ -871,10 +1311,13 @@ impl ObjectStore {
     /// # Errors
     /// [`StoreError::Io`] if a barrier or the flush fails.
     pub fn sync_shards(&self, shards: impl IntoIterator<Item = u8>) -> StoreResult<()> {
-        let dirs: std::collections::BTreeSet<PathBuf> = shards
+        let mut dirs: std::collections::BTreeSet<PathBuf> = shards
             .into_iter()
             .map(|shard| self.objects_root.join(format!("{shard:02x}")))
             .collect();
+        if !dirs.is_empty() && self.local_packs_enabled()? {
+            dirs.insert(self.objects_root.join("pack"));
+        }
         crate::batch::flush_dirents(self, dirs)?;
         Ok(())
     }
@@ -957,6 +1400,7 @@ impl ObjectStore {
     pub fn prune_guard(&self) -> StoreResult<PruneGuard> {
         Ok(PruneGuard {
             format: self.lock_writer()?,
+            objects_root: self.objects_root.clone(),
         })
     }
 
@@ -1030,10 +1474,12 @@ impl ObjectStore {
     }
 
     /// Delete object `h` from the store. Idempotent: a missing object is
-    /// not an error (it may have been pruned already).
+    /// not an error (it may have been pruned already). For tests that model a
+    /// damaged store; a build with the `fault-injection` feature has it.
     ///
     /// # Errors
     /// [`StoreError::Io`] on a filesystem failure other than not-found.
+    #[cfg(any(test, feature = "fault-injection"))]
     pub fn remove_object(&self, h: &Hash) -> StoreResult<()> {
         match fs::remove_file(self.path_for(h)) {
             Ok(()) => Ok(()),
@@ -1090,7 +1536,7 @@ fn sync_reused_file(path: &Path) -> io::Result<()> {
         // accept a failed content flush or change object permissions.
         options.write(true);
     }
-    options.open(path)?.sync_all()
+    crate::durable::flush_file(&options.open(path)?, path)
 }
 
 /// Fill the header buffer unless the reader reaches EOF.
@@ -1108,14 +1554,21 @@ fn parse_type(prologue: &[u8]) -> StoreResult<crate::object::ObjectType> {
     Ok(object_type)
 }
 
-fn head_at(reader: &mut impl Read) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+pub(crate) fn head_at(
+    reader: &mut impl Read,
+) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
     let mut head = [0; 10];
     let len = read_header_prefix(reader, &mut head)?;
-    let object_type = parse_type(&head[..len])?;
+    head_of(&head[..len])
+}
+
+/// The type and blob length that the first bytes of an object name.
+fn head_of(head: &[u8]) -> StoreResult<(crate::object::ObjectType, Option<u64>)> {
+    let object_type = parse_type(head)?;
     if object_type != crate::object::ObjectType::Blob {
         return Ok((object_type, None));
     }
-    let size: [u8; 4] = head[..len]
+    let size: [u8; 4] = head
         .get(6..10)
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or(StoreError::Decode(KitError::EmptyData))?;
@@ -1151,35 +1604,17 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
     Ok(())
 }
 
-/// Atomically write `bytes` to `final_path` with per-object durability
-/// ([`SyncPolicy::PerObject`]): temp file, full flush, rename into
-/// place, parent-dir flush. On Unix, `rename(2)` is atomic with respect
-/// to concurrent readers and replaces the destination. On Windows,
-/// [`tempfile::NamedTempFile::persist`] uses `MOVEFILE_REPLACE_EXISTING`
-/// semantics so the replace-existing path works there too.
-///
-/// After a successful rename we flush the parent directory on Unix to
-/// commit the dirent update — without this, the rename can survive a
-/// power loss only in the page cache and the file appears missing on
-/// reboot.
-///
-/// All flush/rename primitives go through `syncer` so unit tests can
-/// assert ordering; [`RealSyncer`] preserves the historical behaviour
-/// exactly.
-fn write_atomic(final_path: &Path, bytes: &[u8], syncer: &dyn Syncer) -> io::Result<()> {
-    let parent = final_path.parent().expect("write_atomic: path has parent");
-    let mut tmp = crate::atomic::temp_file_in(parent)?;
-    #[cfg(feature = "fault-injection")]
-    crate::fault::check(crate::fault::Site::Store)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    syncer.full(tmp.as_file(), tmp.path())?;
-
-    // NamedTempFile::persist uses a cross-platform atomic replace:
-    // rename(2) on Unix, MoveFileExW with MOVEFILE_REPLACE_EXISTING on Windows.
-    syncer.rename(tmp.into_temp_path(), final_path)?;
-
-    syncer.dir_sync(parent)?;
-    Ok(())
+/// Whether `layout`'s common dir is what a killed `init` leaves: no format
+/// marker, because the marker is written last, and no object under
+/// `objects/`.
+fn is_unfinished_init(layout: &RepoLayout) -> io::Result<bool> {
+    if layout.format_file().try_exists()? {
+        return Ok(false);
+    }
+    if !layout.objects_dir().try_exists()? {
+        return Ok(true);
+    }
+    Ok(fs::read_dir(layout.objects_dir())?.next().is_none())
 }
 
 /// Write target shared by [`ObjectStore`] (per-object durability) and
@@ -1196,13 +1631,41 @@ pub trait ObjectSink {
     /// Store the canonical blob at `origin`, with its prologue and payload
     /// in `parts`. This covers an inline file or a chunk of a file. A sink may
     /// keep the origin and read the payload back from the file. The default
-    /// stores the bytes.
+    /// stores the bytes. A batch that packs also sends the small files past
+    /// its first 64 to its open local pack.
     fn put_chunk_parts(&self, parts: &[&[u8]], _origin: ChunkOrigin<'_>) -> StoreResult<Hash> {
         self.put_parts(parts)
     }
-    /// Make the objects stored so far durable and visible, so a writer of many
-    /// objects keeps its staged set bounded. The default does nothing, for a
-    /// sink that is durable or keeps no state per object.
+    /// Store a chunk whose id is already computed. The default stores its
+    /// bytes through [`Self::put_chunk_parts`] when the chunk has an origin,
+    /// and through [`Self::put_parts`] when it has none.
+    fn put_hashed_chunk(&self, chunk: &HashedChunk<'_>) -> StoreResult<Hash> {
+        let parts = chunk.parts();
+        match chunk.origin() {
+            Some(origin) => self.put_chunk_parts(&parts, origin),
+            None => self.put_parts(&parts),
+        }
+    }
+    /// True when this sink wants the chunks of a file in file order through
+    /// [`Self::put_hashed_chunk`], hashed once. A caller that can hash its
+    /// chunks in parallel hashes them first, then hands them over in order.
+    /// The default is false: such a sink takes chunks in any order.
+    fn orders_chunks(&self) -> bool {
+        false
+    }
+    /// Buffers that live as long as this sink, for the pipeline that cuts and
+    /// hashes the chunks of each large file it takes, so that a sequence of
+    /// files reuses one set. The default is none: each file allocates its own.
+    #[doc(hidden)]
+    fn chunk_buffers(&self) -> Option<&crate::chunker::ChunkBuffers> {
+        None
+    }
+    /// Make the loose objects stored so far durable and visible, so a writer
+    /// of many objects keeps its staged set bounded. An object in an open
+    /// local pack becomes visible when the pack seals or at commit, so a
+    /// caller must not read a chunk or small file back before its commit. A checkpoint never
+    /// makes an object visible before the objects it names. The default does
+    /// nothing, for a sink that is durable or keeps no state per object.
     fn checkpoint(&self) -> StoreResult<()> {
         Ok(())
     }
@@ -1283,26 +1746,6 @@ thread_local! {
     static FAIL_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// On Unix, fsync the directory holding the just-renamed file so the
-/// dirent update is durable. No-op on non-Unix (Windows does not expose
-/// a stable directory-fsync primitive via `std::fs`).
-#[cfg(unix)]
-pub(crate) fn sync_parent_dir(parent: &Path) -> io::Result<()> {
-    match File::open(parent) {
-        Ok(dir) => dir.sync_all(),
-        // If the dir disappeared under us (race with external cleanup),
-        // the durability invariant is moot — propagate silently.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-pub(crate) fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 fn raw_capacity(len: u64) -> StoreResult<usize> {
     let len = usize::try_from(len).map_err(|_| StoreError::ObjectTooLarge)?;
     if len > MAX_RAW_OBJECT_SIZE {
@@ -1358,6 +1801,65 @@ mod tests {
     }
 
     #[test]
+    fn init_again_after_a_killed_init_that_left_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        // `init` stopped after it made `objects/` and before it wrote the
+        // format marker.
+        fs::create_dir_all(layout.objects_dir()).unwrap();
+        ObjectStore::init(&layout).unwrap();
+        assert!(layout.format_file().is_file());
+        // A directory with nothing in it at all counts as new too.
+        let bare = TempDir::new().unwrap();
+        let bare_layout = RepoLayout::single(bare.path());
+        fs::create_dir_all(bare_layout.common_dir()).unwrap();
+        ObjectStore::init(&bare_layout).unwrap();
+        assert!(ObjectStore::open(&bare_layout).is_ok());
+    }
+
+    #[test]
+    fn a_write_that_creates_a_shard_syncs_the_objects_dir() {
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let mut store = ObjectStore::init(&layout).unwrap();
+        let rec = Arc::new(RecordingSyncer::default());
+        store.set_syncer(rec.clone());
+        let root = store.objects_root().to_path_buf();
+        let synced = |rec: &RecordingSyncer| {
+            rec.events()
+                .iter()
+                .filter(|ev| matches!(ev, Ev::DirSync(dir) if *dir == root))
+                .count()
+        };
+
+        // Each object that opens a new shard flushes `objects/` once. One that
+        // lands in a shard that already exists does not.
+        let mut shards = std::collections::BTreeSet::new();
+        let mut repeated = false;
+        for n in 0..300_u32 {
+            let id = store.write(format!("object {n}").as_bytes()).unwrap();
+            let shard = store.path_for(&id).parent().unwrap().to_path_buf();
+            repeated |= !shards.insert(shard);
+            assert_eq!(synced(&rec), shards.len(), "after object {n}");
+        }
+        assert!(repeated, "300 objects must reuse a shard of 256");
+        // The same bytes again hit the dedup path and create no shard.
+        let before = synced(&rec);
+        store.write(b"object 0").unwrap();
+        assert_eq!(synced(&rec), before);
+    }
+
+    #[test]
+    fn init_refuses_a_common_dir_with_objects_but_no_marker() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        fs::create_dir_all(layout.objects_dir().join("ab")).unwrap();
+        let err = ObjectStore::init(&layout).unwrap_err();
+        assert!(matches!(err, StoreError::AlreadyInitialized));
+    }
+
+    #[test]
     fn init_rejects_already_initialized() {
         let dir = TempDir::new().unwrap();
         let layout = RepoLayout::single(dir.path());
@@ -1379,7 +1881,7 @@ mod tests {
         let layout = RepoLayout::single(dir.path());
         ObjectStore::init(&layout).unwrap();
         let marker = fs::read_to_string(dir.path().join(KIT_DIR).join(FORMAT_FILE)).unwrap();
-        assert_eq!(marker.trim(), FORMAT_VALUE);
+        assert_eq!(marker, format!("{FORMAT_VALUE}\nP"));
         // A freshly-init'd repo opens cleanly.
         ObjectStore::open(&layout).unwrap();
     }
@@ -2072,6 +2574,18 @@ mod bulk_writer_tests {
         assert_eq!(store.read(&h).unwrap(), bytes);
     }
 
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_reused_object_is_flushed_with_its_content() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("object");
+        fs::write(&path, b"bytes").unwrap();
+        let before = crate::fault::flushes();
+        sync_reused_file(&path).unwrap();
+        assert_eq!(crate::fault::flushes(), before + 1);
+        assert!(sync_reused_file(&td.path().join("missing")).is_err());
+    }
+
     #[test]
     fn bulk_writer_round_trips_and_rewrites() {
         let td = tempfile::tempdir().unwrap();
@@ -2163,6 +2677,7 @@ mod dedup_mtime_tests {
             now_secs(),
             GRACE,
             false,
+            &mut |_, _, _| {},
         )
         .unwrap();
         assert!(store.contains(&h), "re-written object pruned: {report:?}");
@@ -2277,7 +2792,8 @@ mod sweep_crash_tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let report = crate::ops::gc::run_gc(&reopened, &layout, now, 10, false).unwrap();
+        let report =
+            crate::ops::gc::run_gc(&reopened, &layout, now, 10, false, &mut |_, _, _| {}).unwrap();
         assert!(reopened.contains(&h), "refreshed survivor lost: {report:?}");
         assert!(!reopened.contains(&control));
         assert_eq!(report.pruned, 1);

@@ -26,7 +26,7 @@ of two classes:
 
 | Class | Contents |
 |---|---|
-| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
+| **common dir** (shared by all trees) | `objects/`, `format`, `refs/` (`heads`, `tags`, `remotes`), `shallow`, `config`, `keys/`, `history/`, `history-v1/`, `recovery-log`, `attestations/`, `applied-packs/`, `upload-parts/`, `git/`, `sparse/`, `worktrees/`, `refs-history-<branch>.lock`, `refs-<ref>.lock`, `worktrees.lock`, `config.lock`, `recovery-log.lock`, `serve.lock` (SPEC-CONCURRENCY §2) |
 | **worktree state dir** (private to one tree) | `HEAD`, `PREVIOUS_HEAD`, `index`, `PULL_HEAD`, `ORIG_HEAD`, `MERGE_HEAD`/`MERGE_MSG`, `CHERRY_PICK_HEAD`/`CHERRY_PICK_MSG`, `REVERT_HEAD`/`REVERT_MSG`, `kit-conflicts`, `KIT_OP_RESULT`, `rebase-apply/`, `bisect`, `stash`, `sparse-checkout`, `worktree.lock`, `locked` |
 
 `PREVIOUS_HEAD` holds only the previous HEAD selected by checkout or switch.
@@ -47,7 +47,9 @@ closed. The `pull_state` golden vector pins both fields and their order.
 The target and pre-pull tree are GC roots while the marker exists. A following pull rejects
 detached HEAD before touching files. It discards a well-formed marker when
 neither HEAD nor the selected branch tip names it, because restore cannot
-have started in that state. Corrupt markers fail closed.
+have started in that state. Corrupt markers fail closed. A `reset` that
+resets the index (every mode but `--soft`) removes the marker, because the
+index then follows HEAD.
 
 Before recovery, the current index tree must equal the recorded pre-pull tree
 or the target tree. Otherwise recovery refuses before changing files, HEAD,
@@ -69,6 +71,17 @@ It finishes a branch write already at the marker, even if HEAD still names
 an unborn branch absent on the remote. A later remote advance can then land
 through the ordinary fast-forward and restore checks. With no remote branches,
 a pending marker causes refusal instead of an up-to-date result.
+
+A marker that names HEAD marks a restore that may not have reached the index.
+While it does, a commit refuses if the index still holds the pre-pull entry at
+a path that the pull changed: the same object id and mode as the pre-pull tree
+at a path that the target modified or removed, or no entry at a path that the
+target added. Staging other paths does not lift the refusal. An index that
+holds the target's entries, as after a finished restore or `reset --hard`, does
+not trigger it, until the user stages a pre-pull version of a changed path;
+then the user removes the marker, as no command but a pull clears it.
+`status` warns while it holds. The check reads the trees and
+the index and writes nothing.
 
 A fast-forward that finds no marker restores only the entries whose mode or
 object id differ from the tree of HEAD: its restore safety check has proved

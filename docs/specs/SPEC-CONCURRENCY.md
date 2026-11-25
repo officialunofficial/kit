@@ -37,18 +37,21 @@ document points here.
 |---|---|---|---|---|
 | `worktree.lock` | each tree's state dir | per-tree | that tree's worktree/index read-modify-write | SPEC-WORKTREE §4.3 |
 | `worktrees.lock` | common dir | per-repo | linked-worktree registry mutations, branch-checked-out-elsewhere guard + HEAD write | SPEC-WORKTREE §4.3 |
-| `refs-history-<branch>.lock` | common dir, keyed on the branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
-| `refs-<ref>.lock` | common dir, keyed on the full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
+| `refs-history-<branch>.lock` | common dir, keyed on the ASCII-lowercased branch name | per-branch | ancestry intent + ref + descriptor publication for one branch (`kit_core::refs::history_lock_name`) | §3.2, §3.3 (this document) |
+| `refs-<ref>.lock` | common dir, keyed on the ASCII-lowercased full ref path | per-ref | every direct on-disk ref mutation: Any, Missing, Match, delete, tags, remote refs and batch writes (`kit_core::refs::cas_lock_name`) | SPEC-REFS §5.1 |
 | `<root>/.kit/refs/.lock` | transport root | per-repo, **local to the file transport only** | held shared by a single-ref write and by a two-ref advance of existing refs, and exclusive by a multi-file step and by a two-ref advance that creates a ref; the exclusive hold excludes every file-transport write (`kit-transport-file`'s `RefLock`) | SPEC-REFS §5.1.1, §3.1 (this document) |
 | `<root>/.kit/refs/refs-<hh>.lock` | transport root, keyed on the first byte of the BLAKE3 digest of the full ref name | per-stripe (256), **local to the file transport only** | a single-ref write's Any, Missing and Match critical section, and the checks and writes of a two-ref advance of existing refs | SPEC-REFS §5.1.1 |
 | `git-<remote>.lock` | common dir, keyed on the git bridge remote name | per-bridge-state | one `kit git import`/`fetch`/`pull` import phase or `kit git export` against that remote's bridge state dir (`kit-bin`'s `git_import::import_into`, `git::export`) | §4 (this document) |
-| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except the prune guard, which lasts a whole fetch or the branch phase of a push | shared for bulk writes, cached reuse, format validation, and the fetch and push prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
+| `config.lock` | common dir | per-repo | one read-modify-write of `.kit/config` (`kit remote`, `kit config`, setting an upstream). The holder takes no other lock, so the lock may be taken under any other | this document |
+| `recovery-log.lock` | common dir | per-repo | one `recovery::record` append, with the repair of a torn tail before it. The holder takes no other lock | §3.2 (this document) |
+| `gc-auto` | common dir | per-repo, try-only | one automatic maintenance step at a time. The file holds its advisory stamp | SPEC-GC, "Automatic maintenance" |
+| shared/exclusive `format` handle | existing common-dir `format` inode | per-repo; short object-store critical section, except the prune guard, which lasts a whole fetch or the branch phase of a push | shared for bulk writes, cached reuse, format validation, gc pack copying, and the fetch and push prune guard. Exclusive, try-only, for marker activation, fetch-record invalidation, pack repair, and gc's final checks and unlinks | SPEC-GC, §3.4 (this document) |
 | `attest-fetch.lock` | common dir | per-repo | fetched envelope allowance and publication across worktrees | SPEC-TRANSPORT §1.5 |
 | `git-import-key.lock` | common dir | per-repo | first-time generation of the shared git-import signing key (`git_import::load_or_create_import_key`) | §4 (this document) |
 | `serve.lock` | common dir | per-repo, **detection only, not a critical-section lock** | held **shared** for its whole lifetime by every live server process on the root: `kit serve` (stdin SSH-frame, its only mode) and any layout server, meaning a server that embeds the `.kit` filesystem layout (which also holds `server.lock` exclusively, so one layout server serves a root at a time); taken exclusive without waiting by a starting `kit serve` only to sweep crashed uploads' temp files; probed non-blocking-exclusive by `worktree.lock`/`worktrees.lock` acquisition to warn when a root is concurrently served | §3.1 (this document) |
 
-The recovery log (`.kit/recovery-log`) has **no dedicated lock** &mdash; see
-§3.2.
+The recovery log (`.kit/recovery-log`) has `recovery-log.lock` for its appends
+only; `expire` has no lock of its own &mdash; see §3.2.
 
 In the schematic names above, `<ref>` MUST be the lowercase hexadecimal BLAKE3
 digest of the full UTF-8 ref path relative to the common directory, such as
@@ -132,10 +135,11 @@ Residual gaps this warning does **not** close:
 
 ### 3.2 Recovery-log `record`/`expire` synchronization
 
-`ops::recovery::record` and `ops::recovery::expire` are not internally
-synchronized (see that module's own concurrency note) and have no
-dedicated lock of their own. Correctness instead relies on lock
-**superset** containment:
+`ops::recovery::record` takes the leaf `recovery-log.lock` for its append, so
+two linked trees that record at once cannot cut each other's line off when one
+repairs a torn tail (§2). `ops::recovery::expire` is not internally
+synchronized (see that module's own concurrency note). Its correctness against
+`record` relies on lock **superset** containment:
 
 - Every producer (`commit --amend`, `reset`, `rebase`, `stash pop`)
   calls `record` while already holding *its own tree's* `worktree.lock`
@@ -147,11 +151,12 @@ dedicated lock of their own. Correctness instead relies on lock
 
 Because gc's lock set always contains whichever single `worktree.lock`
 a producer would be holding, a producer's `record` append and gc's
-`expire` rewrite can never interleave &mdash; without a separate recovery-log
-lock being necessary. `ops::recovery`'s module doc calls this "the repo
+`expire` rewrite can never interleave &mdash; without `expire` needing the
+recovery-log lock. `ops::recovery`'s module doc calls this "the repo
 lock" generically rather than naming a specific lock file, precisely
-because the guarantee comes from lock containment, not from a
-dedicated primitive.
+because the guarantee against `expire` comes from lock containment. Two
+producers in different trees hold different `worktree.lock` files, so the
+appends of `record` meet only at `recovery-log.lock`.
 
 ### 3.3 First-parent history publication
 
@@ -175,10 +180,12 @@ the repository is in use. Independently opened handles take shared locks
 for bulk writes, cached reuse, and format validation. The only marker
 update writes the capability byte as described in SPEC-OBJECTS §10.
 Readers treat an exact zero tail as loose storage under the shared lock.
-A publisher tries
-the exclusive lock for activation before taking a shared prune guard.
-After activation it releases the exclusive lock, takes the shared guard,
-and validates the marker again before publishing.
+Any writer of
+objects tries the exclusive lock for activation, once per store handle,
+before its first write and before taking a shared prune guard. A busy
+try leaves that handle's writes loose. After activation it releases the
+exclusive lock, takes the shared guard, and validates the marker again
+before publishing a pack.
 
 Every exclusive acquisition is nonblocking. Gc keeps a candidate when
 the try fails. A writer that reuses a packed object resolves its current
@@ -222,6 +229,19 @@ or push holding the prune guard can therefore wait for that command to release
 `worktree.lock` without a deadlock. The existing local-filesystem locking
 assumptions apply.
 
+Automatic maintenance never waits for a worktree lock or for the exclusive
+`format` lock; the one wait is the copy's shared `format` guard, which waits
+at most for one retirement batch of another process. The leftover sweep tries
+the exclusive `format` lock only when it finds an eligible old leftover.
+A fetch or push arriving during the hold can wait for the recheck,
+unlinks and both directory flushes. During collection, when there is a
+verified pair or copy input to retire, automatic maintenance first copies
+under the shared `format` guard with no worktree lock, then tries the registry
+and worktree locks in gc's order. It holds them for the second root read
+and the retirement of the verified names, whose exclusive `format` holds
+are one per batch of at most 32 items. See SPEC-GC, "Automatic
+maintenance".
+
 ## 4. Global lock order and per-command lock sets
 
 A process that takes more than one lock from §2 MUST acquire them in
@@ -254,7 +274,9 @@ the fetch's interrupt handling and total lock-wait limit.
 
 The short-lived shared/exclusive `format` lock (§3.4) is innermost in
 both chains. Holders acquire no further repository locks; gc never waits
-for its exclusive acquisition. Per-command sets below omit this implicit
+for its exclusive acquisition. The leaf `config.lock` and `recovery-log.lock`
+(§2) are likewise held with no further repository lock and may be taken under
+any other. Per-command sets below omit this implicit
 object-store lock.
 
 The file transport's locks serialize every write condition to one ref within
@@ -286,12 +308,13 @@ the history lock):
 | `checkout`/`switch` (branch-checked-out-elsewhere guard), `branch -d`/`-m` | `worktrees.lock`, then (branch-moving forms) `refs-history-<branch>.lock`, then the full-ref mutation lock |
 | `worktree add` | `worktrees.lock` (guard re-verified after acquiring), then the new tree's `worktree.lock` |
 | `worktree remove` | `worktrees.lock`, then the condemned tree's `worktree.lock` |
-| `gc` | `worktrees.lock` first (freezes the worktree set), then every registered tree's `worktree.lock`, deterministic order (main tree first, then registry ids ascending) |
+| `gc` | `worktrees.lock` first (freezes the worktree set), then every registered tree's `worktree.lock`, deterministic order (main tree first, then registry ids ascending). Pack copying takes the shared `format` guard after the worktree locks and releases it before the exclusive `format` try-lock. |
+| automatic maintenance after `fetch` or `pull` | After release of the command's prune guard and worktree locks, try `gc-auto`. The sweep adds only the exclusive `format` try-lock. A collection that copies takes the shared `format` guard after planning and releases it before any worktree try: it holds no worktree lock while it reads a pack body. Collection with a verified retirement candidate or a copy input then tries `worktrees.lock`, each `worktree.lock` in gc's order, then the exclusive `format` lock, once per batch of at most 32 items. A miss ends the step. |
 | `clean` | this tree's `worktree.lock` |
 | `status` (opportunistic index refresh) | this tree's `worktree.lock`, tried with a 10 ms timeout; on contention the refresh is skipped |
 | `tag <name>` (lightweight and annotated create) | this tree's `worktree.lock`, held across the target re-check (and, for an annotated tag, the tag-object write) and the ref publish, then the tag ref's `refs-<ref>.lock` (`tag.rs`). `tag -d` takes only the tag ref's `refs-<ref>.lock` |
 | `attest` | this tree's `worktree.lock`, held across the subject re-check and the attestation write, after signing (`attest.rs`); no ref lock |
-| `clone`, `fetch`, and the fetch phase of `pull` | optional exclusive `format` try-lock for marker activation (§3.4), released before taking the shared `format` prune guard. Hold the guard from before reading applied packs until the last ref publish. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
+| `clone`, `fetch`, and the fetch phase of `pull` | exclusive `format` try-lock for marker activation (§3.4), released before taking the shared `format` prune guard. Hold the guard from before reading applied packs until the last ref publish. Per remote branch: download, unpack and record the packs with no `worktree.lock` held, then this tree's `worktree.lock` around the remote-tracking ref publish and its checkpoint, then that ref's `refs-<ref>.lock`; released before the next branch (`kit_sync::fetch::fetch_objects_inner`). The wait for `worktree.lock` reports once that it waits and ends on an interrupt. It has no limit by default. With `SyncOptions::lock_wait` set, the time spent blocked in this wait, summed with every other wait of the same clone, fetch or pull (the final update of a pull included), is bounded by that total waiting time; work between two waits is not charged, and `Duration::MAX` is no bound. A retry after a concurrent re-baseline downloads again with no lock held |
 | Fetched attestations | after download and pack validation, this tree's `worktree.lock`, then the common directory's `attest-fetch.lock` across storage accounting and envelope publication |
 | `pull` (fast-forward phase) | this tree's `worktree.lock` across the restore-safety check, the branch write and the worktree restore, then (history-mmr) `refs-history-<branch>.lock`, then the branch's `refs-<ref>.lock` (`kit_sync::pull`) |
 | `push` | the shared `format` prune guard (§3.4) from before it plans the first branch until after its last remote-tracking ref write. Per remote-tracking ref write: this tree's `worktree.lock`, with no limit on the wait (the wait reports once and ends on an interrupt), then that ref's `refs-<ref>.lock`, both released before the next upload (`kit_sync::push`) |

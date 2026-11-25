@@ -2,6 +2,10 @@
 # catch a mutant in them. The Kani prover runs those modules by hand.
 exclude_re = [
   "kani_proofs::",
+  # A per-file writeout leaves no trace a test can observe; the full flush that follows it is counted.
+  'kit-core/src/batch\.rs:[0-9]+:[0-9]+: replace RealSyncer::file_barrier -> ',
+  # The crash-point snapshot hook is test-only (`fault-injection`); the kit-bin `commit_add_crash_points` test runs it in a child process, which this run does not use.
+  'kit-core/src/durable\.rs:[0-9]+:[0-9]+: (replace snapshot_after_flush with|replace copy_tree ->|.* in (snapshot_after_flush|copy_tree)$)',
   # Each protector arm is compiled out on the other platform; active dispatch is covered by tests.
   'kit-keystore/src/software/mod.rs:.*delete match arm (MacosKeychainProtector|LinuxSecretServiceProtector)::ID in default_protector_by_id',
   # Metadata decoding emits only malformed-entry errors, so its error guard is always true.
@@ -16,6 +20,10 @@ exclude_re = [
   'kit-keystore/src/software/atomic_write.rs:.*replace > with >= in create_synced_tmp_key_file',
   # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
   'kit-keystore/src/software/atomic_write.rs:.* in (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable)$',
+  # O_NOFOLLOW and O_NONBLOCK occupy disjoint bits, so OR and XOR are equivalent.
+  'kit-core/src/store/local_pack/reader.rs:[0-9]+:[0-9]+: replace \| with \^$',
+  # The link check in open_member is cfg(not(unix)); on Unix the open refuses a link.
+  'kit-core/src/store/local_pack/reader.rs:[0-9]+:[0-9]+: delete ! in open_member$',
   # The portable writer is cfg(not(unix)); both supported mutation hosts are Unix.
   'kit-keystore/src/software/atomic_write.rs:.*replace (write_key_file_portable|write_key_file_portable_create_new|create_synced_tmp_key_file_portable) ->',
   # Each native constructor has a cfg-gated definition that this host does not compile.
@@ -30,6 +38,8 @@ exclude_re = [
   'signer_external\.rs:.*replace < with <= in spawn_stderr_drainer$',
   # Changing a test's fixed signing seed changes no production behavior.
   'signer_k256\.rs:.*replace tests::fixed_secret ',
+  # Each old index occurs once among the candidates, so < and <= pick the same chain position.
+  'transfer\.rs:[0-9]+:[0-9]+: replace < with <= in unmatched_runs$',
 ]
 
 exclude_globs = [

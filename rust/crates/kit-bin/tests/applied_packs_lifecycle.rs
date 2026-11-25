@@ -153,7 +153,11 @@ fn remove_deletes_record_and_readd_fetch_has_no_self_heal() {
     let consumer = Repo::new();
     consumer.commit_file("local.txt", b"l\n", "local base");
     consumer.ok(&["remote", "add", "up", &url]);
+    // Hold the format lock shared so this fetch keeps its objects loose.
+    let store = ObjectStore::open(&RepoLayout::single(consumer.path())).unwrap();
+    let guard = store.prune_guard().unwrap();
     consumer.ok(&["fetch", "up"]);
+    drop(guard);
     let record = consumer.kit_dir().join("applied-packs").join("up");
     assert!(
         record.is_file(),
@@ -224,6 +228,8 @@ fn stale_record_surviving_remove_trips_self_heal_note() {
     consumer.commit_file("local.txt", b"l\n", "local base");
     consumer.ok(&["remote", "add", "up", &url]);
     consumer.ok(&["fetch", "up"]);
+    let pack_dir = consumer.kit_dir().join("objects/pack");
+    assert!(fs::read_dir(pack_dir).unwrap().next().is_some());
     let record = consumer.kit_dir().join("applied-packs").join("up");
     let record_bytes = fs::read(&record).unwrap();
     assert!(

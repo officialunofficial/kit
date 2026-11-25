@@ -9,7 +9,7 @@ use std::path::Path;
 
 use kit_core::hash::{self, Hash};
 use kit_core::layout::RepoLayout;
-use kit_core::object::{Blob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
+use kit_core::object::{Blob, ChunkedBlob, Commit, EntryMode, Identity, Object, Tree, TreeEntry};
 use kit_core::ops::pull_state::PullState;
 use kit_core::pack::{self, PackWriter};
 use kit_core::protocol::{PackKey, Transport};
@@ -52,6 +52,14 @@ impl Remote {
     /// a re-baselining push resets a packmap.
     fn publish_reset(&self, files: &[(&str, &[u8])]) -> Hash {
         let (objects, tip) = self.build(None, files, true);
+        self.publish_objects(&objects, tip, true);
+        tip
+    }
+
+    /// Move `main` to a new commit on `parent`, even when that is not a
+    /// fast-forward of the branch.
+    fn publish_on(&self, parent: Hash, files: &[(&str, &[u8])]) -> Hash {
+        let (objects, tip) = self.build(Some(parent), files, true);
         self.publish_objects(&objects, tip, true);
         tip
     }
@@ -307,6 +315,285 @@ fn clone_into(remote: &Remote, dir: &Path) -> kit_sync::CloneReport {
         &NoopObserver,
     )
     .unwrap()
+}
+
+// These fixtures need to unlink individual objects to model a damaged store.
+fn clone_loose_into(remote: &Remote, dir: &Path) {
+    let layout = init_clone_dir(dir, &default_remote("kit+memory://x")).unwrap();
+    kit_core::fault::keep_loose(&layout);
+    clone_into(remote, dir);
+}
+
+/// Deterministic bytes that the chunker cuts into several chunks.
+fn noise(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[3]
+        })
+        .collect()
+}
+
+/// The content length of a whole-file blob that serializes to the largest
+/// object a fetch packs.
+const PACKED_BLOB_BYTES: usize = kit_core::chunker::MAX_SIZE;
+
+#[test]
+fn maintenance_stamps_a_clone_and_skips_an_up_to_date_fetch() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let report = clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    assert!(stamp.is_file(), "{report:?}");
+    std::fs::remove_file(&stamp).unwrap();
+
+    fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert!(!stamp.exists());
+}
+
+#[test]
+fn maintenance_can_be_disabled_for_a_fetch_that_applies_a_pack() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a", b"first")], true);
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, dir.path());
+    let layout = kit_core::layout::discover(dir.path()).unwrap();
+    let stamp = layout.common_dir().join("gc-auto");
+    std::fs::remove_file(&stamp).unwrap();
+    remote.publish(Some(first), &[("a", b"second")], true);
+
+    let report = fetch(
+        dir.path(),
+        &remote.source(),
+        "default",
+        &SyncOptions::default().with_auto_maintenance(false),
+        &NoopObserver,
+    )
+    .unwrap();
+    assert_ne!(report.packs_downloaded, 0);
+    assert!(report.maintenance.is_none());
+    assert!(!stamp.exists());
+}
+
+#[test]
+fn clone_packs_every_object_up_to_the_size_limit_and_leaves_larger_ones_loose() {
+    let remote = Remote::new();
+    let chunked = noise(3 << 20, 7);
+    let at_limit = vec![1; PACKED_BLOB_BYTES];
+    let over_limit = vec![2; PACKED_BLOB_BYTES + 1];
+    let tip = remote.publish_paths(
+        None,
+        &[
+            ("at_limit", EntryMode::Blob, &at_limit),
+            ("chunked", EntryMode::Blob, &chunked),
+            ("over_limit", EntryMode::Blob, &over_limit),
+            ("small", EntryMode::Blob, b"short"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    clone_into(&remote, &dir.path().join("clone"));
+    let layout = RepoLayout::single(dir.path().join("clone"));
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+    assert_eq!(
+        std::fs::read_dir(layout.objects_dir().join("pack"))
+            .unwrap()
+            .count(),
+        2
+    );
+    let Object::Commit(commit) = store.read_object(&tip).unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(tree) = store.read_object(&commit.tree_hash).unwrap() else {
+        panic!("expected a tree");
+    };
+    let mut chunks = 0;
+    for entry in tree.entries {
+        let loose = loose_object_path(&layout, &entry.object_hash).is_file();
+        assert_eq!(loose, entry.name == b"over_limit", "{:?}", entry.name);
+        if let Object::ChunkedBlob(manifest) = store.read_object(&entry.object_hash).unwrap() {
+            for (chunk, _) in manifest.entries() {
+                assert!(!loose_object_path(&layout, &chunk).is_file());
+                chunks += 1;
+            }
+        }
+    }
+    assert!(chunks > 2, "the file must be cut into several chunks");
+}
+
+#[test]
+fn a_store_without_local_packs_writes_every_object_loose() {
+    let remote = Remote::new();
+    let chunked = noise(3 << 20, 9);
+    let tip = remote.publish_paths(
+        None,
+        &[
+            ("chunked", EntryMode::Blob, &chunked),
+            ("small", EntryMode::Blob, b"short"),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_loose_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n");
+    assert!(!layout.objects_dir().join("pack").exists());
+    for id in store.iter_object_hashes().unwrap() {
+        assert!(loose_object_path(&layout, &id).is_file());
+    }
+    assert!(store.contains(&tip));
+    assert_eq!(std::fs::read(target.join("chunked")).unwrap(), chunked);
+}
+
+#[test]
+fn an_up_to_date_fetch_activates_a_loose_store() {
+    let remote = Remote::new();
+    remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    // A store an earlier kit made: loose, and with nothing new to fetch.
+    std::fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+
+    signed_fetch(&target, &remote).unwrap();
+
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\nP");
+}
+
+#[test]
+fn fetch_packs_every_blob_of_a_large_tree_even_when_blobs_precede_the_tree() {
+    let remote = Remote::new();
+    let entries: Vec<_> = (0u32..2_000)
+        .map(|n| (format!("file-{n:06}"), n.to_le_bytes()))
+        .collect();
+    let files: Vec<_> = entries
+        .iter()
+        .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+        .collect();
+    let (objects, tip) = remote.build(None, &files, true);
+    let last_blob = objects[1_999].id().unwrap();
+    remote.publish_objects(&objects, tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("fetch");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    signed_fetch(&target, &remote).unwrap();
+
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert_eq!(store.read_object(&last_blob).unwrap(), objects[1_999]);
+    assert!(!loose_object_path(&layout, &last_blob).is_file());
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(tip)
+    );
+}
+
+#[test]
+fn a_packed_chunk_can_read_restore_and_mark() {
+    let remote = Remote::new();
+    let data = b"short last chunk";
+    let (mut objects, _) = remote.build(None, &[("chunked", data)], true);
+    let Object::Commit(mut commit) = objects.pop().unwrap() else {
+        panic!("expected a commit");
+    };
+    let Object::Tree(mut tree) = objects.pop().unwrap() else {
+        panic!("expected a tree");
+    };
+    let chunk = objects.pop().unwrap();
+    let chunk_id = chunk.id().unwrap();
+    let len = data.len() as u64;
+    let manifest =
+        Object::ChunkedBlob(ChunkedBlob::new(len, 16 * 1024, [(chunk_id, len)]).unwrap());
+    tree.entries[0].object_hash = manifest.id().unwrap();
+    let tree = Object::Tree(tree);
+    commit.tree_hash = tree.id().unwrap();
+    commit.signature = sign::sign_commit(&commit, &remote.key).unwrap().0;
+    let commit = Object::Commit(commit);
+    let tip = commit.id().unwrap();
+    remote.publish_objects(&[chunk.clone(), manifest, tree, commit], tip, false);
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    clone_into(&remote, &target);
+    let layout = RepoLayout::single(&target);
+    let store = kit_core::store::ObjectStore::open(&layout).unwrap();
+    assert!(!loose_object_path(&layout, &chunk_id).is_file());
+    assert_eq!(store.read_object(&chunk_id).unwrap(), chunk);
+    assert_eq!(std::fs::read(target.join("chunked")).unwrap(), data);
+    let _lock = kit_core::repo_lock::acquire_default(
+        layout.worktree_state_dir(),
+        kit_core::repo_lock::WORKTREE_LOCK,
+    )
+    .unwrap();
+    let mut marked = 0;
+    kit_core::ops::gc::run_gc(
+        &store,
+        &layout,
+        u64::MAX,
+        0,
+        true,
+        &mut |phase, count, _| {
+            if phase == "gc_mark" {
+                marked = count;
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        marked, 4,
+        "gc must mark the commit, tree, manifest and packed chunk"
+    );
+}
+
+#[test]
+fn a_busy_activation_keeps_the_marker_and_repairs_a_loose_copy() {
+    use kit_core::store::ObjectStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("clone");
+    let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    let store = ObjectStore::open(&layout).unwrap();
+    std::fs::write(layout.format_file(), b"bmt-v2\n\0").unwrap();
+    let guard = store.prune_guard().unwrap();
+
+    let blob = Object::Blob(Blob {
+        data: b"fresh".to_vec(),
+    });
+    let bytes = kit_core::serialize::serialize(&blob).unwrap();
+    let id = store.write(&bytes).unwrap();
+    let mut corrupt = bytes.clone();
+    *corrupt.last_mut().unwrap() ^= 1;
+    std::fs::write(loose_object_path(&layout, &id), corrupt).unwrap();
+
+    let remote = Remote::new();
+    remote.publish(None, &[("file", b"fresh")], true);
+    signed_fetch(&target, &remote).unwrap();
+    assert_eq!(std::fs::read(layout.format_file()).unwrap(), b"bmt-v2\n\0");
+    assert!(!layout.objects_dir().join("pack").exists());
+    assert_eq!(store.read(&id).unwrap(), bytes);
+    drop(guard);
+}
+
+fn loose_object_path(layout: &RepoLayout, id: &Hash) -> std::path::PathBuf {
+    let path = hash::object_path(id);
+    layout
+        .objects_dir()
+        .join(std::str::from_utf8(&path.dir).unwrap())
+        .join(std::str::from_utf8(&path.file).unwrap())
 }
 
 #[test]
@@ -915,6 +1202,87 @@ fn a_failed_download_keeps_the_applied_packs_recorded() {
 }
 
 #[test]
+fn pull_when_the_branch_is_ahead_changes_nothing_and_is_up_to_date() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // The remote branch goes back to `first`: the local branch is ahead of it.
+    remote.repoint(first);
+
+    let report = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+
+    assert_eq!(
+        report.outcome,
+        PullOutcome::UpToDate {
+            branch: "main".to_owned()
+        }
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(second));
+    assert_eq!(
+        refs::read_remote_ref(&layout, "default", "main").unwrap(),
+        Some(first)
+    );
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"two\n");
+}
+
+#[test]
+fn pull_refuses_a_branch_that_has_diverged_from_the_remote() {
+    let remote = Remote::new();
+    let first = remote.publish(None, &[("a.txt", b"one\n")], true);
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("work");
+    clone_into(&remote, &target);
+    let local = remote.publish(Some(first), &[("a.txt", b"local\n")], true);
+    pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap();
+    // Another commit on `first`, so neither tip contains the other.
+    let other = remote.publish_on(first, &[("a.txt", b"other\n")]);
+    assert_ne!(local, other);
+
+    let err = pull(
+        &target,
+        &remote.source(),
+        "default",
+        &SyncOptions::default(),
+        &NoopObserver,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, SyncError::NonFastForwardPull { ref branch } if branch == "main"),
+        "{err:?}"
+    );
+    let layout = RepoLayout::single(&target);
+    assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(local));
+    assert_eq!(std::fs::read(target.join("a.txt")).unwrap(), b"local\n");
+}
+
+#[test]
 fn pull_refuses_anything_that_is_not_a_fast_forward() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
@@ -1032,17 +1400,17 @@ fn assert_refused(target: &Path, remote: &Remote, forged: Hash, tracking: Hash, 
     assert_eq!(refs::read_ref(&layout, "main").unwrap(), Some(held));
 }
 
-/// A refused pack leaves its objects in the store. A remote that then points
-/// the branch at the refused commit with a chain that no longer carries it
-/// is refused again: the tip is checked, not only the packs this run applied.
+/// The tip is checked even when the store held its unsigned objects before
+/// the fetch and the advertised chain does not carry them.
 #[test]
-fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
+fn an_unsigned_commit_in_the_store_is_refused_when_the_branch_is_repointed_at_it() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     clone_into(&remote, &target);
-    let forged = remote.publish(Some(first), &[("a.txt", b"forged\n")], false);
+    let (objects, forged) = remote.build(Some(first), &[("a.txt", b"forged\n")], false);
+    remote.publish_objects(&objects, forged, false);
     let error = signed_fetch(&target, &remote).unwrap_err();
     assert!(
         matches!(error, SyncError::UnsignedOrInvalidObject { .. }),
@@ -1050,10 +1418,12 @@ fn a_refused_commit_left_in_the_store_is_refused_when_the_branch_is_repointed_at
     );
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
-    assert!(
-        store.contains(&forged),
-        "the refused objects stay in the store"
-    );
+    assert!(!store.contains(&forged), "a refused pack stays private");
+    for object in objects {
+        store
+            .write(&kit_core::serialize::serialize(&object).unwrap())
+            .unwrap();
+    }
 
     remote.repoint(forged);
     assert_refused(&target, &remote, forged, first, first);
@@ -1408,7 +1778,7 @@ fn a_fetch_checks_history_only_down_to_its_own_remotes_tracking_tips() {
     let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     // Drop an object below the tracking tip from the store.
     let bee = Object::Blob(Blob {
@@ -1470,7 +1840,7 @@ fn a_tracking_tip_the_verified_record_does_not_name_is_no_anchor() {
     let first = remote.publish(None, &[("a.txt", b"one\n"), ("b.txt", b"bee\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let second = remote.publish(Some(first), &[("a.txt", b"two\n")], true);
     fetch(
@@ -1526,6 +1896,7 @@ fn history_gc_pruned_after_a_forced_update_is_checked_again() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     let layout = init_clone_dir(&target, &default_remote("kit+memory://x")).unwrap();
+    kit_core::fault::keep_loose(&layout);
     let fetch_default = || {
         fetch(
             &target,
@@ -1544,7 +1915,7 @@ fn history_gc_pruned_after_a_forced_update_is_checked_again() {
     );
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
     assert!(
-        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false)
+        kit_core::ops::run_gc(&store, &layout, u64::MAX, 0, false, &mut |_, _, _| {})
             .unwrap()
             .pruned
             > 0
@@ -2423,7 +2794,9 @@ fn omitted_prefix_heals_a_missing_delta_base(keep_record: bool) {
         "the fetch heals once"
     );
     assert_eq!(report.packs_downloaded, 2);
-    assert_eq!(counted.take().len(), 9); // suffix attempt, one full walk, tag listing
+    // The suffix attempt, one full walk, the tag listing. The delta pack that
+    // failed on its missing base is kept, so the retry does not get it again.
+    assert_eq!(counted.take().len(), 8);
     assert_eq!(
         refs::read_remote_ref(&layout, "default", "main").unwrap(),
         Some(second)
@@ -3496,7 +3869,7 @@ fn an_unchanged_cursor_checks_the_tips_not_their_closure() {
     remote.publish(None, &[("a.txt", b"one\n")], true);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
-    clone_into(&remote, &target);
+    clone_loose_into(&remote, &target);
     let layout = RepoLayout::single(&target);
     let store = kit_core::store::ObjectStore::open(&layout).unwrap();
     let blob = Object::Blob(Blob {
@@ -4248,7 +4621,7 @@ fn interrupted_pull_with_a_missing_unchanged_blob_refuses_recovery() {
     let remote = Remote::new();
     let first = remote.publish(None, &[("a", b"keep"), ("b", b"old")], true);
     let dir = tempfile::tempdir().unwrap();
-    clone_into(&remote, dir.path());
+    clone_loose_into(&remote, dir.path());
     let layout = RepoLayout::single(dir.path());
     let blob = Object::Blob(Blob {
         data: b"keep".to_vec(),

@@ -146,7 +146,10 @@ pub(super) fn push_step(
             )
             .map_err(|error| repository_operation_error(tx, error))?;
         match outcome {
-            CommitOutcome::Advanced(AdvanceOutcome::Committed) => return Ok(()),
+            CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                tx.record_advance(staged.keys.iter().copied());
+                return Ok(());
+            }
             CommitOutcome::Advanced(AdvanceOutcome::PackmapConflict) => {
                 let current = tx.read_ref(&push.packmap_name)?;
                 if chain_state(

@@ -747,6 +747,7 @@ pub(crate) fn map_client(error: kit_client::Error, upload: bool) -> TransportErr
             TransportError::AdmissionRequired(challenges)
         }
         kit_client::Error::Connection(_) => TransportError::ServerError { status: 503 },
+        kit_client::Error::ServerStatus { status } => TransportError::ServerError { status },
         kit_client::Error::RequestTimeout(cause) => TransportError::RemoteError(cause),
         kit_client::Error::Invalid(_) | kit_client::Error::Limit(_) => {
             TransportError::InvalidResponse
@@ -892,6 +893,18 @@ impl RemoteSource for HostSource<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_connect_server_status_stays_a_server_error() {
+        for status in [429, 500, 503] {
+            let mapped = map_client(kit_client::Error::ServerStatus { status }, false);
+            assert!(
+                matches!(mapped, TransportError::ServerError { status: seen } if seen == status)
+            );
+        }
+        let mapped = map_client(kit_client::Error::Invalid("Connect error JSON"), false);
+        assert!(matches!(mapped, TransportError::InvalidResponse));
+    }
 
     #[test]
     fn admission_classification_uses_http_status_and_ignores_spoofed_markers() {

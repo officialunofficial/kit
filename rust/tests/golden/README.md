@@ -24,6 +24,7 @@ Use its `--check` option to find stale digests.
 | `closure` | SPEC-DISCLOSURE, SPEC-PACKFILE | `closure_ref.py` |
 | `disclosure` | SPEC-DISCLOSURE | `disclosure_ref.py` |
 | `fastcdc` | SPEC-FASTCDC | `objects_ref.py` |
+| `formats` | SPEC-OBJECTS, SPEC-MERKLE-OBJECTS, SPEC-TRANSPORT-CONNECT, SPEC-SPARSE-CHECKOUT, SPEC-WORKTREE | `formats_ref.py` |
 | `git-bridge` | SPEC-GIT-BRIDGE | `git_bridge_ref.py` |
 | `git-import` | SPEC-GIT-IMPORT | `git_bridge_ref.py` |
 | `grants` | SPEC-WRITE-GRANTS | `grants_ref.py` |
@@ -41,6 +42,15 @@ Use its `--check` option to find stale digests.
 | `uploads` | SPEC-TRANSPORT-CONNECT | `blake3_subtree_ref.py` |
 | `blame-stash` | none | none (see its README) |
 | `diff-merge` | none | none (see its README) |
+
+## Format vectors
+
+`formats` holds the bytes of the format versions that had no committed vector:
+the object ids, the pack list, the sparse cache and the stash manifest.
+`cargo run -p kit-core --example write_format_vectors` writes them once. No
+test rewrites them. The test `kit-core/tests/formats_stay_readable.rs` reads
+them, and the vectors of the other directories, with the current readers.
+CONTRIBUTING, "Formats stay readable", states the rule.
 
 ## Facts that a reference check takes from the fixture
 

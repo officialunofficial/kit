@@ -135,7 +135,7 @@ size, or use as a chunk. It enforces the §5 format caps of 10,000,000
 entries and 4 GiB of payload. The transport's whole-body and decode
 budgets apply to wire packs. Frame overhead can place local payload
 offsets above 4 GiB. The 64 MiB fetch publication target and the
-16 KiB fetch selection limit are writer rules in
+262,154-byte fetch selection limit are writer rules in
 [SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch).
 
 The pair lives in the common object directory under
@@ -147,7 +147,7 @@ rebuildable locator. All integer fields are unsigned little-endian.
 | Field | Size | Meaning |
 |---|---|---|
 | Magic | 4 bytes | ASCII `KITX` |
-| Index version | 4 bytes | `1`, independent of the pack header version |
+| Index version | 4 bytes | `1`, the same version as the pack header |
 | Count | 4 bytes | Number of frames, `N` |
 | Fanout | 256 × 4 bytes | Bucket `i` counts ids with first byte ≤ `i` |
 | Object ids | `N` × 32 bytes | Binary ids in strictly increasing byte order |
@@ -159,32 +159,37 @@ rebuildable locator. All integer fields are unsigned little-endian.
 The letters after `bmt-v2\n` in the repository marker form a set of
 required capabilities. If a reader encounters an unknown letter, it
 MUST refuse to open the store with `IncompatibleRepoFormat` and tell the
-user to update kit. The exact marker `bmt-v2\n\0` represents a lost
-activation and selects loose storage. See
+user to update kit. The marker is exactly one of `bmt-v2\n`, `bmt-v2\n\0`
+and `bmt-v2\nP`. The zero-tail form represents a lost activation and
+selects loose storage. See
 [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
 
-On a live pair, an unknown pack header version or index version MUST
-raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
-check the version before using its declared layout. Repair MUST preserve
-a pair with an unknown version.
+On a live pair whose pack header version and index version are the same
+unknown version, readers MUST raise `IncompatibleRepoFormat` and tell the
+user to update kit. Readers check the version before using its declared
+layout. Repair MUST preserve such a pair. A pair in which only one file has
+an unknown version, or in which the two versions differ, is damage to that
+pair, reported as such (SPEC-OBJECTS, "Object lookup"). A change to either
+format therefore bumps both versions together, so that an older reader can
+tell a newer pair from damage.
 
-The exact version-1 index size is `1,100 + 44 × N` bytes. Reject unknown magic or
-version, trailing or truncated bytes, a bad checksum, a mismatched
-key or frame count, duplicate or unsorted ids, and fanout inconsistent
-with the ids. Before allocating or following an offset, check the count,
-exact file size, and all arithmetic and integer conversions. Every row
-must describe one whole frame before the trailer. Extents include the
-five-byte frame headers for the overlap check. Check the frame type and
-length before using its payload. Bound memory independently of the number
-of local packs.
+The exact version-1 index size is `1,100 + 44 × N` bytes. Before
+allocating or following an offset, check the magic, version, key, count,
+exact file size, fanout bounds, and arithmetic and integer conversions.
+Ordinary lookups check the extent of each selected row, including the
+five-byte frame header. Check the frame type and length before using
+its payload. Full object reads check canonical encoding and recompute
+the requested id. Bound cached row bytes and open file handles
+independently of the number of local packs.
 
-Before sealing or rebuilding an index, and during an integrity scan,
-check the pack trailer and whole-file key, walk the declared frames to
-the trailer with no gaps or extra data, and check the one-to-one
-correspondence of frames and index rows. Check canonical encoding and
-recompute each indexed id using SPEC-OBJECTS §10. Ordinary lookups can use
-the validated index and check the selected frame and object without
-rehashing the whole pack on every read.
+Integrity scans, repair, merge and retirement MUST verify the full index
+checksum. Reject duplicate or unsorted ids, fanout inconsistent with the
+ids, and overlapping or missing extents. Check the pack trailer and
+whole-file key, walk the declared frames to the trailer with no gaps or
+extra data, and check the one-to-one correspondence of frames and index
+rows. Check canonical encoding and recompute each indexed id using
+SPEC-OBJECTS §10. A writer performs these checks on the pair it seals
+or on the rebuilt index and its verified pack.
 
 See [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage) for marker activation,
 discovery, publication, and the mixed local-pack conformance vector.

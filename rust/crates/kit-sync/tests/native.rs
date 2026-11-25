@@ -287,3 +287,372 @@ fn pack_location_rejects_private_literals_before_dispatch() {
         assert!(error.contains("destination refused"), "{host}: {error}");
     }
 }
+
+mod resume {
+    //! An interrupted location body continues with `Range` against an exact
+    //! `206` with the first answer's strong entity tag. Any other answer
+    //! reads the location again from its start, and a location that keeps
+    //! stopping ends the fetch, so the client reads the pack from the server.
+
+    use std::time::Duration;
+
+    use kit_core::hash;
+    use kit_core::object::{Blob, Object};
+    use kit_core::pack::{PackError, PackSpool, PackWriter, pack_key};
+    use kit_core::protocol::{
+        PACK_BODY_LIMIT, PackKey, PackSink, RestartReason, ResumeOutcome, TransportResult,
+    };
+    use kit_sync::NativeHttp;
+    use kit_test_util::range_server::{RangeServer, Request, Response, honest};
+
+    const ETAG: &str = "\"v1\"";
+
+    fn pack() -> (Vec<u8>, PackKey) {
+        let mut writer = PackWriter::new();
+        for seed in 0u8..6 {
+            let data: Vec<u8> = (0u32..2000)
+                .flat_map(|n| hash::hash(&[&n.to_le_bytes()[..], &[seed]].concat()))
+                .collect();
+            let object = Object::Blob(Blob { data });
+            writer
+                .push_raw(
+                    object.id().unwrap(),
+                    &kit_core::serialize::serialize(&object).unwrap(),
+                )
+                .unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        let key = PackKey::from_hash(pack_key(&bytes));
+        (bytes, key)
+    }
+
+    struct Recording {
+        spool: Option<PackSpool>,
+        outcomes: Vec<ResumeOutcome>,
+        begins: usize,
+    }
+
+    impl Recording {
+        fn spool(&mut self) -> &mut PackSpool {
+            self.spool.as_mut().unwrap()
+        }
+    }
+
+    impl PackSink for Recording {
+        fn begin(&mut self, declared: Option<u64>) -> TransportResult<()> {
+            self.begins += 1;
+            PackSink::begin(self.spool(), declared)
+        }
+        fn write(&mut self, bytes: &[u8]) -> TransportResult<()> {
+            PackSink::write(self.spool(), bytes)
+        }
+        fn failed(&self) -> Option<std::io::ErrorKind> {
+            self.spool.as_ref().unwrap().failed()
+        }
+        fn retained(&self) -> u64 {
+            PackSink::retained(self.spool.as_ref().unwrap())
+        }
+        fn resume(&mut self, total: u64, offset: u64) -> TransportResult<()> {
+            PackSink::resume(self.spool(), total, offset)
+        }
+        fn note_resume(&mut self, outcome: ResumeOutcome) {
+            self.outcomes.push(outcome);
+        }
+    }
+
+    /// A name, the reason it must give, and how it spoils the honest answer.
+    type Case = (
+        &'static str,
+        RestartReason,
+        Box<dyn Fn(Response) -> Response + Send + Sync>,
+    );
+
+    struct Fetched {
+        result: Result<(), String>,
+        verified: Result<(), PackError>,
+        outcomes: Vec<ResumeOutcome>,
+        begins: usize,
+        requests: Vec<Request>,
+    }
+
+    fn fetch(
+        transport: &NativeHttp,
+        object: &[u8],
+        key: &PackKey,
+        timeout: Option<Duration>,
+        script: impl Fn(usize, &Request, Response) -> Response + Send + Sync + 'static,
+    ) -> Fetched {
+        use kit_client::HttpTransport as _;
+        use kit_sync::Executor as _;
+        let object = object.to_vec();
+        let server = RangeServer::start(move |n, request| {
+            script(n, request, honest(&object, ETAG, request))
+        });
+        let mut sink = Recording {
+            spool: Some(PackSpool::create(&std::env::temp_dir(), PACK_BODY_LIMIT).unwrap()),
+            outcomes: Vec::new(),
+            begins: 0,
+        };
+        let url = format!("{}/pack?signature=test", server.endpoint());
+        let fetched = transport.block_on(transport.fetch_pack_location(
+            &url,
+            PACK_BODY_LIMIT,
+            timeout,
+            &mut sink,
+        ));
+        let verified = sink.spool.take().unwrap().finish(key).map(drop);
+        Fetched {
+            result: fetched,
+            verified,
+            outcomes: sink.outcomes,
+            begins: sink.begins,
+            requests: server.requests(),
+        }
+    }
+
+    fn transport() -> NativeHttp {
+        NativeHttp::new()
+            .unwrap()
+            .with_test_pack_location_http(true)
+            .allow_private_pack_locations(true)
+    }
+
+    fn ranged(request: &Request) -> bool {
+        request.header("range").is_some()
+    }
+
+    #[test]
+    fn an_interrupted_location_continues_where_it_stopped() {
+        let (object, key) = pack();
+        for cut in [1, 17, 4096, object.len() / 2, object.len() - 1] {
+            let got = fetch(&transport(), &object, &key, None, move |n, _, answer| {
+                if n == 0 {
+                    answer.cut_after(cut)
+                } else {
+                    answer
+                }
+            });
+            got.result.unwrap();
+            got.verified.unwrap();
+            assert_eq!(got.requests.len(), 2, "cut at {cut}");
+            assert_eq!(
+                got.requests[1].header("range"),
+                Some(&*format!("bytes={cut}-"))
+            );
+            assert_eq!(got.requests[1].header("if-match"), Some(ETAG));
+            assert_eq!(
+                got.outcomes,
+                [ResumeOutcome::Resumed { bytes: cut as u64 }],
+                "cut at {cut}"
+            );
+            assert_eq!(got.begins, 1, "the body begins once");
+        }
+    }
+
+    #[test]
+    fn a_stalled_location_continues_too() {
+        let (object, key) = pack();
+        let transport = transport().with_transfer_timeout(Duration::from_millis(400));
+        let got = fetch(&transport, &object, &key, None, |n, _, answer| {
+            if n == 0 {
+                answer.cut_after(3000).hold_for(Duration::from_secs(3))
+            } else {
+                answer
+            }
+        });
+        got.result.unwrap();
+        got.verified.unwrap();
+        assert_eq!(got.outcomes, [ResumeOutcome::Resumed { bytes: 3000 }]);
+    }
+
+    #[test]
+    fn an_answer_that_is_not_the_rest_reads_the_location_again() {
+        let (object, key) = pack();
+        let total = object.len();
+        let cases: Vec<Case> = vec![
+            (
+                "weak tag",
+                RestartReason::Validator,
+                Box::new(|a| a.header("etag", "W/\"v1\"")),
+            ),
+            (
+                "another tag",
+                RestartReason::Validator,
+                Box::new(|a| a.header("etag", "\"v2\"")),
+            ),
+            (
+                "no tag",
+                RestartReason::Validator,
+                Box::new(|a| a.without("etag")),
+            ),
+            (
+                "wrong start",
+                RestartReason::Range,
+                Box::new(move |a| {
+                    a.header("content-range", &format!("bytes 99-{}/{total}", total - 1))
+                }),
+            ),
+            (
+                "wrong total",
+                RestartReason::Range,
+                Box::new(move |a| {
+                    a.header(
+                        "content-range",
+                        &format!("bytes 100-{}/{}", total, total + 1),
+                    )
+                }),
+            ),
+            (
+                "no range",
+                RestartReason::Range,
+                Box::new(|a| a.without("content-range")),
+            ),
+            (
+                "coded",
+                RestartReason::Range,
+                Box::new(|a| a.header("content-encoding", "gzip")),
+            ),
+            (
+                "wrong length",
+                RestartReason::Range,
+                Box::new(|mut a| {
+                    a.declared = Some(a.body.len() + 1);
+                    a
+                }),
+            ),
+            (
+                "precondition failed",
+                RestartReason::Validator,
+                Box::new(|_| Response::new(412, b"")),
+            ),
+            (
+                "range not satisfiable",
+                RestartReason::Range,
+                Box::new(|_| Response::new(416, b"")),
+            ),
+        ];
+        for (name, reason, tamper) in cases {
+            let got = fetch(
+                &transport(),
+                &object,
+                &key,
+                None,
+                move |n, _, answer| match n {
+                    0 => answer.cut_after(100),
+                    1 => tamper(answer),
+                    _ => answer,
+                },
+            );
+            got.result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            got.verified
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert_eq!(
+                got.outcomes,
+                [ResumeOutcome::Restarted { reason }],
+                "{name}"
+            );
+            assert_eq!(got.requests.len(), 3, "{name}");
+            assert!(
+                ranged(&got.requests[1]) && !ranged(&got.requests[2]),
+                "{name}"
+            );
+            assert_eq!(got.begins, 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_server_that_ignores_range_has_its_full_answer_taken() {
+        let (object, key) = pack();
+        let full = object.clone();
+        let got = fetch(
+            &transport(),
+            &object,
+            &key,
+            None,
+            move |n, _, answer| match n {
+                0 => answer.cut_after(100),
+                1 => Response::new(200, &full).header("etag", ETAG),
+                _ => answer,
+            },
+        );
+        got.result.unwrap();
+        got.verified.unwrap();
+        assert_eq!(got.requests.len(), 2);
+        assert_eq!(
+            got.outcomes,
+            [ResumeOutcome::Restarted {
+                reason: RestartReason::Status
+            }]
+        );
+        assert_eq!(got.begins, 2);
+    }
+
+    #[test]
+    fn without_a_strong_tag_an_interrupted_location_is_not_retried() {
+        let (object, key) = pack();
+        for tag in [None, Some("W/\"v1\"")] {
+            let got = fetch(&transport(), &object, &key, None, move |n, _, answer| {
+                let answer = match tag {
+                    Some(tag) => answer.header("etag", tag),
+                    None => answer.without("etag"),
+                };
+                if n == 0 {
+                    answer.cut_after(100)
+                } else {
+                    answer
+                }
+            });
+            assert!(got.result.is_err(), "{tag:?}");
+            assert_eq!(got.requests.len(), 1, "{tag:?}");
+            assert!(got.outcomes.is_empty(), "{tag:?}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_the_pack_fails_the_whole_pack_check() {
+        let (object, key) = pack();
+        let mut damaged = object.clone();
+        damaged[50] ^= 1;
+        let got = fetch(&transport(), &object, &key, None, move |n, _, answer| {
+            if n == 0 {
+                let mut first = answer;
+                first.body = damaged.clone();
+                first.cut_after(100)
+            } else {
+                answer
+            }
+        });
+        got.result.unwrap();
+        assert!(
+            matches!(got.verified, Err(PackError::KeyMismatch)),
+            "{:?}",
+            got.verified
+        );
+    }
+
+    #[test]
+    fn a_location_that_keeps_stopping_ends_after_the_resumes_run_out() {
+        let (object, key) = pack();
+        let got = fetch(&transport(), &object, &key, None, |_, _, answer| {
+            answer.cut_after(10)
+        });
+        assert!(got.result.is_err());
+        // The first request and three resumes.
+        assert_eq!(got.requests.len(), 4);
+        assert_eq!(got.outcomes.len(), 3);
+    }
+
+    #[test]
+    fn the_deadline_covers_every_resume() {
+        let (object, key) = pack();
+        let got = fetch(
+            &transport(),
+            &object,
+            &key,
+            Some(Duration::from_millis(300)),
+            |_, _, answer| answer.cut_after(10).hold_for(Duration::from_millis(200)),
+        );
+        assert_eq!(got.result.unwrap_err(), "pack location deadline exceeded");
+        assert!(got.requests.len() <= 3);
+    }
+}

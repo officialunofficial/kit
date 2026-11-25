@@ -355,3 +355,156 @@ fn restore_staged_and_worktree_restores_a_clean_file() {
     assert!(!out.stderr.is_empty());
     assert_eq!(repo.read("a.txt"), "edited\n");
 }
+
+/// A repo with files in several directories, all committed, then every
+/// tracked file deleted from the worktree.
+fn repo_with_deleted_tree() -> Repo {
+    let repo = Repo::new();
+    for rel in [
+        "Makefile",
+        "top.txt",
+        "t/one.txt",
+        "t/two.txt",
+        "t/deep/three.txt",
+        "t/deep/er/four.txt",
+        "u/five.txt",
+        "u/Makefile",
+        "tt/six.txt",
+    ] {
+        repo.write(rel, rel.as_bytes());
+    }
+    ok(repo.path(), repo.xdg(), &["add", "-A"]);
+    repo.commit("base");
+    for entry in ["Makefile", "top.txt", "t", "u", "tt"] {
+        let path = repo.path().join(entry);
+        if path.is_dir() {
+            fs::remove_dir_all(path).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    repo
+}
+
+/// The files in the worktree, relative and sorted, without `.kit`.
+fn worktree_files(repo: &Repo) -> Vec<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            if prefix.is_empty() && name == ".kit" {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.file_type().unwrap().is_dir() {
+                walk(&entry.path(), &path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(repo.path(), "", &mut out);
+    out.sort();
+    out
+}
+
+/// `restore <dir>` brings back every file under that directory, nested ones
+/// included, and nothing else, not even a sibling whose name starts the same.
+#[test]
+fn restore_directory_brings_back_only_that_directory() {
+    let repo = repo_with_deleted_tree();
+    ok(repo.path(), repo.xdg(), &["restore", "t"]);
+    assert_eq!(
+        worktree_files(&repo),
+        [
+            "t/deep/er/four.txt",
+            "t/deep/three.txt",
+            "t/one.txt",
+            "t/two.txt"
+        ]
+    );
+    assert_eq!(repo.read("t/deep/er/four.txt"), "t/deep/er/four.txt");
+}
+
+/// A nested directory pathspec restores that subtree only.
+#[test]
+fn restore_nested_directory_brings_back_only_that_subtree() {
+    let repo = repo_with_deleted_tree();
+    ok(repo.path(), repo.xdg(), &["restore", "t/deep"]);
+    assert_eq!(
+        worktree_files(&repo),
+        ["t/deep/er/four.txt", "t/deep/three.txt"]
+    );
+}
+
+/// One command naming a file and a directory restores both, and a file that
+/// shares its name with a file in another directory is restored once, in
+/// its own place.
+#[test]
+fn restore_file_and_directory_pathspecs_together() {
+    let repo = repo_with_deleted_tree();
+    ok(
+        repo.path(),
+        repo.xdg(),
+        &["restore", "Makefile", "u", "t/one.txt"],
+    );
+    assert_eq!(
+        worktree_files(&repo),
+        ["Makefile", "t/one.txt", "u/Makefile", "u/five.txt"]
+    );
+}
+
+/// Naming a path twice, or a directory and a file inside it, changes nothing.
+#[test]
+fn restore_overlapping_pathspecs_restore_each_file_once() {
+    let repo = repo_with_deleted_tree();
+    ok(
+        repo.path(),
+        repo.xdg(),
+        &["restore", "tt", "tt/six.txt", "tt"],
+    );
+    assert_eq!(worktree_files(&repo), ["tt/six.txt"]);
+}
+
+/// A directory with some files present and some deleted gets the deleted
+/// ones back and leaves the rest as they are.
+#[test]
+fn restore_directory_leaves_present_files_alone() {
+    let repo = repo_with_deleted_tree();
+    ok(repo.path(), repo.xdg(), &["restore", "t"]);
+    fs::remove_file(repo.path().join("t/two.txt")).unwrap();
+    ok(repo.path(), repo.xdg(), &["restore", "t"]);
+    assert_eq!(repo.read("t/two.txt"), "t/two.txt");
+    assert_eq!(repo.read("t/one.txt"), "t/one.txt");
+}
+
+/// A pathspec that matches no tracked file is still an error.
+#[test]
+fn restore_directory_without_tracked_files_is_refused() {
+    let repo = repo_with_deleted_tree();
+    let out = fail(repo.path(), repo.xdg(), &["restore", "nope"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("did not match"));
+}
+
+/// A pathspec names a path from the repository root and what lies below it. A
+/// one-component pathspec such as `Makefile` does not also select a file with
+/// that name in another directory the command reaches through a second
+/// pathspec.
+#[test]
+fn restore_one_component_pathspec_selects_only_the_top_level_path() {
+    let repo = repo_with_deleted_tree();
+    ok(
+        repo.path(),
+        repo.xdg(),
+        &["restore", "Makefile", "u/five.txt", "t/one.txt"],
+    );
+    assert_eq!(
+        worktree_files(&repo),
+        ["Makefile", "t/one.txt", "u/five.txt"]
+    );
+}

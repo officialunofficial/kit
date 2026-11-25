@@ -49,16 +49,6 @@ use super::{
 use crate::packmap::packmap_ref;
 use crate::{SourceError, SyncError};
 
-/// The most bytes a push lets a remote's listing of `refs/tags/`, or of
-/// `refs/kit/tagmap/`, reach on a remote whose listing comes in one frame
-/// ([`RefListing::OneFrame`]), counted as `kit serve` counts a listing: each
-/// name without its prefix, plus 48 bytes. 960 KiB keeps
-/// each listing within `kit serve`'s frame of 1 MiB: about 17,000 short tags.
-pub const MAX_TAG_LISTING_BYTES: usize = 960 * 1024;
-
-/// The bytes an entry adds to a `kit serve` listing beyond its name.
-const TAG_LISTING_ENTRY_BYTES: usize = 48;
-
 /// The most commits one tag's base search visits that no earlier search of
 /// the push visited. A tag that finds no base within it sends its whole
 /// closure.
@@ -124,10 +114,6 @@ pub enum TagPushRejection {
     /// remote's value too, and this repository lacks it or its history.
     #[error("the remote tag holds {} with no tag map; fetch the remote tag first, or delete it", to_hex(.remote))]
     OldValueNotLocal { remote: Hash },
-    /// A new tag would take the remote's tag listing past
-    /// [`MAX_TAG_LISTING_BYTES`].
-    #[error("the remote holds too many tags to list")]
-    TooManyTags,
     /// The tags of one group need more packs, or more objects, than one
     /// ticketed advance of this server carries.
     #[error("the tags need more than one advance carries; push the branch first, then the tags")]
@@ -244,44 +230,28 @@ fn classify(value: Hash, remote: RemoteState, force: bool) -> Result<Row, TagPus
 }
 
 /// The remote's listings of `refs/tags/` and `refs/kit/tagmap/`, read once
-/// per push, and the bytes a one-frame listing of each would take.
+/// per push.
 struct Listing {
     tags: BTreeMap<String, Hash>,
     maps: BTreeMap<String, Hash>,
-    tag_bytes: usize,
-    map_bytes: usize,
-    /// Names this push already counted as new in each listing.
-    new_tags: HashSet<String>,
-    new_maps: HashSet<String>,
 }
 
 impl Listing {
     /// List the tags, then the tag maps: a tag map is written before its tag,
     /// so on an ordered listing a tag map listed after its tag covers it.
     fn read(tx: &PushContext<'_>) -> Result<Self, PushError> {
-        let collect = |prefix: &str| -> Result<(BTreeMap<String, Hash>, usize), PushError> {
+        let collect = |prefix: &str| -> Result<BTreeMap<String, Hash>, PushError> {
             let listed = tx
                 .list_refs(prefix)
                 .map_err(|error| repository_operation_error(tx, error))?;
-            let bytes = listed
-                .iter()
-                .map(|r| r.name.len() + TAG_LISTING_ENTRY_BYTES)
-                .sum();
-            let refs = listed
+            Ok(listed
                 .into_iter()
                 .filter_map(|r| Some((r.name, r.hash?)))
-                .collect();
-            Ok((refs, bytes))
+                .collect())
         };
-        let (tags, tag_bytes) = collect(TAG_REF_PREFIX)?;
-        let (maps, map_bytes) = collect(TAGMAP_REF_PREFIX)?;
         Ok(Self {
-            tags,
-            maps,
-            tag_bytes,
-            map_bytes,
-            new_tags: HashSet::new(),
-            new_maps: HashSet::new(),
+            tags: collect(TAG_REF_PREFIX)?,
+            maps: collect(TAGMAP_REF_PREFIX)?,
         })
     }
 
@@ -290,31 +260,6 @@ impl Listing {
             tag: self.tags.get(name).copied(),
             map: self.maps.get(name).copied(),
         }
-    }
-
-    /// Count the refs that writing `row` for `name` adds to each listing, or
-    /// refuse when either would pass [`MAX_TAG_LISTING_BYTES`].
-    fn admit(&mut self, name: &str, row: Row) -> bool {
-        let entry = name.len() + TAG_LISTING_ENTRY_BYTES;
-        let new_tag = matches!(row, Row::Create | Row::Leftover { .. })
-            && !self.tags.contains_key(name)
-            && !self.new_tags.contains(name);
-        let new_map =
-            row.creates_map() && !self.maps.contains_key(name) && !self.new_maps.contains(name);
-        if (new_tag && self.tag_bytes + entry > MAX_TAG_LISTING_BYTES)
-            || (new_map && self.map_bytes + entry > MAX_TAG_LISTING_BYTES)
-        {
-            return false;
-        }
-        if new_tag {
-            self.tag_bytes += entry;
-            self.new_tags.insert(name.to_owned());
-        }
-        if new_map {
-            self.map_bytes += entry;
-            self.new_maps.insert(name.to_owned());
-        }
-        true
     }
 }
 
@@ -856,6 +801,8 @@ impl TagPush<'_, '_> {
         };
         let refused = match outcome {
             CommitOutcome::Advanced(AdvanceOutcome::Committed) => {
+                self.tx
+                    .record_advance(keys.iter().copied().map(PackKey::into_hash));
                 return Ok(Advance::Landed { members: true });
             }
             // The tag map's condition failed: this write may have landed
@@ -1263,9 +1210,9 @@ fn push_tags_with(
         }
     }
     let listing_kind = tx.ref_listing();
-    let mut listing = if work.is_empty() {
+    let listing = if work.is_empty() {
         None
-    } else if matches!(selection, TagSelection::All) || listing_kind == RefListing::OneFrame {
+    } else if matches!(selection, TagSelection::All) {
         Some(Listing::read(tx)?)
     } else {
         None
@@ -1310,13 +1257,6 @@ fn push_tags_with(
                     continue;
                 }
             };
-            if listing_kind == RefListing::OneFrame
-                && let Some(listing) = &mut listing
-                && !listing.admit(&local.name, row)
-            {
-                push.reject(&local, TagPushRejection::TooManyTags);
-                continue;
-            }
             if let Row::ForcedFresh { old } = row
                 && !store_holds_closure(store, old)?
             {

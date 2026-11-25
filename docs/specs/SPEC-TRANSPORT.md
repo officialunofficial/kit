@@ -106,6 +106,15 @@ gc remove every spool file (named `.tmp` and a random suffix) in `.kit/tmp/`
 when they start, which clears what a power loss leaves on Windows. A spool that
 another process holds open is left alone.
 
+A fetch keeps a verified pack whose apply failed, in `.kit/tmp/retained/`
+as `<key>.pack`, so a retry reads it from disk instead of downloading it. The
+file is a disposable cache and is never trusted: a retry reads it again through
+a spool, which checks its length, its trailer and its key, and a file that fails
+is deleted. The cache holds at most four packs and none older than seven days,
+and the sweep that fetch, push and gc run when they start enforces both. A pack
+leaves the cache when a retry records it as applied. A directory or file in the
+cache that is a symlink is never followed.
+
 `update_ref`'s condition is one of:
 
 - `Any` &mdash; clobber the ref unconditionally.
@@ -253,7 +262,7 @@ branch or another tag.
   holds it, with no second download.
 - **Failure scope.** A refusal names the tag and its reason. The fetch reports
   it and goes on. A failed tag listing stops the tag phase with "tag listing
-  failed (possibly too many tags): `<error>`", and the branches stay
+  failed: `<error>`", and the branches stay
   published. An interrupt, a transport failure other than a bad reply to a
   node or pack download, or a local I/O error, including one while a tag's
   pack is written, fails the fetch, as for a branch. The tags proved before
@@ -713,7 +722,7 @@ refs (§1.2). It treats the reply strictly:
   does its full work. Any other `Error` is an error.
 
 **Older peers.** A client that predates the request never sends it, so a new
-server serves it as before, and the golden sessions 1 to 3 are unchanged. A
+server serves it as before. A
 server that predates the request answers the unknown body with `Error {
 ERROR_CODE_INVALID_REQUEST }` and keeps the session open, so the client
 offers no cursor and its fetch works as it did. The failed request costs one
@@ -723,6 +732,50 @@ frame of the budget. Neither side needs a version or a capability field.
 listing. A server that holds back a changed cursor can equally hold back a
 changed ref. The fetch verifies every object and signature it applies, so a
 stale cursor can only leave the client at a state the server once offered.
+
+#### 4.2.3 `ListRefs` paging
+
+`ListRefs` lists one page of the refs under a prefix, in name order
+(SPEC-REFS §4.1). It carries the fields that Connect's `ListRefs` carries
+(SPEC-TRANSPORT-CONNECT §7.9), with the same field numbers:
+
+| Field | Message | Meaning |
+|---|---|---|
+| `page_size = 2` | `ListRefs` | The most refs the reply may hold. Required: an absent or zero value is refused. |
+| `page_token = 3` | `ListRefs` | The `next_page_token` of the page before. Empty starts the listing. |
+| `next_page_token = 2` | `ListRefsResponse` | Empty ends the listing. Any other value is the `page_token` of the next request. |
+
+The server answers with the refs after `page_token`, at most `page_size`
+and at most 1,000 (`MAX_LIST_PAGE_REFS`). Its `next_page_token` is the last
+name of the page, and it is set only when more refs follow. A page of 1,000
+names of the longest length (512 bytes) is about 560,000 bytes, so a page
+always fits one frame (SPEC-RPC §1). The token names no state of the session:
+it is a name, and the next page holds the refs that sort after it, whether
+the ref of that name still exists or not. So a listing carries on across a
+reconnect, and a ref that is created or deleted while the listing runs is
+shown or not, as in any listing that pages (§1.2). A token over 512 bytes is
+`Error { ERROR_CODE_INVALID_REQUEST, "invalid page token" }`.
+
+The client requests 1,000 refs a page and takes pages until one has no
+`next_page_token`. It checks each page as the Connect client does
+(SPEC-TRANSPORT-CONNECT §7.9): the names are in strict order, within a page
+and across pages, a token never repeats, and the listing is bounded in pages
+and in bytes. A listing that breaks a rule is an `InvalidResponse`. Each page
+is a request frame and a response frame of the per-connection budget (§4.4).
+
+**Older peers.** A server that predates paging ignores the two new request
+fields and sends the listing in one frame with no `next_page_token`, which
+the client takes as a listing of one page. It still fails, as before, when
+the listing does not fit one frame. A client that predates paging sends no
+`page_size`. A new server refuses it with `Error { ERROR_CODE_INVALID_REQUEST,
+"list refs needs a page_size; upgrade the client" }` and keeps the session
+open. It does not answer with a first page, because that client would take
+the page for the whole listing and could prune against it. Every listing of
+such a client fails, so the client has to be upgraded: kit keeps no fallback
+for it. A client of this version that pushes tags to a server that predates
+paging no longer bounds the remote's tag listing to one frame, so a listing
+that grows past one frame fails for every client of that server until the
+server is upgraded.
 
 ### 4.3 Trust model
 
@@ -766,13 +819,15 @@ names it: `per-connection frame budget exceeded: at most 10000 frames per
 session (SPEC-TRANSPORT 4.4)`.
 
 **Reference-server behavior.** What fits in one session follows from the
-frame cap. A fetch costs one `ListRefs` frame, then per branch a `ReadRef` of
+frame cap. A fetch costs the `ListRefs` frames of the branch listing (one per
+1,000 branches, §4.2.3), then per branch a `ReadRef` of
 the packmap and a `DownloadPack` of each node of its packmap chain, even when no
 branch changed: the SSH transport names no repository, so a fetch keeps no
 per-branch checkpoint for it and walks each packmap chain again. The tag phase
 (§1.4) adds one `ListRefs` of `refs/tags/`, and one of `refs/kit/tagmap/` only
 when some tag is not yet proved from local objects. With one node per packmap
-chain and no new tag, 4,999 branches use all 10,000 frames. Additional
+chain and no new tag, 4,997 branches use all 10,000 frames: five listing pages,
+two frames per branch and the tag listing. Additional
 requests require a fresh session. A clone of many individually pushed
 annotated tags can also take multiple sessions as it downloads their nodes
 and packs. Tags pushed together share a node and pack.
@@ -783,7 +838,9 @@ uses a server that predates the request can use the full session budget.
 A push walks the branch's packmap chain. Re-baselining (§7.2) keeps the
 chain short while one node can list its packs. A push that walks a longer
 chain or an attestation transfer that walks a long log can need more than
-one session. Each ref listing uses one request frame and one response frame.
+one session. Each page of a ref listing is one request, so a listing of
+100,000 refs is 100 frames of the budget, and paging itself leaves the budget
+to the per-branch requests.
 
 Nested `UploadPack` chunk drains enforce the same 1 GiB byte ceiling on
 the declared upload length and additionally cap the number of chunk
@@ -1032,8 +1089,24 @@ reaches the sink: its `Content-Length`, when present, goes to `begin`
 before any byte is read, so a pack over `PACK_BODY_LIMIT` or the sink's
 limit is refused unread, and each piece of the body is written to the sink
 as it arrives. Any other answer's body is never read (§6.4). A retried
-attempt begins the sink again. `download_blob` is the same `GET` into a
-sink limited to the caller's bound.
+attempt begins the sink again, unless it continues the body.
+`download_blob` is the same `GET` into a sink limited to the caller's bound.
+
+**Continuing a download.** When an attempt fails after some bytes and the
+sink still holds them (`PackSink::retained`), a client MAY ask for the rest
+instead of reading the pack again from its start, if the `200` answer had a
+strong `ETag` (not starting `W/`) and a `Content-Length`. The retry is a
+`GET` with `Range: bytes=<n>-` for the `n` bytes held and `If-Match` with that
+`ETag`. The client MUST take the body only from a `206` whose `ETag` is the
+first answer's, whose `Content-Range` is `bytes <n>-<total-1>/<total>` for the
+first answer's length, whose `Content-Length` is `total - n`, and that has no
+content coding. A `200`, a `412`, a `416` or a `206` that fails a check reads the
+pack again from its start: a `200` is taken whole and begins the sink again, and
+the others are followed at once by a `GET` with neither header. Any other status
+is handled as for a first request, and a retry may continue again. The sink keeps the prefix and its hash, and
+the caller still checks the whole pack against its key, so a prefix that was not
+the pack's own fails there. A transport reports a continuation, and why it read
+again from the start, to the sink (`PackSink::note_resume`).
 
 ### 6.8 Repository cursor
 
@@ -1131,6 +1204,17 @@ that ledger.
 `upload_pack` IS idempotent (content-addressed: re-uploading the
 same bytes produces the same digest and is a no-op on the server
 side).
+
+A transport stores a pack whole or not at all: a file or ssh remote renames
+a finished temporary file into place, and an S3 `PUT` takes effect when it
+completes. A pack key is the digest of the pack's bytes, so `pack_exists`
+true names a complete pack with those bytes. A push to a remote that issues
+no upload tickets (S3, file, ssh) therefore checks a sealed pack of 8 MiB or
+more with `pack_exists` first and does not upload one the remote holds; a
+re-run of a failed push sends only the packs it missed. A check that fails
+for any reason counts as "not stored", and the push uploads. Kit deletes no
+pack on these remotes, so no cleanup can run between the check and the ref
+write.
 
 `download_pack` and `pack_exists` are pure reads; no idempotency
 concerns.
@@ -1287,10 +1371,7 @@ under `Missing`. A tag read back at the pushed value with no tag map is a
 conflict, so the next decision repairs it. A push
 refuses, before it reads the remote, a tag whose `refs/kit/tagmap/<t>`
 would not be a valid ref name, an annotated tag whose object names
-another tag, and an unsigned annotated tag. On a remote whose tag listing
-comes in one `kit serve` frame (`kit+ssh`, `kit+file`), a push refuses a
-create that would take the listing of `refs/tags/` or `refs/kit/tagmap/`
-past 960 KiB, counting each name without its prefix plus 48 bytes. A
+another tag, and an unsigned annotated tag. A
 conflict reads that tag again and decides again, at most eight times.
 
 ### 7.3 Deleting a head and its chain ref
@@ -1420,23 +1501,28 @@ spool there until the next fetch, push or gc removes it (§1.1).
 Downloads and apply hold no worktree lock. The CLI limits chain packs
 to one million and pack-list nodes to 100,000.
 
-Fetch and clone pack fetched objects whose serialized size is smaller
-than 16 KiB. Objects of 16 KiB or more and chunks stay loose. The latter
-rule includes short final chunks and chunks from small fixed-size
-layouts. A chunk shares the Blob encoding of a whole-file blob. A writer
-that lacks enough information to classify a blob writes it loose.
-Local creation and import write loose objects. The local reader accepts
-the wider format in [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
+Fetch and clone pack every fetched object whose serialized size is at
+most 262,154 bytes, whatever its kind or its use as a chunk. That is the
+largest FastCDC chunk, 262,144 bytes (SPEC-FASTCDC), plus the ten-byte
+blob prologue, so every chunk a kit writer cuts is packed. A larger object
+stays loose: a whole-file blob of more than 262,144 content bytes, a large
+tree or manifest, and a larger chunk of a fixed-size layout. The limit is
+writer policy. Readers accept any storable object in a pack
+([SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs)). Local creation
+and import write loose objects, and reuse an existing loose or packed copy
+instead of writing a second one (SPEC-OBJECTS §10.1).
 
-Fetch stages accepted objects in 64 MiB publication windows of decoded
-serialized bytes. A window can span several remote packs. Seal the
-current window before adding an object that would pass the target.
+Fetch stages accepted objects in publication windows. The current writer
+seals at 64 MiB of decoded serialized bytes or 65,536 entries. These
+limits are writer policy. A window can span several remote packs. Seal
+the current window before adding an object that would pass either limit.
 A larger loose object occupies a window by itself. Seal a final partial
 window before closing the branch or tag batch.
 Respect the local pack caps and any lower staging-memory bound. Publish
 one local pack for the window's eligible objects when `P` is active and
 commit its loose writes using [SPEC-OBJECTS §10.1](SPEC-OBJECTS.md#101-durability).
-A window with no eligible objects needs no local pack. The cadence fixes
+A window with no eligible objects needs no local pack. In loose storage,
+a window may also close when it completes a wire pack. The cadence fixes
 when progress is durable. Flush batching and decode-window sizes remain
 implementation choices.
 

@@ -165,7 +165,20 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
             Ok(Some(h)) => Some(h),
             _ => return emit_err("no previous branch", exit::GENERAL_ERROR),
         },
-        Some(refs::Head::Detached(h)) => Some(*h),
+        Some(refs::Head::Detached(h)) => {
+            // An older kit's gc does not know PREVIOUS_HEAD and may have
+            // pruned the commit it names.
+            if !store.contains(h) {
+                return emit_err(
+                    &format!(
+                        "previous HEAD {} was pruned; nothing to switch back to",
+                        format::short_hash(h, 8)
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Some(*h)
+        }
         None => None,
     };
     if let Some(head) = &previous_head {
@@ -335,7 +348,11 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // identical between it and the target are skipped rather than
     // re-read and rewritten. `--force` discards local edits, so it must
     // rewrite everything.
-    let base_tree = if opts.force {
+    // A repository with no index file, as `kit clone --no-checkout` leaves
+    // it, has nothing checked out: the first checkout writes every entry and
+    // owes no local change to the tree of HEAD (git's initial checkout).
+    let initial_checkout = !layout.index_file().exists();
+    let base_tree = if opts.force || initial_checkout {
         None
     } else {
         super::current_head_tree(&layout, &store).ok().flatten()
@@ -351,26 +368,34 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // collide with the target are preserved (git branch-switch
     // semantics), so they no longer block the checkout.
     // `--force` (git checkout -f) skips the gate, discarding local edits.
-    if !opts.force
-        && let Err(e) =
+    if !opts.force {
+        let safe = if initial_checkout {
+            super::ensure_initial_checkout_safe(&layout, &store, tree_hash, &sparse_opts)
+        } else {
             super::ensure_restore_safe_from(&layout, &store, tree_hash, &sparse_opts, checked_base)
-    {
-        return emit_err(&e, exit::GENERAL_ERROR);
+        };
+        if let Err(e) = safe {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
     }
 
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
     // first if any of them carries local edits (unless `--force`).
-    let dropped = match dropped_paths_guarded(
-        &layout,
-        &store,
-        tree_hash,
-        checked_base,
-        &sparse_opts,
-        opts.force,
-    ) {
-        Ok(d) => d,
-        Err(code) => return code,
+    let dropped = if initial_checkout {
+        Vec::new()
+    } else {
+        match dropped_paths_guarded(
+            &layout,
+            &store,
+            tree_hash,
+            checked_base,
+            &sparse_opts,
+            opts.force,
+        ) {
+            Ok(d) => d,
+            Err(code) => return code,
+        }
     };
 
     if let Err(e) = kit_core::ops::restore::check_nested_repositories(
@@ -539,7 +564,8 @@ fn dropped_paths_guarded(
     match super::locally_modified_dropped_path(layout.worktree_root(), store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(
-                "restore would overwrite local changes; commit, stash, or reset '{path}' first"
+                "restore would overwrite local changes; commit, stash, or reset '{}' first",
+                super::display_path(&path)
             ),
             exit::GENERAL_ERROR,
         )),
