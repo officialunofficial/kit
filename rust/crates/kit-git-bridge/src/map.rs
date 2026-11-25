@@ -516,7 +516,13 @@ mod tests {
             let why = e.to_string();
             assert!(why.contains("Delete it and rerun"), "{why}");
         };
-        for name in [MAP_FILE, REFS_FILE, ".refs.tmp", "direction", ".direction.tmp"] {
+        for name in [
+            MAP_FILE,
+            REFS_FILE,
+            ".refs.tmp",
+            "direction",
+            ".direction.tmp",
+        ] {
             let dir = tempfile::tempdir().unwrap();
             let other = tempfile::tempdir().unwrap();
             let target = other.path().join("target");
@@ -539,7 +545,11 @@ mod tests {
                     refused(bind_direction(dir.path(), Direction::Import).unwrap_err());
                 }
             }
-            assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\n", "{name}");
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                "keep\n",
+                "{name}"
+            );
         }
     }
 
