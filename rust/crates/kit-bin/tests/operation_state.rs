@@ -309,6 +309,13 @@ fn a_commit_during_a_cherry_pick_or_revert_needs_the_conflicts_resolved() {
         ok(root, &["add", "a.txt"]);
         // The state lost its conflict list.
         fs::remove_file(root.join(".kit/kit-conflicts")).unwrap();
+        // A refused `commit -a` stages nothing.
+        write(root, "a.txt", "edited again\n");
+        let index = fs::read(root.join(".kit/index")).unwrap();
+        let out = run_in(root, &["commit", "-a", "-m", "torn"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert_eq!(fs::read(root.join(".kit/index")).unwrap(), index, "{op}");
+        write(root, "a.txt", "resolved\n");
         let out = run_in(root, &["commit", "-m", "torn"]);
         assert!(!out.status.success(), "{op}: {out:?}");
         assert!(
