@@ -1756,4 +1756,57 @@ mod walk_budget_tests {
         merge(1_000_000).unwrap();
         assert!(matches!(merge(100), Err(StoreError::TreeTooLarge)));
     }
+
+    #[test]
+    fn a_long_directory_name_counts_against_the_byte_budget_at_each_path() {
+        let dir = TempDir::new().unwrap();
+        let store = crate::store::ObjectStore::init(&crate::layout::RepoLayout::single(dir.path()))
+            .unwrap();
+        // Both sides add a directory with a 100 byte name, holding files "a"
+        // and "b" that differ. The walk compares the directory (100 bytes),
+        // then "a" and "b" (102 bytes each), at 67 bytes of index entry each.
+        let side = |data: &[u8]| {
+            let blob = put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            );
+            let file = |name: &[u8]| TreeEntry {
+                name: name.to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: blob,
+            };
+            let tree = put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: vec![file(b"a"), file(b"b")],
+                }),
+            );
+            vec![TreeEntry {
+                name: vec![b'd'; 100],
+                mode: EntryMode::Tree,
+                object_hash: tree,
+            }]
+        };
+        let (ours, theirs) = (side(b"ours"), side(b"theirs"));
+        let merge = |byte_limit| {
+            let (mut merged, mut conflicts) = (Vec::new(), Vec::new());
+            let mut budget = WalkBudget::with_byte_limit(byte_limit);
+            merge_entries_recursive(
+                &store,
+                &[],
+                &ours,
+                &theirs,
+                "",
+                &mut merged,
+                &mut conflicts,
+                0,
+                &mut budget,
+            )
+        };
+        let exact = (67 + 100) + 2 * (67 + 102);
+        merge(exact).unwrap();
+        assert!(matches!(merge(exact - 1), Err(StoreError::TreeTooLarge)));
+    }
 }

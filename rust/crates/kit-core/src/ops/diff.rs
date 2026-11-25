@@ -3561,4 +3561,34 @@ mod tests {
             Err(StoreError::TreeTooLarge)
         ));
     }
+    /// A chain of `levels` directories named `c` over `bottom`.
+    fn chain_over(store: &ObjectStore, levels: usize, bottom: Vec<TreeEntry>) -> Hash {
+        let mut cur = put_tree(store, bottom);
+        for _ in 0..levels {
+            cur = put_tree(store, vec![entry(b"c", EntryMode::Tree, cur)]);
+        }
+        cur
+    }
+
+    #[test]
+    fn a_one_sided_directory_counts_its_depth_from_where_the_walk_reached_it() {
+        let (_dir, store) = fresh_store();
+        let file = |name: &[u8]| entry(name, EntryMode::Blob, put_blob(&store, name));
+        // The directory `r` is 10 levels deep and the shared chain above it
+        // is 120 levels deep. Each is under the nesting limit, the two
+        // together are not.
+        let deep = chain_over(&store, 10, vec![file(b"leaf")]);
+        let with_r = vec![entry(b"r", EntryMode::Tree, deep), file(b"z")];
+        let without_r = vec![file(b"y"), file(b"z")];
+        let with = load_entries(&store, Some(chain_over(&store, 120, with_r))).unwrap();
+        let without = load_entries(&store, Some(chain_over(&store, 120, without_r))).unwrap();
+        let walk = |old: &[TreeEntry], new: &[TreeEntry]| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(1_000_000);
+            diff_entries_recursive(&store, old, new, "", &mut out, false, 0, &mut budget)
+        };
+        assert!(matches!(walk(&with, &without), Err(StoreError::TreeTooDeep)));
+        assert!(matches!(walk(&without, &with), Err(StoreError::TreeTooDeep)));
+    }
+
 }

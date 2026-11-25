@@ -108,6 +108,13 @@ impl WalkBudget {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_byte_limit(byte_limit: u64) -> Self {
+        let mut budget = Self::with_limit(u64::MAX);
+        budget.byte_limit = byte_limit;
+        budget
+    }
+
     fn check(&self) -> StoreResult<()> {
         if self.used > self.limit || self.bytes > self.byte_limit {
             return Err(StoreError::TreeTooLarge);
