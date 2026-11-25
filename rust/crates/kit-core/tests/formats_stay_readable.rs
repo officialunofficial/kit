@@ -526,8 +526,8 @@ fn stash_entry_of_0_8_keeps_applying() {
         None
     );
     let staged = stash::entry_index(&store, &layout, 0).unwrap();
-    assert_eq!(staged.entries.len(), 1);
-    assert_eq!(staged.entries[0].path, "a.txt");
+    let paths: Vec<_> = staged.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
 
     // The worktree as the stash left it: `HEAD`'s files.
     fs::write(dir.path().join("a.txt"), b"one\n").unwrap();
