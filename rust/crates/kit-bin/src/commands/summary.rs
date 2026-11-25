@@ -58,10 +58,20 @@ pub fn print_commit_summary(
     for e in &result.entries {
         match e.kind {
             DiffKind::Added => {
-                let _ = writeln!(out, " create mode {} {}", octal(e.new_mode), e.path);
+                let _ = writeln!(
+                    out,
+                    " create mode {} {}",
+                    octal(e.new_mode),
+                    super::display_path(&e.path)
+                );
             }
             DiffKind::Removed => {
-                let _ = writeln!(out, " delete mode {} {}", octal(e.old_mode), e.path);
+                let _ = writeln!(
+                    out,
+                    " delete mode {} {}",
+                    octal(e.old_mode),
+                    super::display_path(&e.path)
+                );
             }
             DiffKind::Modified | DiffKind::ModeChanged | DiffKind::Renamed => {}
         }

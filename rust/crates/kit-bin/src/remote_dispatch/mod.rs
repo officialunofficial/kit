@@ -528,6 +528,7 @@ pub(crate) fn pull_all_with_source(
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     target_branch: Option<&str>,
+    checkout: bool,
     require_signed: bool,
     tags: bool,
     cfg: &crate::config::Config,
@@ -536,6 +537,7 @@ pub(crate) fn pull_all_with_source(
 ) -> Result<kit_sync::PullReport, Error> {
     let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
+        .with_checkout(checkout)
         .with_verify_signatures(require_signed)
         .with_tags(tags)
         .with_auto_maintenance(cfg.gc_auto_enabled())

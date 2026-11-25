@@ -23,9 +23,9 @@
 //!
 //! | Variant   | Mechanism                                              | Race behaviour |
 //! |-----------|--------------------------------------------------------|----------------|
-//! | `Any`     | `write_atomic`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
-//! | `Missing` | `write_create_new`: same tmp+fsync, then a hard-link    | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
-//! | `Match(H)`| OS file-locks + in-process locks around read-then-`write_atomic` | Atomic across processes on the same on-disk root. The exclusive lock of the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock`, serialises every CAS critical section on that ref; the in-process stripe mutex keeps multi-threaded callers from racing each other before they hit the file lock. |
+//! | `Any`     | `durable::write_pointer`: tmp file → `fsync` → `rename` → parent | Last writer wins. Concurrent writers never expose a half-written file because `rename(2)` is atomic on POSIX. |
+//! | `Missing` | `durable::write_pointer_new`: same tmp+fsync, then a no-replace rename | Only the first writer succeeds. If two concurrent callers both see "absent" before writing, only one `link(2)` wins; the other gets `AlreadyExists` → `RefConflict`. |
+//! | `Match(H)`| OS file-locks + in-process locks around read-then-`write_pointer` | Atomic across processes on the same on-disk root. The exclusive lock of the ref's stripe, `<root>/.kit/refs/refs-<hh>.lock`, serialises every CAS critical section on that ref; the in-process stripe mutex keeps multi-threaded callers from racing each other before they hit the file lock. |
 //!
 //! Cross-process atomicity for `Match` is achieved via
 //! [`std::fs::File::lock`] (stable as of Rust 1.89) on two files under
@@ -55,8 +55,8 @@ use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
-/// Open the pack at `path` for reading, never through a link, and check
-/// on the open handle that it is a regular file.
+/// Open the pack at `path` for reading, never through a link and never
+/// waiting on a FIFO, and check on the open handle that it is a regular file.
 ///
 /// # Errors
 /// The open fails, which includes a link at `path`. A file that is not
@@ -67,7 +67,11 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // `O_NONBLOCK`: the open of a FIFO returns at once, so the check
+        // below refuses it, and a plain open would wait for a writer.
+        // `O_NOCTTY`: a terminal device opened here never becomes the
+        // controlling terminal of the process.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     #[cfg(windows)]
     {
@@ -116,7 +120,44 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Read the file at `path` as [`bounded_read::read_capped`] does, but open it
+/// without blocking and refuse a file that is not regular before any read: a
+/// FIFO, a device or a socket at a ref or pack-map path would otherwise make
+/// a read wait for a writer that never comes. The check reads the open
+/// handle, so a swap of the path after the open changes nothing. Unlike
+/// [`open_pack_file`] the open follows a link: [`FileTransport::guard_ref_path`]
+/// decides which links a ref path may cross.
+///
+/// # Errors
+/// The open or the read fails, or the file is over `limit` bytes
+/// ([`ErrorKind::InvalidData`]). A directory fails as a read of one does. Any
+/// other file that is not regular has kind [`ErrorKind::InvalidInput`].
+fn read_regular_capped(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    let kind = file.metadata()?.file_type();
+    if kind.is_dir() {
+        // As a read of a directory fails, so a directory of other refs is no
+        // ref file ([`no_ref_file`]).
+        return Err(io::Error::from(ErrorKind::IsADirectory));
+    }
+    if !kind.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "ref file is not a regular file",
+        ));
+    }
+    bounded_read::read_capped_from(file, limit)
+}
+
 use kit_core::bounded_read;
+use kit_core::durable::Parents;
 use kit_core::hash::Hash;
 use kit_core::pack::SPOOL_BUFFER;
 use kit_core::protocol::{
@@ -127,10 +168,6 @@ use kit_core::refs::{
     REF_FILE_MAX_BYTES, Ref, decode_ref_wire, encode_ref_wire, validate_ref_name,
     validate_ref_name_grammar, validate_ref_prefix,
 };
-
-// We need write_atomic and write_create_new from kit_core's private `atomic`
-// module. Since they are `pub(crate)`, we re-implement them locally here.
-// The logic is identical to `kit_core::atomic`.
 
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -163,11 +200,11 @@ fn temp_path(dest: &Path) -> io::Result<PathBuf> {
 /// Create a new, empty temp file beside `dest`, named `.kit.tmp.<pid>.<seq>`.
 /// The file is created with `create_new`, which never follows a link and
 /// never truncates: a name that is taken, by a file or a link, is skipped and
-/// the next one is tried. Every temp file this crate writes is created here.
-/// A streaming writer that publishes into the same layout (a blob store
-/// writing `packs/`) creates its temp files here too, so it can never
-/// collide with this crate's own writes. The caller removes the file when it
-/// fails to publish it.
+/// the next one is tried. A streaming writer that publishes into the same
+/// layout (a blob store writing `packs/`) creates its temp files here, so it
+/// can never collide with the pointer writes of this crate, which go through
+/// `kit_core::durable` and add a random suffix to the same prefix. The caller
+/// removes the file when it fails to publish it.
 ///
 /// # Errors
 /// `InvalidInput` if `dest` has no parent directory or no file name. Any
@@ -187,187 +224,54 @@ pub fn create_temp(dest: &Path) -> io::Result<(PathBuf, fs::File)> {
     }
 }
 
-/// Write `bytes` to a new temp file beside `dest` and fsync it. A failure
-/// removes the temp file and returns the original error.
-fn write_temp(dest: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-    write_temp_from(dest, &mut &bytes[..], bytes.len() as u64).map_err(StreamError::into_inner)
+/// A reader that notes when a read of it failed, so that a failed write can
+/// tell its source from its destination.
+struct Tracked<'a> {
+    inner: &'a mut dyn io::Read,
+    failed: bool,
 }
 
-/// Where a streamed write failed: reading its source, or writing its
-/// destination.
-#[derive(Debug)]
-enum StreamError {
-    Source(io::Error),
-    Dest(io::Error),
-}
+impl io::Read for Tracked<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf);
+        self.failed |= read.is_err();
+        read
+    }
 
-impl StreamError {
-    fn into_inner(self) -> io::Error {
-        match self {
-            Self::Source(e) | Self::Dest(e) => e,
-        }
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let read = self.inner.read_exact(buf);
+        self.failed |= read.is_err();
+        read
     }
 }
 
-/// Copy exactly `len` bytes of `source` to a new temp file beside `dest`,
-/// [`SPOOL_BUFFER`] bytes at a time, and fsync it. A failure removes the
-/// temp file.
-fn write_temp_from(
-    dest: &Path,
-    source: &mut dyn io::Read,
-    len: u64,
-) -> Result<PathBuf, StreamError> {
-    use std::io::Write;
-    let (path, mut file) = create_temp(dest).map_err(StreamError::Dest)?;
-    let mut copy = || {
-        let mut buf = vec![0u8; usize::try_from(len).map_or(SPOOL_BUFFER, |n| n.min(SPOOL_BUFFER))];
-        let mut left = len;
-        while left > 0 {
-            let n = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
-            source
-                .read_exact(&mut buf[..n])
-                .map_err(StreamError::Source)?;
-            file.write_all(&buf[..n]).map_err(StreamError::Dest)?;
-            left -= n as u64;
-        }
-        file.sync_all().map_err(StreamError::Dest)
-    };
-    if let Err(e) = copy() {
-        drop(file);
-        let _ = fs::remove_file(&path);
-        return Err(e);
-    }
-    Ok(path)
+/// Write a ref or server file: its directories first, each made durable, then
+/// the pointer.
+fn write_ref(dest: &Path, bytes: &[u8]) -> io::Result<()> {
+    parents_durably(dest)?;
+    kit_core::durable::write_pointer_shared(dest, bytes, Parents::Existing)
 }
 
-/// [`write_atomic`] of exactly `len` bytes read from `source`, so a pack of
-/// any size is written with one buffer of memory.
-fn write_atomic_from(
-    dest: &Path,
-    source: &mut dyn io::Read,
-    len: u64,
-    make_parents: bool,
-) -> Result<(), StreamError> {
-    let parent = dest.parent().ok_or_else(|| {
-        StreamError::Dest(io::Error::new(
-            ErrorKind::InvalidInput,
-            "destination path has no parent",
-        ))
-    })?;
-    if make_parents {
-        create_dir_all_durably(parent).map_err(StreamError::Dest)?;
-    }
-    let tmp_path = write_temp_from(dest, source, len)?;
-    if let Err(e) = fs::rename(&tmp_path, dest) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(StreamError::Dest(e));
-    }
-    sync_parent(parent).map_err(StreamError::Dest)
-}
-
-/// Atomically write `bytes` to `dest` using a temp-file + fsync +
-/// rename + parent-dir-fsync sequence. Creates parent dirs when
-/// `make_parents` is `true`. Mirrors `kit_core::atomic::write_atomic`.
-fn write_atomic(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<()> {
+/// Make the directory of `dest` and its parents, each made durable, so the
+/// pointer written there next does not vanish with its directory on power
+/// loss.
+fn parents_durably(dest: &Path) -> io::Result<()> {
     let parent = dest
         .parent()
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
-    if make_parents {
-        create_dir_all_durably(parent)?;
-    }
-
-    let tmp_path = write_temp(dest, bytes)?;
-
-    if let Err(e) = fs::rename(&tmp_path, dest) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    // Make the rename's dirent durable. Propagated (not best-effort
-    // discarded): on power loss a swallowed parent-dir fsync could lose a
-    // committed ref/pack write. Matches `kit_core::atomic::write_atomic`,
-    // which propagates its `sync_parent_dir(parent)?` the same way.
-    sync_parent(parent)?;
-    Ok(())
-}
-
-/// Exclusive-create variant: writes `bytes` to `dest` only if `dest`
-/// does not already exist. Returns `Ok(true)` on success, `Ok(false)`
-/// if the destination was already present. Mirrors
-/// `kit_core::atomic::write_create_new`.
-fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result<bool> {
-    let parent = dest
-        .parent()
-        .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "destination path has no parent"))?;
-    if make_parents {
-        create_dir_all_durably(parent)?;
-    }
-
-    let tmp_path = write_temp(dest, bytes)?;
-
-    // Hard-link tmp → dest (atomic, fails with AlreadyExists if dest exists).
-    match fs::hard_link(&tmp_path, dest) {
-        Ok(()) => {
-            let _ = fs::remove_file(&tmp_path);
-            // Make the hard-link's dirent durable. Propagated (not
-            // best-effort discarded): on power loss a swallowed
-            // parent-dir fsync could lose a committed ref write. Matches
-            // `kit_core::atomic::write_create_new`.
-            sync_parent(parent)?;
-            Ok(true)
-        }
-        Err(e) if e.kind() == ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(&tmp_path);
-            Ok(false)
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&tmp_path);
-            Err(e)
-        }
-    }
-}
-
-/// Fsync a directory, making completed renames/hard-links durable.
-///
-/// The result is propagated by callers (not discarded) so a power loss
-/// cannot silently lose a committed ref/pack write. A `NotFound` is
-/// tolerated as success — the directory only vanishes if a concurrent
-/// actor removed it, in which case there is nothing left to make
-/// durable. Mirrors `kit_core::atomic::sync_parent_dir`.
-///
-/// Unix-only: opening a directory with a plain [`fs::File::open`] (no
-/// `FILE_FLAG_BACKUP_SEMANTICS`) fails on Windows with `ERROR_ACCESS_DENIED`
-/// (os error 5) — this crate's `write_atomic`/`write_create_new` were
-/// silently failing every ref/pack write on Windows through this path
-/// before the platform split below was added (caught by the `windows-smoke`
-/// CI job; `kit_core::atomic::sync_parent_dir`, which this mirrors, already
-/// had this split). Directory-fsync is a POSIX durability idiom with no
-/// direct Windows equivalent reachable from safe `std::fs`, so the
-/// non-Unix arm is a deliberate no-op, not a partial implementation.
-#[cfg(unix)]
-fn sync_parent(dir: &Path) -> io::Result<()> {
-    match fs::File::open(dir) {
-        Ok(d) => d.sync_all(),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn sync_parent(_dir: &Path) -> io::Result<()> {
-    Ok(())
+    create_dir_all_durably(parent)
 }
 
 /// Fsync directory `dir`, making the renames, links and removals already
 /// done in it durable: what every write of this crate does after its
 /// rename. A missing `dir` counts as success; on non-Unix targets this is a
-/// no-op (see `sync_parent`). For writers that publish into the same
+/// no-op (see [`kit_core::durable::flush_dir`]). For writers that publish into the same
 /// layout with their own temp file (see [`create_temp`]).
 ///
 /// # Errors
 /// The directory could not be opened or synced.
 pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    sync_parent(dir)
+    kit_core::durable::flush_dir(dir)
 }
 
 /// [`fs::create_dir_all`], then fsync the parent of every directory it
@@ -387,7 +291,7 @@ pub fn create_dir_all_durably(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     for created in missing.iter().rev() {
         if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
-            sync_parent(parent)?;
+            kit_core::durable::flush_dir(parent)?;
         }
     }
     Ok(())
@@ -963,7 +867,7 @@ impl FileTransport {
     fn restore(&self, name: &str, path: &Path, previous: Option<&[u8]>) {
         match previous {
             Some(bytes) => {
-                let _ = write_atomic(path, bytes, false);
+                let _ = kit_core::durable::write_pointer_shared(path, bytes, Parents::Existing);
             }
             None => {
                 if remove_durably(path).unwrap_or(false) {
@@ -993,7 +897,7 @@ impl FileTransport {
         if path.exists() {
             self.guard_ref_path(&path)?;
         }
-        match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+        match read_regular_capped(&path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
@@ -1020,6 +924,25 @@ impl FileTransport {
         &self,
         prefix: &str,
     ) -> Result<Vec<(String, Option<Hash>)>, RefFileError> {
+        let mut out = Vec::new();
+        for name in self.list_ref_file_names(prefix)? {
+            match read_regular_capped(&self.root.join(&name), REF_FILE_MAX_BYTES) {
+                Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
+                // An oversized file is malformed content, like a bad hash.
+                Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
+                Err(e) => return Err(RefFileError::Io(e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The names that [`Self::list_ref_files`] lists, sorted, without reading
+    /// any file. A caller that pages a listing reads only the files of one
+    /// page, with [`Self::read_listed_ref_file`].
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for an invalid prefix, or I/O.
+    pub fn list_ref_file_names(&self, prefix: &str) -> Result<Vec<String>, RefFileError> {
         let trimmed = prefix.trim_end_matches('/');
         if !validate_ref_name(trimmed) {
             return Err(RefFileError::InvalidName(prefix.to_owned()));
@@ -1050,16 +973,25 @@ impl FileTransport {
                 if !file_type.is_file() || !validate_ref_name_grammar(&name) {
                     continue; // a symlink, a temp or lock file, or no ref name
                 }
-                match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
-                    Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
-                    // An oversized file is malformed content, like a bad hash.
-                    Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
-                    Err(e) => return Err(RefFileError::Io(e)),
-                }
+                out.push(name);
             }
         }
         out.sort();
         Ok(out)
+    }
+
+    /// The id in the ref file that [`Self::list_ref_file_names`] listed as
+    /// `name`: `None` when the file holds no ref wire, or is gone since.
+    ///
+    /// # Errors
+    /// [`RefFileError::Io`], including for a file that is not regular.
+    pub fn read_listed_ref_file(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
+        match read_regular_capped(&self.root.join(name), REF_FILE_MAX_BYTES) {
+            Ok(bytes) => Ok(decode_ref_wire(&bytes)),
+            // An oversized file is malformed content, like a bad hash.
+            Err(e) if e.kind() == ErrorKind::InvalidData || no_ref_file(&e) => Ok(None),
+            Err(e) => Err(RefFileError::Io(e)),
+        }
     }
 
     /// The path of a server-owned file: `rel` must be a plain relative path
@@ -1362,9 +1294,10 @@ impl FileTransport {
             .map_err(|e| RefFileError::Io(io::Error::other(e.to_string())))?;
         // Exactly one creator wins the exclusive create; every caller then
         // reads the winner's id.
-        write_create_new(&path, &fresh, true).map_err(RefFileError::Io)?;
-        let bytes =
-            bounded_read::read_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
+        parents_durably(&path)
+            .and_then(|()| kit_core::durable::write_pointer_new(&path, &fresh, Parents::Existing))
+            .map_err(RefFileError::Io)?;
+        let bytes = read_regular_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
         bytes
             .try_into()
             .map_err(|_| RefFileError::Corrupt(REPO_ID_FILE.to_owned()))
@@ -1396,11 +1329,13 @@ impl FileTransport {
 
         match condition {
             // Unconditional atomic overwrite.
-            RefWriteCondition::Any => write_atomic(&dest, &wire, true).map_err(clashed),
+            RefWriteCondition::Any => write_ref(&dest, &wire).map_err(clashed),
 
             RefWriteCondition::Missing => {
                 // Exclusive create: succeeds only when the file is absent.
-                match write_create_new(&dest, &wire, true) {
+                match parents_durably(&dest).and_then(|()| {
+                    kit_core::durable::write_pointer_new_shared(&dest, &wire, Parents::Existing)
+                }) {
                     Ok(true) => Ok(()),
                     Ok(false) if dest.is_dir() => Err(RefFileError::InvalidName(name.to_owned())),
                     Ok(false) => Err(RefFileError::Conflict),
@@ -1413,7 +1348,7 @@ impl FileTransport {
                     Some(c) if c == expected => {}
                     _ => return Err(RefFileError::Conflict),
                 }
-                write_atomic(&dest, &wire, true).map_err(clashed)
+                write_ref(&dest, &wire).map_err(clashed)
             }
         }
     }
@@ -1427,7 +1362,7 @@ impl FileTransport {
                 break;
             }
             if let Some(parent) = dir.parent() {
-                let _ = sync_parent(parent);
+                let _ = kit_core::durable::flush_dir(parent);
             }
         }
     }
@@ -1582,7 +1517,7 @@ impl LockedRefs<'_> {
     pub fn write_file(&self, rel: &Path, bytes: &[u8]) -> Result<(), RefFileError> {
         self.tx.refuse_if_meta_elsewhere()?;
         let path = self.tx.server_path(rel)?;
-        write_atomic(&path, bytes, true).map_err(RefFileError::Io)
+        write_ref(&path, bytes).map_err(RefFileError::Io)
     }
 
     /// Remove the server file at `rel` (see [`FileTransport::server_path`]),
@@ -1666,7 +1601,7 @@ fn condition_holds(path: &Path, condition: RefWriteCondition) -> io::Result<bool
 /// The bytes of the ref file at `path`, bounded like every ref read, or
 /// `None` when there is no file.
 fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+    match read_regular_capped(path, REF_FILE_MAX_BYTES) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -1710,7 +1645,7 @@ fn remove_durably(path: &Path) -> io::Result<bool> {
         Err(e) => return Err(e),
     }
     if let Some(parent) = path.parent() {
-        sync_parent(parent)?;
+        kit_core::durable::flush_dir(parent)?;
     }
     Ok(true)
 }
@@ -1759,12 +1694,27 @@ impl Transport for FileTransport {
         let mut body = pack
             .read_from(0)
             .map_err(|_| TransportError::ProtocolError)?;
-        write_atomic_from(&self.pack_path(key), &mut body, len, true).map_err(|e| match e {
-            StreamError::Source(_) => TransportError::ProtocolError,
-            StreamError::Dest(e) => {
-                TransportError::RemoteError(format!("upload_pack I/O error: {e}"))
-            }
-        })
+        let path = self.pack_path(key);
+        let mut source = Tracked {
+            inner: &mut body,
+            failed: false,
+        };
+        parents_durably(&path)
+            .and_then(|()| {
+                kit_core::durable::write_pointer_from_shared(
+                    &path,
+                    &mut source,
+                    len,
+                    Parents::Existing,
+                )
+            })
+            .map_err(|e| {
+                if source.failed {
+                    TransportError::ProtocolError
+                } else {
+                    TransportError::RemoteError(format!("upload_pack I/O error: {e}"))
+                }
+            })
     }
 
     /// Declare the pack's length to `sink` before any byte, then copy it in
@@ -1910,12 +1860,6 @@ impl Transport for FileTransport {
             .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
     }
 
-    /// A file root may also be served by `kit serve`, whose listing is one
-    /// frame.
-    fn ref_listing(&self) -> kit_core::protocol::RefListing {
-        kit_core::protocol::RefListing::OneFrame
-    }
-
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.to_owned()));
@@ -1942,7 +1886,7 @@ impl Transport for FileTransport {
 /// Read and decode the hash from a ref file. Returns `None` if no ref
 /// file is there ([`no_ref_file`]); propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    ref_from_read(bounded_read::read_capped(path, REF_FILE_MAX_BYTES))
+    ref_from_read(read_regular_capped(path, REF_FILE_MAX_BYTES))
 }
 
 /// The ref a capped read of a ref file yields.
@@ -2009,7 +1953,7 @@ fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> Tran
                 continue;
             }
 
-            if let Ok(bytes) = bounded_read::read_capped(&path, REF_FILE_MAX_BYTES)
+            if let Ok(bytes) = read_regular_capped(&path, REF_FILE_MAX_BYTES)
                 && let Some(hash) = decode_ref_wire(&bytes)
             {
                 out.push(Ref {
@@ -2139,6 +2083,118 @@ mod tests {
         assert!(
             open_pack_file(dir.path()).is_err(),
             "a directory is no pack"
+        );
+    }
+
+    /// Make a FIFO at `path`.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo");
+    }
+
+    /// The result of `work`, which must come back within 20 s. A read that
+    /// waits on the FIFO at `fifo` is let go, by opening its write end, so a
+    /// failing test does not leave its thread stuck.
+    #[cfg(unix)]
+    fn returns_at_once<T: Send + 'static>(
+        fifo: &Path,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        if let Ok(value) = result.recv_timeout(std::time::Duration::from_secs(20)) {
+            value
+        } else {
+            drop(fs::OpenOptions::new().write(true).open(fifo));
+            panic!("a read waited on the FIFO at {}", fifo.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_pack_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let key = pack_key_for(b"a pack that is a FIFO");
+        let (root, fifo) = (
+            dir.path().to_path_buf(),
+            FileTransport::new(dir.path()).pack_path(&key),
+        );
+        make_fifo(&fifo);
+        let err = returns_at_once(&fifo.clone(), move || {
+            let mut sink = kit_core::protocol::MemorySink::new(99);
+            FileTransport::new(root).download_pack(&key, None, &mut sink)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, TransportError::RemoteError(m) if m.contains("not a regular file")),
+            "{err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_ref_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let fifo = dir.path().join("refs/heads/main");
+        make_fifo(&fifo);
+        let root = dir.path().to_path_buf();
+        let (read, strict, listed, update) = returns_at_once(&fifo.clone(), move || {
+            let t = FileTransport::new(root);
+            (
+                t.read_ref("refs/heads/main"),
+                t.read_ref_strict("refs/heads/main"),
+                t.list_refs("refs/heads/"),
+                t.update_ref(
+                    "refs/heads/main",
+                    RefWriteCondition::Match([1; 32]),
+                    &[2; 32],
+                ),
+            )
+        });
+        assert!(read.is_err(), "{read:?}");
+        assert!(matches!(strict, Err(RefFileError::Io(_))), "{strict:?}");
+        assert!(listed.unwrap().is_empty(), "a listing skips a FIFO");
+        assert!(update.is_err(), "{update:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_ref_file_is_read_only_when_it_is_regular() {
+        let dir = tmp();
+        let file = dir.path().join("ref");
+        fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_regular_capped(&file, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(&file, 3).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_regular_capped(&link, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(Path::new("/dev/null"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput,
+            "a device is no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(dir.path(), 4).unwrap_err().kind(),
+            ErrorKind::IsADirectory,
+            "a directory of refs reads as no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(&dir.path().join("absent"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
         );
     }
 
@@ -2472,7 +2528,8 @@ mod tests {
     }
 
     /// Plant links to `target` at the next 64 temp names beside `dest`,
-    /// counted from a name taken now. Returns the links.
+    /// counted from a name taken now. Returns the links this call made; a
+    /// name that already holds a link is left as it is.
     #[cfg(unix)]
     fn plant_links_ahead(dest: &Path, target: &Path) -> Vec<PathBuf> {
         let next = temp_path(dest).unwrap();
@@ -2480,18 +2537,22 @@ mod tests {
         let (stem, seq) = name.rsplit_once('.').unwrap();
         let seq: u64 = seq.parse().unwrap();
         (seq + 1..seq + 65)
-            .map(|n| {
+            .filter_map(|n| {
                 let link = next.with_file_name(format!("{stem}.{n}"));
-                std::os::unix::fs::symlink(target, &link).unwrap();
-                link
+                match std::os::unix::fs::symlink(target, &link) {
+                    Ok(()) => Some(link),
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("plant a link: {e}"),
+                }
             })
             .collect()
     }
 
-    /// A link planted at the temp names a write is about to use is neither
-    /// followed nor truncated: the target keeps its bytes, the link stays
-    /// and the write lands under a name that is free. The links are planted
-    /// from a fresh name right before each write.
+    /// A link planted at the names [`create_temp`] would use is neither
+    /// followed nor truncated by a write: the target keeps its bytes, the link
+    /// stays and the write lands under a name that is free. The temp names of
+    /// the writes themselves end in a random suffix and are created with
+    /// `O_EXCL`, so a link cannot be planted at one.
     #[cfg(unix)]
     #[test]
     fn writes_never_follow_a_link_at_a_temp_name() {
@@ -2507,7 +2568,10 @@ mod tests {
         let mut planted = plant_links_ahead(&heads.join("main"), &target);
         t.write_ref("refs/heads/main", &h).unwrap();
         planted.extend(plant_links_ahead(&heads.join("fresh"), &target));
-        assert!(write_create_new(&heads.join("fresh"), b"x", false).unwrap());
+        assert!(
+            kit_core::durable::write_pointer_new(&heads.join("fresh"), b"x", Parents::Existing)
+                .unwrap()
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"old");
         for link in &planted {
@@ -2522,6 +2586,28 @@ mod tests {
             .filter(|e| !e.file_type().unwrap().is_symlink())
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    /// A link planted at the next temp names is skipped by [`create_temp`]:
+    /// the target keeps its bytes and the temp file is a new regular file.
+    #[cfg(unix)]
+    #[test]
+    fn create_temp_skips_a_link_at_its_next_names() {
+        let dir = tmp();
+        let outside = tmp();
+        let target = outside.path().join("target");
+        fs::write(&target, b"old").unwrap();
+        let dest = dir.path().join("pack");
+        let planted = plant_links_ahead(&dest, &target);
+
+        let (path, file) = create_temp(&dest).unwrap();
+
+        assert!(!planted.contains(&path));
+        assert!(file.metadata().unwrap().file_type().is_file());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        for link in &planted {
+            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        }
     }
 
     #[test]
@@ -3213,8 +3299,9 @@ mod tests {
     /// rename's / hard-link's dirent durable is now propagated via `?`
     /// instead of being discarded as best-effort. This exercises the
     /// now-propagating path end-to-end across all three write conditions
-    /// (`Any` and the `Missing` create path go through `write_atomic` /
-    /// `write_create_new`, both of which `sync_parent(parent)?`). A true
+    /// (`Any` and the `Missing` create path go through
+    /// `durable::write_pointer` / `write_pointer_new`, both of which flush the
+    /// parent directory and propagate its error). A true
     /// power-loss / fsync-fault injection is impractical in a unit test;
     /// this asserts the synced write path still succeeds for every verb.
     #[test]
@@ -3222,41 +3309,41 @@ mod tests {
         let dir = tmp();
         let t = FileTransport::new(dir.path());
 
-        // pack upload → write_atomic → sync_parent(parent)?
+        // pack upload → write_pointer_from → flush_dir(parent)?
         let data = b"durable pack payload";
         let key = pack_key_for(data);
         t.upload_pack(&kit_core::protocol::SliceBody(data), &key, None)
             .expect("upload_pack must succeed through the propagated parent fsync");
         assert_eq!(t.download_blob(&key, None, u64::MAX).unwrap(), data);
 
-        // Missing → write_create_new → sync_parent(parent)? on the link arm
+        // Missing → write_pointer_new → flush_dir(parent)? on the rename arm
         let h0 = blake3_hash(b"durable-missing");
         t.update_ref("refs/heads/main", RefWriteCondition::Missing, &h0)
             .expect("update_ref(Missing) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h0));
 
-        // Any → write_atomic → sync_parent(parent)?
+        // Any → write_pointer → flush_dir(parent)?
         let h1 = blake3_hash(b"durable-any");
         t.update_ref("refs/heads/main", RefWriteCondition::Any, &h1)
             .expect("update_ref(Any) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h1));
 
-        // Match → read-check-write → write_atomic → sync_parent(parent)?
+        // Match → read-check-write → write_pointer → flush_dir(parent)?
         let h2 = blake3_hash(b"durable-match");
         t.update_ref("refs/heads/main", RefWriteCondition::Match(h1), &h2)
             .expect("update_ref(Match) must succeed through the propagated parent fsync");
         assert_eq!(t.read_ref("refs/heads/main").unwrap(), Some(h2));
     }
 
-    /// `sync_parent` tolerates a vanished directory as success (mirrors
-    /// `atomic::sync_parent_dir`): if the parent was removed concurrently
+    /// `sync_dir` tolerates a vanished directory as success: if the parent
+    /// was removed concurrently
     /// there is nothing left to make durable, so a `NotFound` must not be
     /// surfaced as an error.
     #[test]
-    fn sync_parent_tolerates_missing_dir() {
+    fn sync_dir_tolerates_missing_dir() {
         let dir = tmp();
         let gone = dir.path().join("does-not-exist");
-        sync_parent(&gone).expect("sync_parent must treat a missing dir as success");
+        sync_dir(&gone).expect("sync_dir must treat a missing dir as success");
     }
 
     /// Write side: a symlink that already exists inside `<root>/` but

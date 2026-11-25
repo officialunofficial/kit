@@ -984,8 +984,7 @@ pub trait Transport: Send + Sync {
     }
 
     /// How [`Self::list_refs`] answers: an ordered read that pages, by
-    /// default. A transport whose listing comes in one bounded frame, or
-    /// whose listing may lag a write, says so.
+    /// default. A transport whose listing may lag a write says so.
     fn ref_listing(&self) -> RefListing {
         RefListing::Ordered
     }
@@ -1172,10 +1171,6 @@ pub enum RefListing {
     /// The listing reflects every write that completed before it, and it
     /// pages, so its size has no bound of its own.
     Ordered,
-    /// As [`RefListing::Ordered`], but `kit serve` answers a listing in one
-    /// frame of about 1 MiB. Its `kit+ssh` remotes and `kit+file` roots,
-    /// which `kit serve` may serve, keep each listing within that frame.
-    OneFrame,
     /// The listing may lag a completed write, as a Connect server's may. A
     /// strong `read_ref` is the authority.
     Eventual,

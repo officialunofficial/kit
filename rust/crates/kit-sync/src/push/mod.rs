@@ -30,8 +30,7 @@ pub use error::PushError;
 use packmap::{PACKMAP_CAS_ATTEMPTS, advance_packmap, commit_head};
 pub use split::{MAX_CHAIN_COMMITS, MAX_SPLIT_STEPS, PushControl, StepAuthority, plan_push_steps};
 pub use tags::{
-    MAX_BASE_WALK_COMMITS, MAX_TAG_LISTING_BYTES, TagPushOutcome, TagPushRejection, TagPushResult,
-    TagSelection,
+    MAX_BASE_WALK_COMMITS, TagPushOutcome, TagPushRejection, TagPushResult, TagSelection,
 };
 
 struct PreparedPlan {

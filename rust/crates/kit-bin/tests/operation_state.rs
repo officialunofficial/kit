@@ -163,3 +163,184 @@ fn a_continue_refuses_an_operation_whose_conflict_list_is_missing() {
         assert!(root.join(".kit").join(marker).exists(), "{op}");
     }
 }
+
+const OPERATIONS: [(&str, &str); 3] = [
+    ("merge", "MERGE_HEAD"),
+    ("cherry-pick", "CHERRY_PICK_HEAD"),
+    ("revert", "REVERT_HEAD"),
+];
+
+/// A repository where `op` conflicts in `a.txt`, and the target to give it.
+fn conflicting(op: &str) -> (tempfile::TempDir, &'static str) {
+    if op == "revert" {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        ok(root, &["init"]);
+        ok(root, &["keygen"]);
+        write(root, "a.txt", "base\n");
+        commit_all(root, "base");
+        write(root, "a.txt", "changed\n");
+        commit_all(root, "change");
+        write(root, "a.txt", "later\n");
+        commit_all(root, "later");
+        (td, "HEAD~1")
+    } else {
+        (diverged_repo(false), "side")
+    }
+}
+
+/// A repository with `op` paused on a text conflict in `a.txt`.
+fn paused(op: &str) -> tempfile::TempDir {
+    let (td, target) = conflicting(op);
+    let out = run_in(td.path(), &[op, target]);
+    assert!(!out.status.success(), "{op}: {out:?}");
+    assert!(td.path().join(".kit/kit-conflicts").is_file(), "{op}");
+    td
+}
+
+fn head(root: &Path) -> Vec<u8> {
+    let out = run_in(root, &["rev-parse", "HEAD"]);
+    assert!(out.status.success(), "{out:?}");
+    out.stdout
+}
+
+#[test]
+fn a_mixed_reset_ends_an_operation_in_progress() {
+    for (op, marker) in OPERATIONS {
+        for args in [["reset"].as_slice(), ["reset", "--mixed"].as_slice()] {
+            let td = paused(op);
+            let root = td.path();
+            ok(root, args);
+            for name in [
+                marker,
+                "ORIG_HEAD",
+                "KIT_OP_RESULT",
+                "kit-conflicts",
+                "MERGE_MSG",
+                "CHERRY_PICK_MSG",
+                "REVERT_MSG",
+            ] {
+                assert!(
+                    !root.join(".kit").join(name).exists(),
+                    "{op} {args:?}: {name} is left"
+                );
+            }
+            assert!(!status_text(root).contains("in progress"), "{op}");
+        }
+    }
+}
+
+#[test]
+fn a_soft_reset_keeps_an_operation_in_progress() {
+    for (op, marker) in OPERATIONS {
+        let td = paused(op);
+        let root = td.path();
+        ok(root, &["reset", "--soft"]);
+        assert!(root.join(".kit").join(marker).exists(), "{op}");
+    }
+}
+
+/// Gives a directory its mode back, also when a test fails.
+#[cfg(unix)]
+struct Restore<'a>(&'a Path);
+
+#[cfg(unix)]
+impl Drop for Restore<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_state_of_an_operation_is_on_disk_before_its_material_is() {
+    use std::os::unix::fs::PermissionsExt;
+    for (op, marker) in OPERATIONS {
+        let (td, target) = conflicting(op);
+        let root = td.path();
+        // The files cannot be written, so the conflict is found and the state
+        // is written, and then the material fails. A stop between the
+        // material and the state would look the same on disk.
+        fs::set_permissions(root, fs::Permissions::from_mode(0o555)).unwrap();
+        let _restore = Restore(root);
+        let out = run_in(root, &[op, target]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert!(
+            root.join(".kit").join(marker).exists(),
+            "{op}: the state is missing, so nothing can abort the half written conflict"
+        );
+        // The list is not written, so nothing finishes the operation.
+        assert!(!root.join(".kit/kit-conflicts").exists(), "{op}");
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755)).unwrap();
+        let before = head(root);
+        for args in [
+            [op, "--continue"].as_slice(),
+            ["commit", "-m", "x"].as_slice(),
+        ] {
+            let out = run_in(root, args);
+            assert!(!out.status.success(), "{op} {args:?}: {out:?}");
+            assert_eq!(head(root), before, "{op} {args:?}");
+        }
+        // The operation can be undone.
+        ok(root, &[op, "--abort"]);
+        assert!(!root.join(".kit").join(marker).exists(), "{op}");
+        assert_eq!(head(root), before, "{op}");
+        assert!(!status_text(root).contains("in progress"), "{op}");
+    }
+}
+
+#[test]
+fn a_commit_during_a_cherry_pick_or_revert_needs_the_conflicts_resolved() {
+    for op in ["cherry-pick", "revert"] {
+        let td = paused(op);
+        let root = td.path();
+        let before = head(root);
+
+        let out = run_in(root, &["commit", "-m", "premature"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("unresolved"),
+            "{op}: {out:?}"
+        );
+        assert_eq!(head(root), before, "{op}");
+
+        write(root, "a.txt", "resolved\n");
+        ok(root, &["add", "a.txt"]);
+        // The state lost its conflict list.
+        fs::remove_file(root.join(".kit/kit-conflicts")).unwrap();
+        // A refused `commit -a` stages nothing.
+        write(root, "a.txt", "edited again\n");
+        let index = fs::read(root.join(".kit/index")).unwrap();
+        let out = run_in(root, &["commit", "-a", "-m", "torn"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert_eq!(fs::read(root.join(".kit/index")).unwrap(), index, "{op}");
+        write(root, "a.txt", "resolved\n");
+        let out = run_in(root, &["commit", "-m", "torn"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("conflict list"),
+            "{op}: {out:?}"
+        );
+        assert_eq!(head(root), before, "{op}");
+    }
+}
+
+#[test]
+fn a_commit_during_a_cherry_pick_or_revert_goes_through_once_resolved() {
+    for op in ["cherry-pick", "revert"] {
+        let td = paused(op);
+        let root = td.path();
+        let before = head(root);
+        write(root, "a.txt", "resolved\n");
+        ok(root, &["add", "a.txt"]);
+        ok(root, &["commit", "-m", "resolved"]);
+        assert_ne!(head(root), before, "{op}");
+        // The commit ends the operation, so no abort can undo it.
+        let after = head(root);
+        assert!(!status_text(root).contains("in progress"), "{op}");
+        let out = run_in(root, &[op, "--abort"]);
+        assert!(!out.status.success(), "{op}: {out:?}");
+        assert_eq!(head(root), after, "{op}");
+    }
+}

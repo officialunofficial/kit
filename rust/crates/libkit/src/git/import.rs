@@ -513,7 +513,8 @@ fn translate_upstream(
     // Written only now, after the read-only probe: the marker brackets
     // exactly the window where torn objects can exist (store writes
     // until the map/ref-state commit below).
-    write_durable(&marker, b"").map_err(|e| step(Class::CannotCreate, "marker", e))?;
+    kit_core::durable::write_pointer(&marker, b"", kit_core::durable::Parents::Existing)
+        .map_err(|e| step(Class::CannotCreate, "marker", e))?;
 
     let direction = map::read_direction(state)
         .map_err(|e| plain(Class::General, e))?
@@ -808,23 +809,6 @@ fn skip(
         ref_name: ref_name.to_owned(),
         reason,
     });
-}
-
-/// `std::fs::write` + content fsync + parent-dir fsync — for tiny
-/// state files whose EXISTENCE is the signal (the crash marker).
-fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    {
-        use std::io::Write as _;
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    if let Some(parent) = path.parent()
-        && let Ok(d) = std::fs::File::open(parent)
-    {
-        let _ = d.sync_all();
-    }
-    Ok(())
 }
 
 /// SPEC-GIT-IMPORT §5: subject = kit head, predicate carries the git

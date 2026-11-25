@@ -38,7 +38,7 @@ impl LooseStaging {
     fn write(&self, id: &Hash, bytes: &[u8]) -> StoreResult<TempPath> {
         let shard = self.objects_root.join(&to_hex(id)[..2]);
         fs::create_dir_all(&shard)?;
-        let mut file = crate::atomic::temp_file_in(&shard)?;
+        let mut file = crate::durable::temp_file_in(&shard)?;
         #[cfg(feature = "fault-injection")]
         crate::fault::check(crate::fault::Site::Store)?;
         file.as_file_mut().write_all(bytes)?;

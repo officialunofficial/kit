@@ -31,5 +31,5 @@ pub fn note(event: &Event) {
         _ => return,
     };
     let mut stderr = std::io::stderr().lock();
-    let _ = writeln!(stderr, "  {path} ({how})");
+    let _ = writeln!(stderr, "  {} ({how})", super::display_path(path));
 }

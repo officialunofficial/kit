@@ -108,6 +108,15 @@ pub enum SyncError {
     /// signature verification. Never retried as local staleness.
     #[error("object {hash} failed signature verification: {reason}")]
     UnsignedOrInvalidObject { hash: String, reason: String },
+    /// The tip a remote branch names is a tree, a blob or another object that
+    /// is not a commit or a remix, so the branch cannot be a tracking ref.
+    /// Nothing was published for the branch, and the fetch stops there.
+    #[error("remote branch '{branch}' points at a {found}, not a commit")]
+    BranchTipNotCommit {
+        branch: String,
+        /// The type the tip has, such as `tree`.
+        found: &'static str,
+    },
     /// A remote name is not a legal ref name, so it cannot name a record
     /// under `.kit/applied-packs/`.
     #[error("invalid remote name for applied-packs record: '{0}'")]

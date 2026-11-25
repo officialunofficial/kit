@@ -190,6 +190,7 @@ fn pull_one(
                                 source,
                                 &resolved.name,
                                 None,
+                                true,
                                 require_signed,
                                 opts.tags.fetch_tags(),
                                 &cfg.merged,

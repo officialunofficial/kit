@@ -4,8 +4,11 @@
 //! the scope: it holds the returned guard for as long as the operation must
 //! exclude other writers, then drops the guard. An operation that must exclude
 //! other writers for its whole run, such as [`crate::branch::delete`], takes
-//! the lock itself, and its documentation says so. No other library operation
-//! takes a lock behind the caller's back.
+//! the lock itself, and its documentation says so. So does a change to the
+//! repo config that reads the layer itself ([`crate::branch::set_upstream`],
+//! [`crate::branch::unset_upstream`], [`crate::push::record_upstream`]): it
+//! holds the config lock, [`crate::config::lock`], for the read and the write.
+//! No other library operation takes a lock behind the caller's back.
 //!
 //! Each tree has a worktree lock for its index and files. The common
 //! directory has a registry lock for the set of linked trees. A process that
@@ -18,7 +21,7 @@ use kit_core::observer::Observer;
 use kit_core::repo_lock;
 
 pub use kit_core::repo_lock::{
-    LockError, RepoLock, SERVE_LOCK, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK,
+    CONFIG_LOCK, LockError, RepoLock, SERVE_LOCK, WORKTREE_LOCK, WORKTREES_REGISTRY_LOCK,
 };
 
 /// What a lock helper reports to its [`Observer`].

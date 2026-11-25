@@ -12,7 +12,7 @@ use std::io::Write;
 use clap::Parser;
 use kit_core::hash::Hash;
 use kit_core::object::{EntryMode, Object};
-use kit_core::store::ObjectStore;
+use kit_core::store::{MAX_TREE_DEPTH, ObjectStore};
 
 use crate::clap_args;
 use crate::exit;
@@ -64,87 +64,104 @@ pub fn run(args: &[String]) -> u8 {
     // slash (`sub/`) means "list the directory's contents".
     let specs: Vec<(String, bool)> = pathspecs.iter().map(|p| normalize(p)).collect();
     let mut stdout = std::io::stdout().lock();
-    if let Err(msg) = list(
-        &store,
-        &tree_hash,
-        "",
-        opts.recursive,
-        opts.z,
-        &specs,
-        &mut stdout,
-    ) {
+    let listing = Listing {
+        store: &store,
+        recursive: opts.recursive,
+        z: opts.z,
+        pathspecs: &specs,
+    };
+    if let Err(msg) = listing.list(&tree_hash, "", 0, &mut stdout) {
         return emit_err(&msg, exit::GENERAL_ERROR);
     }
     exit::OK
 }
 
-/// Recursively emit a tree's entries, honoring pathspecs like git.
-///
-/// Without pathspecs: list immediate entries (a sub-tree prints as
-/// `040000 tree`), recursing only under `-r`. With pathspecs we descend
-/// into a sub-tree whenever a pathspec lies **within** it (e.g.
-/// `sub/inner.txt` descends through `sub`), when `-r` recurses a selected
-/// tree, or when a `sub/` pathspec asks to list its contents; a sub-tree
-/// named exactly by a pathspec (no trailing slash, no `-r`) prints as a
-/// tree line. An entry is printed when it equals or lies under a pathspec.
-fn list(
-    store: &ObjectStore,
-    tree_hash: &Hash,
-    prefix: &str,
+/// What a listing reads and how it prints: the store, `-r`, `-z` and the
+/// normalized pathspecs.
+struct Listing<'a> {
+    store: &'a ObjectStore,
     recursive: bool,
     z: bool,
-    pathspecs: &[(String, bool)],
-    out: &mut impl Write,
-) -> Result<(), String> {
-    let Object::Tree(tree) = store
-        .read_object(tree_hash)
-        .map_err(|e| format!("read tree: {e}"))?
-    else {
-        return Err(format!("{} is not a tree", format::hex_hash(tree_hash)));
-    };
-    for e in &tree.entries {
-        let Ok(name) = std::str::from_utf8(&e.name) else {
-            return Err("tree entry name is not valid UTF-8".to_string());
-        };
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        let is_tree = e.mode == EntryMode::Tree;
+    pathspecs: &'a [(String, bool)],
+}
 
-        if pathspecs.is_empty() {
-            if is_tree && recursive {
-                list(store, &e.object_hash, &path, recursive, z, pathspecs, out)?;
+impl Listing<'_> {
+    /// Recursively emit a tree's entries, honoring pathspecs like git.
+    ///
+    /// Without pathspecs: list immediate entries (a sub-tree prints as
+    /// `040000 tree`), recursing only under `-r`. With pathspecs we descend
+    /// into a sub-tree whenever a pathspec lies **within** it (e.g.
+    /// `sub/inner.txt` descends through `sub`), when `-r` recurses a selected
+    /// tree, or when a `sub/` pathspec asks to list its contents; a sub-tree
+    /// named exactly by a pathspec (no trailing slash, no `-r`) prints as a
+    /// tree line. An entry is printed when it equals or lies under a pathspec.
+    ///
+    /// `depth` is the nesting of `tree_hash` below the listed tree. Past
+    /// [`MAX_TREE_DEPTH`], the limit checkout uses, the listing refuses, so a
+    /// hostile chain of trees cannot overflow the stack.
+    fn list(
+        &self,
+        tree_hash: &Hash,
+        prefix: &str,
+        depth: usize,
+        out: &mut impl Write,
+    ) -> Result<(), String> {
+        if depth > MAX_TREE_DEPTH {
+            return Err(format!("tree nesting exceeds {MAX_TREE_DEPTH} levels"));
+        }
+        let Object::Tree(tree) = self
+            .store
+            .read_object(tree_hash)
+            .map_err(|e| format!("read tree: {e}"))?
+        else {
+            return Err(format!("{} is not a tree", format::hex_hash(tree_hash)));
+        };
+        for e in &tree.entries {
+            let Ok(name) = std::str::from_utf8(&e.name) else {
+                return Err("tree entry name is not valid UTF-8".to_string());
+            };
+            let path = if prefix.is_empty() {
+                name.to_string()
             } else {
-                emit_entry(e, &path, z, out);
+                format!("{prefix}/{name}")
+            };
+            let is_tree = e.mode == EntryMode::Tree;
+
+            if self.pathspecs.is_empty() {
+                if is_tree && self.recursive {
+                    self.list(&e.object_hash, &path, depth + 1, out)?;
+                } else {
+                    emit_entry(e, &path, self.z, out);
+                }
+                continue;
             }
-            continue;
-        }
 
-        // `path` equals or lies under a pathspec.
-        let matched = pathspecs
-            .iter()
-            .any(|(s, _)| super::index_path_matches_or_descends(&path, s));
-        // A pathspec lies strictly under `path` (a dir on the way to a
-        // deeper target) — descend to reach it.
-        let ancestor = pathspecs
-            .iter()
-            .any(|(s, _)| super::index_path_descends_from(s, &path));
-        // `path` is named with a trailing slash → list its contents.
-        let list_contents = pathspecs.iter().any(|(s, slash)| *slash && &path == s);
+            // `path` equals or lies under a pathspec.
+            let matched = self
+                .pathspecs
+                .iter()
+                .any(|(s, _)| super::index_path_matches_or_descends(&path, s));
+            // A pathspec lies strictly under `path` (a dir on the way to a
+            // deeper target) — descend to reach it.
+            let ancestor = self
+                .pathspecs
+                .iter()
+                .any(|(s, _)| super::index_path_descends_from(s, &path));
+            // `path` is named with a trailing slash → list its contents.
+            let list_contents = self.pathspecs.iter().any(|(s, slash)| *slash && &path == s);
 
-        if is_tree {
-            if ancestor || list_contents || (matched && recursive) {
-                list(store, &e.object_hash, &path, recursive, z, pathspecs, out)?;
+            if is_tree {
+                if ancestor || list_contents || (matched && self.recursive) {
+                    self.list(&e.object_hash, &path, depth + 1, out)?;
+                } else if matched {
+                    emit_entry(e, &path, self.z, out);
+                }
             } else if matched {
-                emit_entry(e, &path, z, out);
+                emit_entry(e, &path, self.z, out);
             }
-        } else if matched {
-            emit_entry(e, &path, z, out);
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Emit one `<mode> <type> <hash>\t<name>` record (NUL-terminated raw under

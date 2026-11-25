@@ -135,6 +135,12 @@ pub struct SyncOptions {
     pub remote_url: String,
     /// Maximum decoded attestation bytes per fetch, capped at 512 MiB.
     pub attestation_decode_bytes: u64,
+    /// Write the worktree and index after [`pull`] moves the branch. `true` by
+    /// default. With `false`, a pull that creates the branch (a clone) sets the
+    /// branch and HEAD and writes no file and no index (`kit clone
+    /// --no-checkout`), and `kit checkout` fills the worktree later. A pull
+    /// that moves an existing branch ignores it.
+    pub checkout: bool,
 }
 
 impl SyncOptions {
@@ -180,6 +186,13 @@ impl SyncOptions {
         self
     }
 
+    /// Set [`checkout`](Self::checkout).
+    #[must_use]
+    pub fn with_checkout(mut self, checkout: bool) -> Self {
+        self.checkout = checkout;
+        self
+    }
+
     /// Set [`sync_policy`](Self::sync_policy).
     #[must_use]
     pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
@@ -202,6 +215,7 @@ impl Default for SyncOptions {
             refetch_attestations: false,
             remote_url: String::new(),
             attestation_decode_bytes: kit_attest::pack::MAX_FETCH_DECODED_BYTES,
+            checkout: true,
         }
     }
 }

@@ -40,6 +40,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::durable::Parents;
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
 use crate::layout::RepoLayout;
@@ -243,21 +244,22 @@ fn write_hex_file(state_dir: &Path, name: &str, h: &Hash) -> ConflictStateResult
 /// Write one state file with temp, sync and rename, so a failed or stopped
 /// write leaves the old file or none, never a short one.
 fn write_state_file(path: &Path, bytes: &[u8]) -> ConflictStateResult<()> {
-    crate::atomic::write_atomic(path, bytes, false)?;
+    crate::durable::write_pointer(path, bytes, Parents::Existing)?;
     Ok(())
 }
 
 /// Write the files of one operation: the other files first, the head marker
 /// last. The marker is what says an operation is in progress, so a write that
 /// fails or stops part way leaves no marker. On an error, `clear` removes
-/// what was written.
+/// what was written. Without a conflict list, the operation is recorded as
+/// started and not yet complete: the list is what lets it be continued.
 fn write_operation_state(
     layout: &RepoLayout,
     head_name: &str,
     head: &Hash,
     orig_head: &Hash,
     message: (&Path, &[u8]),
-    conflicts: &[ConflictRecord],
+    conflicts: Option<&[ConflictRecord]>,
     clear: fn(&RepoLayout) -> ConflictStateResult<()>,
 ) -> ConflictStateResult<()> {
     let dir = layout.worktree_state_dir();
@@ -265,7 +267,9 @@ fn write_operation_state(
         fs::create_dir_all(dir)?;
         write_hex_file(dir, ORIG_HEAD, orig_head)?;
         write_state_file(message.0, message.1)?;
-        write_state_file(&layout.conflicts_file(), &serialize_conflicts(conflicts))?;
+        if let Some(conflicts) = conflicts {
+            write_state_file(&layout.conflicts_file(), &serialize_conflicts(conflicts))?;
+        }
         write_hex_file(dir, head_name, head)
     })();
     if written.is_err() {
@@ -341,7 +345,26 @@ pub fn write_revert_state(
         &state.revert_head,
         &state.orig_head,
         (&layout.revert_msg_file(), &state.message),
-        conflicts,
+        Some(conflicts),
+        clear_revert_state,
+    )
+}
+
+/// Record a revert as started, with no conflict list yet. A revert that
+/// pauses writes this before it writes the conflict material, and
+/// [`write_conflicts`] after, so a stop in between leaves a revert that can be
+/// aborted and cannot be continued.
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures.
+pub fn begin_revert_state(layout: &RepoLayout, state: &RevertState) -> ConflictStateResult<()> {
+    write_operation_state(
+        layout,
+        REVERT_HEAD,
+        &state.revert_head,
+        &state.orig_head,
+        (&layout.revert_msg_file(), &state.message),
+        None,
         clear_revert_state,
     )
 }
@@ -402,7 +425,24 @@ pub fn write_merge_state(
         &state.merge_head,
         &state.orig_head,
         (&layout.merge_msg_file(), &state.message),
-        conflicts,
+        Some(conflicts),
+        clear_merge_state,
+    )
+}
+
+/// Record a merge as started, with no conflict list yet. See
+/// [`begin_revert_state`].
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures.
+pub fn begin_merge_state(layout: &RepoLayout, state: &MergeState) -> ConflictStateResult<()> {
+    write_operation_state(
+        layout,
+        MERGE_HEAD,
+        &state.merge_head,
+        &state.orig_head,
+        (&layout.merge_msg_file(), &state.message),
+        None,
         clear_merge_state,
     )
 }
@@ -444,7 +484,27 @@ pub fn write_cherry_pick_state(
         &state.cherry_pick_head,
         &state.orig_head,
         (&layout.cherry_pick_msg_file(), &state.message),
-        conflicts,
+        Some(conflicts),
+        clear_cherry_pick_state,
+    )
+}
+
+/// Record a cherry-pick as started, with no conflict list yet. See
+/// [`begin_revert_state`].
+///
+/// # Errors
+/// [`ConflictStateError::Io`] on filesystem failures.
+pub fn begin_cherry_pick_state(
+    layout: &RepoLayout,
+    state: &CherryPickState,
+) -> ConflictStateResult<()> {
+    write_operation_state(
+        layout,
+        CHERRY_PICK_HEAD,
+        &state.cherry_pick_head,
+        &state.orig_head,
+        (&layout.cherry_pick_msg_file(), &state.message),
+        None,
         clear_cherry_pick_state,
     )
 }
@@ -514,6 +574,34 @@ pub fn clear_merge_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     remove_if_present(&layout.orig_head_file())?;
     remove_if_present(&layout.conflicts_file())?;
     remove_if_present(&layout.result_tree_file())?;
+    Ok(())
+}
+
+/// [`clear_merge_state`], then a writeout of the directory on `group`. The
+/// removals are durable when the caller flushes `group`, so a commit that
+/// concludes a merge makes them durable after the ref that records it.
+///
+/// # Errors
+/// As [`clear_merge_state`], or the group is poisoned.
+pub fn clear_merge_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_merge_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
+    Ok(())
+}
+
+/// [`clear_operation_state`], then a writeout of the directory on `group`.
+///
+/// # Errors
+/// As [`clear_operation_state`], or the group is poisoned.
+pub fn clear_operation_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_operation_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
     Ok(())
 }
 
@@ -884,5 +972,44 @@ mod tests {
         clear_operation_state(&kit).unwrap();
         assert!(!is_revert_in_progress(&kit));
         assert!(!kit.conflicts_file().exists());
+    }
+
+    #[test]
+    fn the_clear_in_a_group_removes_the_state_and_writes_its_directory_out() {
+        use crate::batch::Syncer;
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use crate::durable::Group;
+        use std::sync::Arc;
+
+        for operation in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(dir.path());
+            fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+            for file in [
+                layout.merge_head_file(),
+                layout.cherry_pick_head_file(),
+                layout.orig_head_file(),
+                layout.conflicts_file(),
+            ] {
+                fs::write(file, b"x").unwrap();
+            }
+            let rec = Arc::new(RecordingSyncer::default());
+            let mut group = Group::with_syncer(Arc::clone(&rec) as Arc<dyn Syncer>);
+            if operation {
+                clear_operation_state_in(&layout, &mut group).unwrap();
+                assert!(!layout.cherry_pick_head_file().exists());
+            } else {
+                clear_merge_state_in(&layout, &mut group).unwrap();
+                // A merge's clear leaves a cherry-pick's marker alone.
+                assert!(layout.cherry_pick_head_file().exists());
+            }
+            assert!(!layout.merge_head_file().exists());
+            assert!(!layout.orig_head_file().exists());
+            assert!(!layout.conflicts_file().exists());
+            assert_eq!(
+                rec.events(),
+                [Ev::DirBarrier(layout.worktree_state_dir().to_path_buf())]
+            );
+        }
     }
 }

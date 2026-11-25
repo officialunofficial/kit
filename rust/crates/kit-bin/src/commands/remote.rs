@@ -151,7 +151,24 @@ pub fn run(args: &[String]) -> u8 {
             opts.verbose,
         );
     };
-    let mut cfg = layered.repo;
+    // A change reads the repo layer again under the config lock, so two
+    // `kit remote` commands at once keep both changes.
+    let config_lock = if matches!(sub, RemoteCmd::GetUrl { .. }) {
+        None
+    } else {
+        match config::lock(&layout) {
+            Ok(lock) => Some(lock),
+            Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+        }
+    };
+    let mut cfg = if config_lock.is_some() {
+        match config::read_layered(&layout) {
+            Ok(c) => c.repo,
+            Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+        }
+    } else {
+        layered.repo
+    };
 
     match sub {
         RemoteCmd::Add { name_or_url, url } | RemoteCmd::Set { name_or_url, url } => {

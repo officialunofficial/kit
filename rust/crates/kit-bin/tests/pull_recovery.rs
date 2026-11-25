@@ -168,13 +168,83 @@ fn recovery_checks_the_index_even_when_the_worktree_is_safe() {
 fn recovery_refuses_soft_reset_work_with_a_stale_marker() {
     let pending = Pending::new();
     let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let marker = fs::read(layout.pull_head_file()).unwrap();
     ok(dir, &["reset", "--hard", "-f", "HEAD"]);
+    // The reset ends the pull. The marker is put back to stand for a pull
+    // that began again and left a stale record behind.
+    fs::write(layout.pull_head_file(), marker).unwrap();
     fs::write(dir.join("w.txt"), b"new work\n").unwrap();
     ok(dir, &["add", "w.txt"]);
     ok(dir, &["commit", "-m", "local"]);
     ok(dir, &["reset", "--soft", "HEAD~1"]);
     pending.refuses_without_changes();
     assert_eq!(fs::read(dir.join("w.txt")).unwrap(), b"new work\n");
+}
+
+#[test]
+fn a_reset_that_moves_the_index_ends_an_unfinished_pull() {
+    for args in [
+        ["reset", "--hard", "-f"].as_slice(),
+        ["reset", "--mixed"].as_slice(),
+        ["reset"].as_slice(),
+    ] {
+        let pending = Pending::new();
+        let dir = pending.local.path();
+        let layout = RepoLayout::single(dir);
+        assert!(layout.pull_head_file().exists());
+        ok(dir, args);
+        assert!(!layout.pull_head_file().exists(), "{args:?}");
+        // The pre-pull version of a pulled file can be committed on purpose.
+        fs::write(dir.join("a.txt"), b"one\n").unwrap();
+        ok(dir, &["add", "a.txt"]);
+        ok(dir, &["commit", "-m", "deliberate undo"]);
+    }
+}
+
+#[test]
+fn a_soft_reset_keeps_the_unfinished_pull_record() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    ok(dir, &["reset", "--soft"]);
+    assert!(layout.pull_head_file().exists());
+}
+
+#[test]
+fn a_commit_is_refused_while_a_pull_has_not_finished_restoring() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let status = run(dir, &["status"]);
+    let warning = String::from_utf8(status.stderr).unwrap();
+    assert!(warning.contains("interrupted pull"), "{warning}");
+    for args in [
+        ["commit", "-m", "would revert the pull"].as_slice(),
+        ["commit", "-a", "-m", "would revert the pull"].as_slice(),
+        ["commit", "--amend", "-m", "would revert the pull"].as_slice(),
+    ] {
+        let out = run(dir, args);
+        assert!(!out.status.success(), "{args:?}");
+        let message = String::from_utf8(out.stderr).unwrap();
+        assert!(message.contains("kit pull"), "{message}");
+        assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    }
+    // Staging more files does not hide the unfinished pull.
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    let out = run(dir, &["commit", "-m", "would revert the pull"]);
+    assert!(!out.status.success());
+    assert_eq!(refs::resolve_head(&layout).unwrap(), Some(pending.target));
+    // A hard reset restores HEAD, so the way out needs no remote.
+    ok(dir, &["reset", "--hard", "-f"]);
+    ok(dir, &["pull"]);
+    let status = run(dir, &["status"]);
+    let quiet = String::from_utf8(status.stderr).unwrap();
+    assert!(!quiet.contains("interrupted pull"), "{quiet}");
+    fs::write(dir.join("w.txt"), b"new work\n").unwrap();
+    ok(dir, &["add", "w.txt"]);
+    ok(dir, &["commit", "-m", "work"]);
 }
 
 #[test]

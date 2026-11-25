@@ -12,6 +12,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Identity, Object, Tree};
 use kit_core::ops::conflict_state::{self, ConflictRecord, MergeState};
 use kit_core::ops::merge::ConflictKind;
+use kit_core::ops::pull_state::PullState;
 use kit_core::ops::recovery;
 use kit_core::refs;
 use kit_core::serialize;
@@ -277,6 +278,73 @@ fn an_amend_stops_when_head_moved_while_the_message_was_composed() {
     assert_eq!(f.head(), Some(concurrent.commit), "the branch is untouched");
 }
 
+/// The index file as a test sees a rewrite of it: the bytes, and the inode,
+/// which a temporary file and a rename change.
+#[cfg(unix)]
+fn index_file(f: &Fixture) -> (Vec<u8>, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = f.layout.index_file();
+    (fs::read(&path).unwrap(), fs::metadata(path).unwrap().ino())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_plain_commit_leaves_the_index_file_alone() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    f.stage("b.txt", "two\n");
+    f.stage("a.txt", "three\n");
+    let staged = index_file(&f);
+
+    let second = f.commit("second");
+    assert_eq!(index_file(&f), staged, "the index already holds the tree");
+    let idx = index::read_index(&f.layout).unwrap();
+    let paths: Vec<_> = idx.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(idx.find_entry("a.txt").is_some() && idx.find_entry("b.txt").is_some());
+    assert_eq!(f.head(), Some(second.commit));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_of_a_staged_removal_rebuilds_the_index_without_it() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.stage("b.txt", "two\n");
+    f.commit("first");
+    let mut idx = index::read_index(&f.layout).unwrap();
+    let removed = idx.find_entry("b.txt").unwrap();
+    idx.entries[removed].status = index::EntryStatus::Removed;
+    idx.entries[removed].object_hash = kit_core::hash::ZERO;
+    index::write_index(&f.layout, &idx).unwrap();
+    let staged = index_file(&f);
+
+    f.commit("drop b");
+    assert_ne!(index_file(&f), staged, "the tombstone is dropped");
+    let idx = index::read_index(&f.layout).unwrap();
+    assert!(idx.find_entry("b.txt").is_none(), "{:?}", idx.entries);
+    assert!(idx.find_entry("a.txt").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_amend_rebuilds_the_index_from_its_tree() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    f.stage("a.txt", "two\n");
+    let staged = index_file(&f);
+
+    let pending = f.begin(true).unwrap();
+    f.make("amended", false, &pending).unwrap();
+    assert_ne!(
+        index_file(&f).1,
+        staged.1,
+        "an amend writes the index again"
+    );
+}
+
 fn start_merge(f: &Fixture, other: Hash) -> MergeState {
     let state = MergeState {
         merge_head: other,
@@ -295,6 +363,8 @@ fn a_commit_that_concludes_a_merge_has_two_parents_and_clears_the_merge() {
     let other = f.loose_commit("other", vec![]);
     start_merge(&f, other);
     f.stage("b.txt", "merged\n");
+    #[cfg(unix)]
+    let staged = index_file(&f);
 
     let pending = f.begin(false).unwrap();
     assert_eq!(
@@ -302,6 +372,8 @@ fn a_commit_that_concludes_a_merge_has_two_parents_and_clears_the_merge() {
         Some("Merge branch 'other'")
     );
     let merged = f.make("Merge branch 'other'", false, &pending).unwrap();
+    #[cfg(unix)]
+    assert_ne!(index_file(&f).1, staged.1, "a merge writes the index again");
     assert!(merged.is_merge());
     assert_eq!(merged.parents, vec![first.commit, other]);
     assert_eq!(
@@ -367,6 +439,205 @@ fn a_plain_commit_does_not_run_the_gate() {
     let pending = f.begin(false).unwrap();
     let refuse = |_: &[ConflictRecord]| Err("never".to_owned());
     f.make_gated("m", false, &pending, &refuse).unwrap();
+}
+
+/// A repository whose pull stopped partway: `HEAD` is at the pulled commit,
+/// which changed `a.txt` and `c.txt`, and the index holds both files from
+/// before the pull.
+struct StoppedPull {
+    fixture: Fixture,
+    first: Created,
+    pulled: Created,
+}
+
+impl StoppedPull {
+    fn new() -> Self {
+        let mut fixture = Fixture::new();
+        fixture.stage("a.txt", "one\n");
+        fixture.stage("c.txt", "one\n");
+        let first = fixture.commit("first");
+        fixture.stage("a.txt", "two\n");
+        fixture.stage("c.txt", "two\n");
+        let pulled = fixture.commit("pulled");
+        fixture.stage("a.txt", "one\n");
+        fixture.stage("c.txt", "one\n");
+        Self {
+            fixture,
+            first,
+            pulled,
+        }
+    }
+
+    /// Record the pull, as it does before it moves the branch.
+    fn record(&self) {
+        record_pull(&self.fixture, self.pulled.commit, self.first.tree);
+    }
+}
+
+fn record_pull(fixture: &Fixture, target: Hash, before_tree: Hash) {
+    fs::create_dir_all(fixture.layout.worktree_state_dir()).unwrap();
+    let state = PullState {
+        target,
+        before_tree,
+    };
+    fs::write(fixture.layout.pull_head_file(), state.encode()).unwrap();
+}
+
+#[test]
+fn a_commit_is_refused_while_an_interrupted_pull_has_not_finished() {
+    let mut s = StoppedPull::new();
+    let pending = s.fixture.begin(false).unwrap();
+    s.record();
+    assert!(matches!(
+        s.fixture.begin(false),
+        Err(Error::PullUnfinished(target)) if target == s.pulled.commit
+    ));
+    assert!(matches!(
+        s.fixture.begin(true),
+        Err(Error::PullUnfinished(_))
+    ));
+    // A caller that read its state before the pull stopped meets the same
+    // refusal when it commits.
+    assert!(matches!(
+        s.fixture
+            .make("would revert the pulled change", false, &pending),
+        Err(Error::PullUnfinished(_))
+    ));
+    assert_eq!(s.fixture.head(), Some(s.pulled.commit));
+}
+
+#[test]
+fn commit_all_is_refused_before_it_stages_a_half_restored_tree() {
+    let mut s = StoppedPull::new();
+    let pending = s.fixture.begin(false).unwrap();
+    s.record();
+    // The files of the pulled commit are on disk for some paths.
+    fs::write(s.fixture.root.join("a.txt"), "two\n").unwrap();
+    assert!(matches!(
+        s.fixture.make("would record a mixture", true, &pending),
+        Err(Error::PullUnfinished(_))
+    ));
+    let staged = index::read_index(&s.fixture.layout).unwrap();
+    assert_eq!(staged.entries.len(), 2);
+    assert_eq!(s.fixture.head(), Some(s.pulled.commit));
+}
+
+#[test]
+fn staging_other_files_does_not_hide_an_interrupted_pull() {
+    let s = StoppedPull::new();
+    s.record();
+    // A new file, then every file of a half-restored worktree.
+    s.fixture.stage("new.txt", "work\n");
+    assert!(matches!(
+        s.fixture.begin(false),
+        Err(Error::PullUnfinished(_))
+    ));
+    fs::write(s.fixture.root.join("a.txt"), "two\n").unwrap();
+    s.fixture.stage("new.txt", "work\n");
+    assert!(matches!(
+        s.fixture.begin(false),
+        Err(Error::PullUnfinished(_))
+    ));
+}
+
+#[test]
+fn a_commit_goes_on_once_the_index_holds_the_pulled_files() {
+    let mut s = StoppedPull::new();
+    s.record();
+    // The restore reached the index, which it writes last, and stopped before
+    // it removed the record. Staged work on top is the user's.
+    s.fixture.stage("a.txt", "two\n");
+    s.fixture.stage("c.txt", "two\n");
+    s.fixture.stage("b.txt", "work\n");
+    let pending = s.fixture.begin(false).unwrap();
+    let created = s.fixture.make("work", false, &pending).unwrap();
+    assert_eq!(
+        s.fixture.read(&created.commit).parents,
+        vec![s.pulled.commit]
+    );
+}
+
+#[test]
+fn a_commit_goes_on_when_the_pull_has_not_moved_head() {
+    let mut s = StoppedPull::new();
+    s.record();
+    // `HEAD` is at the commit before the pull, as it is when the pull stopped
+    // before it moved the branch.
+    refs::write_ref(&s.fixture.layout, "main", &s.first.commit).unwrap();
+    s.fixture.stage("b.txt", "work\n");
+    let pending = s.fixture.begin(false).unwrap();
+    s.fixture.make("work", false, &pending).unwrap();
+}
+
+#[test]
+fn a_clone_stopped_in_its_restore_refuses_a_commit() {
+    let mut f = Fixture::new();
+    let empty = Object::Tree(Tree {
+        entries: Vec::new(),
+    });
+    let before_tree = f
+        .store
+        .write(&serialize::serialize(&empty).unwrap())
+        .unwrap();
+    f.stage("a.txt", "one\n");
+    let cloned = f.commit("cloned");
+    // The index of a clone is written last, so it does not exist yet.
+    fs::remove_file(f.layout.index_file()).unwrap();
+    record_pull(&f, cloned.commit, before_tree);
+    assert!(matches!(
+        f.begin(false),
+        Err(Error::PullUnfinished(target)) if target == cloned.commit
+    ));
+}
+
+#[test]
+fn a_malformed_pull_record_stops_a_commit() {
+    let s = StoppedPull::new();
+    fs::create_dir_all(s.fixture.layout.worktree_state_dir()).unwrap();
+    fs::write(s.fixture.layout.pull_head_file(), b"short").unwrap();
+    assert!(matches!(
+        s.fixture.begin(false),
+        Err(Error::ReadPullState(_))
+    ));
+}
+
+#[test]
+fn a_pull_that_only_added_a_file_is_unfinished_while_the_index_lacks_it() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    let first = f.commit("first");
+    f.stage("dir/new.txt", "added\n");
+    let pulled = f.commit("pulled");
+    // The index of the stopped restore lacks the added file.
+    let mut staged = index::read_index(&f.layout).unwrap();
+    staged.remove_path("dir/new.txt").unwrap();
+    index::write_index(&f.layout, &staged).unwrap();
+    record_pull(&f, pulled.commit, first.tree);
+    assert!(matches!(f.begin(false), Err(Error::PullUnfinished(_))));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pull_that_only_changed_a_mode_is_unfinished_while_the_index_holds_the_old_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut f = Fixture::new();
+    f.stage("run.sh", "echo\n");
+    let first = f.commit("first");
+    let path = f.root.join("run.sh");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    f.stage("other.txt", "x\n");
+    let pulled = f.commit("pulled");
+    assert_ne!(pulled.tree, first.tree);
+    // The index of the stopped restore holds the file without its mode.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    f.stage("other.txt", "x\n");
+    record_pull(&f, pulled.commit, first.tree);
+    assert!(matches!(f.begin(false), Err(Error::PullUnfinished(_))));
+    // A finished restore holds the mode again.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    f.stage("other.txt", "x\n");
+    f.begin(false).unwrap();
 }
 
 #[test]
