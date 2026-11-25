@@ -243,10 +243,11 @@ fn local_pack_vector_keeps_reading() {
         0,
         "no damaged pair"
     );
-    // The vector's fourth object is the loose one (`loose.bin`); the other
-    // three are in the pack.
-    let packed = &objects[..3];
-    assert_eq!(store.iter_object_hashes().unwrap().len(), 3);
+    // The pack holds all four objects. `loose.bin` is a second copy of the
+    // fourth, which a store reads from either place.
+    let packed = &objects[..objects.len() - 1];
+    assert_eq!(packed.len(), 4);
+    assert_eq!(store.iter_object_hashes().unwrap().len(), 4);
     for row in packed {
         let id = hash::from_hex(&row[0]).unwrap();
         let bytes = store.read(&id).unwrap();
