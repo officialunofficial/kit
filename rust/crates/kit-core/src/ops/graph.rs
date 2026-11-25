@@ -15,7 +15,7 @@ use std::hash::BuildHasher;
 use super::chunk_heads::{LenCache, for_each_checked_chunk};
 use crate::hash::{self, Hash};
 use crate::object::{ChunkedBlob, EntryMode, KitError, Object, ObjectType};
-use crate::store::{ObjectSource, ObjectStore, StoreError};
+use crate::store::{ClosureSource, ObjectSource, ObjectStore, StoreError};
 
 /// Why a strict ancestor walk failed. A strict walk reads every commit of
 /// the history: a walk that ended at a commit it could not read would miss
@@ -376,6 +376,19 @@ pub fn check_closure_present_observed(
     tip: &Hash,
     progress: &dyn Fn(usize),
 ) -> Result<bool, StoreError> {
+    check_closure_present_observed_from(store, tip, progress)
+}
+
+/// The same closure walk over a read-only object view.
+///
+/// # Errors
+/// The errors of `check_closure_present_observed`.
+#[doc(hidden)]
+pub fn check_closure_present_observed_from(
+    store: &(impl ClosureSource + ?Sized),
+    tip: &Hash,
+    progress: &dyn Fn(usize),
+) -> Result<bool, StoreError> {
     let hooks = Hooks {
         progress: Some(progress),
         ..Hooks::NONE
@@ -478,6 +491,21 @@ pub fn check_closure_present_above(
     cap: usize,
     stop: &dyn Fn() -> bool,
 ) -> Result<Presence, StoreError> {
+    check_closure_present_above_from(store, root, known, cap, stop)
+}
+
+/// The same closure walk over a read-only object view.
+///
+/// # Errors
+/// The errors of `check_closure_present_above`.
+#[doc(hidden)]
+pub fn check_closure_present_above_from(
+    store: &(impl ClosureSource + ?Sized),
+    root: &Hash,
+    known: &dyn Fn(&Hash) -> Known,
+    cap: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<Presence, StoreError> {
     let hooks = Hooks {
         known,
         paths: true,
@@ -569,7 +597,7 @@ where
 /// named each object with children, so a missing object ends it with the path
 /// to it; without, a missing object is [`StoreError::ObjectNotFound`].
 fn walk_closure<'a, I>(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     roots: I,
     mode: ClosureMode,
     cap: usize,
@@ -692,7 +720,7 @@ where
 /// [`StoreError::ObjectNotFound`] and the errors of
 /// [`ObjectStore::object_head`], and [`KitError::ChunkNotBlob`].
 pub(crate) fn chunk_blob_len(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     chunk: &Hash,
     index: u32,
 ) -> Result<u64, StoreError> {
@@ -724,7 +752,7 @@ impl LenCache for CheckedChunks<'_> {
 /// window of chunks run in parallel; the result and the error are those of
 /// reading them in manifest order.
 fn check_manifest_chunks(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     manifest: &ChunkedBlob,
     memory: usize,
     checked: &mut BTreeMap<Hash, u64>,
@@ -817,6 +845,21 @@ mod tests {
         s.write(&bytes).unwrap()
     }
 
+    #[test]
+    fn observed_closure_reports_completed_objects_and_propagates_missing_objects() {
+        let (_dir, store) = store();
+        let tip = make_single_file_tree(&store, b"file", b"contents");
+        let progress = std::cell::Cell::new(0);
+        assert!(!check_closure_present_observed(&store, &tip, &|done| progress.set(done)).unwrap());
+        assert_eq!(progress.get(), 2);
+
+        let missing = hash::hash(b"missing tip");
+        assert!(matches!(
+            check_closure_present_observed(&store, &missing, &|_| {}),
+            Err(StoreError::ObjectNotFound(_))
+        ));
+    }
+
     /// The closure check stops at the objects `known` calls present: below
     /// them it neither reads nor reports, and it returns what it checked. A
     /// missing object above them ends it with the path to that object, an
@@ -879,12 +922,25 @@ mod tests {
     #[test]
     fn check_closure_present_above_polls_stop() {
         let (_d, s) = store();
-        let mut tip = None;
-        for i in 0..(STOP_POLL_OBJECTS / 3 + 2) {
-            let tree = make_single_file_tree(&s, b"f", format!("{i}").as_bytes());
-            tip = Some(make_commit(&s, tree, tip.as_slice(), &format!("c{i}")));
-        }
-        let tip = tip.unwrap();
+        // The poll depends on object count, not history depth. Publish the
+        // blobs together so fixture setup needs one batch of file barriers.
+        let batch = s.batch();
+        let entries = (0..STOP_POLL_OBJECTS)
+            .map(|i| {
+                let bytes = serialize::serialize(&Object::Blob(Blob {
+                    data: i.to_le_bytes().to_vec(),
+                }))
+                .unwrap();
+                TreeEntry {
+                    name: format!("f{i:05}").into_bytes(),
+                    mode: EntryMode::Blob,
+                    object_hash: batch.write(&bytes).unwrap(),
+                }
+            })
+            .collect();
+        batch.commit().unwrap();
+        let tree = put_tree(&s, entries);
+        let tip = make_commit(&s, tree, &[], "root");
         let unknown = |_: &Hash| Known::Unknown;
         assert_eq!(
             check_closure_present_above(&s, &tip, &unknown, usize::MAX, &|| true).unwrap(),

@@ -14,7 +14,7 @@ use std::process::{Command, Output, Stdio};
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
-use kit_core::protocol::{RefWriteCondition, Transport};
+use kit_core::protocol::{RefWriteCondition, Transport, TransportError};
 use kit_core::refs;
 use kit_rpc::kit::rpc::v1::ssh::{HelloResponse, ReadRefResponse, SshFrame, ssh_frame};
 use kit_rpc::kit::rpc::v1::{Error as RpcError, ErrorCode, ProtocolVersion};
@@ -176,6 +176,29 @@ fn a_branch_is_deleted_over_ssh_with_its_packmap_and_tracking_ref() {
     assert_eq!(tx.read_ref(MAIN).unwrap(), None);
     assert_eq!(tx.read_ref(MAIN_MAP).unwrap(), None);
     assert_eq!(fx.tracking(), None);
+}
+
+#[test]
+fn a_push_over_ssh_between_the_deletes_keeps_the_branch_cloneable() {
+    let fx = Fixture::new();
+    let tx = fx.tx();
+    let tip = tx.read_ref(MAIN).unwrap().unwrap();
+    let previous = tx.read_ref(MAIN_MAP).unwrap().unwrap();
+
+    // Pause the ordered delete after its head CAS. The push and clone both
+    // go through kit serve, against the same refs the delete operates on.
+    tx.delete_ref(MAIN, &tip).unwrap();
+    ok(&fx.push(&["origin"]), "recreate main");
+    assert!(matches!(
+        tx.delete_ref(MAIN_MAP, &previous),
+        Err(TransportError::RefConflict)
+    ));
+
+    assert_eq!(tx.read_ref(MAIN).unwrap(), Some(tip));
+    ok(
+        &fx.kit(fx.work.path(), &["clone", &fx.url(), "fresh"], &[]),
+        "clone recreated main",
+    );
 }
 
 /// A tag and its tag map go. The local tag stays.

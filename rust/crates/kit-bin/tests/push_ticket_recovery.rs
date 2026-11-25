@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use common::Repo;
+use common::{Repo, push_branch_with_limits};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
@@ -23,7 +23,7 @@ use kit_core::store::ObjectStore;
 use kit_transport_memory::MemoryTransport;
 use libkit::transfer::{
     Error as TransferError, PushControl, RetryReason, StepAuthority, plan_push_steps,
-    push_all_with, push_branch_steps, push_branch_with_limits,
+    push_all_with, push_branch_steps,
 };
 
 #[derive(Clone, Copy)]

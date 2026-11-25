@@ -136,6 +136,8 @@ fn open_terminal() -> Result<std::fs::File, Error> {
 }
 
 #[cfg(not(unix))]
+// Excluded from every mutation run: Unix omits this terminal implementation.
+#[cfg_attr(false, mutants::skip)]
 fn open_terminal() -> Result<std::io::Stdin, Error> {
     Ok(std::io::stdin())
 }
@@ -163,6 +165,8 @@ fn restore_terminal_echo(tty: &std::fs::File) {
 }
 
 #[cfg(not(unix))]
+// Excluded from every mutation run: Unix omits this echo stub.
+#[cfg_attr(false, mutants::skip)]
 fn disable_terminal_echo(_tty: &std::io::Stdin) -> bool {
     false
 }
@@ -173,6 +177,48 @@ fn restore_terminal_echo(_tty: &std::io::Stdin) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_pin_requests_fail_closed_and_restore_echo() {
+        let result = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(include_str!("../tests/support/pin_terminal.py"))
+            .arg(std::env::current_exe().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "called by the owned-terminal fixture"]
+    fn interactive_pin_fixture() {
+        let Ok(mode) = std::env::var("KIT_TEST_PIN_TERMINAL") else {
+            return;
+        };
+        let result = TtyPinProvider.provide_pin(&PinPromptInfo {
+            reason: "Device".into(),
+            retries_remaining: mode.parse().unwrap_or(0),
+            wants_pin: true,
+        });
+        if mode == "detached" {
+            assert!(matches!(result, Err(Error::ExternalSignerSpawn(_))));
+        } else {
+            assert!(result.is_ok_and(|pin| pin.as_str() == "2468"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn echo_disable_reports_failure_for_an_ordinary_file() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(!disable_terminal_echo(&file));
+    }
 
     #[derive(Debug)]
     struct FakePinProvider {

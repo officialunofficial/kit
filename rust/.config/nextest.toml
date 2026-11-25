@@ -50,16 +50,14 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 filter = 'binary(branch_rename_commit_race)'
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# The bridge map fuzz test writes three files in every iteration and must
-# finish each iteration in 100 ms. Other tests that sync files to disk can
-# stall those writes for longer than that. The test runs alone. It takes
-# about 0.3 s.
+# These fuzz checks include filesystem writes or subprocesses in a 100 ms
+# iteration budget. Keep competing fixture work out of that timed window.
 [[profile.default.overrides]]
-filter = 'package(kit-fuzz) and test(=tests::unit_bridge_map)'
+filter = 'package(kit-fuzz) and test(/^(tests::unit_bridge_map|tests::unit_fetch_cursor_record|tests::pack_entries_target_runs_within_caps|tests::ssh_session_target_runs_within_caps)$/)'
 threads-required = "num-test-threads"
 
 [[profile.ci.overrides]]
-filter = 'package(kit-fuzz) and test(=tests::unit_bridge_map)'
+filter = 'package(kit-fuzz) and test(/^(tests::unit_bridge_map|tests::unit_fetch_cursor_record|tests::pack_entries_target_runs_within_caps|tests::ssh_session_target_runs_within_caps)$/)'
 threads-required = "num-test-threads"
 
 # The bounded stateful suite (tests/state_machine.rs) spawns the binary for
@@ -108,7 +106,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # KIT_RUN_NATIVE_KEYSTORE_TESTS), the Docker-based S3 test and the
 # recorders and profiling tools that run by hand. Some of these panic when
 # their gate is unset, so a plain run would fail.
-default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_kit_ssh_url|second_mutating_command_blocks_on_worktree_lock|gc_blocks_on_a_sibling_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|chunked_id_at_the_chunk_cap_is_pinned|many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/) or binary(pack_entry_cost) or binary(pack_file_memory) or binary(pack_file_no_regression) or binary(large_file_clone) or binary(ssh_s3_streaming) or binary(connect_streaming_memory)'
+default-filter = 'test(/hang_before_stdout_times_out_and_reaps_child|fills_stderr_before_stdout_does_not_deadlock|valid_response_then_never_exits_is_bounded|open_accepts_syntactically_valid_kit_ssh_url|second_mutating_command_blocks_on_worktree_lock|gc_blocks_on_a_sibling_worktree_lock|wait_child_timeout_kills_stalled_child|ssh_clone_retries_past_a_dropped_first_connection|large_mixed_pack_decodes_under_production_resident_cap|chunked_id_at_the_chunk_cap_is_pinned|many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit|a_repository_with_many_branches_clones_fetches_and_pulls_over_ssh/) or binary(pack_entry_cost) or binary(pack_file_memory) or binary(pack_file_no_regression) or binary(large_file_clone) or binary(ssh_s3_streaming) or binary(connect_streaming_memory)'
 # Run the tests one at a time, so their real timers and sockets do not
 # contend. Only localhost networking is needed.
 test-threads = 1
@@ -175,21 +173,75 @@ threads-required = "num-test-threads"
 filter = 'binary(pack_entry_cost)'
 threads-required = "num-test-threads"
 
+# The 20,000-branch ssh test writes a tracking ref for each branch, in the
+# clone and again in the fetch and the pull. It does not hang.
+[[profile.ignored-lane.overrides]]
+filter = 'test(=a_repository_with_many_branches_clones_fetches_and_pulls_over_ssh)'
+slow-timeout = { period = "300s", terminate-after = 12 }
+
 # Proof-boundary assertions build large valid inputs before refusing one byte.
 [[profile.ignored-lane.overrides]]
 filter = 'test(/many_random_histories_plan_complete_packs|a_span_one_byte_over_the_cap|the_scan_covers_a_file_of_one_gibibyte|a_file_that_grows_past_the_limit/)'
 slow-timeout = { period = "120s", terminate-after = 5 }
 
 # Large ref-listing fixtures contend with concurrent filesystem barriers on
-# APFS. Reserve the pool for their 1,000 branches or 25,000 tags, as for the
+# APFS. Reserve the pool for their 1,000 branches, as for the
 # other disk-bound fixtures above. Allow the same five-minute ceiling when
 # the workstation is busy with other builds.
 [[profile.default.overrides]]
-filter = '(binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)) or (binary(ssh_tag_fetch) and test(=an_over_size_tag_listing_stops_only_the_tag_phase))'
+filter = 'binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)'
 threads-required = "num-test-threads"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
 [[profile.ci.overrides]]
-filter = '(binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)) or (binary(ssh_tag_fetch) and test(=an_over_size_tag_listing_stops_only_the_tag_phase))'
+filter = 'binary(ssh_fetch_cursor) and test(=an_unchanged_fetch_of_1000_branches_is_one_request)'
 threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Publishing 5,001 tags and their maps takes thousands of filesystem barriers.
+[[profile.default.overrides]]
+filter = 'binary(ssh_tag_push) and test(=a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+[[profile.ci.overrides]]
+filter = 'binary(ssh_tag_push) and test(=a_tag_push_spends_two_ssh_sessions_and_publishes_every_tag)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+# The page cap test lists 1,001 refs of the longest names, each in its own
+# directory, twice. It takes about 20 s alone and more on a busy runner.
+[[profile.default.overrides]]
+filter = 'binary(session) and test(=a_page_holds_at_most_the_cap_and_fits_a_frame)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+filter = 'binary(session) and test(=a_page_holds_at_most_the_cap_and_fits_a_frame)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# Cloning 5,100 branches writes as many tracking refs, each with its own
+# filesystem barrier, and a fetch and a pull follow. The test does not hang.
+[[profile.default.overrides]]
+filter = 'binary(ssh_many_branches) and test(=a_repository_with_thousands_of_branches_clones_fetches_and_pulls_over_ssh)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+[[profile.ci.overrides]]
+filter = 'binary(ssh_many_branches) and test(=a_repository_with_thousands_of_branches_clones_fetches_and_pulls_over_ssh)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+# These closure and pack checks build and remove many small files. Run them
+# alone on APFS with the same five-minute ceiling as the history fixtures.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(kit-core) and test(/check_closure_present_above_polls_stop|random_packs_unpack_the_same_from_a_slice_and_a_file|random_tips_plan_within_the_single_tip_plans|the_plan_holds_everything_the_closure_difference_holds/)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[[profile.ci.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(kit-core) and test(/check_closure_present_above_polls_stop|random_packs_unpack_the_same_from_a_slice_and_a_file|random_tips_plan_within_the_single_tip_plans|the_plan_holds_everything_the_closure_difference_holds/)'
+threads-required = "num-test-threads"
+retries = 0
 slow-timeout = { period = "60s", terminate-after = 5 }

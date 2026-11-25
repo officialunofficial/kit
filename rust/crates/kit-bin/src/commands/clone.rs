@@ -36,8 +36,12 @@ struct CloneOpts {
     /// materialising only the matching files.
     /// Repeat the flag to add more patterns.
     #[cfg(feature = "sparse-checkout")]
-    #[arg(long = "sparse", value_name = "PATTERN", num_args = 1..)]
+    #[arg(long = "sparse", value_name = "PATTERN", num_args = 1.., conflicts_with = "no_checkout")]
     sparse: Vec<String>,
+    /// Fetch and set the branch and HEAD, but write no worktree files and no
+    /// index. `kit checkout <branch>` fills the worktree later.
+    #[arg(short = 'n', long = "no-checkout")]
+    no_checkout: bool,
     /// Check out `<branch>` instead of the remote's default branch. Must
     /// name a branch the remote actually advertises; unlike the default
     /// heuristic (current default branch, falling back to whatever the
@@ -95,11 +99,22 @@ pub fn run(args: &[String]) -> u8 {
         Some(d) => PathBuf::from(d),
         None => PathBuf::from(derive_dir_from_url(url)),
     };
+    // Resolve the worktree path once so object staging can create its
+    // temporary files without resolving the current directory for each one.
+    let absolute_target = match std::path::absolute(&target) {
+        Ok(path) => path,
+        Err(e) => {
+            return emit_err(
+                &format!("create {}: {e}", target.display()),
+                exit::CANTCREAT,
+            );
+        }
+    };
     // An existing destination is refused unless it is a clone of the same
     // remote that stopped before it made a branch or landed HEAD:
     // `init_clone_dir` returns that one, and the pull below resumes it. A
     // `.kit` that is a symlink is not a clone this command made.
-    let existed = target.exists();
+    let existed = absolute_target.exists();
     let already_exists = || {
         emit_err(
             &format!("destination '{}' already exists", target.display()),
@@ -107,7 +122,7 @@ pub fn run(args: &[String]) -> u8 {
         )
     };
     if existed
-        && !std::fs::symlink_metadata(target.join(kit_core::store::KIT_DIR))
+        && !std::fs::symlink_metadata(absolute_target.join(kit_core::store::KIT_DIR))
             .is_ok_and(|meta| meta.is_dir())
     {
         return already_exists();
@@ -131,9 +146,15 @@ pub fn run(args: &[String]) -> u8 {
     // `kit remote add <name> <url>` would, so the pull below (called with
     // this same name) resolves tracking refs under `refs/remotes/<name>/*`
     // consistently with what `.kit/config` records.
-    let target_layout = match kit_sync::init_clone_dir(&target, &remote) {
+    let target_layout = match kit_sync::init_clone_dir(&absolute_target, &remote) {
         Ok(layout) => layout,
         Err(kit_sync::CloneInitError::AlreadyInitialized) if existed => return already_exists(),
+        Err(kit_sync::CloneInitError::CreateDir { source, .. }) => {
+            return emit_err(
+                &format!("create {}: {source}", target.display()),
+                exit::CANTCREAT,
+            );
+        }
         Err(e) => return emit_err(&e.to_string(), clone_init_exit_code(&e)),
     };
     if existed {
@@ -180,12 +201,14 @@ pub fn run(args: &[String]) -> u8 {
             let outcome = tx
                 .with_source(|source| {
                     remote_dispatch::pull_all_with_source(
-                        &target,
+                        &absolute_target,
                         source,
                         &origin_name,
                         opts.branch.as_deref(),
+                        !opts.no_checkout,
                         require_signed,
                         opts.tags.fetch_tags(),
+                        &merged,
                         opts.attestations.settings(&merged, url),
                         progress.terminal(),
                     )
@@ -212,7 +235,7 @@ pub fn run(args: &[String]) -> u8 {
     // run a verifiable sparse checkout against HEAD right now.
     #[cfg(feature = "sparse-checkout")]
     if !opts.sparse.is_empty()
-        && let Err((msg, code)) = apply_sparse_after_clone(&target, &opts.sparse)
+        && let Err((msg, code)) = apply_sparse_after_clone(&absolute_target, &opts.sparse)
     {
         return emit_err(&msg, code);
     }
@@ -323,9 +346,10 @@ fn clone_init_exit_code(error: &kit_sync::CloneInitError) -> u8 {
     match error {
         E::CreateDir { .. } | E::Store(_) | E::Refs(_) | E::WriteConfig(_) => exit::CANTCREAT,
         E::Discover(_) => exit::DATAERR,
-        E::AlreadyInitialized => exit::GENERAL_ERROR,
         // `validate_clone_inputs` rejects these first with the same code.
         E::InvalidRemote(_) => exit::PROTOCOL_ERROR,
+        // `AlreadyInitialized` and any later variant.
+        _ => exit::GENERAL_ERROR,
     }
 }
 

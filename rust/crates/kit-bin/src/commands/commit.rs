@@ -7,7 +7,7 @@
 //! The module also keeps two helpers for the commands that sign objects:
 //! `load_commit_signer` and `resolve_author`.
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 use clap::{Parser, ValueEnum};
 use kit_core::layout::RepoLayout;
@@ -206,7 +206,7 @@ pub fn run(args: &[String]) -> u8 {
         None => super::summary::HeadRef::Detached,
     };
     if !opts.quiet {
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = BufWriter::with_capacity(8 * 1024, std::io::stderr().lock());
         super::summary::print_commit_summary(
             &mut stderr,
             &store,
@@ -217,6 +217,7 @@ pub fn run(args: &[String]) -> u8 {
             created.base_tree,
             Some(created.tree),
         );
+        let _ = stderr.flush();
     }
     if json {
         let mut obj = JsonObject::new();
@@ -240,6 +241,10 @@ pub fn run(args: &[String]) -> u8 {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", obj.finish());
     }
+    // The commit is published and its locks are released. A repository that
+    // never fetches builds up packs, so the due step runs here, after the
+    // output, and cannot change the result.
+    super::maintenance::after_write(&layout, &store, &cfg, opts.quiet);
     exit::OK
 }
 

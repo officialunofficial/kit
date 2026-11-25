@@ -438,6 +438,11 @@ mod tests {
     use crate::signer_p256::P256Signer;
     use p256::ecdsa::{Signature as P256Sig, SigningKey, signature::Signer as _};
 
+    #[test]
+    fn json_escape_preserves_space_and_escapes_other_controls() {
+        assert_eq!(json_escape("\u{1f} "), "\\u001f ");
+    }
+
     const TEST_SECRET: [u8; 32] = [7u8; 32];
 
     /// Build an authenticator-data prefix: `rpIdHash(32) || flags(1) ||

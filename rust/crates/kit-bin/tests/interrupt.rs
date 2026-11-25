@@ -12,7 +12,7 @@ mod common;
 
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -52,6 +52,7 @@ fn spawn(repo: &Repo, args: &[&str], extra_env: &[(&str, &str)]) -> Child {
         .current_dir(repo.path())
         .env("XDG_CONFIG_HOME", repo.xdg())
         .env("HOME", repo.xdg())
+        .env("TMPDIR", repo.xdg())
         .env("EDITOR", "true")
         .env("VISUAL", "true")
         .env("GIT_EDITOR", "true")
@@ -211,54 +212,168 @@ fn interrupt_mid_restore(repo: &Repo, args: &[&str], signal: i32) -> ExitStatus 
         std::thread::sleep(Duration::from_millis(1));
     }
     interrupt(&child, signal);
-    wait_within(&mut child, Duration::from_secs(3), args[0])
+    wait_within(&mut child, Duration::from_secs(20), args[0])
 }
 
-/// A checkout stopped while it writes a large file leaves its branch, HEAD
-/// and the index where they were, as git does: nothing is staged, a file the
-/// target drops is still tracked, and the same checkout run again with `-f`
-/// finishes it and removes the temporary file the stopped one left.
+/// The first signal during a restore lets checkout publish a matching
+/// worktree, HEAD and index, including when it moves an existing branch.
 #[test]
-fn an_interrupted_checkout_leaves_head_and_the_index() {
+fn the_first_sigint_during_checkout_leaves_a_clean_switch() {
     let repo = Repo::new();
     repo.commit_file("a.txt", b"one\n", "one");
     repo.ok(&["checkout", "-b", "big"]);
-    repo.write("big.bin", &noise(96 << 20));
-    repo.ok(&["add", "big.bin"]);
-    repo.ok(&["commit", "-m", "big"]);
+    let big = noise(96 << 20);
+    repo.commit_file("big.bin", &big, "big");
+    let tip = fs::read_to_string(repo.kit_dir().join("refs/heads/big")).unwrap();
     repo.ok(&["checkout", "main"]);
     repo.commit_file("gone.txt", b"main only\n", "gone");
-    let main = fs::read_to_string(repo.kit_dir().join("refs/heads/main")).unwrap();
-    let signal = signals()[0];
-    let staged = |repo: &Repo| -> Vec<String> {
-        let out = repo.ok(&["status", "--porcelain"]);
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter(|line| !line.starts_with(' ') && !line.starts_with("??"))
-            .map(str::to_owned)
-            .collect()
-    };
 
-    for args in [&["checkout", "big"][..], &["checkout", "-B", "main", "big"]] {
-        let status = interrupt_mid_restore(&repo, args, signal);
-        assert_eq!(status.signal(), Some(signal), "{args:?}: {status:?}");
+    for (args, branch) in [
+        (&["checkout", "big"][..], "big"),
+        (&["checkout", "-B", "main", "big"][..], "main"),
+    ] {
+        let status = interrupt_mid_restore(&repo, args, signals()[0]);
+        assert!(status.success(), "{args:?}: {status:?}");
         check_invariants(repo.path(), "after an interrupted checkout").unwrap();
         let head = fs::read_to_string(repo.kit_dir().join("HEAD")).unwrap();
-        assert!(head.contains("refs/heads/main"), "{args:?}: {head}");
+        assert!(head.contains(&format!("refs/heads/{branch}")), "{head}");
         assert_eq!(
-            fs::read_to_string(repo.kit_dir().join("refs/heads/main")).unwrap(),
-            main,
-            "{args:?}"
+            fs::read_to_string(repo.kit_dir().join("refs/heads").join(branch)).unwrap(),
+            tip,
         );
-        assert_eq!(staged(&repo), Vec::<String>::new(), "{args:?}");
-        assert!(repo.path().join("gone.txt").exists(), "{args:?}");
+        assert!(!repo.path().join("gone.txt").exists());
+        let restored = fs::read(repo.path().join("big.bin")).unwrap();
+        assert!(restored == big, "checkout restored different file contents");
+        assert!(restore_temp_files(repo.path()).is_empty());
+        assert!(repo.ok(&["status", "--porcelain"]).stdout.is_empty());
+        repo.ok(&["checkout", "main"]);
     }
+}
 
-    repo.ok(&["checkout", "-f", "big"]);
-    assert_eq!(restore_temp_files(repo.path()), Vec::<String>::new());
-    assert!(!repo.path().join("gone.txt").exists());
-    let out = repo.ok(&["status", "--porcelain"]);
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+#[test]
+fn restore_temp_files_are_hidden_and_cannot_be_staged() {
+    let repo = Repo::new();
+    repo.commit_file("a.txt", b"one\n", "one");
+    let temp = "sub/.kit-restore-tmp.123.456";
+    repo.write(temp, b"left by a stopped restore\n");
+    repo.write("sub/keep.txt", b"ordinary file\n");
+    let link = "sub/.kit-restore-tmp.123.457";
+    std::os::unix::fs::symlink("keep.txt", repo.path().join(link)).unwrap();
+
+    assert_eq!(
+        repo.ok(&["status", "--porcelain"]).stdout,
+        b"?? sub/keep.txt\n"
+    );
+    repo.ok(&["add", "."]);
+    assert!(!repo.run(&["add", "-f", temp]).status.success());
+    assert!(!repo.run(&["add", "-f", link]).status.success());
+    for alias in [
+        "sub/.KIT-RESTORE-TMP.123.456",
+        "sub/.\u{212a}it-restore-tmp.123.456",
+        "sub/.ki\u{200d}t-restore-tmp.123.456",
+    ] {
+        if repo.path().join(alias).exists() {
+            assert!(!repo.run(&["add", "-f", alias]).status.success());
+        }
+    }
+    assert_eq!(repo.ok(&["ls-files"]).stdout, b"a.txt\nsub/keep.txt\n");
+    assert!(repo.path().join(temp).is_file());
+}
+
+#[test]
+fn a_restore_temp_file_cannot_replace_a_tracked_directory_in_the_index() {
+    let repo = Repo::new();
+    let temp = ".kit-restore-tmp.123.456";
+    let child = ".kit-restore-tmp.123.456/keep.txt";
+    repo.commit_file(child, b"tracked\n", "base");
+    assert!(repo.ok(&["status", "--porcelain"]).stdout.is_empty());
+    fs::remove_dir_all(repo.path().join(temp)).unwrap();
+    repo.write(temp, b"left by a stopped restore\n");
+    assert_eq!(
+        repo.ok(&["status", "--porcelain"]).stdout,
+        format!(" D {child}\n").as_bytes()
+    );
+    repo.ok(&["add", "."]);
+    assert!(repo.ok(&["ls-files"]).stdout.is_empty());
+}
+
+#[test]
+fn a_tracked_case_variant_cannot_pick_up_a_restore_temp_file() {
+    let repo = Repo::new();
+    let tracked = ".KIT-RESTORE-TMP.123.456";
+    let temp = ".kit-restore-tmp.123.456";
+    repo.commit_file(tracked, b"historical\n", "base");
+    if !repo.path().join(temp).exists() {
+        return;
+    }
+    fs::remove_file(repo.path().join(tracked)).unwrap();
+    repo.write(temp, b"left by a stopped restore\n");
+
+    assert!(!repo.run(&["add", tracked]).status.success());
+    repo.ok(&["add", "-u"]);
+    assert!(repo.ok(&["ls-files"]).stdout.is_empty());
+}
+
+#[test]
+fn a_case_variant_of_a_tracked_ordinary_file_can_still_be_refreshed() {
+    let repo = Repo::new();
+    let tracked = "Dir/.KIT-RESTORE-TMP.123.456";
+    repo.commit_file(tracked, b"old\n", "base");
+    if !repo.path().join("dir").exists() {
+        return;
+    }
+    fs::rename(repo.path().join("Dir"), repo.path().join("dir")).unwrap();
+    repo.write("dir/.KIT-RESTORE-TMP.123.456", b"new\n");
+    repo.ok(&["add", "-u"]);
+    assert_eq!(
+        repo.ok(&["ls-files"]).stdout,
+        format!("{tracked}\n").as_bytes()
+    );
+}
+
+#[test]
+fn add_can_stage_an_ordinary_unicode_path_in_a_searchable_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repo = Repo::new();
+    let paths = ["private/café.1.2", "private/.kit-restore-tmp.1.2é"];
+    let parent = repo.path().join("private");
+    for path in paths {
+        repo.write(path, b"ordinary file\n");
+    }
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o111)).unwrap();
+    let out = repo.run(&["add", paths[0], paths[1]]);
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let staged = repo.ok(&["ls-files", "-z"]).stdout;
+    for path in paths {
+        assert!(
+            staged
+                .split(|byte| *byte == 0)
+                .any(|name| name == path.as_bytes())
+        );
+    }
+}
+
+#[test]
+fn add_can_stage_a_case_alias_of_an_ordinary_hard_link() {
+    let repo = Repo::new();
+    let ordinary = ".kit-restore-tmp.1.2é";
+    let alias = ".KIT-RESTORE-TMP.1.2é";
+    repo.write(ordinary, b"ordinary file\n");
+    if !repo.path().join(alias).exists() {
+        return;
+    }
+    fs::hard_link(
+        repo.path().join(ordinary),
+        repo.path().join(".kit-restore-tmp.1.2"),
+    )
+    .unwrap();
+    repo.ok(&["add", alias]);
+    assert_eq!(
+        repo.ok(&["ls-files", "-z"]).stdout,
+        format!("{alias}\0").as_bytes()
+    );
 }
 
 /// A push polls the shutdown flag, but not while it waits on its transport.
@@ -347,7 +462,16 @@ fn sigterm_while_the_editor_runs_ends_kit() {
     repo.commit_file("a.txt", b"one\n", "one");
     repo.commit_file("a.txt", b"two\n", "two");
     let script = repo.xdg().join("hung-editor.sh");
-    fs::write(&script, "#!/bin/sh\nkill -TERM $PPID\nexec sleep 10\n").unwrap();
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+printf '%s' "$1" > "${0%/*}/message-path"
+printf '%s' "$$" > "${0%/*}/editor-pid"
+kill -TERM $PPID
+exec sleep 10
+"#,
+    )
+    .unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
@@ -359,7 +483,24 @@ fn sigterm_while_the_editor_runs_ends_kit() {
         &[("GIT_EDITOR", editor)],
     );
     let status = wait_within(&mut child, Duration::from_secs(5), "rebase -i");
+    let editor_pid: u32 = fs::read_to_string(repo.xdg().join("editor-pid"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        Command::new("kill")
+            .arg(editor_pid.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
     assert_eq!(status.signal(), Some(SIGTERM), "{status:?}");
+    let message = PathBuf::from(fs::read_to_string(repo.xdg().join("message-path")).unwrap());
+    assert!(
+        message.starts_with(repo.xdg()),
+        "unowned editor scratch: {}",
+        message.display()
+    );
     assert_eq!(common::in_progress(&repo.kit_dir()), None);
     check_invariants(repo.path(), "after SIGTERM in the editor").unwrap();
 }

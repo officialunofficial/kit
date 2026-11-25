@@ -174,6 +174,7 @@ fn fetch_one(
                             require_signed,
                             opts.prune,
                             opts.tags.fetch_tags(),
+                            &cfg.merged,
                             opts.attestations.settings(&cfg.merged, endpoint),
                             progress.terminal(),
                         )
@@ -200,6 +201,7 @@ fn fetch_one(
                             &report,
                         );
                     }
+                    super::maintenance::print(report.maintenance.as_ref(), quiet);
                     code
                 }
                 Err(libkit::transfer::Error::Interrupted) => {
@@ -257,6 +259,7 @@ fn emit_fetch_json(
         top.field_raw("pruned", &format!("[{}]", names.join(",")));
     }
     super::fetched_tags::json_fields(&mut top, report);
+    super::maintenance::json_field(&mut top, report.maintenance.as_ref());
     let mut stdout = std::io::stdout().lock();
     let _ = writeln!(stdout, "{}", top.finish());
 }

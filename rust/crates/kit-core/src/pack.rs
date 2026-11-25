@@ -68,22 +68,28 @@
 pub mod window;
 
 mod file_read;
+mod object_spool;
+mod retained;
 pub mod rewrite;
 mod spool;
 use crate::delta;
 use crate::hash::{self, Hash};
 use crate::object::{KitError, Object};
+use crate::store::StoreError;
 use crate::store::{MAX_RAW_OBJECT_SIZE, ObjectStore};
 pub use file_read::{
     MAX_FRAME_PAYLOAD, MAX_RAW_FRAME_PAYLOAD, PACK_ENTRY_READ_COST, RESIDENT_ENTRY_MAX,
     STAGE_WINDOW_BYTES, UNPACK_MEMORY_CAP, max_frame_payload,
 };
+#[doc(hidden)]
+pub use object_spool::{LooseStaging, ObjectSpool};
+pub use retained::RetainedPacks;
 pub use rewrite::{Rewritten, rewrite_excluding};
 pub use spool::{
     CountingWriter, PackSpool, SPOOL_BUFFER, SpoolWriter, SpooledPack, VerifiedPack,
     sweep_spool_dir,
 };
-pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled};
+pub(crate) use spool::{read_exact_at as read_spooled, write_all_at as write_spooled, write_at};
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
@@ -257,6 +263,7 @@ impl std::fmt::Display for ReadLimit {
 /// pack-specific failures (trailer mismatch, base-missing) without
 /// catching every object decode error.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackError {
     #[error("packfile is shorter than the {HEADER_LEN}-byte header + {TRAILER_LEN}-byte trailer")]
     PackfileTooShort,
@@ -309,6 +316,9 @@ pub enum PackError {
     /// prefix a `0x04` entry has in front of this.
     #[error("zstd entry payload is shorter than its length-prefix header")]
     ZstdEntryTruncated,
+    /// This build cannot decode compressed pack entries.
+    #[error("compressed entries require the pack-zstd feature")]
+    CompressionUnavailable,
     /// Claimed `uncompressed_len` exceeds [`MAX_RAW_OBJECT_SIZE`] —
     /// rejected before any decompression allocation is attempted
     /// (SPEC-PACKFILE §3.3 bomb-guarding).
@@ -353,6 +363,7 @@ thread_local! {
 /// Result of an unpack: which entries were stored, plus a count of
 /// delta resolutions vs raw writes. Useful for transport/CLI summaries.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnpackReport {
     pub raw_count: u32,
     pub delta_count: u32,
@@ -1256,6 +1267,31 @@ impl<W> PackWriter<W> {
     }
 }
 
+/// Bytes a raw entry for `bytes` takes in a pack, its frame included: what
+/// [`PackWriter::push_raw`] writes, compressed or not. A planner that picks
+/// between a full entry and a delta compares these, since an object that
+/// compresses well is cheaper in full than its raw length says.
+#[must_use]
+pub fn raw_entry_len(bytes: &[u8]) -> u64 {
+    let payload = match maybe_compress(bytes, 0) {
+        Some(frame) => ZSTD_LEN_PREFIX + frame.len(),
+        None => bytes.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
+}
+
+/// Bytes a delta entry holding `stream` takes in a pack, its frame and base
+/// id included: what [`PackWriter::push_delta`] writes. See
+/// [`raw_entry_len`].
+#[must_use]
+pub fn delta_entry_len(stream: &[u8]) -> u64 {
+    let payload = match maybe_compress(stream, DELTA_BASE_LEN) {
+        Some(frame) => DELTA_BASE_LEN + ZSTD_LEN_PREFIX + frame.len(),
+        None => DELTA_BASE_LEN + stream.len(),
+    };
+    (ENTRY_FRAME_LEN + payload) as u64
+}
+
 /// Compute the on-disk pack key: BLAKE3 of the entire packfile bytes
 /// (including the trailer). SPEC-PACKFILE §7. Returns the bare digest;
 /// callers prepend `packs/` and lower-hex-encode for the storage path.
@@ -1417,10 +1453,10 @@ fn check_zstd_claim(frame: &[u8], claim: usize) -> Result<(), PackError> {
 
 /// Without `pack-zstd` no frame can be decoded, so no buffer is reserved for one.
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn check_zstd_claim(_frame: &[u8], _claim: usize) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 fn zstd_entry_len(payload: &[u8]) -> Result<usize, PackError> {
@@ -1522,14 +1558,14 @@ fn zstd_decompress_capped(frame: &[u8], capacity: usize) -> Result<Vec<u8>, Pack
 }
 
 #[cfg(not(feature = "pack-zstd"))]
+// The all-features mutation tests exclude this compression-disabled fallback.
+#[cfg_attr(false, mutants::skip)]
 fn zstd_decompress_into(
     _frame: &[u8],
     _capacity: usize,
     _output: &mut Vec<u8>,
 ) -> Result<(), PackError> {
-    Err(PackError::ZstdDecompress(
-        "this build was compiled without the `pack-zstd` feature".to_string(),
-    ))
+    Err(PackError::CompressionUnavailable)
 }
 
 /// Shared decode window cap: 8 MiB (`windowLog` 23).
@@ -2026,6 +2062,17 @@ pub trait DeltaBaseSource {
         admit(bytes.len())?;
         Ok(Some(bytes))
     }
+    /// Admit a replacement after a corrupt copy. Each call replaces the
+    /// previous reservation for this object. Sources with one copy use
+    /// the same admission path as before.
+    #[doc(hidden)]
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        self.base_with_admission(id, admit)
+    }
 }
 
 /// A [`DeltaBaseSource`] with no external bases: a pack must be
@@ -2046,10 +2093,10 @@ impl DeltaBaseSource for &ObjectStore {
     const VERIFIED: bool = true;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        if self.contains(id) {
-            Ok(Some(self.read(id)?))
-        } else {
-            Ok(None)
+        match self.read(id) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::ObjectNotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -2058,18 +2105,45 @@ impl DeltaBaseSource for &ObjectStore {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        if !self.contains(id) {
-            return Ok(None);
-        }
-        self.read_with_allocator(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        match self.read_with_allocator(id, |len| {
             admit(len)?;
             let mut bytes = Vec::new();
             bytes
                 .try_reserve_exact(len)
                 .map_err(|_| PackError::PackfileTooLarge)?;
             Ok(bytes)
-        })
-        .map(Some)
+        }) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(PackError::Store(StoreError::ObjectNotFound(_))) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// The run-once API can reuse the same reservation for another copy of the
+// same size. Different-sized copies need a replacement reservation.
+fn admit_same_size(
+    admit: impl FnOnce(usize) -> Result<(), PackError>,
+) -> impl FnMut(usize) -> Result<(), PackError> {
+    let mut admit = Some(admit);
+    let mut admitted = None;
+    move |len| {
+        if let Some(admit) = admit.take() {
+            admit(len)?;
+            admitted = Some(len);
+        }
+        if admitted != Some(len) {
+            return Err(PackError::PackfileTooLarge);
+        }
+        Ok(())
     }
 }
 
@@ -2221,7 +2295,7 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
     const VERIFIED: bool = B::VERIFIED;
 
     fn base(&mut self, id: &Hash) -> Result<Option<Vec<u8>>, PackError> {
-        self.base_with_admission(id, |_| Ok(()))
+        self.base_with_retry_admission(id, |_| Ok(()))
     }
 
     fn base_with_admission(
@@ -2229,14 +2303,27 @@ impl<B: DeltaBaseSource> DeltaBaseSource for ChargedBases<'_, B> {
         id: &Hash,
         admit: impl FnOnce(usize) -> Result<(), PackError>,
     ) -> Result<Option<Vec<u8>>, PackError> {
-        self.inner.base_with_admission(id, |len| {
+        self.base_with_retry_admission(id, admit_same_size(admit))
+    }
+
+    fn base_with_retry_admission(
+        &mut self,
+        id: &Hash,
+        mut admit: impl FnMut(usize) -> Result<(), PackError>,
+    ) -> Result<Option<Vec<u8>>, PackError> {
+        let result = self.inner.base_with_retry_admission(id, |len| {
+            if let Some(prev) = self.charged.remove(id) {
+                self.budget.used = self.budget.used.saturating_sub(prev);
+            }
             let charged_len = u64::try_from(len).map_err(|_| PackError::PackfileTooLarge)?;
             self.budget.charge(charged_len)?;
-            admit(len)?;
-            let held = self.charged.entry(*id).or_default();
-            *held = held.saturating_add(charged_len);
-            Ok(())
-        })
+            self.charged.insert(*id, charged_len);
+            admit(len)
+        });
+        if !matches!(result, Ok(Some(_))) {
+            self.release(id);
+        }
+        result
     }
 }
 
@@ -2712,6 +2799,29 @@ pub fn decode_entry_with<B: DeltaBaseSource>(
     Ok((id, bytes))
 }
 
+trait UnpackSink: Sync {
+    fn stage(
+        &self,
+        position: usize,
+        id: Hash,
+        ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError>;
+}
+
+impl UnpackSink for crate::batch::WriteBatch<'_> {
+    fn stage(
+        &self,
+        _position: usize,
+        id: Hash,
+        _ty: crate::object::ObjectType,
+        bytes: &[u8],
+    ) -> Result<(), PackError> {
+        self.write_prehashed(id, &[bytes])?;
+        Ok(())
+    }
+}
+
 /// Replay one window's staging results in pack order. Deferred admissions
 /// are strict here. `first_position` is the pack position of `window[0]`.
 #[allow(clippy::too_many_arguments)]
@@ -2723,8 +2833,8 @@ fn replay_window<'p, 'b>(
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'p, 'b>>,
     report: &mut UnpackReport,
     budget: &'b ResidentBudget<'_>,
-    bases: &mut &ObjectStore,
-    batch: &crate::batch::WriteBatch<'_>,
+    bases: &mut impl DeltaBaseSource,
+    batch: &(impl UnpackSink + ?Sized),
     keep_stored: bool,
 ) -> Result<(), PackError> {
     let mut raw_results = raw_results.into_iter();
@@ -2753,8 +2863,15 @@ fn replay_window<'p, 'b>(
             }
             Entry::Delta { base, stream } => {
                 let stream = stream.decode(budget)?;
-                let staged =
-                    stage_delta_target(bases, batch, in_pack, uses, budget, base, stream.as_ref())?;
+                let staged = stage_delta_target(
+                    bases,
+                    (batch, position),
+                    in_pack,
+                    uses,
+                    budget,
+                    base,
+                    stream.as_ref(),
+                )?;
                 report.delta_count += 1;
                 report.note(staged, keep_stored);
             }
@@ -2994,59 +3111,46 @@ type RawStageResults<'b> = Vec<RawStageResult<'b>>;
 /// Validate, hash and stage independent raw frames, preserving result order.
 /// Errors stay in the result queue until step 3 reaches that pack position.
 fn stage_raw_entries<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     frames: &[(usize, EncodedPayload<'_>)],
     uses: &std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
 ) -> RawStageResults<'b> {
+    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    stage_independent(frames, |&(position, payload)| {
+        stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
+    })
+}
+
+/// Run independent staging operations with bounded workers and return their
+/// results in input order. Small windows use the caller's thread.
+pub(crate) fn stage_independent<T: Sync, R: Send>(
+    entries: &[T],
+    stage: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         const ENTRIES_PER_THREAD: usize = 8;
         let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        if threads > 1 && frames.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
-            return stage_raw_entries_parallel(batch, frames, uses, budget, threads);
+        if threads > 1 && entries.len() >= ENTRIES_PER_THREAD.saturating_mul(threads) {
+            return stage_parallel(entries, &stage, threads);
         }
     }
-    let first_failure = std::sync::atomic::AtomicUsize::new(usize::MAX);
-    frames
-        .iter()
-        .map(|&(position, payload)| {
-            stage_raw_in_phase_two(batch, position, payload, uses, budget, &first_failure)
-        })
-        .collect()
+    entries.iter().map(stage).collect()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn stage_raw_entries_parallel<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
-    frames: &[(usize, EncodedPayload<'_>)],
-    uses: &std::collections::HashMap<Hash, BaseUses>,
-    budget: &'b ResidentBudget<'_>,
+fn stage_parallel<T: Sync, R: Send>(
+    entries: &[T],
+    stage: &(impl Fn(&T) -> R + Sync),
     threads: usize,
-) -> RawStageResults<'b> {
-    let first_failure = &std::sync::atomic::AtomicUsize::new(usize::MAX);
-    let chunk_size = frames.len().div_ceil(threads).max(1);
-    let mut out = Vec::with_capacity(frames.len());
+) -> Vec<R> {
+    let chunk_size = entries.len().div_ceil(threads).max(1);
+    let mut out = Vec::with_capacity(entries.len());
     std::thread::scope(|scope| {
-        let handles: Vec<_> = frames
+        let handles: Vec<_> = entries
             .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|&(position, payload)| {
-                            stage_raw_in_phase_two(
-                                batch,
-                                position,
-                                payload,
-                                uses,
-                                budget,
-                                first_failure,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
+            .map(|chunk| scope.spawn(move || chunk.iter().map(stage).collect::<Vec<_>>()))
             .collect();
         for handle in handles {
             out.extend(handle.join().expect("pack unpack worker thread panicked"));
@@ -3056,7 +3160,7 @@ fn stage_raw_entries_parallel<'b>(
 }
 
 fn stage_raw_in_phase_two<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3078,7 +3182,7 @@ fn stage_raw_in_phase_two<'b>(
 }
 
 fn prepare_and_stage_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: EncodedPayload<'_>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3088,7 +3192,7 @@ fn prepare_and_stage_raw<'b>(
 }
 
 fn stage_decoded_raw<'b>(
-    batch: &crate::batch::WriteBatch<'_>,
+    batch: &(impl UnpackSink + ?Sized),
     position: usize,
     payload: ResidentBytes<'_, 'b>,
     uses: &std::collections::HashMap<Hash, BaseUses>,
@@ -3097,7 +3201,7 @@ fn stage_decoded_raw<'b>(
     let obj = validate_storable_object(payload.as_ref())?;
     let stored_hash = crate::object::id_from_object(&obj, payload.as_ref());
     let staged = Staged::of(stored_hash, &obj, payload.as_ref());
-    batch.write_prehashed(stored_hash, &[payload.as_ref()])?;
+    batch.stage(position, stored_hash, obj.object_type(), payload.as_ref())?;
     let retained = if let ResidentBytes::Owned(bytes) = payload {
         budget.record_owned(bytes.bytes.len());
         if uses
@@ -3450,7 +3554,7 @@ impl<'a> Iterator for PackEntries<'a> {
 /// which also handles identity deltas whose target hash equals their base.
 fn stage_delta_target<'b, B: DeltaBaseSource>(
     bases: &mut B,
-    batch: &crate::batch::WriteBatch<'_>,
+    (batch, position): (&(impl UnpackSink + ?Sized), usize),
     in_pack: &mut std::collections::HashMap<Hash, ResidentBytes<'_, 'b>>,
     uses: &mut std::collections::HashMap<Hash, BaseUses>,
     budget: &'b ResidentBudget<'_>,
@@ -3460,7 +3564,8 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     if let std::collections::hash_map::Entry::Vacant(entry) = in_pack.entry(base_hash) {
         let mut reservation = None;
         let bytes = bases
-            .base_with_admission(&base_hash, |len| {
+            .base_with_retry_admission(&base_hash, |len| {
+                drop(reservation.take());
                 reservation = Some(budget.charge(len)?);
                 Ok(())
             })?
@@ -3481,7 +3586,7 @@ fn stage_delta_target<'b, B: DeltaBaseSource>(
     let obj = validate_storable_object(&resolved.bytes)?;
     let stored_hash = crate::object::id_from_object(&obj, &resolved.bytes);
     let staged = Staged::of(stored_hash, &obj, &resolved.bytes);
-    batch.write_prehashed(stored_hash, &[&resolved.bytes])?;
+    batch.stage(position, stored_hash, obj.object_type(), &resolved.bytes)?;
     budget.record_owned(resolved.bytes.len());
     let usage = uses.get_mut(&base_hash).expect("counted delta base");
     usage.remaining -= 1;
@@ -3721,6 +3826,45 @@ mod tests {
         let budget = ResidentBudget::new(resident_bytes_cap(pack.len()), None);
         PackReader::read_with_budget(&pack, &store, MAX_TOTAL_PAYLOAD, &budget, STAGE_WINDOW)
             .unwrap();
+    }
+
+    #[test]
+    fn entry_len_matches_what_the_writer_writes() {
+        // The planner compares these lengths, so each must be exact for a
+        // body that compresses (the zstd frame) and one that does not.
+        let squeezes = vec![b'a'; 8 * 1024];
+        let mut noise = vec![0u8; 8 * 1024];
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        for b in &mut noise {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = x.to_le_bytes()[0];
+        }
+        for body in [&squeezes[..], &noise[..], &noise[..10]] {
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_raw(hash::hash(body), body).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(raw_entry_len(body)).unwrap()
+            );
+        }
+        let base = noise.clone();
+        let mut grown = noise.clone();
+        grown.extend(vec![b'z'; 8 * 1024]);
+        let mut edited = noise.clone();
+        edited[100] ^= 1;
+        for target in [&grown, &edited] {
+            let stream = delta::encode(&base, target).unwrap();
+            let mut writer = PackWriter::new();
+            let before = writer.serialized_len();
+            writer.push_delta(&hash::hash(&base), &stream).unwrap();
+            assert_eq!(
+                writer.serialized_len() - before,
+                usize::try_from(delta_entry_len(&stream)).unwrap()
+            );
+        }
     }
 
     #[test]
@@ -3965,6 +4109,56 @@ mod tests {
     }
 
     #[test]
+    fn retrying_a_base_replaces_its_decode_and_resident_reservations() {
+        struct Source;
+        impl DeltaBaseSource for Source {
+            fn base(&mut self, _: &Hash) -> Result<Option<Vec<u8>>, PackError> {
+                unreachable!("this source admits before allocation")
+            }
+
+            fn base_with_retry_admission(
+                &mut self,
+                _id: &Hash,
+                mut admit: impl FnMut(usize) -> Result<(), PackError>,
+            ) -> Result<Option<Vec<u8>>, PackError> {
+                admit(8)?;
+                admit(12)?;
+                Ok(Some(vec![0; 12]))
+            }
+        }
+
+        let id = [0; 32];
+        let mut source = Source;
+        let mut budget = DecodeBudget { used: 0, max: 12 };
+        let mut charged = std::collections::HashMap::new();
+        let mut bases = ChargedBases {
+            inner: &mut source,
+            budget: &mut budget,
+            charged: &mut charged,
+        };
+        for cap in [11, 12] {
+            let resident = ResidentBudget::new(cap, None);
+            let mut reservation = None;
+            let result = bases.base_with_retry_admission(&id, |len| {
+                drop(reservation.take());
+                reservation = Some(resident.charge(len)?);
+                Ok(())
+            });
+            if cap == 12 {
+                assert_eq!(result.unwrap().unwrap().len(), 12);
+                assert_eq!(bases.budget.used, 12);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 12);
+            } else {
+                assert!(matches!(result, Err(PackError::PackfileTooLarge)));
+                assert_eq!(bases.budget.used, 0);
+                assert_eq!(resident.used.load(Ordering::Relaxed), 0);
+            }
+            bases.release(&id);
+            drop(reservation);
+        }
+    }
+
+    #[test]
     fn provided_base_admission_preserves_existing_sources() {
         struct Source(Vec<u8>);
         impl DeltaBaseSource for Source {
@@ -3988,6 +4182,13 @@ mod tests {
             source.base_with_admission(&[0; 32], |_| Err(PackError::PackfileTooLarge)),
             Err(PackError::PackfileTooLarge)
         ));
+    }
+
+    #[test]
+    fn staging_a_small_window_uses_the_callers_thread() {
+        let caller = std::thread::current().id();
+        let workers = stage_independent(&[()], |()| std::thread::current().id());
+        assert_eq!(workers, vec![caller]);
     }
 
     #[test]
@@ -4027,7 +4228,20 @@ mod tests {
                 .is_none()
             );
             assert_eq!(first_failure.load(Ordering::Relaxed), usize::MAX);
-            let results = stage_raw_entries_parallel(&batch, &frames, &uses, &budget, threads);
+            let results = stage_parallel(
+                &frames,
+                &|(position, payload)| {
+                    stage_raw_in_phase_two(
+                        &batch,
+                        *position,
+                        *payload,
+                        &uses,
+                        &budget,
+                        &first_failure,
+                    )
+                },
+                threads,
+            );
             assert_eq!(results.len(), frames.len());
             assert!(results.iter().all(Option::is_none));
             drop(in_flight);
@@ -4461,7 +4675,7 @@ mod tests {
             assert_eq!(
                 stage_delta_target(
                     &mut &store,
-                    &batch,
+                    (&batch, 0),
                     &mut in_pack,
                     &mut uses,
                     &budget,
@@ -4497,7 +4711,7 @@ mod tests {
         assert!(matches!(
             stage_delta_target(
                 &mut &store,
-                &batch,
+                (&batch, 0),
                 &mut in_pack,
                 &mut uses,
                 &budget,

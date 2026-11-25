@@ -108,10 +108,14 @@ fn tree(blob: Hash) -> Object {
 fn assert_readers_agree(pack: &[u8], seed: &[Vec<u8>], shape: WindowShape) {
     let (slice_dir, slice_store) = fresh_store();
     let (file_dir, file_store) = fresh_store();
+    let slice_seed = slice_store.batch();
+    let file_seed = file_store.batch();
     for bytes in seed {
-        slice_store.write(bytes).unwrap();
-        file_store.write(bytes).unwrap();
+        slice_seed.write(bytes).unwrap();
+        file_seed.write(bytes).unwrap();
     }
+    slice_seed.commit().unwrap();
+    file_seed.commit().unwrap();
     let spool_dir = TempDir::new().unwrap();
     let from_slice = PackReader::read(pack, &slice_store);
     let pack_file = verified(pack, spool_dir.path());
@@ -267,7 +271,9 @@ proptest! {
     /// any shape.
     #[test]
     fn random_packs_unpack_the_same_from_a_slice_and_a_file(
-        entries in prop::collection::vec(gen_entry(), 0..80),
+        // A few windows cover the same entry shapes without thousands of
+        // durable object writes per generated case.
+        entries in prop::collection::vec(gen_entry(), 0..24),
         window_entries in 1usize..9,
         window_bytes in 1u64..4096,
     ) {
@@ -640,6 +646,43 @@ fn a_spool_takes_writes_larger_than_its_buffer() {
     assert_eq!(store.read(&id).unwrap(), big);
 }
 
+#[test]
+fn file_unpack_uses_two_full_flushes_per_byte_window() {
+    use crate::batch::testing::{Ev, RecordingSyncer};
+    use std::sync::Arc;
+
+    let mut writer = PackWriter::new_raw_only();
+    for i in 0u8..6 {
+        let (id, bytes) = blob(&[i; 64]);
+        writer.push_raw(id, &bytes).unwrap();
+    }
+    let pack = writer.finish().unwrap();
+    // Six equal frames fit two at a time.
+    let window_bytes = ((pack.len() - HEADER_LEN - TRAILER_LEN) / 3) as u64;
+    let (dir, mut store) = fresh_store();
+    let file = verified(&pack, dir.path());
+    let syncer = Arc::new(RecordingSyncer::default());
+    store.set_syncer(syncer.clone());
+
+    let report = read_file(
+        &file,
+        &store,
+        WindowShape {
+            entries: 6,
+            bytes: window_bytes,
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(report.raw_count, 6);
+    let events = syncer.events();
+    let full_flushes = events.iter().filter(|event| matches!(event, Ev::Full(_)));
+    assert_eq!(full_flushes.count(), 6);
+    assert!(!events.iter().any(|event| matches!(event, Ev::DirSync(_))));
+}
+
 /// A small file whose header claims ten million entries is refused by the
 /// header check, before the reader charges or allocates anything for them.
 #[test]
@@ -888,6 +931,64 @@ fn the_report_lists_exactly_the_signed_objects_stored() {
 }
 
 #[test]
+fn a_previously_staged_pack_supplies_a_delta_without_publishing_its_base() {
+    let (dir, store) = fresh_store();
+    let (base, base_bytes) = blob(b"base contents");
+    let (target, target_bytes) = blob(b"changed contents");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(base, &base_bytes).unwrap();
+    let first = verified(&writer.finish().unwrap(), dir.path());
+    let pending = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&first, &store, &[], &pending).unwrap();
+    assert_eq!(report.raw_count, 1);
+    assert!(!store.contains(&base));
+
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base, &delta::encode(&base_bytes, &target_bytes).unwrap())
+        .unwrap();
+    // Independent raw frames can stage in parallel. This frame must never
+    // supply the earlier delta, although it carries the exact base bytes.
+    writer.push_raw(base, &base_bytes).unwrap();
+    let second = verified(&writer.finish().unwrap(), dir.path());
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    assert!(matches!(
+        PackReader::stage_verified(&second, &store, &[], &staged),
+        Err(PackError::DeltaBaseMissing(_)),
+    ));
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&pending], &staged).unwrap();
+    assert_eq!((report.raw_count, report.delta_count), (1, 1));
+    assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
+    assert!(!store.contains(&base));
+    assert!(!store.contains(&target));
+}
+
+#[test]
+fn a_delta_base_may_be_in_any_of_the_pending_windows() {
+    let (dir, store) = fresh_store();
+    let (base, base_bytes) = blob(b"base contents");
+    let (target, target_bytes) = blob(b"changed contents");
+    let mut writer = PackWriter::new_raw_only();
+    writer.push_raw(base, &base_bytes).unwrap();
+    let first = verified(&writer.finish().unwrap(), dir.path());
+    let sealing = ObjectSpool::new(dir.path()).unwrap();
+    PackReader::stage_verified(&first, &store, &[], &sealing).unwrap();
+    // The open window holds something else.
+    let open = ObjectSpool::new(dir.path()).unwrap();
+
+    let mut writer = PackWriter::new();
+    writer
+        .push_delta(&base, &delta::encode(&base_bytes, &target_bytes).unwrap())
+        .unwrap();
+    let second = verified(&writer.finish().unwrap(), dir.path());
+    let staged = ObjectSpool::new(dir.path()).unwrap();
+    let report = PackReader::stage_verified(&second, &store, &[&open, &sealing], &staged).unwrap();
+    assert_eq!(report.delta_count, 1);
+    assert_eq!(staged.read(&target).unwrap(), Some(target_bytes));
+}
+
+#[test]
 fn an_empty_pack_reads_from_a_file() {
     let pack = PackWriter::new().finish().unwrap();
     let dir = TempDir::new().unwrap();
@@ -928,4 +1029,147 @@ fn the_file_reader_refuses_a_bad_header() {
         );
         assert!(from_file.is_err());
     }
+}
+
+/// A pack of `len` bytes that do not compress.
+fn noise_pack(len: usize) -> (Vec<u8>, PackKey) {
+    // Hash output does not compress, so the pack is about `len` bytes.
+    let mut data = vec![0u8; len];
+    blake3::Hasher::new()
+        .update(b"noise")
+        .finalize_xof()
+        .fill(&mut data);
+    let (id, bytes) = blob(&data);
+    let mut w = PackWriter::new();
+    w.push_raw(id, &bytes).unwrap();
+    let pack = w.finish().unwrap();
+    let key = PackKey::new(pack_key(&pack));
+    (pack, key)
+}
+
+#[test]
+fn a_spool_continues_an_interrupted_body_and_verifies_the_whole_pack() {
+    let (pack, key) = noise_pack(3 << 20);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    // Cuts in the buffer, on the buffer edge, past it, and at the last byte.
+    for cut in [
+        1,
+        100,
+        SPOOL_BUFFER - 1,
+        SPOOL_BUFFER,
+        SPOOL_BUFFER + 1,
+        5 << 19,
+        pack.len() - 1,
+    ] {
+        let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+        assert_eq!(s.retained(), 0, "before a body");
+        s.begin(Some(len)).unwrap();
+        assert_eq!(s.retained(), 0, "no byte yet");
+        s.write(&pack[..cut]).unwrap();
+        assert_eq!(s.retained(), cut as u64, "cut at {cut}");
+        s.resume(len, cut as u64).unwrap();
+        assert_eq!(s.retained(), cut as u64, "resuming keeps the prefix");
+        s.write(&pack[cut..]).unwrap();
+        let done = s.finish(&key).unwrap();
+        assert_eq!(done.len(), len);
+        let mut read = vec![0u8; pack.len()];
+        done.read_at(0, &mut read).unwrap();
+        assert!(read == pack, "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_prefix_of_another_body_fails_the_pack_check_after_a_resume() {
+    let (pack, key) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let mut damaged = pack.clone();
+    damaged[1000] ^= 1;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    s.begin(Some(len)).unwrap();
+    s.write(&damaged[..5000]).unwrap();
+    s.resume(len, 5000).unwrap();
+    s.write(&pack[5000..]).unwrap();
+    assert!(matches!(s.finish(&key), Err(PackError::KeyMismatch)));
+}
+
+#[test]
+fn a_spool_refuses_to_continue_what_it_does_not_hold() {
+    let (pack, _) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let begun = |declared: Option<u64>, taken: usize| {
+        let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+        s.begin(declared).unwrap();
+        s.write(&pack[..taken]).unwrap();
+        s
+    };
+
+    // No body begun.
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    assert!(matches!(s.resume(len, 0), Err(PackError::UnexpectedEof)));
+    // No byte taken.
+    assert!(begun(Some(len), 0).resume(len, 0).is_err());
+    // No declared length: the end of the body is not known.
+    let mut s = begun(None, 100);
+    assert_eq!(s.retained(), 0);
+    assert!(s.resume(len, 100).is_err());
+    // An offset that is not the prefix held, or a total that is not declared.
+    let mut s = begun(Some(len), 100);
+    assert!(s.resume(len, 99).is_err());
+    assert!(s.resume(len, 101).is_err());
+    assert!(s.resume(len + 1, 100).is_err());
+    assert!(s.resume(len - 1, 100).is_err());
+    s.resume(len, 100).unwrap();
+    // A prefix that already is the whole body has nothing to continue.
+    let mut s = begun(Some(100), 100);
+    assert_eq!(s.retained(), 100);
+    assert!(s.resume(100, 100).is_err());
+    // A body that ended past its length keeps nothing.
+    let mut s = begun(Some(100), 50);
+    assert!(s.write(&pack[..100]).is_err());
+    assert_eq!(s.retained(), 0);
+    assert!(s.resume(100, 50).is_err());
+    // A new body starts over.
+    let mut s = begun(Some(len), 100);
+    s.begin(Some(len)).unwrap();
+    assert_eq!(s.retained(), 0);
+}
+
+#[test]
+fn a_sink_view_of_a_spool_resumes_and_maps_refusals() {
+    let (pack, key) = noise_pack(1 << 16);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    let sink: &mut dyn crate::protocol::PackSink = &mut s;
+    sink.begin(Some(len)).unwrap();
+    sink.write(&pack[..200]).unwrap();
+    assert_eq!(sink.retained(), 200);
+    assert!(matches!(
+        sink.resume(len, 199),
+        Err(crate::protocol::TransportError::ProtocolError)
+    ));
+    sink.resume(len, 200).unwrap();
+    sink.write(&pack[200..]).unwrap();
+    assert!(s.finish(&key).is_ok());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_spool_that_failed_to_write_keeps_nothing_to_continue() {
+    let (pack, _) = noise_pack(3 << 20);
+    let len = pack.len() as u64;
+    let dir = TempDir::new().unwrap();
+    let mut s = PackSpool::create(dir.path(), PACK_BODY_LIMIT).unwrap();
+    s.begin(Some(len)).unwrap();
+    s.write(&pack[..100]).unwrap();
+    {
+        let _full = crate::fault::fail_writes(crate::fault::Site::Spool);
+        assert!(s.write(&pack[100..(2 << 20)]).is_err());
+    }
+    assert!(s.failed().is_some());
+    assert_eq!(s.retained(), 0);
+    assert!(matches!(s.resume(len, 100), Err(PackError::Io(_))));
 }

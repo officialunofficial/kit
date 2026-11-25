@@ -21,7 +21,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::atomic;
+use crate::durable::Parents;
 use crate::hash::{Hash, ZERO};
 use crate::index::{self, Index};
 use crate::layout::RepoLayout;
@@ -959,7 +959,7 @@ fn read_list(layout: &RepoLayout) -> StashResult<StashList> {
 fn write_list(layout: &RepoLayout, list: &StashList) -> StashResult<()> {
     let bytes = serialize_list(list)?;
     let path = stash_path(layout);
-    atomic::write_atomic(&path, &bytes, true)?;
+    crate::durable::write_pointer(&path, &bytes, Parents::Create)?;
     Ok(())
 }
 

@@ -113,6 +113,12 @@ pub enum Error {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would make the branch's pack chain longer than a fetch
+    /// reads. The advance that would cross the bound was not published.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// A packmap chain was malformed — it exceeded the depth cap, contained
     /// a cycle, or a node could not be downloaded/decoded. Indicates a
     /// corrupt or hostile remote.
@@ -164,6 +170,14 @@ pub enum Error {
     /// published. NOT a self-heal trigger.
     #[error("fetched history has a chunk that does not fit its manifest: {0}")]
     RemoteObject(KitError),
+    /// The tip a remote branch names is not a commit or a remix. Nothing was
+    /// published for the branch.
+    #[error("remote branch '{branch}' points at a {found}, not a commit")]
+    BranchTipNotCommit {
+        branch: String,
+        /// The type the tip has, such as `tree`.
+        found: &'static str,
+    },
     /// A commit/remix/tag newly introduced by this fetch failed Ed25519
     /// signature verification via [`kit_core::sign::verify_commit`] /
     /// `verify_remix` / `verify_tag` — the exact check `kit verify <rev>`
@@ -410,10 +424,13 @@ impl From<kit_sync::SyncError> for Error {
             S::RemoteMissingObject(h) => Self::RemoteMissingObject(h),
             S::ClosureTooLarge(n) => Self::ClosureTooLarge(n),
             S::RemoteObject(e) => Self::RemoteObject(e),
+            S::BranchTipNotCommit { branch, found } => Self::BranchTipNotCommit { branch, found },
             S::UnsignedOrInvalidObject { hash, reason } => {
                 Self::UnsignedOrInvalidObject { hash, reason }
             }
             S::InvalidRemoteName(n) => Self::InvalidRemoteName(n),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }
@@ -434,6 +451,7 @@ impl From<kit_sync::PushError> for Error {
             P::Sync(error) => error.into(),
             P::NonFastForwardPush { branch } => Self::NonFastForwardPush { branch },
             P::PackmapContended { branch } => Self::PackmapContended { branch },
+            P::PackChainTooLong { branch } => Self::PackChainTooLong { branch },
             P::PushTooLarge {
                 packs,
                 limit,
@@ -488,6 +506,8 @@ impl From<kit_sync::PushError> for Error {
                 ..
             }) if message == PENDING_INTERRUPTED_MESSAGE => Self::Interrupted,
             P::Delete(error) => Self::Delete(error),
+            // A variant of a newer engine reports its message as an I/O error.
+            other => Self::Io(std::io::Error::other(other)),
         }
     }
 }
@@ -518,6 +538,13 @@ mod tests {
         assert!(matches!(
             Error::from(S::InvalidRemoteName("bad name".into())),
             Error::InvalidRemoteName(name) if name == "bad name"
+        ));
+        assert!(matches!(
+            Error::from(S::BranchTipNotCommit {
+                branch: "b".into(),
+                found: "tree"
+            }),
+            Error::BranchTipNotCommit { branch, found: "tree" } if branch == "b"
         ));
         assert!(matches!(
             Error::from(S::RemoteMissingObject("ab".into())),

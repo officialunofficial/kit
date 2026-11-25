@@ -302,7 +302,9 @@ History / commits:
   <subject>` (with `(root-commit)` for the first commit, `detached HEAD`
   when detached) followed by a diffstat and `create/delete mode` lines;
   `-q`/`--quiet` suppresses it. kit always signs commits and has no
-  hooks.
+  hooks. After the commit is durable, `commit` runs the due automatic
+  local pack maintenance step (see `kit fetch`); it can take about 5
+  seconds longer when one is due, and `gc.auto = false` turns it off.
   `--format=json` additionally emits one JSON object to stdout on success:
   `{"ok":true,"hash":"<64-hex>","branch":"<name>|null",
   "parents":["<64-hex>",...],"tree":"<64-hex>","subject":"...",
@@ -375,19 +377,20 @@ History / commits:
   commit's first parent, so a merged side branch never enters the walk at
   all. All of these filters apply **before** `-n <limit>`, so `-n` caps
   the filtered result, matching git.
-  One walk reads at most 1,000,000 commits, counting the excluded side of
-  a range: both sides of a range share that budget. A walk that would read
-  more fails with an error that names the limit; `kit log` never prints
-  part of a history as if it were all of it. The merge base of `A...B`
-  comes from a separate walk with the same limit on each side.
-  A commit of the walk, or of the excluded side of a range, that is
-  missing, corrupt or not a commit fails the walk with an error that names
-  it; it never drops out of the history.
-  With `-n`, a walk from one revision reads only the commits it needs while
-  each commit has at most one followed parent, so `-n 20` on a linear
-  history or with `--first-parent` reads about 20 commits. From the first
-  merge on, it reads the rest of the reachable history before it prints,
-  because a later commit can still be a child of any commit seen so far.
+  The selected graph and retained exclusion set share a 1,000,000-commit
+  budget. Bounded range probes have a separate allowance. A walk that
+  exceeds that budget fails without printing a partial answer. The merge base of `A...B` uses a separate bounded walk.
+  Missing, corrupt or non-commit objects fail when inspected. Objects below
+  a proven stopping boundary are not inspected. In a closed `A..B` range,
+  where every selected path reaches `A`, ancestors of `A` stay unread.
+  Range discovery may inspect commits beyond the output limit to prove a
+  cut. It first probes up to 63 selected commits for the excluded endpoint,
+  then up to 4,096 commits from both endpoints for a shared frontier. If
+  neither proof succeeds, it uses the full exclusion walk.
+  With `-n`, a linear or first-parent walk stops at the filtered limit.
+  At a merge, it sorts the region above a shared unread frontier before
+  continuing below that frontier. Separate roots or exclusion boundaries
+  can require the full remaining graph to preserve the topological order.
 - `kit reflog [<ref>] [--format=json] [-n N]` &mdash; **read-only** view of a
   branch's first-parent ancestry. Defaults to the branch `HEAD` points at;
   detached `HEAD` needs an explicit `<ref>`. Walks newest-first, addressing each
@@ -511,9 +514,10 @@ History / commits:
   diagnostics). A line that never survives a step stays on `<start>`
   (git marks such lines with a leading `^`; kit's tab format carries no
   `^`, consistent with its existing boundary-marker omission). `-w` and
-  `-L` compose with `--reverse`. A range whose first-parent walk from
-  `<end>` holds more than 1,000,000 commits fails with an error that names
-  the limit and blames nothing. Default emits
+  `-L` compose with `--reverse`. If the first-parent walk from `<end>`
+  cannot read a commit or finds another object type, the error names that
+  object. If the walk exceeds 1,000,000 commits, the error names the limit.
+  In either case, blame prints no attribution. Default emits
   `<short12>\t<line_num>\t<text>` per line; `--format=json` emits JSONL
   with keys `hash`, `line_num`, `author`, `timestamp`, `text`.
 - `kit verify <rev> [--trusted] [--trust-roots <path>]` &mdash; verify the
@@ -902,7 +906,10 @@ Branches / refs:
   `checkout -` return to the previous HEAD, detached when it was detached.
   A successful HEAD change atomically saves one previous HEAD in the local
   per-worktree `PREVIOUS_HEAD` file. A missing or unreadable file reports
-  `no previous branch`. `@{-N}` for N greater than 1 is not supported.
+  `no previous branch`. Running an older kit's gc on a repository a newer kit
+  uses can prune the previous HEAD; `switch -` then reports `previous HEAD
+  <id> was pruned; nothing to switch back to` and changes nothing. `@{-N}`
+  for N greater than 1 is not supported.
 - `kit clean [-n] [-f] [-d] [-x|-X] [<path>...]` &mdash; remove untracked files
   from the worktree. **Destructive, so it refuses to delete without an
   explicit `-f`** (matching git's `clean.requireForce` default); `-n`
@@ -1054,8 +1061,15 @@ Branches / refs:
   entries, computes the live set reachable from the retention roots (refs,
   stash, in-progress operations, attestations, and the recovery log of
   commits superseded by `commit --amend`/`reset`/`rebase`), then deletes
-  unreachable objects older than the grace window (default 14 days).
-  `-n`/`--dry-run` reports what would be pruned without deleting.
+  unreachable objects older than the grace window (default 14 days). It also
+  retires local packs that are wholly dead past grace, rewrites packs that
+  hold a quarter or more garbage, merges small packs and retires duplicate
+  packs, copying what must survive into new packs before it retires the
+  old ones. A damaged pack or a failed copy is kept and reported as a
+  warning on standard error, and so is a retirement that stopped because a
+  fetch, push or add held the store lock; the exit code does not change.
+  `-n`/`--dry-run` reports what would be pruned without deleting, and
+  reports packed garbage.
   `--grace-secs 0` prunes every unreachable object, but **bypasses the
   grace window** &mdash; the grace window is gc's concurrency-safety net (some
   root-publishing paths such as `tag` and `fetch` write an object before
@@ -1215,9 +1229,7 @@ attestation support warn once per command and skip the log.
   failure, a name mismatch, a missing tag map or object, or a history past the
   check's bound.
   A remote tag name that kit cannot push prints a `warning:` line and is not a
-  refusal. A tag listing that fails, for example one too large for one
-  `kit serve` frame, prints `error: tag listing failed (possibly too many
-  tags): <error>`. A refused tag or a failed listing never stops the branches
+  refusal. A tag listing that fails prints `error: tag listing failed: <error>`. A refused tag or a failed listing never stops the branches
   or the other tags, and the fetch then exits 1 after everything else is
   published; the next fetch tries the tag again.
   `--prune` then deletes the `refs/remotes/<remote>/<branch>` refs whose
@@ -1275,6 +1287,29 @@ attestation support warn once per command and skip the log.
   "branch":"...","old":"<hex>|null","new":"<hex>|null",
   "up_to_date":<bool>}` plus the tag fields of `kit fetch` on success, or
   `{"ok":false,"error":"..."}` on failure.
+- **Automatic local pack maintenance (default on).** After applying a
+  pack or pruning a remote-tracking ref, fetch and pull remove abandoned
+  staging files and lone indexes past the 14-day grace period.
+  They periodically retire wholly dead packs past grace, remove a pack
+  that lost its index past grace only after a collection's mark found
+  nothing live that needs it, and rewrite,
+  merge and retire covered packs. `kit commit` runs the same step after
+  it publishes, so a repository that never fetches does not build up
+  packs, and `kit add` alone does not run it. A fetch or clone that applies packs creates the advisory stamp. A clone that finds fewer than
+  32 pairs leaves it empty, and an empty stamp counts as never run, so the
+  first fetch or commit that finds 32 pairs runs a full step. Set `gc.auto = false` in repo or user config to disable the
+  step. A step has a 5 second budget before retirement, so a command that
+  runs a due step can take about 5 seconds longer, and more when it retires
+  packs. A maintenance failure leaves the command's exit status unchanged.
+  Use `-q` to hide the maintenance lines. Fetch and fast-forward pull add a
+  `maintenance` object to `--format=json` when collection was attempted or
+  a file was removed. It contains `leftovers_removed`, `packs_retired`,
+  `packs_rewritten`, `packs_merged`, `packs_retired_covered`,
+  `bytes_copied`, `bytes_reclaimed`, `collection` and `elapsed` in
+  milliseconds. `collection` is one of `not_due`, `complete`, `busy`,
+  `roots_changed`, `over_budget`, `progress` (planned work is left; the
+  next step is due in an hour) and `failed`. `kit commit` prints its
+  maintenance line on standard error and adds nothing to its JSON.
 - **Post-fetch signature verification (default ON).**
   `clone`/`pull`/`fetch` verify every commit/remix/tag the fetch newly
   introduces &mdash; the same check `kit verify <rev>` runs manually
@@ -1393,9 +1428,7 @@ attestation support warn once per command and skip the log.
   (<reason>)`. A remote tag with another value is refused unless `--force`
   or `--force-with-lease`; both condition on the value the push read. A push
   refuses an unsigned annotated tag (re-create it with `kit tag -s`, or push
-  a lightweight tag), an annotated tag whose object names another tag, and,
-  over `kit+ssh` and `kit+file`, a new tag that would take the remote's tag
-  listing past 960 KiB. On a ticketed Connect remote, tags whose history
+  a lightweight tag), an annotated tag whose object names another tag. On a ticketed Connect remote, tags whose history
   needs more than one advance are refused: push the branch first, then the
   tags. A refused tag does not stop the others, and the push exits 1.
   `--format=json` prints `{"ok":<bool>,"remote":"...","endpoint":"...",
@@ -1492,9 +1525,9 @@ attestation support warn once per command and skip the log.
   `.kit/server-meta` (exit 78), because the refs of that root live in a
   database. A session may send at most 10,000 frames after `Hello`; the
   server refuses the next one with an error that names the limit. An
-  unchanged fetch costs two frames (the branch and tag listings) plus at
-  least two per branch, so one session fetches at most 4,999 branches
-  (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
+  unchanged fetch costs the frames of the branch and tag listings (one for each
+  1,000 refs) plus at least two per branch, so one session fetches at most
+  4,997 branches (SPEC-TRANSPORT §4.4). Each new annotated tag pushed alone costs two more
   frames, so a clone of about 5,000 of them fails the same way.
 
   `--http` and `--listen-enc` do not exist. `KIT_API_TOKEN` is sent as a
@@ -1534,6 +1567,9 @@ attestation support warn once per command and skip the log.
   (`DATAERR`).
 
   The store-less `--from`/pack mode can check unreferenced objects, while local mode streams only reachable objects by default and enumerates the whole store only with `--show-unreferenced`.
+- `kit closure repair-indexes` &mdash; rebuild damaged or missing local pack
+  indexes from verified packs. Run it from any worktree, even if no revision resolves.
+  If a pack fails verification, fetch again from the remote that supplied it.
 - `kit git export <dest> [--remote-name <name>] [--ref <ref>]...
   [--no-attest] [--algorithm <alg>] [--signer <kind>] [--passthrough] [--json]`
   &mdash; deterministic **one-way** export of
@@ -1933,7 +1969,9 @@ These are documented behaviors, not bugs:
   passed explicitly (and requires `--ignore-rev`/`--ignore-revs-file`).
 - `kit reset [--soft|--mixed|--hard] [-f] [<commit>]` &mdash; `--soft` moves
   HEAD only; `--mixed` (the default) also resets the index; both leave the
-  worktree untouched. `--hard` additionally resets the worktree to the
+  worktree untouched. Every mode but `--soft` also ends a merge, cherry-pick
+  or revert in progress and drops the record of a pull that stopped before
+  its restore. `--hard` additionally resets the worktree to the
   target tree &mdash; overwriting tracked-file changes and removing tracked
   files the target drops. Untracked files are kept (like git), **except**
   an untracked path that *collides* with one the target writes. As a
@@ -1992,6 +2030,7 @@ which routes them to the user scope automatically.
 | `ssh.strict_host_key_checking` | `yes` / `no` / `accept-new` | inherit | User-scoped only |
 | `ssh.user_known_hosts_file` | path | inherit | User-scoped only |
 | `ssh.identity_file` | path | inherit | User-scoped only |
+| `gc.auto` | `true` / `false` | `true` | Repo or user config. `false` turns off the automatic local pack maintenance step of `commit`, `fetch` and `pull`. Kit 0.9 and older reject the key in a repository config |
 | `signer` | `file` / `keystore` | `file` | User-scoped commit signing source |
 | `key.backend` | backend name | `software` | User-scoped default for `kit key` |
 | `key.default_ref` | `<backend>:<label>` | `software:default` | User-scoped fallback key ref |
@@ -2219,18 +2258,18 @@ that kit intentionally accepts only from user scope or explicit flags.
 
 ### Signals
 
-- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** stop a local command at once.
-  Every write is a temp file renamed into place, so a stopped command
-  leaves no half-written ref or index. `checkout` and `reset --hard`
-  write the files first and then the branch, HEAD and the index
-  together, as git does: a stopped one leaves its branch, HEAD and the
-  index where they were, the files it wrote show as local changes (new
-  files as untracked), and the same command run again with `-f`
-  finishes it.
-  `kit gc` sweeps the object temp files a stopped command leaves, the
-  next restore that writes into a directory (a checkout, `kit reset
-  --hard`, a pull) removes the worktree temp files left there, and a temp
-  file left beside a ref is never read as one.
+- **`SIGINT`** (Ctrl-C) and **`SIGTERM`** usually stop a local command
+  at once. `reset --hard` writes the files first, then updates the branch,
+  HEAD, and index together. If it stops during the file writes, the files it
+  wrote show as local changes. Rerun it with `-f` to finish.
+- When `checkout` or `switch` starts restoring files for a branch or detached
+  HEAD, the first signal lets it finish updating the worktree, HEAD, and
+  index. A second signal stops it immediately. Rerun with `-f` to finish an
+  interrupted switch.
+- `kit gc` sweeps object temporary files. The next restore that writes into
+  a directory removes stale regular restore temporary files there. Status
+  and add skip untracked restore temporary files and symlinks. Ref reads
+  skip temporary files.
 - `push`, `pull`, `fetch`, `clone`, `log`, `reflog`, `grant`, `epoch` and
   `visibility` instead set a graceful-shutdown flag on the first signal.
   They poll it at natural checkpoints and exit with `tempfail` (75) so the

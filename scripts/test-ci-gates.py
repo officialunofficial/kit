@@ -228,6 +228,8 @@ class Gates(unittest.TestCase):
         self.assertEqual(sorted(deny), sorted(audit))
         sweep = strip_comments((ROOT / ".github/workflows/rust-security.yml").read_text())
         self.assertEqual(sorted(deny), sorted(re.findall(r"--ignore (RUSTSEC-[\d-]+)", sweep)))
+        recipes = strip_comments((ROOT / "justfile").read_text())
+        self.assertEqual(sorted(deny), sorted(re.findall(r"--ignore (RUSTSEC-[\d-]+)", recipes)))
 
     def test_public_workflows_have_the_gate_job_and_no_secret(self):
         text = strip_comments((ROOT / ".github/workflows/rust.yml").read_text())

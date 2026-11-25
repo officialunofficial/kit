@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use super::{RefError, RefResult};
 use crate::hash::{self, Hash};
 
-pub(crate) const DIRECTORY: &str = "history-v1";
+/// The directory under the repository directory that holds branch history.
+pub const DIRECTORY: &str = "history-v1";
 const MAX_TRANSACTION: u64 = 8192;
 
 /// First line of a pending history transaction file. It names the record
@@ -120,7 +121,7 @@ pub(crate) fn invalidate(common: &Path, full_ref: &str) -> RefResult<()> {
 
 pub(crate) fn remove_synced(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
-        Ok(()) => crate::atomic::sync_dir(path.parent().expect("metadata has parent")),
+        Ok(()) => crate::durable::flush_dir(path.parent().expect("metadata has parent")),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

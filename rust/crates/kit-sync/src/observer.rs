@@ -22,6 +22,16 @@ pub enum SyncEvent {
         bytes: u64,
         bytes_total: Option<u64>,
     },
+    /// A pack download that was interrupted continued where it stopped: the
+    /// remote sent only the rest, and `bytes` bytes were not fetched again.
+    DownloadResumed { bytes: u64 },
+    /// An interrupted pack download could not continue, because the remote
+    /// refused the range or answered with another body, so the pack is read
+    /// again from its start.
+    DownloadRestarted { reason: &'static str },
+    /// A verified pack kept after an earlier failed apply came from disk, so
+    /// its `bytes` bytes were not downloaded again.
+    PackReused { bytes: u64 },
     /// Objects checked for presence; the total is not known during a walk.
     ClosureProgress { done: usize },
     /// Signed history objects checked; the total is not known during a walk.
@@ -32,6 +42,9 @@ pub enum SyncEvent {
     PushPlanning { done: usize },
     /// Local lease checks completed; a branch is about to be transferred.
     PushBranchStarted { branch: String },
+    /// A tag publication finished. The command can report it if a later tag fails.
+    #[doc(hidden)]
+    TagPublished(crate::push::TagPushResult),
     /// One outgoing object was staged into a pack.
     ObjectsPacked { count: usize },
     /// A sealed outgoing pack was uploaded successfully.

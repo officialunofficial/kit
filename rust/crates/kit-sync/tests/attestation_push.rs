@@ -17,6 +17,9 @@ fn local(tx: &dyn Transport, predicate: &str) -> (tempfile::TempDir, Hash) {
         url: "kit+memory://push".into(),
         kind: "memory".into(),
     };
+    // One caller removes a tree to exercise incomplete attested history.
+    let layout = kit_sync::init_clone_dir(temp.path(), &desc).unwrap();
+    kit_core::fault::keep_loose(&layout);
     kit_sync::clone(
         temp.path(),
         &TransportSource::new(tx),
@@ -105,6 +108,8 @@ fn simultaneous_attesters_both_survive_cas() {
         let a = scope.spawn(|| {
             let gated = Gated {
                 deny_compaction: false,
+                members_only: false,
+                hook: None,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -115,6 +120,8 @@ fn simultaneous_attesters_both_survive_cas() {
         let b = scope.spawn(|| {
             let gated = Gated {
                 deny_compaction: false,
+                members_only: false,
+                hook: None,
                 source,
                 barrier,
                 first: std::cell::Cell::new(true),
@@ -160,6 +167,8 @@ struct Gated<'a> {
     first: std::cell::Cell<bool>,
     limits: kit_core::protocol::UploadLimits,
     deny_compaction: bool,
+    members_only: bool,
+    hook: Option<&'a dyn Fn(bool)>,
 }
 impl kit_sync::RemoteSource for Gated<'_> {
     fn upload_limits(&self) -> kit_core::protocol::UploadLimits {
@@ -178,6 +187,11 @@ impl kit_sync::RemoteSource for Gated<'_> {
         self.source.list_refs(prefix)
     }
     fn read_ref(&self, name: &str) -> Result<Option<Hash>, kit_sync::SourceError> {
+        if name == ATTESTMAP_REF
+            && let Some(hook) = self.hook
+        {
+            hook(false);
+        }
         let result = self.source.read_ref(name);
         if name == ATTESTMAP_REF && self.first.replace(false) {
             self.barrier.wait();
@@ -193,6 +207,25 @@ impl kit_sync::RemoteSource for Gated<'_> {
         hint: &str,
         sink: &mut dyn kit_core::protocol::PackSink,
     ) -> Result<(), kit_sync::SourceError> {
+        if self.members_only && hint == ATTESTMAP_REF {
+            let mut head = self.source.read_ref(ATTESTMAP_REF)?;
+            let mut member = false;
+            while let Some(id) = head {
+                let node = kit_core::transfer::decode_packlist(
+                    &self.source.download_blob(&PackKey::new(id), hint)?,
+                )
+                .unwrap();
+                if PackKey::new(id) == *key || node.packs.iter().any(|id| PackKey::new(*id) == *key)
+                {
+                    member = true;
+                    break;
+                }
+                head = node.prev;
+            }
+            if !member {
+                return Err(kit_sync::SourceError::PackNotFound);
+            }
+        }
         self.source.download_pack(key, hint, sink)
     }
     fn upload_pack(
@@ -240,6 +273,9 @@ impl kit_sync::RemoteSource for Gated<'_> {
                 )));
             }
         }
+        if let Some(hook) = self.hook {
+            hook(true);
+        }
         self.source.write_attestmap(condition, tip, keys)
     }
 }
@@ -272,17 +308,36 @@ fn compaction_splits_existing_packs_under_smaller_upload_and_ticket_caps() {
         .unwrap();
     let (dir, _) = local(&tx, "example.com/new/v1");
     let source = TransportSource::new(&tx);
-    let gated = Gated {
+    let mut gated = Gated {
         deny_compaction: false,
+        members_only: true,
+        hook: None,
         source: &source,
         barrier: &std::sync::Barrier::new(1),
         first: std::cell::Cell::new(false),
         limits: kit_core::protocol::UploadLimits {
             max_pack_bytes: Some(1024),
-            data_packs_per_advance: Some(1),
+            data_packs_per_advance: Some(16),
             ..Default::default()
         },
     };
+    gated.limits.data_packs_per_advance = Some(1);
+    let refused = kit_sync::push(dir.path(), &gated, &options()).unwrap();
+    assert_eq!(refused.attestations_pushed, 0);
+    assert_eq!(tx.read_ref(ATTESTMAP_REF).unwrap(), Some(id));
+    assert!(
+        refused
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("atomic upload ticket limit"))
+    );
+    assert!(
+        !refused
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("permanent"))
+    );
+    gated.limits.data_packs_per_advance = Some(16);
     let report = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert_eq!(report.attestations_pushed, 1);
     assert!(
@@ -355,38 +410,134 @@ fn depth_64_rebaseline_preserves_oldest_first_pack_order_under_update_permission
 }
 
 #[test]
-fn git_bridge_warns_for_userinfo_and_local_mirrors_without_printing_them() {
-    for (mirror, expected) in [
-        ("https://user:secret@example.org/repo", true),
-        ("/local/private/path", true),
-        ("https://example.org/repo", false),
+fn push_skips_private_git_locators_and_publishes_safe_envelopes() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&tx);
+    let (dir, tip) = local(&tx, "example.com/local/v1");
+    let layout = RepoLayout::single(dir.path());
+    let safe = std::fs::read(&kit_attest::store::list(&layout, &tip).unwrap()[0]).unwrap();
+    let mut published = vec![safe];
+    let mut skipped = Vec::new();
+    let bridge_cases = [
+        ("https://user:example@example.org/repo", Some("userinfo")),
+        ("ssh://user@example.org/repo", Some("userinfo")),
+        ("/private/example/repo", Some("local path")),
+        ("relative/repo", Some("local path")),
+        ("git@example.org:repo", Some("local path")),
+        ("FiLe:///private/example/repo", Some("local path")),
+        ("https://example.org/repo?key=example", Some("query")),
+        ("https://example.org/repo?", Some("query")),
+        ("https://example.org/repo#example", Some("fragment")),
+        ("https://example.org/path@revision", Some("userinfo")),
+        ("https://user:part/part@example.org/repo", Some("userinfo")),
+        ("https://user%40example.org/repo", Some("userinfo")),
+        ("/private/https://example.org/repo", Some("local path")),
+        ("helper::https://example.org/repo", Some("local path")),
+        ("C://private/repo", Some("local path")),
+        (r"https://localhost\private\repo", Some("local path")),
+        ("https:///private/repo", Some("local path")),
+        ("https://example.org/:/private/repo", Some("local path")),
+        ("1https://example.org/repo", Some("local path")),
+        ("ssh://[::1]:22/group/repo", None),
+        ("ssh://[::1]/group/repo", None),
+        ("https://example.org:443/repo", None),
+        ("https://example.org/repo", None),
+        ("local", None),
+    ];
+    let import_cases = [
+        ("/private/old-import/repo", Some("local path")),
+        ("https://user:partial", Some("userinfo")),
+        ("https://[user:partial]/repo", Some("userinfo")),
+        ("https://user:123:456/repo", Some("userinfo")),
+        ("https://[::1]partial/repo", Some("userinfo")),
+        ("https://[::1/repo", Some("userinfo")),
+        ("https://:443/repo", Some("userinfo")),
+        ("https://example.org:/repo", Some("userinfo")),
+        ("file:///private/source/repo", Some("local path")),
+        ("https://example.org/source", None),
+        ("local", None),
+    ];
+    let other_cases = [("file:///example/provenance/source", None)];
+    for (kind, cases) in [
+        ("git-bridge", bridge_cases.as_slice()),
+        ("git-import", import_cases.as_slice()),
+        ("provenance", other_cases.as_slice()),
     ] {
-        let tx = kit_transport_memory::MemoryTransport::new();
-        attestation_fetch::code(&tx);
-        let (dir, tip) = local(&tx, "example.com/local/v1");
-        let layout = RepoLayout::single(dir.path());
-        let mut env = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
-        let mut statement: serde_json::Value = serde_json::from_slice(&env.payload).unwrap();
-        statement["predicateType"] = "https://kit.dev/git-bridge/v1".into();
-        statement["predicate"] = serde_json::json!({"mirror": mirror});
-        env.payload = serde_json::to_vec(&statement).unwrap();
-        kit_attest::store::save(&layout, &tip, env.encode().unwrap().as_bytes()).unwrap();
-        let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
-        assert_eq!(report.attestations_pushed, 2);
-        assert_eq!(
-            report
-                .attestation_warnings
-                .iter()
-                .any(|warning| warning.contains("git-bridge")),
-            expected
-        );
-        assert!(
-            report
-                .attestation_warnings
-                .iter()
-                .all(|warning| !warning.contains(mirror))
-        );
+        for &(locator, reason) in cases {
+            let bytes = attestation_fetch::git_locator_envelope(tip, kind, locator);
+            let (id, path) = kit_attest::store::save(&layout, &tip, &bytes).unwrap();
+            if let Some(reason) = reason {
+                skipped.push((kind, locator, id, path, reason));
+            } else {
+                published.push(bytes);
+            }
+        }
     }
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, published.len());
+    assert_eq!(report.attestation_warnings.len(), skipped.len() + 1);
+    for (kind, locator, id, path, reason) in skipped {
+        assert!(report.attestation_warnings.iter().any(|warning| {
+            warning.contains("skipped")
+                && warning.contains(kind)
+                && warning.contains(&hash::to_hex(&id))
+                && warning.contains(reason)
+                && !warning.contains(locator)
+        }));
+        assert!(path.is_file());
+    }
+    published.sort_by_key(|bytes| hash::hash(bytes));
+    let expected = kit_attest::pack::build(
+        &published.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        1 << 20,
+    )
+    .unwrap();
+    let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
+    let node = kit_core::transfer::decode_packlist(
+        &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(node.packs, vec![hash::hash(&expected)]);
+}
+
+#[test]
+fn compaction_skips_reuploading_unsafe_git_bridge_envelopes() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    let (tip, _) = attestation_fetch::code(&tx);
+    let mirror = "https://example.org/repo?key=example";
+    let bridge = attestation_fetch::git_locator_envelope(tip, "git-bridge", mirror);
+    let safe = attestation_fetch::envelope(tip);
+    let safe_pack = kit_attest::pack::build(&[&safe], 4096).unwrap();
+    let old_pack = kit_attest::pack::build(&[&bridge, &safe], 4096).unwrap();
+    let key = hash::hash(&old_pack);
+    tx.upload_blob(&old_pack, &PackKey::new(key), None).unwrap();
+    let node = kit_core::transfer::encode_packlist(None, &vec![key; 4096]).unwrap();
+    let head = hash::hash(&node);
+    tx.upload_blob(&node, &PackKey::new(head), None).unwrap();
+    tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &head)
+        .unwrap();
+    attestation_fetch::append(&tx, &safe_pack);
+    let (dir, tip) = local(&tx, "example.com/local/v1");
+    let layout = RepoLayout::single(dir.path());
+    for path in kit_attest::store::list(&layout, &tip).unwrap() {
+        std::fs::remove_file(path).unwrap();
+    }
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, 0);
+    let head = tx.read_ref(ATTESTMAP_REF).unwrap().unwrap();
+    let node = kit_core::transfer::decode_packlist(
+        &tx.download_blob(&PackKey::new(head), None, 4096).unwrap(),
+    )
+    .unwrap();
+    assert!(node.prev.is_none());
+    assert_eq!(node.packs, vec![hash::hash(&safe_pack)]);
+    assert!(report.attestation_warnings.iter().any(|warning| {
+        warning.contains("skipped")
+            && warning.contains("during compaction")
+            && warning.contains(&hash::to_hex(&hash::hash(&bridge)))
+            && warning.contains("query")
+            && !warning.contains(mirror)
+    }));
 }
 #[test]
 fn cached_push_never_walks_an_incomplete_tree() {
@@ -461,6 +612,8 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
         first: std::cell::Cell::new(false),
         limits: kit_core::protocol::UploadLimits::default(),
         deny_compaction: true,
+        members_only: false,
+        hook: None,
     };
     let result = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert!(
@@ -470,6 +623,17 @@ fn refused_compaction_retries_do_not_grow_the_published_log() {
             .any(|warning| warning.contains("requires f"))
     );
     let after = gated.read_ref(ATTESTMAP_REF).unwrap();
+    assert_eq!(after, Some(id));
+    assert_eq!(result.attestations_pushed, 0);
+    assert!(
+        !result
+            .attestation_warnings
+            .iter()
+            .any(|w| w.contains("permanent"))
+    );
+    let layout = RepoLayout::single(dir.path());
+    let cache = kit_sync::attestation_records::path(&layout, &gated, "origin", "", true);
+    assert!(!cache.exists());
     let again = kit_sync::push(dir.path(), &gated, &options()).unwrap();
     assert!(
         again
@@ -516,7 +680,7 @@ fn stale_subjects_never_block_commit_attestations_on_an_incomplete_tree() {
 }
 
 #[test]
-fn permanence_warning_is_observed_once_before_the_first_publication() {
+fn permanence_warning_is_recorded_only_after_publication() {
     use kit_sync::Observer;
     struct Warning<'a> {
         transport: &'a kit_transport_memory::MemoryTransport,
@@ -527,8 +691,8 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
         fn event(&self, event: &kit_sync::SyncEvent) {
             if matches!(event, kit_sync::SyncEvent::AttestationWarning { message } if message.contains("permanent"))
             {
-                assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_none());
-                assert!(!self.transport.pack_exists(&self.pack, None).unwrap());
+                assert!(self.transport.read_ref(ATTESTMAP_REF).unwrap().is_some());
+                assert!(self.transport.pack_exists(&self.pack, None).unwrap());
                 self.count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -555,4 +719,115 @@ fn permanence_warning_is_observed_once_before_the_first_publication() {
     let report = kit_sync::push(dir.path(), &TransportSource::new(&transport), &opts).unwrap();
     assert_eq!(report.attestations_pushed, 1);
     assert_eq!(warning.count.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn concurrent_compaction_and_append_preserve_every_envelope() {
+    for shrink in [false, true] {
+        let tx = kit_transport_memory::MemoryTransport::new();
+        let (tip, _) = attestation_fetch::code(&tx);
+        let old = kit_attest::pack::build(&[&attestation_fetch::envelope(tip)], 4096).unwrap();
+        let old_key = hash::hash(&old);
+        tx.upload_blob(&old, &PackKey::new(old_key), None).unwrap();
+        let bytes = kit_core::transfer::encode_packlist(None, &vec![old_key; 4096]).unwrap();
+        let id = hash::hash(&bytes);
+        tx.upload_blob(&bytes, &PackKey::new(id), None).unwrap();
+        tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Missing, &id)
+            .unwrap();
+        let (dir, _) = local(&tx, "example.com/local/v1");
+        let reads = std::cell::Cell::new(0);
+        let fired = std::cell::Cell::new(false);
+        let remote_env = {
+            let mut env = kit_attest::envelope::decode(&attestation_fetch::envelope(tip)).unwrap();
+            env.payload = String::from_utf8(env.payload)
+                .unwrap()
+                .replace("example.com/test/v1", "example.com/racing/v1")
+                .into_bytes();
+            env.encode().unwrap().into_bytes()
+        };
+        let remote_pack = kit_attest::pack::build(&[&remote_env], 4096).unwrap();
+        let hook = |writing: bool| {
+            if !writing {
+                reads.set(reads.get() + 1);
+            }
+            if fired.get() || (shrink && (writing || reads.get() != 2)) || (!shrink && !writing) {
+                return;
+            }
+            fired.set(true);
+            if shrink {
+                let bytes = kit_core::transfer::encode_packlist(None, &[old_key]).unwrap();
+                let id = hash::hash(&bytes);
+                tx.upload_blob(&bytes, &PackKey::new(id), None).unwrap();
+                tx.update_ref(ATTESTMAP_REF, RefWriteCondition::Any, &id)
+                    .unwrap();
+            } else {
+                attestation_fetch::append(&tx, &remote_pack);
+            }
+        };
+        let source = TransportSource::new(&tx);
+        let gated = Gated {
+            source: &source,
+            barrier: &std::sync::Barrier::new(1),
+            first: std::cell::Cell::new(false),
+            limits: kit_core::protocol::UploadLimits::default(),
+            deny_compaction: false,
+            members_only: true,
+            hook: Some(&hook),
+        };
+        let report = kit_sync::push(dir.path(), &gated, &options()).unwrap();
+        assert_eq!(report.attestations_pushed, 1);
+        assert!(fired.get());
+        let clone_dir = tempfile::tempdir().unwrap();
+        let remote = CloneRemote {
+            name: "verify".into(),
+            url: "kit+memory://verify".into(),
+            kind: "memory".into(),
+        };
+        kit_sync::clone(
+            clone_dir.path(),
+            &source,
+            &remote,
+            &SyncOptions::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        let layout = RepoLayout::single(clone_dir.path());
+        assert_eq!(
+            kit_attest::store::list(&layout, &tip).unwrap().len(),
+            if shrink { 2 } else { 3 }
+        );
+    }
+}
+
+/// Always reports an interrupt, as after a Ctrl-C.
+struct Interrupted;
+impl kit_sync::Observer<kit_sync::SyncEvent> for Interrupted {
+    fn cancelled(&self) -> bool {
+        true
+    }
+}
+
+/// An interrupt in the attestation phase ends the push as interrupted, not
+/// as a success with a warning. The branch is already up to date, so the
+/// attestation phase is the first to see the interrupt.
+#[test]
+fn an_interrupt_in_the_attestation_phase_ends_the_push_as_interrupted() {
+    let tx = kit_transport_memory::MemoryTransport::new();
+    attestation_fetch::code(&tx);
+    let (dir, _) = local(&tx, "example.com/new/v1");
+    let before = tx.read_ref(ATTESTMAP_REF).unwrap();
+    let mut opts = options();
+    opts.control.observer = &Interrupted;
+    let result = kit_sync::push(dir.path(), &TransportSource::new(&tx), &opts);
+    assert!(
+        matches!(
+            result,
+            Err(kit_sync::PushError::Sync(kit_sync::SyncError::Interrupted))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(tx.read_ref(ATTESTMAP_REF).unwrap(), before);
+    // The next push publishes the envelope.
+    let report = kit_sync::push(dir.path(), &TransportSource::new(&tx), &options()).unwrap();
+    assert_eq!(report.attestations_pushed, 1);
 }

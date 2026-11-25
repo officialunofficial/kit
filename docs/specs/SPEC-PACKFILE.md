@@ -9,7 +9,7 @@ audience: implementers of compatible packfile readers and writers; transport imp
 
 Status: **Normative** for kit v1 and v2.
 Scope: the byte layout of a `.kit`-produced packfile, used for
-transport upload/download and for bundle exchange.
+transport upload/download, bundle exchange, and local object storage.
 
 This spec defines the pack format and its magic.
 Version 2 (§3.3, §3.4) adds per-entry zstd compression;
@@ -118,13 +118,81 @@ only.
 
 Payload is exactly the bytes you would get from SPEC-OBJECTS
 serialization, starting with the object prologue. Unpackers insert
-these bytes into the object store verbatim (writing
-`.kit/objects/<dd>/<rr...>`) after verifying the object's id &mdash; computed
-per the type-dependent rule in SPEC-OBJECTS §10 (a flat BLAKE3 digest of
-the serialized bytes for most object types; the domain-wrapped Merkle
-root of SPEC-MERKLE-OBJECTS for `Tree` and `ChunkedBlob`) &mdash; matches the
-expected storage path. It is never simply `BLAKE3(bytes)` for every
-type.
+these bytes into the object store verbatim after verifying the object's
+type-dependent id and canonical encoding (SPEC-OBJECTS §10). The store
+can keep the bytes loose or in a local pack (§3.1.1).
+
+#### 3.1.1 Local packs
+
+A local pack has the §1 header with `version = 1`, exactly one raw
+(`0x00`) frame per distinct object id, and the §8 trailer. Readers MUST
+reject other header versions and entry types in local packs. The
+`0x03` entry remains exclusive to version-2 packfiles (§3.3).
+
+A local reader MUST accept any canonical, storable SPEC-OBJECTS object
+up to and including 1 GiB of serialized bytes, whatever its kind,
+size, or use as a chunk. It enforces the §5 format caps of 10,000,000
+entries and 4 GiB of payload. The transport's whole-body and decode
+budgets apply to wire packs. Frame overhead can place local payload
+offsets above 4 GiB. The 64 MiB fetch publication target and the
+262,154-byte fetch selection limit are writer rules in
+[SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch).
+
+The pair lives in the common object directory under
+`objects/pack/<key>.pack` and `objects/pack/<key>.idx`. The key is 64
+lowercase hex digits encoding BLAKE3 of the entire pack, trailer
+included (§7). Pack bytes are immutable. The index is a separate,
+rebuildable locator. All integer fields are unsigned little-endian.
+
+| Field | Size | Meaning |
+|---|---|---|
+| Magic | 4 bytes | ASCII `KITX` |
+| Index version | 4 bytes | `1`, the same version as the pack header |
+| Count | 4 bytes | Number of frames, `N` |
+| Fanout | 256 × 4 bytes | Bucket `i` counts ids with first byte ≤ `i` |
+| Object ids | `N` × 32 bytes | Binary ids in strictly increasing byte order |
+| Payload offsets | `N` × 8 bytes | Absolute offsets from pack byte zero, past each five-byte frame header |
+| Payload lengths | `N` × 4 bytes | On-disk payload bytes, including the object prologue |
+| Pack key | 32 bytes | Binary key encoded by both filenames |
+| Index checksum | 32 bytes | BLAKE3 of all preceding index bytes |
+
+The letters after `bmt-v2\n` in the repository marker form a set of
+required capabilities. If a reader encounters an unknown letter, it
+MUST refuse to open the store with `IncompatibleRepoFormat` and tell the
+user to update kit. The marker is exactly one of `bmt-v2\n`, `bmt-v2\n\0`
+and `bmt-v2\nP`. The zero-tail form represents a lost activation and
+selects loose storage. See
+[SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
+
+On a live pair whose pack header version and index version are the same
+unknown version, readers MUST raise `IncompatibleRepoFormat` and tell the
+user to update kit. Readers check the version before using its declared
+layout. Repair MUST preserve such a pair. A pair in which only one file has
+an unknown version, or in which the two versions differ, is damage to that
+pair, reported as such (SPEC-OBJECTS, "Object lookup"). A change to either
+format therefore bumps both versions together, so that an older reader can
+tell a newer pair from damage.
+
+The exact version-1 index size is `1,100 + 44 × N` bytes. Before
+allocating or following an offset, check the magic, version, key, count,
+exact file size, fanout bounds, and arithmetic and integer conversions.
+Ordinary lookups check the extent of each selected row, including the
+five-byte frame header. Check the frame type and length before using
+its payload. Full object reads check canonical encoding and recompute
+the requested id. Bound cached row bytes and open file handles
+independently of the number of local packs.
+
+Integrity scans, repair, merge and retirement MUST verify the full index
+checksum. Reject duplicate or unsorted ids, fanout inconsistent with the
+ids, and overlapping or missing extents. Check the pack trailer and
+whole-file key, walk the declared frames to the trailer with no gaps or
+extra data, and check the one-to-one correspondence of frames and index
+rows. Check canonical encoding and recompute each indexed id using
+SPEC-OBJECTS §10. A writer performs these checks on the pair it seals
+or on the rebuilt index and its verified pack.
+
+See [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage) for marker activation,
+discovery, publication, and the mixed local-pack conformance vector.
 
 ### 3.2 `delta` (0x02)
 
@@ -290,8 +358,10 @@ requires decompressing anything to evaluate), at least one of:
 
 1. An earlier successfully decoded and reconstructed entry in the same pack
    whose type-dependent object ID is `H`, or
-2. An object already present at path `objects/<H>` in the destination
-   store at unpack time.
+2. An object of id `H` already present in the destination store at
+   unpack time (SPEC-OBJECTS §10). Local fetch can also resolve an object
+   from an earlier accepted pack in its open publication window
+   ([SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch)).
 
 Must hold. Readers MUST NOT buffer undefined delta chains.
 
@@ -414,8 +484,9 @@ bump.
 
 ## 6. Parsing model
 
-kit packfiles (v1 and v2 alike) have no index, and a reader knows a pack is
-whole only once it has checked the trailer, which comes last. The slice
+The packfile itself contains no index. Local packs use a separate index
+(§3.1.1). A reader knows a pack is whole only once it has checked the
+trailer, which comes last. The slice
 reader (`PackReader::read`) takes the entire packfile in memory and then
 walks entries. The file-backed reader (`PackReader::read_verified`, §11.1)
 takes a pack already verified in a file and reads it one window at a time.
@@ -770,7 +841,8 @@ pack the slice reader reads, refusing what it refuses, though perhaps with
 another error. It also reads short packs with millions of entries, which the
 slice reader's charge of 896 bytes per entry refuses. A failure leaves the
 windows committed before it in the store; they hold verified,
-content-addressed objects.
+content-addressed objects. Fetch publication has its own acceptance and
+durability rules in [SPEC-TRANSPORT](SPEC-TRANSPORT.md#pack-chain-fetch).
 
 ### 11.2 The window reader
 
@@ -797,11 +869,11 @@ publication path before the terminal acceptance step.
 | Any bit-flip or truncation before the trailer is detected | 32-byte BLAKE3 trailer, verified **before** any entry is stored (§8) |
 | No entry read past the pack tail | mandatory `payload_len` bounds-check against the remaining pre-trailer bytes → `UnexpectedEof` (§2) |
 | Only known entry types are processed | anything but `0x00`/`0x02`/`0x03`/`0x04` (incl. reserved `0x01`) → `InvalidEntryType`; `0x03`/`0x04` additionally require `version = 2` or the same error fires (§3) |
-| Every stored object's bytes match its storage path | id computed via the type-dependent rule (SPEC-OBJECTS §10 / SPEC-MERKLE-OBJECTS) and verified before writing `objects/<dd>/<rr…>`; delta targets reconstructed (decompressed first, for `0x03`/`0x04`), then run through the same rule (§3.1–§3.4) |
+| Every stored object's bytes match its id | verify the type-dependent id (SPEC-OBJECTS §10 / SPEC-MERKLE-OBJECTS) before publishing at either location. Apply the same rule after reconstruction or decompression (§3.1–§3.4) |
 | No malformed or pack-only object reaches the object store | canonical SPEC-OBJECTS deserialization gate; `Object::Delta` payloads rejected (§3) |
 | Every delta is resolvable when encountered | ordering rule: base precedes its delta in-pack or pre-exists in the store; else `DeltaBaseMissing`; no buffering of undefined chains; `0x04`'s uncompressed `base_hash` needs no decompression to check (§4) |
 | Resource use is bounded on the wire | `entry_count ≤ 10M` → `TooManyObjects`; payload sum ≤ 4 GiB → `PackfileTooLarge`, never silent truncation (§5) |
-| A writer seals only packs a reader accepts | serialized size ≤ 4 GiB, decoded bytes ≤ the reader's cap for the pack length, entries ≤ 1,198,372 (§5) |
+| A wire writer seals only packs a transport reader accepts | serialized size ≤ 4 GiB, decoded bytes ≤ the reader's cap for the pack length, entries ≤ 1,198,372 (§5) |
 | Resource use is bounded on decompression | claimed `uncompressed_len` checked against `MAX_RAW_OBJECT_SIZE` (1 GiB) before any decompression allocation; decompression capacity-bounded to the claim; actual decompressed length re-checked against the claim exactly → `DecompressedSizeOverCap`/`DecompressedSizeMismatch` (§3.3) |
 | No hidden trailing data | bytes between the entry list and the trailer are rejected even if the trailer hashes them (§6) |
 | Pack identity is deterministic and byte-exact | key = lowercase hex `BLAKE3(pack_bytes)` over the whole pack including the trailer; byte-exact comparison (§7) |

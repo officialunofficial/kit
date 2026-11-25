@@ -18,11 +18,24 @@ turn a successful reuse into a dangling ref.
 **If violated:** gc can delete an object after its writer refreshed it, or
 prune an old descendant hidden behind a map-cache hit.
 
-**Enforcement status:** shared/exclusive locks on the immutable format file,
+**Enforcement status:** shared/exclusive locks on the same format inode,
 `ObjectStore::prune_if_old`, `BulkWriter::reuse_object`, and import-run memoization.
 Deterministic sweep interleaving, killed-sweeper restart, read-only reuse and
 cached chunk-closure refresh regressions cover the boundaries. SPEC-GC states
 the remaining zero-grace and long-import restrictions.
+
+## Local pack publication preserves object identity
+
+A local pack is visible through its index and pack names. The store syncs
+both staged files and the packed marker before publication. The pack
+name is durable before the index name is published. Readers treat the
+exact zero-tail marker as loose storage. Activation writes and syncs the
+capability byte at offset seven on the existing format inode.
+
+Verified readers recompute the id of the selected copy and try other
+locations if it fails. Pack repair scans the full pack before replacing
+an index. The store tests exercise staged files, lone packs, complete
+pairs, concurrent publication, corruption, and index repair.
 
 ## Connect retries preserve identity and durable acknowledgements
 
@@ -328,7 +341,7 @@ unreachable object does not meet today.
 
 ## Single commonware release train across every manifest and lockfile
 
-**Always:** Commonware requirements use the same lower bound (`2026.10.0`)
+**Always:** Commonware requirements use the same lower bound (`2026.11.0`)
 across manifests. Committed lockfiles select the same release. A move to a
 new release changes every manifest and lockfile in one commit.
 
@@ -438,7 +451,7 @@ of `rust/tests/golden/pack-v2/`. The `boundary_` packs there hold no zstd frame.
 **Always:** `kit_core::merkle::Proof`'s wire bytes (`u32 BE leaf_count ‖
 varint(n) ‖ n × 32-byte digest`) and its level-major, self-duplicate- and
 already-proven-sibling-omitting selection rule are byte-identical to
-`commonware_storage::bmt::Proof` at the pinned `2026.10.0` train, for
+`commonware_storage::bmt::Proof` at the pinned `2026.11.0` train, for
 single, range, and multi-leaf proofs alike — both directions: kit
 decodes and accepts upstream's proof bytes, and upstream decodes and
 accepts kit's.
@@ -949,8 +962,13 @@ file transport) for a push whose head condition is `Match(h)` with `h` an
 ancestor of the new tip in the local store. A conditioned push plans only
 against a head its
 condition holds for, and is refused when the head it reads differs. Force
-pushes never reset, and on a serialized or atomic advance they re-plan when
-a concurrent reset dropped the chain node their plan depended on.
+pushes never reset a valid chain. On a serialized or atomic advance they
+re-plan when a concurrent reset drops the chain node their plan depended on.
+On an ordered or serialized advance they lease the head they read and re-plan
+if a concurrent writer moves it. A push that recreates a missing head moves
+the packmap even when the chain already lists all of its packs. A push of the
+current tip restores a missing packmap from the tip's full closure. A push
+whose plan depends on a previous head cannot start a new packmap chain.
 
 **Because:** a serialized advance writes the packmap before the head, so the
 new packmap and the old head are visible together, and stay together after a
@@ -959,7 +977,10 @@ head that chain rebuilt. A reset holds only the new tip's closure: it contains t
 closure exactly when the push fast-forwards that head. An ordered force
 append after a reset would publish packs whose bases the reset dropped. A
 lease that differs from the planned head can hold again after the head moves
-away and back while a reset drops what the plan left out.
+away and back while a reset drops what the plan left out. A delete's packmap
+CAS cannot remove the newer node published by a push that observed the head
+gone. A force push that loses its head lease must re-plan before it can recreate
+the branch.
 
 **If violated:** every fetch and clone of the branch fails with a missing
 object until another push repairs the chain.
@@ -968,7 +989,8 @@ object until another push repairs the chain.
 advance kind, a crash between the two writes, a force push racing a reset
 and a re-baseline, a lease that differs from the head the push reads),
 `kit-transport-file` `push_tests` (the advance's crash hook under the push
-driver), CLI `tests/pack_rebaseline.rs`, and the `advance3` models in
+driver), `kit-sync` `tests/ref_delete.rs`, CLI `tests/pack_rebaseline.rs` and
+`tests/ssh_ref_delete.rs`, and the `advance3` models in
 `formal/quint/refs/advance.qnt` (TLC, with mutants `advance3_noAncestry`,
 `advance3_forceOrdered`, `advance3_atomicForceOrdered`,
 `advance3_leaseUnchecked` and `advance3_atomicLeaseUnchecked`, and the canary
@@ -1018,25 +1040,28 @@ after every gc.
 
 ## A fetch holds a prune guard, not the repository lock
 
-**Always:** a fetch downloads, authenticates, unpacks and records each pack as
-it arrives, in chain order, with no `worktree.lock` held and one spool file in
-`.kit/tmp/` at a time. It takes `ObjectStore::prune_guard` first, before it
-reads the applied-packs record, and holds it until after its last ref publish,
-on every return path. While any guard is held, gc deletes no object at any grace period.
+**Always:** a fetch downloads and authenticates one wire pack at a time in chain
+order. It decodes to private storage and checks required signatures before
+any of that pack's objects can publish. A publication window can hold objects
+from several accepted packs. The final closure and history checks can read
+both the durable store and that window. The fetch tries activation before
+`ObjectStore::prune_guard`. It reads the applied-packs record under the guard
+and holds it until after its last ref publish. While any guard is held, gc deletes no object at any grace period.
 `worktree.lock` is taken only around the tracking-ref write and the checkpoint.
 That wait has no deadline, reports itself once, and ends on an interrupt. No
 process ever blocks on the exclusive lock of the `format` file: gc only tries it.
-A pack is recorded as applied only after its objects are committed and its
-signatures are checked, and the record is appended as each pack lands. When a
+A wire pack is recorded as applied after the window that completes it is
+durable. A later fetch can skip the completed packs of an interrupted clone. When a
 run that skipped a recorded pack finds a delta base or a closure object
 missing, it clears the record and applies the whole chain again, once.
+A push holds the same guard from before it plans until after its last
+remote-tracking ref write, and writes each of those refs under
+`worktree.lock`.
 
 **Because:** one large file is many packs, so a clone can take hours. A lock
-held that long stops `add`, `commit` and `checkout`. Staging the packs first
-makes the disk a clone needs grow with the file. The lock was only there to keep
-gc away from objects no ref names yet, and a dedup hit leaves an old object's
-modification time, so the grace period does not protect an object a fetch
-reuses. A guard keeps gc away without any wait. The guard relies on a local
+held that long stops `add`, `commit` and `checkout`. The prune guard protects
+the objects of every reused and newly applied pack until the ref names them,
+including old objects past the grace period. The guard relies on a local
 filesystem, as every lock does (SPEC-CONCURRENCY §3.4).
 
 **If violated:** commands fail as busy during a clone, or gc deletes an object
@@ -1048,7 +1073,8 @@ lock would wait as long as the longest fetch.
 (the lock free mid-download and mid-apply, the publish wait and its interrupt,
 gc during a fetch with and without a reused old object, a fetch killed in each
 download, gc after a killed fetch then a fetch, two fetches at once, a resumed
-clone equal to an uninterrupted one); `kit-bin` `fetch_pull_lock_scope`
+clone equal to an uninterrupted one); `kit-sync` `push_tracking` (gc during a
+push); `kit-bin` `fetch_pull_lock_scope`
 (`add` and `commit` during a paused fetch); and `stage::tests`.
 
 ## A fetch closure check counts no chunk

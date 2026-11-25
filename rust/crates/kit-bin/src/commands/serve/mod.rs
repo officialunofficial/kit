@@ -145,12 +145,13 @@ fn resolve_root_repo(root: &Path, path: &str) -> Result<(PathBuf, WritePolicy), 
     };
     let root = std::fs::canonicalize(root).map_err(|_| exit::NOINPUT)?;
     let expected = root.join(namespace.to_string()).join(identity.name());
-    let resolved = std::fs::canonicalize(&expected).map_err(|_| exit::NOINPUT)?;
+    let resolved =
+        std::fs::canonicalize(&expected).map_err(|_| not_a_repository(path, exit::NOINPUT))?;
     if resolved != expected {
         return Err(exit::NOPERM);
     }
     if !resolved.is_dir() || !resolved.join(".kit").is_dir() {
-        return Err(exit::DATAERR);
+        return Err(not_a_repository(path, exit::DATAERR));
     }
     if let Ok(pinned) = std::env::var("KIT_SERVE_ROOT") {
         let pinned = std::fs::canonicalize(&pinned).map_err(|_| exit::NOPERM)?;
@@ -263,14 +264,22 @@ pub fn run(args: &[String]) -> u8 {
     )
 }
 
+/// Say on standard error that `path` is not a kit repository, and return
+/// `code`. A path that is not there and one that is not a repository share
+/// the line and keep their own exit codes. Standard output carries the wire,
+/// so nothing goes there; an ssh client shows this line where it would
+/// otherwise see only a failed handshake.
+fn not_a_repository(path: &str, code: u8) -> u8 {
+    eprintln!("kit serve: {path}: not a kit repository");
+    code
+}
+
 /// Resolve and validate the on-disk path supplied to `kit serve`.
 pub(crate) fn resolve_repo_path(path: &str) -> Result<PathBuf, u8> {
-    let resolved = std::fs::canonicalize(path).map_err(|_| exit::NOINPUT)?;
-    if !resolved.is_dir() {
-        return Err(exit::DATAERR);
-    }
-    if !resolved.join(".kit").is_dir() {
-        return Err(exit::DATAERR);
+    let resolved =
+        std::fs::canonicalize(path).map_err(|_| not_a_repository(path, exit::NOINPUT))?;
+    if !resolved.is_dir() || !resolved.join(".kit").is_dir() {
+        return Err(not_a_repository(path, exit::DATAERR));
     }
     if let Ok(root) = std::env::var("KIT_SERVE_ROOT") {
         let pinned = std::fs::canonicalize(&root).map_err(|_| exit::NOPERM)?;

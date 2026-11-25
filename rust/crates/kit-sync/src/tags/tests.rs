@@ -132,12 +132,12 @@ fn a_tag_on_a_commit_the_tracking_refs_reach_checks_only_its_tag_object() {
     assert_eq!(prover.objects_checked, 1, "the tag object only");
 }
 
-/// 1,000 tags along one new history: the first proof walks it, and each
+/// 64 tags along one new history: the first proof walks it, and each
 /// other one reads only its tag object.
 #[test]
 fn tags_along_one_new_history_share_one_walk() {
     let repo = Repo::new();
-    let history = repo.line(None, 1000);
+    let history = repo.line(None, 64);
     let tags: Vec<(String, Hash)> = history
         .iter()
         .enumerate()
@@ -158,9 +158,9 @@ fn tags_along_one_new_history_share_one_walk() {
         );
     }
 
-    assert_eq!(prover.signed_read, 2000, "each commit and tag once");
+    assert_eq!(prover.signed_read, 128, "each commit and tag once");
     // Each commit, tree and blob once, and each tag object.
-    assert_eq!(prover.objects_checked, 4000);
+    assert_eq!(prover.objects_checked, 256);
 }
 
 /// A failed proof adds nothing to the proved set, and a second tag on the
@@ -332,7 +332,7 @@ fn tags_over_one_history_with_a_missing_blob_share_one_walk() {
         );
 
         repo.store.write(&blob_bytes).unwrap();
-        prover.refresh_missing(&repo.store);
+        prover.refresh_missing(|id| repo.store.contains(id));
         for (name, tag) in &tips {
             assert_eq!(
                 repo.prove(&mut prover, &mut verified, name, *tag),

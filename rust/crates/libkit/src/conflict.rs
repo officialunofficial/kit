@@ -518,6 +518,17 @@ fn write_bytes(abs: &Path, data: &[u8]) -> Result<(), Error> {
     })
 }
 
+/// `op_result_tree`, when the store holds all of it, else `None`. Both steps
+/// of an abort use this one test, so they agree on whether the operation has a
+/// result tree: with none, only the conflict paths are the operation's, and
+/// the guards protect every other path.
+fn readable_result_tree(store: &ObjectStore, op_result_tree: Option<Hash>) -> Option<Hash> {
+    // A fresh snapshot, so the answer never depends on trees that a caller
+    // built in memory.
+    let snapshot = EphemeralSink::new(store);
+    op_result_tree.filter(|tree| diff_trees(&snapshot, None, Some(*tree)).is_ok())
+}
+
 /// Refuse an abort before it changes anything, when going back to
 /// `target_tree` would overwrite user work that is not conflict material.
 ///
@@ -563,7 +574,8 @@ pub fn ensure_abort_safe(
 
     let conflict_paths: HashSet<String> = records.iter().map(|r| r.path.clone()).collect();
     let mut discardable = conflict_paths.clone();
-    if let Some(result_tree) = op_result_tree {
+    // A result tree that the store cannot read is the same as no result tree.
+    if let Some(result_tree) = readable_result_tree(store, op_result_tree) {
         let authored = diff_trees(&snapshot, current_tree, Some(result_tree))
             .map_err(check("check operation changes"))?;
         // The paths that the user changed after the operation paused.
@@ -704,12 +716,19 @@ pub fn reset_paths(
         .map(|e| (e.path.as_str(), e))
         .collect();
 
+    let conflict_paths: HashSet<&str> = records.iter().map(|r| r.path.as_str()).collect();
+    // The content the operation wrote at each path of its result tree.
+    let mut authored_hash: HashMap<String, Hash> = HashMap::new();
     let mut paths: BTreeSet<String> = records.iter().map(|r| r.path.clone()).collect();
-    if let Some(result_tree) = op_result_tree {
-        let snapshot = EphemeralSink::new(store);
+    // A result tree that the store cannot read is the same as no result tree.
+    let snapshot = EphemeralSink::new(store);
+    if let Some(result_tree) = readable_result_tree(store, op_result_tree) {
         let authored = diff_trees(&snapshot, Some(target_tree), Some(result_tree))
             .map_err(check("check operation changes"))?;
         for e in authored.entries {
+            if let Some(hash) = e.new_hash {
+                authored_hash.insert(e.path.clone(), hash);
+            }
             paths.insert(e.path);
         }
     }
@@ -762,6 +781,20 @@ pub fn reset_paths(
         // aligns it. Only a stale index entry at the path itself goes.
         if is_directory_in(&target_map, path) {
             idx.remove_path(path);
+            continue;
+        }
+        // A clean hunk of the operation whose index entry is gone: the user
+        // stopped tracking the file. When they also changed it, it is theirs
+        // now, as in git, and stays. A file that still holds what the
+        // operation wrote is the operation's material and goes. A conflict
+        // path is always the operation's, markers and edits included.
+        if !conflict_paths.contains(path.as_str())
+            && !idx
+                .find_entry(path)
+                .is_some_and(|i| idx.entries[i].status != EntryStatus::Removed)
+            && worktree_object(store, &abs)?
+                .is_some_and(|(_, hash)| authored_hash.get(path.as_str()) != Some(&hash))
+        {
             continue;
         }
         // The operation added the path. Remove it. A directory that the user

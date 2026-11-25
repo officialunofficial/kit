@@ -1,23 +1,45 @@
-//! Declarative CLI transcript tests (`trycmd`) for simple, deterministic
-//! error paths — pins the exact user-facing text, not just an exit code.
-//!
-//! Complements, rather than replaces, the existing test tiers: full
-//! `--help`/`version` output is already pinned via `insta` snapshots in
-//! `help_snapshot.rs`; anything involving a real repo (non-deterministic
-//! hashes/timestamps) belongs with the `Repo` builder in
-//! `tests/common/mod.rs`. `trycmd` is reserved for short, fully
-//! deterministic transcripts where the `.trycmd` file doubles as
-//! human-readable documentation of the exact behavior.
-//!
-//! Fixtures live in `tests/cmd/*.trycmd`. See
-//! <https://docs.rs/trycmd/latest/trycmd/#syntax> for the file format.
+//! Exact output and exit codes for deterministic CLI errors.
+
+use assert_cmd::Command;
 
 #[test]
-fn cli_transcripts() {
-    trycmd::TestCases::new()
-        .register_bin(
-            "kit",
-            trycmd::schema::Bin::Path(std::path::PathBuf::from(env!("CARGO_BIN_EXE_kit"))),
-        )
-        .case("tests/cmd/*.trycmd");
+fn add_outside_repo_reports_missing_repository() {
+    let dir = tempfile::tempdir().expect("create directory outside a kit repository");
+
+    Command::new(env!("CARGO_BIN_EXE_kit"))
+        .current_dir(dir.path())
+        .args(["add", "foo.txt"])
+        .assert()
+        .code(1)
+        .stdout("")
+        .stderr("error: not a kit repo: path is not a kit repository (missing .kit/objects)\n");
+}
+
+#[test]
+fn serve_without_path_reports_required_argument() {
+    Command::new(env!("CARGO_BIN_EXE_kit"))
+        .arg("serve")
+        .assert()
+        .code(64)
+        .stdout("")
+        .stderr(concat!(
+            "error: the following required arguments were not provided:\n",
+            "  <PATH>\n",
+            "\n",
+            "Usage: kit serve <PATH>\n",
+            "\n",
+            "For more information, try '--help'.\n",
+        ));
+}
+
+#[test]
+fn unknown_subcommand_reports_usage_error() {
+    Command::new(env!("CARGO_BIN_EXE_kit"))
+        .arg("definitely-nonsense")
+        .assert()
+        .code(64)
+        .stdout("")
+        .stderr(
+            "error: unknown command 'definitely-nonsense' (run 'kit --help' for a list of commands)\n",
+        );
 }

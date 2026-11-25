@@ -53,6 +53,7 @@ use kit_core::hash::Hash;
 use kit_core::protocol::{
     BackoffIterator, PackKey, RepoCursor, Transport, TransportError, TransportResult,
 };
+use kit_core::ref_listing::{MAX_PAGES, RefListing};
 use kit_core::refs::{Ref, RefWriteCondition, validate_ref_name, validate_ref_prefix};
 use kit_rpc::kit::rpc::v1::ssh::{
     DownloadPack, Hello, ListRefs, PackChunk, PackExists, ReadRef, ReadRepoCursor, SshFrame,
@@ -72,6 +73,17 @@ use kit_core::protocol::{PACK_BODY_LIMIT, PackBody, PackSink, saturating_usize};
 /// from the workspace version, so a release bump propagates
 /// automatically.
 const CLIENT_ID: &str = concat!("kit ", env!("CARGO_PKG_VERSION"));
+
+// Match the reference server's fixed session budgets (SPEC-TRANSPORT §4.4).
+// Only top-level requests after Hello count toward the frame budget.
+// Uploads cost their declared length. Other requests cost 64 bytes.
+const SESSION_FRAMES: u32 = 10_000;
+const SESSION_BYTES: u64 = 1 << 30;
+const CONTROL_REQUEST_BYTES: u64 = 64;
+
+/// The refs one `ListRefs` request asks for: the most a `kit serve` page
+/// holds. A server that holds fewer answers fewer.
+const LIST_PAGE_REFS: u32 = 1000;
 
 /// Default timeout for SSH handshake replies, verb responses, and child shutdown.
 pub const DEFAULT_SSH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -128,7 +140,8 @@ pub enum SshInitError {
 /// pipe that already desynced would corrupt every subsequent frame, so
 /// the only safe retry is a full reconnect. `upload_pack` is
 /// content-addressed and safe to resend in full on the new connection
-/// (SPEC-TRANSPORT §7); a retried `update_ref` CAS write is not
+/// (SPEC-TRANSPORT §7). A request that would exceed either session
+/// budget starts on a fresh connection. A retried `update_ref` CAS write is not
 /// idempotent and callers MUST disambiguate a `RefConflict` with
 /// `read_ref` as usual.
 #[derive(Debug)]
@@ -156,6 +169,8 @@ struct ChildIo {
     child: Child,
     stdin_tx: Option<mpsc::SyncSender<WriteJob>>,
     stdout_rx: mpsc::Receiver<Result<SshFrame, FrameError>>,
+    remaining_frames: u32,
+    remaining_bytes: u64,
     /// `true` once we've shut down the child pipe. Guards double-close
     /// from `Drop` + explicit `close`.
     closed: bool,
@@ -222,45 +237,31 @@ impl SshTransport {
         }
     }
 
-    /// Ensure the child connection is live, respawning it from
-    /// `self.target` / `self.options` if a prior failure marked it
-    /// `closed`. Called at the top of every retry attempt so a
-    /// `ConnectionFailed` from the previous attempt heals before the
-    /// verb is re-issued.
-    fn ensure_connected(&self) -> TransportResult<()> {
-        let needs_reconnect = {
-            let io = self
-                .io
-                .lock()
-                .map_err(|_| TransportError::ConnectionFailed)?;
-            io.closed
+    /// Send one top-level request, reconnecting before the request if
+    /// the old session ended or lacks room. The I/O lock covers the
+    /// reconnect, accounting and the full request and response.
+    fn write_request(&self, io: &mut ChildIo, request: SshFrame) -> TransportResult<()> {
+        let bytes = match &request.body {
+            Some(ssh_frame::Body::UploadPack(header)) => header.total_bytes.unwrap_or_default(),
+            _ => CONTROL_REQUEST_BYTES,
         };
-        if !needs_reconnect {
-            return Ok(());
+        if io.closed || io.remaining_frames == 0 || bytes > io.remaining_bytes {
+            let _ = shut_child(io);
+            *io = spawn_and_handshake(&self.target, &self.options)
+                .map_err(|_| TransportError::ConnectionFailed)?;
         }
-        let fresh = spawn_and_handshake(&self.target, &self.options)
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        let mut io = self
-            .io
-            .lock()
-            .map_err(|_| TransportError::ConnectionFailed)?;
-        // Defensive: tear down whatever's left of the old child (already
-        // marked closed, but a fresh `shut_child` call is a no-op if so).
-        let _ = shut_child(&mut io);
-        *io = fresh;
-        Ok(())
+        io.remaining_frames -= 1;
+        io.remaining_bytes -= bytes;
+        write_child_frame_or_err(io, request)
     }
 
-    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder,
-    /// reconnecting before every attempt after the first if the prior
-    /// one left the connection `closed`.
+    /// Drive `attempt` through the SPEC-TRANSPORT §7 retry ladder.
     fn with_retry<T>(
         &self,
         mut attempt: impl FnMut(&mut ChildIo) -> TransportResult<T>,
     ) -> TransportResult<T> {
         kit_core::protocol::retrying(
             || {
-                self.ensure_connected()?;
                 let mut io = self
                     .io
                     .lock()
@@ -275,7 +276,7 @@ impl SshTransport {
 
 /// Spawn the `ssh` child, wire up its stdio pumps, and drive the
 /// mandatory `Hello` handshake. Shared by [`SshTransport::connect_with_options`]
-/// and [`SshTransport::ensure_connected`]'s reconnect path so the two
+/// and [`SshTransport::write_request`]'s reconnect path so the two
 /// never drift.
 fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<ChildIo, SshInitError> {
     validate_ssh_path(&target.path)?;
@@ -299,6 +300,8 @@ fn spawn_and_handshake(target: &SshTarget, options: &SshOptions) -> Result<Child
         child,
         stdin_tx: Some(stdin_tx),
         stdout_rx,
+        remaining_frames: SESSION_FRAMES,
+        remaining_bytes: SESSION_BYTES,
         closed: false,
     };
     if let Err(e) = perform_client_handshake(&mut io) {
@@ -325,6 +328,11 @@ impl Drop for SshTransport {
 }
 
 impl Transport for SshTransport {
+    /// A `kit serve` remote ingests and serves packs with this crate's pack reader, so a replacement manifest may go as a delta.
+    fn accepts_manifest_deltas(&self) -> bool {
+        true
+    }
+
     fn supports_attestations(&self) -> bool {
         true
     }
@@ -351,7 +359,7 @@ impl Transport for SshTransport {
                 )),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             cursor_from_reply(read_child_frame_or_err(io)?.body)
         })
     }
@@ -360,8 +368,8 @@ impl Transport for SshTransport {
     /// `PackChunk` carries up to `CHUNK_DATA_MAX` bytes read from `pack`.
     /// Every attempt, after a reconnect too, reads `pack` again from offset
     /// 0, so the server receives the same bytes and checks them against the
-    /// key. A body over [`PACK_BODY_LIMIT`] is refused before any read and
-    /// any frame.
+    /// key. A body over the SSH session budget is refused before any
+    /// read or frame.
     fn upload_pack(
         &self,
         pack: &dyn PackBody,
@@ -369,8 +377,10 @@ impl Transport for SshTransport {
         _head_ref: Option<&str>,
     ) -> TransportResult<()> {
         let total = pack.len();
-        if total > PACK_BODY_LIMIT {
-            return Err(TransportError::PayloadTooLarge(saturating_usize(total)));
+        if total > SESSION_BYTES {
+            return Err(TransportError::Unsupported(
+                "SSH pack exceeds the 1 GiB upload limit",
+            ));
         }
         self.with_retry(|io| {
             // Opened before the header, so a body that cannot be opened
@@ -386,7 +396,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, header)?;
+            self.write_request(io, header)?;
             send_pack_chunks(&mut body, total, key, |chunk| {
                 write_child_frame_or_err(io, chunk)
             })
@@ -425,7 +435,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             read_download_pack(|| read_child_frame_or_err(io), sink).map_err(|e| match e {
                 ReplyError::Answered(e) => e,
                 ReplyError::Cut(e) => {
@@ -444,7 +454,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::PackExistsResponse(r)) => Ok(r.exists.unwrap_or(false)),
@@ -482,7 +492,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
 
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
@@ -521,7 +531,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::UpdateRefResponse(_)) => Ok(None),
@@ -556,7 +566,7 @@ impl Transport for SshTransport {
                 ))),
                 ..Default::default()
             };
-            write_child_frame_or_err(io, req)?;
+            self.write_request(io, req)?;
             let resp = read_child_frame_or_err(io)?;
             match resp.body {
                 Some(ssh_frame::Body::ReadRefResponse(r)) => {
@@ -577,11 +587,9 @@ impl Transport for SshTransport {
         })
     }
 
-    /// `kit serve` answers a listing in one frame.
-    fn ref_listing(&self) -> kit_core::protocol::RefListing {
-        kit_core::protocol::RefListing::OneFrame
-    }
-
+    /// Every page of the listing, in name order. Each page is one request, so
+    /// a listing may carry on across a reconnect: the page token is the last
+    /// name of the page before, and it names no state of the old session.
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !prefix.is_empty() && !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.into()));
@@ -589,21 +597,39 @@ impl Transport for SshTransport {
         if prefix.len() > MAX_REF_NAME {
             return Err(TransportError::InvalidRef("ref prefix too long".into()));
         }
-        self.with_retry(|io| {
-            let req = SshFrame {
-                body: Some(ssh_frame::Body::ListRefs(Box::new(
-                    ListRefs::default().with_prefix(prefix),
-                ))),
-                ..Default::default()
-            };
-            write_child_frame_or_err(io, req)?;
-            let resp = read_child_frame_or_err(io)?;
-            match resp.body {
-                Some(ssh_frame::Body::ListRefsResponse(r)) => list_response_refs(prefix, r.refs),
-                Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
-                other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
+        let mut listing = RefListing::<Ref>::new(MAX_PAGES);
+        while listing.can_request() {
+            let token = listing.cursor().to_owned();
+            let (refs, next) = self.with_retry(|io| {
+                let mut request = ListRefs::default().with_prefix(prefix);
+                request.page_size = Some(LIST_PAGE_REFS);
+                request.page_token = (!token.is_empty()).then(|| token.clone());
+                let req = SshFrame {
+                    body: Some(ssh_frame::Body::ListRefs(Box::new(request))),
+                    ..Default::default()
+                };
+                self.write_request(io, req)?;
+                let resp = read_child_frame_or_err(io)?;
+                match resp.body {
+                    Some(ssh_frame::Body::ListRefsResponse(r)) => {
+                        Ok((list_response_refs(prefix, r.refs)?, r.next_page_token))
+                    }
+                    Some(ssh_frame::Body::Error(e)) => Err(rpc_error_to_transport(*e, "ssh")),
+                    other => Err(unexpected_frame("ssh", "ListRefsResponse", other)),
+                }
+            })?;
+            // `kit serve` sets a token only when refs follow the page, so an
+            // empty page with a token is a server that never ends the listing.
+            if refs.is_empty() && next.as_deref().is_some_and(|token| !token.is_empty()) {
+                return Err(TransportError::InvalidResponse);
             }
-        })
+            listing
+                .push(refs, next, |r| &mut r.name)
+                .map_err(|_| TransportError::InvalidResponse)?;
+        }
+        listing
+            .finish()
+            .map_err(|_| TransportError::InvalidResponse)
     }
 }
 

@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use kit_core::hash::{self, Hash};
 use kit_core::object::{Object, ObjectType};
 use kit_core::sign;
-use kit_core::store::{ObjectStore, StoreError};
+#[cfg(test)]
+use kit_core::store::ObjectStore;
+use kit_core::store::{ClosureSource, ObjectSource, StoreError};
 use rayon::prelude::*;
 
 use crate::error::SyncError;
@@ -113,7 +115,7 @@ fn verify_chunk_size() -> usize {
 /// §1), so fetch and `kit verify` never disagree. Only when a batch fails
 /// does [`verify_slice`] check each object on its own to name the bad one.
 pub(crate) fn verify_new_object_signatures(
-    store: &ObjectStore,
+    store: &(impl ObjectSource + Sync + ?Sized),
     signed: &[(Hash, u32)],
     require_signed: bool,
 ) -> Result<(), SyncError> {
@@ -259,7 +261,11 @@ fn verify_batch(batch: &[BatchEntry], parallel: bool) -> bool {
 /// The signed objects are checked as a batch first. If the batch fails,
 /// each object is checked with [`verify_one_object`], in parallel iff
 /// `parallel`, so the first failure names the offending hash.
-fn verify_slice(store: &ObjectStore, hashes: &[Hash], parallel: bool) -> Result<(), SyncError> {
+fn verify_slice(
+    store: &(impl ObjectSource + Sync + ?Sized),
+    hashes: &[Hash],
+    parallel: bool,
+) -> Result<(), SyncError> {
     // The caller lists the commits, remixes and tags an unpack stored, so
     // no blob is read here. An object of another kind is still dropped
     // right after it is read, rather than kept for the rest of the call.
@@ -412,7 +418,7 @@ pub(crate) type MissingHistory = HashMap<Hash, Hash>;
 /// decoded objects is held at a time, and `observer` is polled for
 /// cancellation after each full chunk.
 pub(crate) fn verify_history_signatures(
-    store: &ObjectStore,
+    store: &(impl ClosureSource + ?Sized),
     observer: &dyn Observer<SyncEvent>,
     tip: &Hash,
     verified: &mut VerifiedHistory,
@@ -454,7 +460,7 @@ impl HistoryWalk<'_> {
     /// Walk the history of `tip` as [`verify_history_signatures`] describes.
     pub(crate) fn run(
         &mut self,
-        store: &ObjectStore,
+        store: &(impl ClosureSource + ?Sized),
         observer: &dyn Observer<SyncEvent>,
         tip: &Hash,
     ) -> Result<(), SyncError> {
@@ -670,8 +676,9 @@ mod tests {
         let store = ObjectStore::init(&layout).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
 
+        let batch = store.batch();
         let blob = |seed: usize| -> Hash {
-            store
+            batch
                 .write(
                     &kit_core::serialize::serialize(&Object::Blob(kit_core::object::Blob {
                         data: format!("unsigned blob fixture #{seed}").into_bytes(),
@@ -687,8 +694,9 @@ mod tests {
         let mut stored: Vec<Hash> = Vec::with_capacity(2 * LARGE_BATCH);
         for i in 0..LARGE_BATCH {
             stored.push(blob(i));
-            stored.push(store.write(&signed_commit_bytes(&kp, i)).unwrap());
+            stored.push(batch.write(&signed_commit_bytes(&kp, i)).unwrap());
         }
+        batch.commit().unwrap();
         assert!(stored.len() >= verify_fanout_threshold());
 
         verify_new_object_signatures(&store, &sized(&store, &stored), true)
@@ -782,7 +790,7 @@ mod tests {
     /// A commit over the tree `seed` names, parented on `parents`, signed
     /// with `kp` when `signed`.
     fn history_commit(
-        store: &ObjectStore,
+        store: &impl kit_core::store::ObjectSink,
         kp: &kit_core::sign::KeyPair,
         seed: usize,
         parents: Vec<Hash>,
@@ -802,7 +810,7 @@ mod tests {
             c.signature = kit_core::sign::sign_commit(&c, kp).unwrap().0;
         }
         store
-            .write(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
+            .put(&kit_core::serialize::serialize(&Object::Commit(c)).unwrap())
             .unwrap()
     }
 
@@ -815,11 +823,13 @@ mod tests {
         let store = ObjectStore::init(&kit_core::layout::RepoLayout::single(dir.path())).unwrap();
         let kp = kit_core::sign::KeyPair::generate().unwrap();
         let line = |root_signed: bool, offset: usize| {
-            let root = history_commit(&store, &kp, offset, Vec::new(), root_signed);
+            let batch = store.batch();
+            let root = history_commit(&batch, &kp, offset, Vec::new(), root_signed);
             let mut tip = root;
             for seed in 1..verify_chunk_size() + 8 {
-                tip = history_commit(&store, &kp, offset + seed, vec![tip], true);
+                tip = history_commit(&batch, &kp, offset + seed, vec![tip], true);
             }
+            batch.commit().unwrap();
             (root, tip)
         };
         let (_, clean) = line(true, 0);

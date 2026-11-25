@@ -419,8 +419,8 @@ complete -c kit -n "__fish_seen_subcommand_from verify-proof" \
     -l format -d "Output format" -xa "default json"
 complete -c kit -n "__fish_seen_subcommand_from verify-proof" \
     -l payload-out -d "Write verified payload bytes" -r
-complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify" \
-    -a "export verify"
+complete -c kit -n "__fish_seen_subcommand_from closure; and not __fish_seen_subcommand_from export verify repair-indexes" \
+    -a "export verify repair-indexes"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \
     -l history -d "Full ancestry (history mode)"
 complete -c kit -n "__fish_seen_subcommand_from closure; and __fish_seen_subcommand_from export" \

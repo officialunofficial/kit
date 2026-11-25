@@ -24,6 +24,7 @@ mod packmap;
 
 mod upload_receipts;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -359,6 +360,7 @@ struct PushObserver<'a> {
     terminal: &'a Terminal,
     warning: Option<String>,
     attestations: std::sync::atomic::AtomicUsize,
+    published_tags: Option<&'a RefCell<Vec<kit_sync::push::TagPushResult>>>,
 }
 
 impl Observer<SyncEvent> for PushObserver<'_> {
@@ -377,6 +379,11 @@ impl Observer<SyncEvent> for PushObserver<'_> {
             if *count > 0 {
                 eprintln!("Published {count} attestations");
             }
+        }
+        if let SyncEvent::TagPublished(tag) = event
+            && let Some(published) = self.published_tags
+        {
+            published.borrow_mut().push(tag.clone());
         }
         self.terminal.event(event);
     }
@@ -428,9 +435,11 @@ pub(crate) fn push_tags_with_source(
     authority: Option<&dyn StepAuthority>,
     attestations: (bool, &str),
     terminal: &Terminal,
+    published: &RefCell<Vec<kit_sync::push::TagPushResult>>,
 ) -> Result<Vec<kit_sync::push::TagPushResult>, Error> {
     let layout = kit_core::layout::discover(cwd)?;
-    let (mut settings, observer) = push_inputs(&layout, authority, terminal);
+    let (mut settings, mut observer) = push_inputs(&layout, authority, terminal);
+    observer.published_tags = Some(published);
     settings.attestations = attestations.0;
     settings.remote_url = attestations.1;
     transfer::push_tags_with_source(cwd, source, remote, selection, force, &settings, &observer)
@@ -506,36 +515,40 @@ fn push_inputs<'a>(
             terminal,
             warning,
             attestations: std::sync::atomic::AtomicUsize::new(0),
+            published_tags: None,
         },
     )
 }
 
 /// Fetch the remote and fast-forward the current branch; see
-/// [`transfer::pull_with_source`]. `tags` takes the remote's tags too.
+/// [`transfer::pull_with_options`]. `tags` takes the remote's tags too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pull_all_with_source(
     cwd: &Path,
     source: &dyn kit_sync::RemoteSource,
     remote: &str,
     target_branch: Option<&str>,
+    checkout: bool,
     require_signed: bool,
     tags: bool,
+    cfg: &crate::config::Config,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::PullReport, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
     let mut options = kit_sync::SyncOptions::default()
         .with_target_branch(target_branch.map(str::to_owned))
+        .with_checkout(checkout)
         .with_verify_signatures(require_signed)
         .with_tags(tags)
-        .with_sync_policy(sync_policy(&layout));
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
     attestations.2.clone_into(&mut options.remote_url);
     Ok(kit_sync::pull(cwd, source, remote, &options, terminal)?)
 }
 
-/// Fetch the remote; see [`transfer::fetch_with_source`]. `tags` takes the
+/// Fetch the remote; see [`transfer::fetch_with_options`]. `tags` takes the
 /// remote's tags too, and the report names each tag published or refused.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fetch_all_with_source(
@@ -545,15 +558,16 @@ pub(crate) fn fetch_all_with_source(
     require_signed: bool,
     prune: bool,
     tags: bool,
+    cfg: &crate::config::Config,
     attestations: (bool, bool, &str),
     terminal: &Terminal,
 ) -> Result<kit_sync::FetchReport, Error> {
-    let layout = kit_core::layout::discover(cwd)?;
     let mut options = kit_sync::SyncOptions::default()
         .with_verify_signatures(require_signed)
         .with_prune(prune)
         .with_tags(tags)
-        .with_sync_policy(sync_policy(&layout));
+        .with_auto_maintenance(cfg.gc_auto_enabled())
+        .with_sync_policy(cfg.object_sync_policy());
     options.attestations = attestations.0;
     options.refetch_attestations = attestations.1;
     attestations.2.clone_into(&mut options.remote_url);

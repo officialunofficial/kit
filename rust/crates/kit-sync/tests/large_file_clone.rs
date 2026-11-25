@@ -292,7 +292,7 @@ fn remote() -> CloneRemote {
 #[test]
 fn a_file_of_many_chunks_clones_with_each_pack_downloaded_once() {
     let _guard = serial();
-    let file = large_file(4_096, KIB, 128);
+    let file = large_file(512, KIB, 16);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     let source = measured(&file, &target);
@@ -311,7 +311,7 @@ fn a_file_of_many_chunks_clones_with_each_pack_downloaded_once() {
         file.content
     );
     // 32 packs of chunks and one holding the manifest, tree and commit.
-    assert_eq!(source.packs.get(), 4_096 / 128 + 1);
+    assert_eq!(source.packs.get(), 512 / 16 + 1);
     assert_eq!(source.staging_seen.get(), 0, "no named staging directory");
     assert_eq!(
         staging_entries(&target) + staging_entries(&target.join(".kit")),
@@ -323,7 +323,7 @@ fn a_file_of_many_chunks_clones_with_each_pack_downloaded_once() {
 #[test]
 fn fetching_a_file_of_many_chunks_holds_about_one_pack() {
     let _guard = serial();
-    let file = large_file(16_384, 2 * KIB, 256);
+    let file = large_file(512, 128 * KIB, 4);
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("work");
     let source = measured(&file, &target);
@@ -346,9 +346,9 @@ fn fetching_a_file_of_many_chunks_holds_about_one_pack() {
     );
     assert_eq!(source.staging_seen.get(), 0, "no named staging directory");
     assert_eq!(spool_entries(&target), 0, "the spools are unnamed");
-    // One spooled pack's window, its unpack working set and the manifest,
-    // far below the 32 MiB of packs.
-    let ceiling = 8 * MIB;
+    // One spooled pack's window, its unpack working set, the manifest and the
+    // seal's check buffer (up to 8 MiB), far below the 64 MiB of packs.
+    let ceiling = 16 * MIB;
     assert!(ceiling * 4 <= file.pack_bytes);
     assert!(peak < ceiling, "a fetch held {} KiB at once", peak / KIB);
 }

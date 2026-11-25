@@ -453,7 +453,6 @@ impl Tag {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkedBlob {
     total_size: u64,
-    /// `0` = content-defined chunking (`FastCDC`), otherwise fixed-size.
     chunk_size: u32,
     chunks: Vec<Hash>,
     /// `ends[i]` is the end offset of chunk `i`; the same length as `chunks`.
@@ -476,9 +475,11 @@ impl ChunkedBlobBuilder {
     ///
     /// # Errors
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
-    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
+    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`] and
+    /// [`KitError::UnknownChunkerProfile`] for an unknown profile ID.
     pub(crate) fn new(total_size: u64, chunk_size: u32, capacity: usize) -> Result<Self, KitError> {
         crate::serialize::check_total_size_cap(total_size)?;
+        crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
         let capacity = capacity.min(crate::serialize::MAX_CHUNKS as usize);
         Ok(Self {
             total_size,
@@ -531,14 +532,15 @@ impl ChunkedBlobBuilder {
 impl ChunkedBlob {
     /// Build a manifest from its header and its entries, each a chunk id
     /// and the offset one past the chunk's last byte. Runs every decode
-    /// check of SPEC-OBJECTS §7: the chunk cap, the size bound, the order,
-    /// length and layout of each end, and the last end. This is the only
-    /// way to build a value outside this module.
+    /// check of SPEC-OBJECTS §7: the chunk cap, the size bound, the chunker
+    /// profile, the order, length and layout of each end, and the last end.
+    /// This is the only way to build a value outside this module.
     ///
     /// # Errors
     /// [`KitError::TooManyChunks`] above [`crate::serialize::MAX_CHUNKS`],
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
     /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`],
+    /// [`KitError::UnknownChunkerProfile`] for an unknown profile ID,
     /// [`KitError::ChunkedBlobNoChunks`] for a non-zero `total_size` without
     /// chunks, and the entry and last-end errors of
     /// [`crate::serialize::check_chunk_entry`] and
@@ -574,6 +576,7 @@ impl ChunkedBlob {
         }
         let count = u32::try_from(chunks.len()).map_err(|_| KitError::TooManyChunks)?;
         crate::serialize::check_chunked_header(total_size, count)?;
+        crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
         let mut prev_end = 0;
         for (index, &end) in (0u32..).zip(&ends) {
             crate::serialize::check_chunk_entry(index, chunk_size, total_size, prev_end, end)?;
@@ -612,8 +615,8 @@ impl ChunkedBlob {
         self.total_size
     }
 
-    /// The fixed chunk size, or `0` for content-defined chunking
-    /// (`FastCDC`).
+    /// The fixed chunk size or the marker for a content-defined chunker
+    /// (SPEC-OBJECTS §7).
     #[must_use]
     pub fn chunk_size(&self) -> u32 {
         self.chunk_size
@@ -941,6 +944,7 @@ pub(crate) fn object_id_from_parts(parts: &[&[u8]]) -> Hash {
 /// All decode / validation errors raised by the serialize module, plus
 /// a small number of construction-time errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum KitError {
     #[error("input is shorter than the 6-byte v1 prologue")]
     EmptyData,
@@ -983,6 +987,9 @@ pub enum KitError {
     /// and chunk size, or above 128 GiB (SPEC-OBJECTS §7).
     #[error("chunked blob total_size is inconsistent with its chunk layout or too large")]
     ChunkedBlobTotalSizeInvalid,
+    /// The manifest names an unrecognized chunker profile (SPEC-OBJECTS §7).
+    #[error("unknown chunker profile {0:#010x}")]
+    UnknownChunkerProfile(u32),
     /// A `ChunkedBlob` has a non-zero `total_size` and no chunks (SPEC-OBJECTS
     /// §7, decode check 5).
     #[error("chunked blob has a total_size but no chunks")]

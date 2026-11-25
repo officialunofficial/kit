@@ -29,13 +29,14 @@
 //! the XDG config directory and the `-c` overrides.
 
 use kit_core::bounded_read;
+use kit_core::durable::Parents;
 use kit_core::hash::from_hex_bytes;
 use kit_core::layout::RepoLayout;
 use kit_core::observer::{NoopObserver, Observer};
+use kit_core::repo_lock::{self, CONFIG_LOCK, LockError, RepoLock};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -202,6 +203,8 @@ pub struct Config {
     /// that protects the clone against exactly that repo (see
     /// [`REPO_FORBIDDEN_KEYS`]).
     pub pull_require_signed: String,
+    /// Automatic local pack maintenance. Empty means enabled.
+    pub gc_auto: String,
     /// Fetch portable attestations unless explicitly disabled.
     pub fetch_attestations: String,
     /// Publish locally authored attestations only when true.
@@ -395,6 +398,12 @@ impl AttestConfig {
 }
 
 impl Config {
+    /// Whether a successful fetch can run automatic local pack maintenance.
+    #[must_use]
+    pub fn gc_auto_enabled(&self) -> bool {
+        !self.gc_auto.eq_ignore_ascii_case("false")
+    }
+
     /// Return a Config with documented defaults filled in.
     #[must_use]
     pub fn with_defaults() -> Self {
@@ -415,9 +424,13 @@ impl Config {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
+    /// The config lock could not be taken in time.
+    #[error("config lock: {0}")]
+    Lock(LockError),
     #[error("invalid config value — control characters are not permitted")]
     InvalidValue,
     /// A config line, or a `-c` override, that kit refuses. Config fails
@@ -797,11 +810,15 @@ fn apply_kv(cfg: &mut Config, key: &str, val: &str) -> Result<(), String> {
         }
         "push.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
-            val.clone_into(&mut cfg.push_attestations);
+            cfg.push_attestations = val.to_ascii_lowercase();
+        }
+        "gc.auto" => {
+            expect_one_of(key, val, &["true", "false"])?;
+            cfg.gc_auto = val.to_ascii_lowercase();
         }
         "fetch.attestations" => {
             expect_one_of(key, val, &["true", "false"])?;
-            val.clone_into(&mut cfg.fetch_attestations);
+            cfg.fetch_attestations = val.to_ascii_lowercase();
         }
         "pull.require_signed" => {
             expect_one_of(
@@ -984,6 +1001,7 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
         ("default_branch", cfg.default_branch.as_str()),
         ("durability.objects", cfg.durability_objects.as_str()),
         ("fetch.attestations", cfg.fetch_attestations.as_str()),
+        ("gc.auto", cfg.gc_auto.as_str()),
         ("push.attestations", cfg.push_attestations.as_str()),
         ("remote_endpoint", cfg.remote_endpoint.as_str()),
         ("remote_bucket", cfg.remote_bucket.as_str()),
@@ -1016,19 +1034,25 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
             let _ = writeln!(out, "branch.{branch}.merge = {}", up.branch);
         }
     }
-    // Atomic replace: write to a sibling temp file then rename over the
-    // target so a crash mid-write can never leave a truncated config
-    // (which would silently drop remotes / upstream tracking). The temp
-    // file shares the destination directory so the rename stays on one
-    // filesystem.
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut tmp = tempfile::Builder::new()
-        .prefix(".config.")
-        .tempfile_in(dir)?;
-    tmp.write_all(out.as_bytes())?;
-    tmp.flush()?;
-    tmp.persist(&path).map_err(|e| ConfigError::Io(e.error))?;
-    Ok(())
+    // Atomic replace: a crash mid-write can never leave a truncated config
+    // (which would silently drop remotes / upstream tracking).
+    kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)
+        .map_err(ConfigError::Io)
+}
+
+/// Take the lock that serialises read-modify-write of the repo config.
+///
+/// [`write()`] replaces the file atomically, so a reader never sees a torn
+/// config, but two writers that each read the file, change it and write it
+/// back lose one change. A caller that reads the repo layer, changes it and
+/// calls [`write()`] holds this lock from before the read until after the write.
+/// The holder takes no other lock, so it may take this one under any other.
+///
+/// # Errors
+/// [`ConfigError::Lock`] when another process holds the lock for the
+/// whole wait.
+pub fn lock(layout: &RepoLayout) -> Result<RepoLock, ConfigError> {
+    repo_lock::acquire_default(layout.common_dir(), CONFIG_LOCK).map_err(ConfigError::Lock)
 }
 
 pub use kit_core::{DEFAULT_BRANCH, DEFAULT_REMOTE_NAME};
@@ -1176,7 +1200,7 @@ pub fn write_user_kv(environment: &Environment, key: &str, value: &str) -> Resul
     // Atomic temp + fsync + rename so a crash mid-write can't leave the
     // security-sensitive user config half-written. A reader either
     // sees the old contents or the fully-updated file, never a torn one.
-    write_atomic_user_config(&path, out.as_bytes())?;
+    kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)?;
     Ok(())
 }
 
@@ -1212,25 +1236,9 @@ pub fn remove_user_kv(environment: &Environment, key: &str) -> Result<bool, Conf
         out.push('\n');
     }
     if removed {
-        write_atomic_user_config(&path, out.as_bytes())?;
+        kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)?;
     }
     Ok(removed)
-}
-
-/// Atomically write `bytes` to `path`: write into a sibling temp file,
-/// fsync it, then rename over the destination. Mirrors the key-save
-/// path's temp+rename hardening.
-fn write_atomic_user_config(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
-    use tempfile::NamedTempFile;
-    let parent = path.parent().ok_or(ConfigError::Io(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "user config path has no parent",
-    )))?;
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    tmp.as_file_mut().sync_all()?;
-    tmp.persist(path).map_err(|e| ConfigError::Io(e.error))?;
-    Ok(())
 }
 
 /// Expand a user-typed `user.identity` into the canonical hex form

@@ -195,7 +195,7 @@ with a warning.
 - No `@` allowed (Git permits `@{reflog}`-style refs; kit does not).
 - No `+`, `:`, `~`, `^`, `?`, `*`, `[` allowed.
 - No Unicode in ref names.
-- Case-sensitive: `main` and `Main` are distinct.
+- Case-sensitive: `main` and `Main` are distinct names. On a case-insensitive file system they resolve to one ref file; the local ref locks key on the ASCII-lowercased name, and a sibling-tree checkout guard treats them as one branch.
 
 This is a deliberately restrictive grammar to simplify cross-transport
 name validation.
@@ -376,7 +376,9 @@ in-process read-write lock may: a writer that took its stripe first would wait
 behind that request, which waits for a shared holder, which waits for the
 stripe. Every write condition takes
 these locks, `.any` included. A write holds them from its read of the
-current value until its rename and directory fsync complete.
+current value until its rename is durable: its directory flush, or the shared
+flush that covers it (SPEC-OBJECTS §10.1, "Shared flush points"), has
+completed. The same holds for a local `refs/heads/*` write.
 
 Two writes to one ref serialize. Writes to refs in different stripes run in
 parallel. Writes to two refs in one stripe serialize. A step that holds the

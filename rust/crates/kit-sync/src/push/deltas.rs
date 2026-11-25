@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use kit_core::delta;
 use kit_core::hash::Hash;
 use kit_core::store::{ObjectStore, StoreError};
-use kit_core::transfer::{self, DeltaCandidate, DeltaSpool, PackPlan, PlannedDelta};
+use kit_core::transfer::{
+    self, DeltaCandidate, DeltaSpool, ManifestDeltas, PackPlan, PlannedDelta,
+};
 
 /// Bytes the parallel delta encoders of a push may hold at once, each
 /// charged its real peak ([`encoder_peak`]). One encoder over the budget runs
@@ -24,6 +26,8 @@ pub(crate) const DELTA_INFLIGHT_BYTES: u64 = 256 << 20;
 pub(crate) struct DeltaEncoder {
     dir: PathBuf,
     spool: RefCell<Option<DeltaSpool>>,
+    /// Whether a replacement manifest may go as a delta.
+    manifests: ManifestDeltas,
 }
 
 impl DeltaEncoder {
@@ -32,7 +36,15 @@ impl DeltaEncoder {
         Self {
             dir,
             spool: RefCell::new(None),
+            manifests: ManifestDeltas::Full,
         }
+    }
+
+    /// This encoder, sending replacement manifests as `manifests` allows. An
+    /// encoder sends every manifest in full until it is told otherwise.
+    pub(crate) fn with_manifests(mut self, manifests: ManifestDeltas) -> Self {
+        self.manifests = manifests;
+        self
     }
 
     /// [`transfer::plan_pack_with`] for `tip` against `base`, with every delta
@@ -45,9 +57,7 @@ impl DeltaEncoder {
         tip: Hash,
         base: Option<Hash>,
     ) -> Result<PackPlan, StoreError> {
-        transfer::plan_pack_with(store, tip, base, |store, candidates| {
-            self.encode(store, candidates)
-        })
+        self.plan_tips(store, &[tip], base)
     }
 
     /// [`transfer::plan_pack_tips`] for `tips` against `base`, with every
@@ -58,9 +68,13 @@ impl DeltaEncoder {
         tips: &[Hash],
         base: Option<Hash>,
     ) -> Result<PackPlan, StoreError> {
-        transfer::plan_pack_tips(store, tips, base, |store, candidates| {
-            self.encode(store, candidates)
-        })
+        transfer::plan_pack_tips_with_manifests(
+            store,
+            tips,
+            base,
+            self.manifests,
+            |store, candidates| self.encode(store, candidates),
+        )
     }
 
     /// The `encode_deltas` callback of a planner: one result per candidate,
@@ -153,8 +167,8 @@ fn encode_in_runs(
             .iter()
             .map(|c| {
                 Ok(encoder_peak(
-                    store.object_metadata(&c.target)?.len(),
-                    store.object_metadata(&c.base)?.len(),
+                    store.object_size(&c.target)?,
+                    store.object_size(&c.base)?,
                 ))
             })
             .collect::<Result<Vec<_>, StoreError>>()?;
@@ -234,7 +248,7 @@ pub(crate) fn cache_delta_bases(
         if count < 2 || remaining == 0 {
             continue;
         }
-        if store.object_metadata(&base)?.len() > remaining as u64 {
+        if store.object_size(&base)? > remaining as u64 {
             continue;
         }
         let bytes = store.read(&base)?;

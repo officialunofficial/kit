@@ -1,6 +1,7 @@
 use super::RetryReason;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PushError {
     #[error(transparent)]
     Sync(#[from] crate::SyncError),
@@ -25,6 +26,15 @@ pub enum PushError {
         "could not establish the pack map for branch '{branch}' under concurrent pushes; retry"
     )]
     PackmapContended { branch: String },
+    /// The push would link a node onto a pack chain that, with it, holds
+    /// more nodes or listed packs than a fetch walks, so no client without
+    /// the tip could fetch the branch. The advance that would cross the
+    /// bound was not published, and neither is any later one, so a split
+    /// push reports this error alone rather than as a resumable prefix.
+    #[error(
+        "the pack chain of '{branch}' would exceed what a fetch reads (100,000 nodes or 1,000,000 packs), so the push stopped before that advance; delete the remote branch and push it again to start a new chain"
+    )]
+    PackChainTooLong { branch: String },
     /// One advance would need more data packs than the server permits per
     /// advance. `commit` names the single commit or merge that cannot be split
     /// further when the refusal came from the pre-flight dry seal, before

@@ -421,21 +421,28 @@ where
 mod tests {
     use super::*;
 
-    fn token_file(name: &str, body: &[u8], mode: u32) -> PathBuf {
+    fn token_file(name: &str, body: &[u8], mode: u32) -> (tempfile::TempDir, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("kit-mcp-token-{}-{name}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("token");
+        let dir = tempfile::Builder::new().prefix(name).tempdir().unwrap();
+        let path = dir.path().join("token");
         std::fs::write(&path, body).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-        path
+        (dir, path)
+    }
+
+    #[test]
+    fn token_fixture_is_removed_when_dropped() {
+        let (dir, file) = token_file("cleanup", b"fixture", 0o600);
+        let path = file.parent().unwrap().to_path_buf();
+        drop(dir);
+        assert!(!path.exists(), "token fixture left at {}", path.display());
     }
 
     #[test]
     fn token_file_strips_one_trailing_newline() {
-        let p = token_file("newline", b"abc123\n\n", 0o600);
+        let (_dir, p) = token_file("newline", b"abc123\n\n", 0o600);
         assert_eq!(read_token_file(&p).unwrap(), "abc123\n");
-        let p = token_file("plain", b"abc123\n", 0o600);
+        let (_dir, p) = token_file("plain", b"abc123\n", 0o600);
         assert_eq!(read_token_file(&p).unwrap(), "abc123");
     }
 
@@ -443,7 +450,7 @@ mod tests {
     #[test]
     fn token_file_open_to_others_is_refused() {
         for mode in [0o640, 0o604, 0o644] {
-            let p = token_file(&format!("lax{mode:o}"), b"abc", mode);
+            let (_dir, p) = token_file(&format!("lax{mode:o}"), b"abc", mode);
             let e = read_token_file(&p).unwrap_err();
             assert!(e.contains("group or others"), "{e}");
         }
@@ -451,13 +458,13 @@ mod tests {
 
     #[test]
     fn token_file_over_the_cap_is_refused() {
-        let p = token_file("big", &vec![b'a'; 4097], 0o600);
+        let (_dir, p) = token_file("big", &vec![b'a'; 4097], 0o600);
         assert!(read_token_file(&p).unwrap_err().contains("larger than"));
     }
 
     #[test]
     fn token_file_and_env_together_are_refused() {
-        let p = token_file("both", b"abc", 0o600);
+        let (_dir, p) = token_file("both", b"abc", 0o600);
         assert_eq!(load_token(Some(&p), Some("x".into())), Err(exit::USAGE));
         assert_eq!(load_token(Some(&p), None), Ok(Some("abc".into())));
         assert_eq!(load_token(None, Some("x".into())), Ok(Some("x".into())));

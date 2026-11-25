@@ -165,7 +165,20 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
             Ok(Some(h)) => Some(h),
             _ => return emit_err("no previous branch", exit::GENERAL_ERROR),
         },
-        Some(refs::Head::Detached(h)) => Some(*h),
+        Some(refs::Head::Detached(h)) => {
+            // An older kit's gc does not know PREVIOUS_HEAD and may have
+            // pruned the commit it names.
+            if !store.contains(h) {
+                return emit_err(
+                    &format!(
+                        "previous HEAD {} was pruned; nothing to switch back to",
+                        format::short_hash(h, 8)
+                    ),
+                    exit::GENERAL_ERROR,
+                );
+            }
+            Some(*h)
+        }
         None => None,
     };
     if let Some(head) = &previous_head {
@@ -335,7 +348,11 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // identical between it and the target are skipped rather than
     // re-read and rewritten. `--force` discards local edits, so it must
     // rewrite everything.
-    let base_tree = if opts.force {
+    // A repository with no index file, as `kit clone --no-checkout` leaves
+    // it, has nothing checked out: the first checkout writes every entry and
+    // owes no local change to the tree of HEAD (git's initial checkout).
+    let initial_checkout = !layout.index_file().exists();
+    let base_tree = if opts.force || initial_checkout {
         None
     } else {
         super::current_head_tree(&layout, &store).ok().flatten()
@@ -351,26 +368,34 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     // collide with the target are preserved (git branch-switch
     // semantics), so they no longer block the checkout.
     // `--force` (git checkout -f) skips the gate, discarding local edits.
-    if !opts.force
-        && let Err(e) =
+    if !opts.force {
+        let safe = if initial_checkout {
+            super::ensure_initial_checkout_safe(&layout, &store, tree_hash, &sparse_opts)
+        } else {
             super::ensure_restore_safe_from(&layout, &store, tree_hash, &sparse_opts, checked_base)
-    {
-        return emit_err(&e, exit::GENERAL_ERROR);
+        };
+        if let Err(e) = safe {
+            return emit_err(&e, exit::GENERAL_ERROR);
+        }
     }
 
     // Tracked paths the target drops — removed explicitly after
     // materialising (the `clean = false` restore never deletes). Refuses
     // first if any of them carries local edits (unless `--force`).
-    let dropped = match dropped_paths_guarded(
-        &layout,
-        &store,
-        tree_hash,
-        checked_base,
-        &sparse_opts,
-        opts.force,
-    ) {
-        Ok(d) => d,
-        Err(code) => return code,
+    let dropped = if initial_checkout {
+        Vec::new()
+    } else {
+        match dropped_paths_guarded(
+            &layout,
+            &store,
+            tree_hash,
+            checked_base,
+            &sparse_opts,
+            opts.force,
+        ) {
+            Ok(d) => d,
+            Err(code) => return code,
+        }
     };
 
     if let Err(e) = kit_core::ops::restore::check_nested_repositories(
@@ -383,14 +408,10 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         return restore_failure(&e);
     }
 
-    // Write the files first, then the `-b`/`-B` branch ref, HEAD and the
-    // index together, as git does. A checkout stopped or failed partway
-    // leaves HEAD and the index where they were, and the files it wrote
-    // show as unstaged changes;
-    // running the same checkout again (with `-f`) finishes it. Signals are
-    // held across the ref, HEAD and index writes, so they never split, and
-    // a refused or stopped switch leaves no orphan branch behind.
-    //
+    // Finish restoring files and publishing the branch ref, HEAD, and
+    // index after a first signal. A second signal can stop the switch.
+    crate::signal::install();
+
     // Materialise the tree with `clean = false`: tracked entries are
     // written/overwritten, untracked files are preserved. Then delete
     // the tracked paths the target drops (computed above) and prune any
@@ -404,6 +425,10 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
     let is_branch = created
         || previous_is_branch
             .unwrap_or_else(|| matches!(refs::read_ref(&layout, name), Ok(Some(_))));
+    let dropped_before: Vec<_> = dropped
+        .iter()
+        .map(|(path, _, _)| dropped_file_identity(&cwd.join(path)))
+        .collect();
     let mut observed = Vec::new();
     let progress = crate::progress::start(
         "restore",
@@ -443,7 +468,7 @@ fn run_inner(args: &[String], bisect: Option<&kit_core::ops::bisect::BisectState
         Ok(report) => report,
         Err(e) => return restore_failure(&e),
     };
-    if let Err(code) = remove_dropped(&cwd, &dropped) {
+    if let Err(code) = remove_dropped(&cwd, &dropped, &dropped_before) {
         return code;
     }
     let published = crate::signal::defer(|| {
@@ -539,7 +564,8 @@ fn dropped_paths_guarded(
     match super::locally_modified_dropped_path(layout.worktree_root(), store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(
-                "restore would overwrite local changes; commit, stash, or reset '{path}' first"
+                "restore would overwrite local changes; commit, stash, or reset '{}' first",
+                super::display_path(&path)
             ),
             exit::GENERAL_ERROR,
         )),
@@ -548,14 +574,41 @@ fn dropped_paths_guarded(
     }
 }
 
-/// Delete the dropped tracked paths from the worktree and prune any
-/// parent directories that became empty.
+type DroppedFileIdentity = std::io::Result<Option<(u64, u64)>>;
+
+#[cfg(unix)]
+fn dropped_file_identity(path: &std::path::Path) -> DroppedFileIdentity {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::MetadataExt as _;
+
+    match path.symlink_metadata() {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(unix))]
+fn dropped_file_identity(_: &std::path::Path) -> DroppedFileIdentity {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+/// Delete the dropped tracked paths and prune parent directories that became
+/// empty. An insensitive lookup may reach a new inode after restore.
+/// Leave that replacement in place.
 fn remove_dropped(
     cwd: &std::path::Path,
     dropped: &[(String, EntryStatus, Hash)],
+    originals: &[DroppedFileIdentity],
 ) -> Result<(), u8> {
-    for (path, _, _) in dropped {
-        if let Err(e) = super::remove_dropped_path(&cwd.join(path)) {
+    for ((path, _, _), original) in dropped.iter().zip(originals) {
+        let file = cwd.join(path);
+        if let Ok(original) = original
+            && dropped_file_identity(&file).is_ok_and(|now| now.is_some() && now != *original)
+        {
+            continue;
+        }
+        if let Err(e) = super::remove_dropped_path(&file) {
             return Err(output_failure(&format!("restore: remove {path}: {e}")));
         }
         prune_empty_parents(cwd, path);
@@ -692,5 +745,32 @@ mod full_disk_tests {
             source: std::io::Error::from(std::io::ErrorKind::StorageFull),
         };
         assert_eq!(super::restore_failure(&error), 74);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used)]
+mod dropped_file_tests {
+    #[test]
+    fn dropped_file_identity_distinguishes_missing_and_denied_lookups() {
+        use std::fs;
+        use std::io::ErrorKind;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        assert_eq!(super::dropped_file_identity(&path).unwrap(), None);
+        fs::write(&path, b"file").unwrap();
+        let perms = dir.path().metadata().unwrap().permissions();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o600)).unwrap();
+        let lookup = path.symlink_metadata();
+        let identity = super::dropped_file_identity(&path);
+        fs::set_permissions(dir.path(), perms).unwrap();
+
+        // A privileged test process can still read the entry.
+        if let Err(error) = lookup {
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+            assert_eq!(identity.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        }
     }
 }

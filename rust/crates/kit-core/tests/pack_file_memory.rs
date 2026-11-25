@@ -179,14 +179,7 @@ fn reading_a_verified_1_gib_pack_holds_under_96_mib_and_the_entry_charge() {
 fn reading_a_verified_pack_of_two_and_a_half_million_entries_stays_inside_its_charge() {
     const N: u32 = 2_500_000;
     let _serial = serial();
-    let dir = tempfile::Builder::new()
-        .prefix("k")
-        .tempdir_in(if cfg!(unix) {
-            std::path::PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        })
-        .unwrap();
+    let dir = tempfile::Builder::new().prefix("k").tempdir().unwrap();
     let mut w = PackWriter::spool(&dir.path().join("w")).unwrap();
     for i in 0..N {
         let bytes = serialize::serialize(&Object::Blob(Blob {

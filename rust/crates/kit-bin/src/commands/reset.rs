@@ -3,12 +3,15 @@
 //!
 //! Two modes, mirroring `git reset`'s safe subset:
 //!
-//! - **`--soft`** — move HEAD / the current branch only. The index and
-//!   the worktree are left exactly as they are, so the difference between
-//!   the old tip and the new target shows up as staged changes.
+//! - **`--soft`** — move HEAD / the current branch only. The index, the
+//!   worktree and any operation in progress are left exactly as they are,
+//!   so the difference between the old tip and the new target shows up as
+//!   staged changes.
 //! - **`--mixed`** (the default) — move HEAD *and* rewrite `.kit/index`
 //!   to mirror the target commit's tree. The worktree is untouched, so
-//!   changes relative to the target appear as un-staged worktree edits.
+//!   changes relative to the target appear as un-staged worktree edits. A
+//!   merge, cherry-pick or revert in progress, and the record of a pull
+//!   that stopped before its restore, are cleared.
 //!
 //! `<commit>` defaults to `HEAD` (a no-op move that still re-syncs the
 //! index under `--mixed`) and is resolved through the shared revspec
@@ -17,9 +20,10 @@
 //!
 //! - **`--hard`** — move HEAD, reset the index to the target tree, AND
 //!   reset the worktree to it (discarding tracked-file changes). Like
-//!   git, untracked files are left in place. This is the one destructive
-//!   variant, so it runs the same dirty/untracked guard as `checkout`:
-//!   it **refuses** to discard locally-modified or staged content
+//!   git, untracked files are left in place, and a merge, cherry-pick or
+//!   revert in progress, and an unfinished pull, are cleared. This is the
+//!   one destructive variant, so it runs the same dirty/untracked guard as
+//!   `checkout`: it **refuses** to discard locally-modified or staged content
 //!   unless `-f`/`--force` is given. That guard is a kit safety
 //!   divergence — git's `reset --hard` discards silently.
 
@@ -30,6 +34,7 @@ use kit_core::hash::Hash;
 use kit_core::index::EntryStatus;
 use kit_core::layout::RepoLayout;
 use kit_core::object::Object;
+use kit_core::ops::conflict_state;
 use kit_core::ops::restore::{RestoreOptions, restore_tree_to_worktree_with};
 use kit_core::refs::{self, RefWriteCondition};
 use kit_core::store::ObjectStore;
@@ -250,6 +255,20 @@ pub fn run(args: &[String]) -> u8 {
         if reset_index {
             super::sync_index_to_tree(&layout, &store, tree_hash)
                 .map_err(|e| (e, exit::CANTCREAT))?;
+        }
+        // The operation is over, as in git, and so is a pull that stopped
+        // before its restore: the index follows the target now. These go
+        // last: a stop before them leaves the state, and the same reset run
+        // again clears it.
+        if reset_index {
+            conflict_state::clear_operation_state(&layout)
+                .map_err(|e| (format!("clear operation state: {e}"), exit::CANTCREAT))?;
+            match std::fs::remove_file(layout.pull_head_file()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err((format!("clear pull record: {e}"), exit::CANTCREAT));
+                }
+                _ => {}
+            }
         }
         Ok(())
     });

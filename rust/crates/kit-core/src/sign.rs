@@ -20,6 +20,7 @@
 //! `.kit/keys/default.key`, mode 0600. Public-key derivation is
 //! deterministic from the seed.
 
+use crate::durable::Parents;
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{
     Commit, Identity, KitError, MAGIC, Object, ObjectType, Remix, SCHEMA_VERSION, Tag,
@@ -931,7 +932,7 @@ pub fn save_raw_32_create_new(path: &Path, secret: &[u8; 32]) -> Result<bool, Ki
     std::fs::create_dir_all(parent)
         .map_err(|e| KitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
 
-    crate::atomic::write_create_new(path, secret, false)
+    crate::durable::write_pointer_new(path, secret, Parents::Existing)
         .map_err(|e| KitError::KeyIo(format!("create key: {e}")))
 }
 
@@ -1587,7 +1588,8 @@ mod tests {
     #[test]
     fn save_then_load_roundtrip() {
         // The key directory is new, so save creates it at mode 0700.
-        let dir = tempdir().join("keys");
+        let scratch = tempdir();
+        let dir = scratch.path().join("keys");
         let p = dir.join("default.key");
         let kp = KeyPair::from_seed([0x77; 32]);
         save_key(&p, &kp).unwrap();
@@ -1601,7 +1603,7 @@ mod tests {
     fn save_key_writes_mode_0600() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempdir();
-        let p = dir.join("default.key");
+        let p = dir.path().join("default.key");
         let kp = KeyPair::from_seed([0x33; 32]);
         save_key(&p, &kp).unwrap();
         let meta = std::fs::metadata(&p).unwrap();
@@ -1621,7 +1623,7 @@ mod tests {
     fn save_key_tightens_preexisting_wide_mode_to_0600() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let dir = tempdir();
-        let p = dir.join("default.key");
+        let p = dir.path().join("default.key");
         // Pre-seed a wide-mode file at the target path.
         std::fs::write(&p, b"old contents").unwrap();
         let mut perm = std::fs::metadata(&p).unwrap().permissions();
@@ -1645,7 +1647,7 @@ mod tests {
     fn load_key_rejects_world_readable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        let p = dir.join("default.key");
+        let p = dir.path().join("default.key");
         let kp = KeyPair::from_seed([0x33; 32]);
         save_key(&p, &kp).unwrap();
         // Loosen perms to 0644 — load must reject.
@@ -1663,7 +1665,7 @@ mod tests {
     #[test]
     fn load_key_rejects_wrong_length() {
         let dir = tempdir();
-        let p = dir.join("short.key");
+        let p = dir.path().join("short.key");
         std::fs::write(&p, b"too short").unwrap();
         #[cfg(unix)]
         {
@@ -1693,12 +1695,12 @@ mod tests {
     fn load_key_rejects_symlink() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        let real = dir.join("real.key");
+        let real = dir.path().join("real.key");
         let kp = KeyPair::from_seed([0xAB; 32]);
         save_key(&real, &kp).unwrap();
         // Create a symlink at `link.key` → `real.key`. Both files end
         // up under the same 0o700 parent dir.
-        let link = dir.join("link.key");
+        let link = dir.path().join("link.key");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let mut perm = std::fs::metadata(&dir).unwrap().permissions();
         perm.set_mode(0o700);
@@ -1714,7 +1716,7 @@ mod tests {
     fn load_key_rejects_symlinked_ancestor() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        let real_parent = dir.join("realkeys");
+        let real_parent = dir.path().join("realkeys");
         std::fs::create_dir_all(&real_parent).unwrap();
         let mut parent_perm = std::fs::metadata(&real_parent).unwrap().permissions();
         parent_perm.set_mode(0o700);
@@ -1724,7 +1726,7 @@ mod tests {
         let kp = KeyPair::from_seed([0xBC; 32]);
         save_key(&real, &kp).unwrap();
 
-        let symlink_parent = dir.join("symlink-keys");
+        let symlink_parent = dir.path().join("symlink-keys");
         std::os::unix::fs::symlink(&real_parent, &symlink_parent).unwrap();
         match load_key(&symlink_parent.join("default.key")) {
             Err(KitError::KeyPathIsSymlink(_)) => {}
@@ -1740,7 +1742,7 @@ mod tests {
     fn load_key_rejects_world_readable_parent() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        let p = dir.join("default.key");
+        let p = dir.path().join("default.key");
         let kp = KeyPair::from_seed([0xCD; 32]);
         save_key(&p, &kp).unwrap();
         // save_key just tightened the dir to 0o700; loosen it again
@@ -1766,7 +1768,8 @@ mod tests {
     fn save_key_replaces_existing_key_atomically() {
         use std::os::unix::fs::MetadataExt;
         // The key directory is new, so save creates it at mode 0700.
-        let dir = tempdir().join("keys");
+        let scratch = tempdir();
+        let dir = scratch.path().join("keys");
         let p = dir.join("default.key");
         let kp1 = KeyPair::from_seed([0x11; 32]);
         save_key(&p, &kp1).unwrap();
@@ -1795,7 +1798,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        save_key(&dir.join("default.key"), &KeyPair::from_seed([0x44; 32])).unwrap();
+        save_key(
+            &dir.path().join("default.key"),
+            &KeyPair::from_seed([0x44; 32]),
+        )
+        .unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
     }
@@ -1806,9 +1813,9 @@ mod tests {
     fn save_key_creates_missing_dirs_at_0700() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        let p = dir.join("a").join("b").join("default.key");
+        let p = dir.path().join("a").join("b").join("default.key");
         save_key(&p, &KeyPair::from_seed([0x55; 32])).unwrap();
-        for d in [dir.join("a"), dir.join("a").join("b")] {
+        for d in [dir.path().join("a"), dir.path().join("a").join("b")] {
             let mode = std::fs::metadata(&d).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{}", d.display());
         }
@@ -1817,7 +1824,8 @@ mod tests {
     #[test]
     fn save_raw_32_create_new_refuses_existing_key() {
         // The key directory is new, so save creates it at mode 0700.
-        let dir = tempdir().join("keys");
+        let scratch = tempdir();
+        let dir = scratch.path().join("keys");
         let p = dir.join("default.key");
         assert!(save_raw_32_create_new(&p, &[0x11; 32]).unwrap());
         assert!(!save_raw_32_create_new(&p, &[0x22; 32]).unwrap());
@@ -1828,9 +1836,9 @@ mod tests {
     #[test]
     fn save_key_rejects_symlinked_ancestor() {
         let dir = tempdir();
-        let real_parent = dir.join("realkeys");
+        let real_parent = dir.path().join("realkeys");
         std::fs::create_dir_all(&real_parent).unwrap();
-        let symlink_parent = dir.join("symlink-keys");
+        let symlink_parent = dir.path().join("symlink-keys");
         std::os::unix::fs::symlink(&real_parent, &symlink_parent).unwrap();
         let kp = KeyPair::from_seed([0x44; 32]);
         match save_key(&symlink_parent.join("default.key"), &kp) {
@@ -1897,21 +1905,17 @@ mod tests {
         drop(kp);
     }
 
-    // Tiny self-contained tempdir helper — we don't want to pull in the
-    // `tempfile` crate just for two tests. Each call returns a fresh
-    // dir under `std::env::temp_dir()` named with a per-process counter
-    // and a high-resolution timestamp.
-    fn tempdir() -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::time::{SystemTime, UNIX_EPOCH};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let p =
-            std::env::temp_dir().join(format!("kit-sign-test-{nanos}-{n}-{}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    #[test]
+    fn key_fixture_is_removed_when_dropped() {
+        let dir = tempdir();
+        let key = dir.path().join("key");
+        std::fs::write(&key, b"fixture").unwrap();
+        let path = key.parent().unwrap().to_path_buf();
+        drop(dir);
+        assert!(!path.exists(), "key fixture left at {}", path.display());
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
     }
 }

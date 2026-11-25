@@ -148,6 +148,32 @@ fn an_unrelated_non_empty_directory_is_refused_and_left_alone() {
     assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"mine");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_relative_clone_resumes_through_a_symlink_and_keeps_the_display_path() {
+    let (_td, bare, url, tip) = upstream();
+    let dest = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dest.path().join("real/subdir")).unwrap();
+    std::os::unix::fs::symlink("real/subdir", dest.path().join("link")).unwrap();
+    let target = "link/../clone";
+
+    let pack = newest_pack(bare.path());
+    let held = bare.path().join("held");
+    fs::rename(&pack, &held).unwrap();
+    let first = run_in(dest.path(), &["clone", &url, target]);
+    fs::rename(&held, &pack).unwrap();
+    assert!(!first.status.success(), "{first:?}");
+    assert!(stderr_str(&first).contains("Cloning into 'link/../clone'"));
+
+    let resumed = run_in(dest.path(), &["clone", &url, target]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(stderr_str(&resumed).contains("Resuming the unfinished clone in 'link/../clone'"));
+    let clone = dest.path().join("real/clone");
+    assert_eq!(read_ref(&clone, "refs/heads/main"), Some(tip));
+    assert_eq!(fs::read(clone.join("two.txt")).unwrap(), b"two");
+    assert!(!dest.path().join("clone").exists());
+}
+
 #[test]
 fn a_clone_stopped_after_its_first_branch_resumes_when_run_again() {
     // `aside` is fetched before `main`, and its tracking ref is published
@@ -210,6 +236,24 @@ fn a_stopped_clone_holding_anything_a_clone_does_not_write_is_refused() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn clone_resume_refuses_a_symlink_in_place_of_the_maintenance_stamp() {
+    let (_td, bare, url, _tip) = upstream();
+    let dest = tempfile::tempdir().unwrap();
+    let target = dest.path().join("clone");
+    stopped_clone(bare.path(), &url, dest.path(), &target);
+
+    let data = dest.path().join("data");
+    fs::write(&data, b"keep").unwrap();
+    std::os::unix::fs::symlink(&data, target.join(".kit/gc-auto")).unwrap();
+
+    let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(73), "{out:?}");
+    assert_eq!(fs::read(data).unwrap(), b"keep");
+    assert_eq!(read_ref(&target, "refs/heads/main"), None);
+}
+
 #[test]
 fn resumed_clone_discards_tags_before_fetching_them_again() {
     let (_td, bare, url, tip) = upstream();
@@ -268,6 +312,7 @@ fn a_clone_stopped_after_publishing_a_tag_resumes() {
         &kit_sync::NoopObserver,
     )
     .unwrap();
+    assert!(target.join(".kit/gc-auto").is_file());
     assert_eq!(read_ref(&target, "refs/heads/main"), None);
     assert!(read_ref(&target, "refs/tags/v1").is_some());
     let out = run_in(dest.path(), &["clone", &url, target.to_str().unwrap()]);

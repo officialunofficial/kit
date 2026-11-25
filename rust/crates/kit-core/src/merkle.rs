@@ -66,7 +66,7 @@
 //! inclusion-proof construction below are both stable
 //! (`docs/specs/SPEC-MERKLE-OBJECTS.md` §5). [`Proof`]'s bytes and sibling
 //! selection are byte-identical to `commonware_storage::bmt::Proof` at the
-//! pinned `2026.10.0` train: a commonware-based verifier can decode a
+//! pinned `2026.11.0` train: a commonware-based verifier can decode a
 //! kit-produced proof with the upstream type and run its own
 //! `verify_element_inclusion` / `verify_range_inclusion` /
 //! `verify_multi_inclusion` against the **inner root** (see
@@ -390,8 +390,8 @@ impl BmtFold {
 /// 40-byte entries of a manifest with [`Self::push_entries`], and
 /// [`Self::finish`].
 ///
-/// The fold runs the decode checks of SPEC-OBJECTS §7 that the entries
-/// carry: [`Self::new`] checks the count cap and the size cap, [`Self::push`]
+/// The fold runs the decode checks of SPEC-OBJECTS §7. [`Self::new`] checks
+/// the count cap, the size cap and the chunker profile. [`Self::push`]
 /// runs [`crate::serialize::check_chunk_entry`], the decoder's own per-entry
 /// function, and [`Self::finish`] checks the entry count and the last end. So
 /// the fold refuses the manifests a decoder refuses, at the same entry. The
@@ -420,11 +420,13 @@ impl ChunkedIdFold {
     /// [`KitError::TooManyChunks`] for a `chunk_count` above
     /// [`crate::serialize::MAX_CHUNKS`], and
     /// [`KitError::ChunkedBlobTotalSizeInvalid`] for a `total_size` above
-    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`].
+    /// [`crate::serialize::MAX_CHUNKED_TOTAL_SIZE`], or
+    /// [`KitError::UnknownChunkerProfile`] for an unknown profile ID.
     // The expect cannot fire: the metadata leaf is one leaf.
     #[allow(clippy::missing_panics_doc)]
     pub fn new(total_size: u64, chunk_size: u32, chunk_count: u32) -> Result<Self, KitError> {
         crate::serialize::check_chunked_header(total_size, chunk_count)?;
+        crate::chunker::Chunker::classify_chunk_size(chunk_size)?;
         let mut fold = BmtFold::new();
         for leaf in ChunkedBlob::leaf_sequence(total_size, chunk_size, core::iter::empty()) {
             fold.push(&leaf)
@@ -775,7 +777,7 @@ impl BmtTree {
 ///
 /// Bytes are `u32 BE leaf_count ‖ LEB128-varint(n) ‖ n × 32-byte digest` —
 /// byte-identical to `commonware_storage::bmt::Proof<D>` at the pinned
-/// `2026.10.0` train (`tests::proofs_match_commonware` pins this; see also
+/// `2026.11.0` train (`tests::proofs_match_commonware` pins this; see also
 /// `rust/tests/golden/proofs/`). A commonware-based verifier can decode
 /// these bytes with the upstream type directly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1004,8 +1006,9 @@ impl Proof {
         self.reconstruct_multi_root(&elements)
     }
 
-    /// Verify against the bare (pre-wrap) inner root — matches
-    /// `commonware_storage::bmt::Proof::verify_element_inclusion` exactly.
+    /// Verify against the bare (pre-wrap) inner root — accepts exactly what
+    /// `commonware_storage::bmt::Proof::verify_element_inclusion` accepts
+    /// (upstream takes the position first).
     /// `cfg(test)`: kept only for the commonware cross-check test
     /// (`tests::proofs_match_commonware`) and `tests::verify_chunk_rejects_meta_leaf`,
     /// which need to show the *bare* BMT proof accepts a position/leaf the
@@ -2293,7 +2296,7 @@ mod tests {
                 "single-proof bytes diverged at n={n} pos={pos}"
             );
             cw_proof
-                .verify_element_inclusion::<Blake3>(&Digest(leaves[pos as usize]), pos, &cw_root)
+                .verify_element_inclusion::<Blake3>(pos, &Digest(leaves[pos as usize]), &cw_root)
                 .expect("upstream must accept its own proof");
             our_proof
                 .verify_element_inclusion(&leaves[pos as usize], pos, &ours.root)
@@ -2314,7 +2317,7 @@ mod tests {
                 )
                 .unwrap();
             cw_decoded
-                .verify_element_inclusion::<Blake3>(&Digest(leaves[pos as usize]), pos, &cw_root)
+                .verify_element_inclusion::<Blake3>(pos, &Digest(leaves[pos as usize]), &cw_root)
                 .expect("upstream must accept our proof bytes");
 
             // --- mutation must be rejected by both ---
@@ -2381,9 +2384,9 @@ mod tests {
                     );
                     let elements: Vec<(Hash, u32)> =
                         positions.iter().map(|&p| (leaves[p as usize], p)).collect();
-                    let cw_elements: Vec<(Digest, u32)> = positions
+                    let cw_elements: Vec<(u32, Digest)> = positions
                         .iter()
-                        .map(|&p| (Digest(leaves[p as usize]), p))
+                        .map(|&p| (p, Digest(leaves[p as usize])))
                         .collect();
                     cw_multi
                         .verify_multi_inclusion::<Blake3>(&cw_elements, &cw_root)
@@ -2428,9 +2431,9 @@ mod tests {
                         );
                         let bad_elements: Vec<(Hash, u32)> =
                             bad.iter().map(|&p| (leaves[p as usize], p)).collect();
-                        let bad_cw_elements: Vec<(Digest, u32)> = bad
+                        let bad_cw_elements: Vec<(u32, Digest)> = bad
                             .iter()
-                            .map(|&p| (Digest(leaves[p as usize]), p))
+                            .map(|&p| (p, Digest(leaves[p as usize])))
                             .collect();
                         assert_eq!(
                             our_multi.verify_multi_inclusion(&bad_elements, &ours.root),

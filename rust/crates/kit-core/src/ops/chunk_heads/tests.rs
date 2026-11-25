@@ -57,7 +57,7 @@ fn serial(
 /// Chunks a manifest can list: blobs of known length, a tree (not a blob), and
 /// an id the store lacks.
 struct Pool {
-    _dir: TempDir,
+    dir: TempDir,
     store: ObjectStore,
     blobs: Vec<(Hash, u64)>,
     tree: Hash,
@@ -65,9 +65,19 @@ struct Pool {
 }
 
 /// The pool the random walks share: 64 blobs, so a round holds many reads.
-fn shared_pool() -> &'static Pool {
-    static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| pool(64))
+fn with_shared_pool<R>(use_pool: impl FnOnce(&Pool) -> R) -> R {
+    thread_local! {
+        static POOL: Pool = pool(64);
+    }
+    POOL.with(use_pool)
+}
+
+#[test]
+fn shared_pool_is_removed_when_the_thread_ends() {
+    let path = std::thread::spawn(|| with_shared_pool(|pool| pool.dir.path().to_path_buf()))
+        .join()
+        .unwrap();
+    assert!(!path.exists(), "shared pool left at {}", path.display());
 }
 
 /// A pool of `count` distinct blobs.
@@ -86,7 +96,7 @@ fn pool(count: usize) -> Pool {
         .write(&serialize::serialize(&Object::Tree(Tree { entries: vec![] })).unwrap())
         .unwrap();
     Pool {
-        _dir: dir,
+        dir,
         store,
         blobs,
         tree,
@@ -183,52 +193,54 @@ proptest! {
         skip_every in 0usize..4,
         visit_fails_at in proptest::option::of(0u32..240),
     ) {
-        let pool = shared_pool();
-        let blob = manifest(pool, &picks);
-        let primed: Vec<(Hash, u64)> = primed
-            .into_iter()
-            .map(|(n, honest)| (pool.blobs[n].0, pool.blobs[n].1 + u64::from(!honest)))
-            .collect();
-        let visit = |visit_fails_at: Option<u32>| {
-            move |_: &mut Cache, index: u32, chunk: Hash| {
-                if visit_fails_at == Some(index) {
-                    return Err(StoreError::ObjectNotFound(hash::to_hex(&chunk)));
+        with_shared_pool(|pool| {
+            let blob = manifest(pool, &picks);
+            let primed: Vec<(Hash, u64)> = primed
+                .into_iter()
+                .map(|(n, honest)| (pool.blobs[n].0, pool.blobs[n].1 + u64::from(!honest)))
+                .collect();
+            let visit = |visit_fails_at: Option<u32>| {
+                move |_: &mut Cache, index: u32, chunk: Hash| {
+                    if visit_fails_at == Some(index) {
+                        return Err(StoreError::ObjectNotFound(hash::to_hex(&chunk)));
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-        };
-        let expected = run(
-            |cache, wants, visited| {
-                let fail = visit(visit_fails_at);
-                serial(&pool.store, &blob, cache, wants, |c, i, h| {
-                    visited.push((i, h));
-                    fail(c, i, h)
-                })
-            },
-            limit,
-            &primed,
-            skip_every,
-        );
-        let actual = run(
-            |cache, wants, visited| {
-                let fail = visit(visit_fails_at);
-                walk_chunks(
-                    &pool.store,
-                    &blob,
-                    cache,
-                    wants,
-                    |c, i, h| {
+            };
+            let expected = run(
+                |cache, wants, visited| {
+                    let fail = visit(visit_fails_at);
+                    serial(&pool.store, &blob, cache, wants, |c, i, h| {
                         visited.push((i, h));
                         fail(c, i, h)
-                    },
-                    Tuning { window, min_parallel_reads },
-                )
-            },
-            limit,
-            &primed,
-            skip_every,
-        );
-        prop_assert_eq!(actual, expected);
+                    })
+                },
+                limit,
+                &primed,
+                skip_every,
+            );
+            let actual = run(
+                |cache, wants, visited| {
+                    let fail = visit(visit_fails_at);
+                    walk_chunks(
+                        &pool.store,
+                        &blob,
+                        cache,
+                        wants,
+                        |c, i, h| {
+                            visited.push((i, h));
+                            fail(c, i, h)
+                        },
+                        Tuning { window, min_parallel_reads },
+                    )
+                },
+                limit,
+                &primed,
+                skip_every,
+            );
+            prop_assert_eq!(actual, expected);
+            Ok(())
+        })?;
     }
 }
 

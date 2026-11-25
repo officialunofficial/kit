@@ -19,6 +19,7 @@
 #![cfg(unix)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::fs;
 use std::io::Read as _;
 use std::os::unix::fs::PermissionsExt;
@@ -37,6 +38,7 @@ use kit_core::protocol::{
 };
 use kit_core::refs;
 use kit_core::sign::{self, KeyPair};
+use kit_rpc::kit::rpc::v1::ssh::{SshFrame, ssh_frame::Body};
 use kit_sync::{
     CloneRemote, NoopObserver, RemoteSource, SyncOptions, TransportSource, fetch, init_clone_dir,
 };
@@ -467,6 +469,17 @@ if [ "$count" -eq 1 ] && [ -n "${KIT_TEST_SSH_CUT:-}" ]; then
   dd bs=1 count="$KIT_TEST_SSH_CUT" 2>/dev/null | "$KIT_SSH_TARGET_BIN" serve "$path"
   exit 0
 fi
+if [ -n "${KIT_TEST_SSH_RECORD_EXITS:-}" ]; then
+  status=0
+  if [ -n "${KIT_TEST_SSH_RECORD_FRAMES:-}" ]; then
+    tee "$KIT_TEST_SSH_COUNTER.$count.frames" |
+      "$KIT_SSH_TARGET_BIN" serve --idle-timeout-secs 600 "$path" || status=$?
+  else
+    "$KIT_SSH_TARGET_BIN" serve --idle-timeout-secs 600 "$path" || status=$?
+  fi
+  printf '%s\n' "$status" >> "$KIT_TEST_SSH_COUNTER.exits"
+  exit "$status"
+fi
 exec "$KIT_SSH_TARGET_BIN" serve "$path"
 "#;
     fs::write(&wrapper, script).unwrap();
@@ -571,8 +584,8 @@ fn ssh_upload_cut_mid_pack_is_sent_again_from_offset_zero() {
 /// A body whose length is over the limit is refused before it is read and
 /// before any frame: the connection carries the next verb.
 #[test]
-fn ssh_upload_over_the_limit_is_refused_before_any_read() {
-    let name = "ssh_upload_over_the_limit_is_refused_before_any_read";
+fn ssh_upload_over_the_session_limit_is_refused_before_any_read() {
+    let name = "ssh_upload_over_the_session_limit_is_refused_before_any_read";
     if !in_ssh_child(name, &[]) {
         return;
     }
@@ -580,15 +593,247 @@ fn ssh_upload_over_the_limit_is_refused_before_any_read() {
     let (tx, _) = ssh_remote(dir.path());
     let spooled = spooled_pack(dir.path(), 2, 1, KIB);
     let key = PackKey::from_hash(spooled.key());
-    let body = Recorded::new(&spooled).claiming(PACK_BODY_LIMIT + 1);
+    // The byte limit binds before a pack could need too many chunk frames.
+    let body = Recorded::new(&spooled).claiming(kit_serve::MAX_BYTES_PER_CONN + 1);
 
-    assert!(matches!(
-        tx.upload_pack(&body, &key, None),
-        Err(TransportError::PayloadTooLarge(_))
-    ));
+    let err = tx.upload_pack(&body, &key, None).unwrap_err();
+    assert!(matches!(err, TransportError::Unsupported(_)), "{err:?}");
+    assert_eq!(err.to_string(), "SSH pack exceeds the 1 GiB upload limit");
     assert!(body.reads().is_empty());
     assert!(!tx.pack_exists(&key, None).unwrap());
     assert_eq!(ssh_attempts(), 1);
+}
+
+/// The short reader sends a header, then fails before sending any chunk.
+/// This exercises the exact remaining budget without a 1 GiB fixture.
+#[test]
+fn ssh_reconnects_only_when_the_next_request_exceeds_the_remaining_bytes() {
+    let name = "ssh_reconnects_only_when_the_next_request_exceeds_the_remaining_bytes";
+    if !in_ssh_child(name, &[]) {
+        return;
+    }
+    let limit = kit_serve::MAX_BYTES_PER_CONN;
+    for (length, reconnects) in [(limit - 64, 0), (limit - 63, 1), (limit, 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _) = ssh_remote(dir.path());
+        let spooled = spooled_pack(dir.path(), 2, 1, KIB);
+        let key = PackKey::from_hash(spooled.key());
+        assert!(!tx.pack_exists(&key, None).unwrap());
+        let before = ssh_attempts();
+        let body = Recorded::new(&spooled).claiming(length);
+        assert!(matches!(
+            tx.upload_pack(&body, &key, None),
+            Err(TransportError::ProtocolError)
+        ));
+        assert_eq!(
+            ssh_attempts() - before,
+            reconnects,
+            "pack of {length} bytes"
+        );
+    }
+}
+
+const HEAD_REF: &str = "refs/heads/main";
+const PACKMAP_REF: &str = "refs/kit/packmap/main";
+
+struct UnpublishedUploads<'a> {
+    remote: &'a dyn Transport,
+    prior_packmap: Option<Hash>,
+    bytes: Cell<u64>,
+    interrupt: bool,
+}
+
+impl kit_sync::Observer<kit_sync::SyncEvent> for UnpublishedUploads<'_> {
+    fn event(&self, event: &kit_sync::SyncEvent) {
+        if let kit_sync::SyncEvent::PackUploaded { bytes } = event {
+            assert_eq!(self.remote.read_ref(HEAD_REF).unwrap(), None);
+            assert_eq!(
+                self.remote.read_ref(PACKMAP_REF).unwrap(),
+                self.prior_packmap
+            );
+            self.bytes.set(self.bytes.get() + bytes);
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.interrupt && self.bytes.get() > 0
+    }
+}
+
+#[test]
+#[ignore = "pushes over 1 GiB over ssh; run in the ignored lane"]
+fn ssh_push_over_the_session_budget_advances_refs_once_after_all_packs() {
+    let name = "ssh_push_over_the_session_budget_advances_refs_once_after_all_packs";
+    if !in_ssh_child(name, &[("KIT_TEST_SSH_RECORD_EXITS", "1")]) {
+        return;
+    }
+    let _guard = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, url) = ssh_remote(dir.path());
+    let remote = kit_transport_file::FileTransport::new(dir.path().join("remote"));
+    let origin = dir.path().join("origin");
+    init_clone_dir(&origin, &clone_remote(&url, "ssh")).unwrap();
+    let tip = commit_files(&origin, &KeyPair::generate().unwrap(), 65, 16 * MIB, 0);
+    let uploads = UnpublishedUploads {
+        remote: &remote,
+        prior_packmap: None,
+        bytes: Cell::new(0),
+        interrupt: false,
+    };
+    let mut options = kit_sync::PushOptions::default();
+    options.control.observer = &uploads;
+    let report = kit_sync::push(&origin, &TransportSource::new(&tx), &options).unwrap();
+
+    assert!(uploads.bytes.get() > kit_serve::MAX_BYTES_PER_CONN);
+    assert_eq!(ssh_attempts(), 2, "one reconnect for the remaining packs");
+    drop(tx);
+    let counter = std::env::var(SSH_COUNTER_ENV).unwrap();
+    assert_eq!(
+        fs::read_to_string(format!("{counter}.exits")).unwrap(),
+        "0\n0\n",
+        "both sessions close cleanly"
+    );
+    assert_eq!(report.steps, 1);
+    assert_eq!(remote.read_ref(HEAD_REF).unwrap(), Some(tip));
+    assert!(remote.read_ref(PACKMAP_REF).unwrap().is_some());
+}
+
+/// A branch packmap can outlive an interrupted push that never wrote the head.
+fn seed_packmap(remote: &kit_transport_file::FileTransport, nodes: u32) -> Hash {
+    let packs = remote.root().join("packs");
+    fs::create_dir_all(&packs).unwrap();
+    let mut prior = None;
+    for _ in 0..nodes {
+        let bytes = kit_core::transfer::encode_packlist(prior, &[]).unwrap();
+        let key = pack::pack_key(&bytes);
+        fs::write(packs.join(hash::to_hex(&key)), bytes).unwrap();
+        prior = Some(key);
+    }
+    let prior = prior.unwrap();
+    remote
+        .update_ref(
+            PACKMAP_REF,
+            kit_core::protocol::RefWriteCondition::Missing,
+            &prior,
+        )
+        .unwrap();
+    prior
+}
+
+fn recorded_ssh_requests(session: u32) -> Vec<Body> {
+    let counter = std::env::var(SSH_COUNTER_ENV).unwrap();
+    let data = fs::read(format!("{counter}.{session}.frames")).unwrap();
+    let mut reader = std::io::Cursor::new(data.as_slice());
+    let mut requests = Vec::new();
+    while reader.position() < data.len() as u64 {
+        let frame: SshFrame = kit_rpc::read_frame(&mut reader).unwrap();
+        match frame.body.unwrap() {
+            Body::Hello(_) | Body::PackChunk(_) => {}
+            request => requests.push(request),
+        }
+    }
+    requests
+}
+
+#[test]
+fn ssh_push_over_the_frame_budget_publishes_refs_once_without_resending_packs() {
+    const NODES: u32 = 64;
+    let name = "ssh_push_over_the_frame_budget_publishes_refs_once_without_resending_packs";
+    if !in_ssh_child(
+        name,
+        &[
+            ("KIT_TEST_SSH_RECORD_EXITS", "1"),
+            ("KIT_TEST_SSH_RECORD_FRAMES", "1"),
+        ],
+    ) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, url) = ssh_remote(dir.path());
+    let remote = kit_transport_file::FileTransport::new(dir.path().join("remote"));
+    let prior = seed_packmap(&remote, NODES);
+    // Leave enough requests for the data packs, then exhaust the session
+    // during the packmap walk. Keep the on-disk fixture small.
+    let missing = PackKey::from_hash([0; 32]);
+    for _ in 0..kit_serve::MAX_FRAMES_PER_CONN - NODES {
+        assert!(!tx.pack_exists(&missing, None).unwrap());
+    }
+    let origin = dir.path().join("origin");
+    init_clone_dir(&origin, &clone_remote(&url, "ssh")).unwrap();
+    let tip = commit_files(&origin, &KeyPair::generate().unwrap(), 8, KIB, 0);
+    let uploads = UnpublishedUploads {
+        remote: &remote,
+        prior_packmap: Some(prior),
+        bytes: Cell::new(0),
+        interrupt: false,
+    };
+    let mut options = kit_sync::PushOptions::default();
+    options.pack_payload_cap = 2 * KIB as u64;
+    options.control.observer = &uploads;
+
+    let report = kit_sync::push(&origin, &TransportSource::new(&tx), &options).unwrap();
+    assert_eq!(ssh_attempts(), 2);
+    drop(tx);
+    let counter = std::env::var(SSH_COUNTER_ENV).unwrap();
+    assert_eq!(
+        fs::read_to_string(format!("{counter}.exits")).unwrap(),
+        "0\n0\n"
+    );
+
+    let first = recorded_ssh_requests(1);
+    let second = recorded_ssh_requests(2);
+    assert_eq!(first.len(), kit_serve::MAX_FRAMES_PER_CONN as usize);
+    assert!(matches!(first.last(), Some(Body::DownloadPack(_))));
+    assert!(matches!(second.first(), Some(Body::DownloadPack(_))));
+    let mut keys = std::collections::HashSet::new();
+    let mut ref_updates = Vec::new();
+    for request in first.into_iter().chain(second) {
+        match request {
+            Body::UploadPack(header) => {
+                assert!(ref_updates.is_empty(), "upload after a ref update");
+                assert!(keys.insert(header.pack_id.unwrap()), "pack sent twice");
+            }
+            Body::UpdateRef(update) => ref_updates.push(update.name.unwrap()),
+            _ => {}
+        }
+    }
+    assert!(keys.len() > 2, "several data packs and the packmap");
+    assert_eq!(ref_updates, [PACKMAP_REF, HEAD_REF]);
+    assert_eq!(report.steps, 1);
+    assert_eq!(remote.read_ref(HEAD_REF).unwrap(), Some(tip));
+    assert_ne!(remote.read_ref(PACKMAP_REF).unwrap().unwrap(), prior);
+}
+
+#[test]
+fn ssh_push_interrupted_after_a_pack_upload_leaves_both_refs_unmoved() {
+    let name = "ssh_push_interrupted_after_a_pack_upload_leaves_both_refs_unmoved";
+    if !in_ssh_child(name, &[]) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, url) = ssh_remote(dir.path());
+    let remote = kit_transport_file::FileTransport::new(dir.path().join("remote"));
+    let origin = dir.path().join("origin");
+    init_clone_dir(&origin, &clone_remote(&url, "ssh")).unwrap();
+    commit_files(&origin, &KeyPair::generate().unwrap(), 8, KIB, 0);
+    let uploads = UnpublishedUploads {
+        remote: &remote,
+        prior_packmap: None,
+        bytes: Cell::new(0),
+        interrupt: true,
+    };
+    let mut options = kit_sync::PushOptions::default();
+    options.pack_payload_cap = 2 * KIB as u64;
+    options.control.observer = &uploads;
+
+    let err = kit_sync::push(&origin, &TransportSource::new(&tx), &options).unwrap_err();
+    assert!(matches!(
+        err,
+        kit_sync::PushError::Sync(kit_sync::SyncError::Interrupted)
+    ));
+    assert!(uploads.bytes.get() > 0);
+    assert_eq!(remote.read_ref(HEAD_REF).unwrap(), None);
+    assert_eq!(remote.read_ref(PACKMAP_REF).unwrap(), None);
 }
 
 /// A body that ends before its length is a local error: the upload is not

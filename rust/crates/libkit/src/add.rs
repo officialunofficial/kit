@@ -16,11 +16,13 @@
 //! The index changes in the order of the walk, whichever way the hash ran.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kit_core::KitError;
+use kit_core::durable::Group;
 use kit_core::hash::{self, Hash, ZERO};
 use kit_core::ignore::{self, IgnoreError, IgnoreList};
 use kit_core::index::{self, EntryStatus, Index, IndexEntry, IndexError};
@@ -28,10 +30,11 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Blob, Object};
 use kit_core::observer::Observer;
 pub use kit_core::ops::PatchHunk;
+use kit_core::ops::restore::is_restore_temp_name;
 use kit_core::ops::{BINARY_SNIFF_LEN, apply_hunks_subset, enumerate_hunks, is_binary};
 use kit_core::serialize;
 use kit_core::store::{HashOnlySink, ObjectSink, ObjectStore, StoreError};
-use kit_core::worktree::{self, LoadedBlob, WorktreeError};
+use kit_core::worktree::{self, LoadedBlob, TrackedStats, WorktreeError};
 use kit_sync::fanout;
 use kit_sync::worktree::{index_tracks_path_or_descendant, read_or_seed_index_from_head};
 
@@ -325,7 +328,7 @@ fn stage_with_limit(
         return stage_tracked_observed(layout, &store, observer);
     }
 
-    let mut idx = read_or_seed_index_from_head(layout, &store).map_err(Error::ReadIndex)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, &store).map_err(Error::ReadIndex)?;
     let previous = idx.clone();
 
     // One durability batch for the whole call. A staged object costs no full
@@ -356,10 +359,55 @@ fn stage_with_limit(
         return Ok(());
     }
 
-    // The objects become durable before the index that names them.
-    batch.commit().map_err(Error::Store)?;
+    // The objects become durable before the index that names them, on the
+    // flushes of one group: the bytes of the objects (flush 1), then their
+    // names and the bytes of the index (flush 2), then the name of the index
+    // (flush 3).
+    let mut group = store.group();
+    batch.commit_in(&mut group).map_err(Error::Store)?;
     retain_content_identities(&store, &previous, &mut idx)?;
-    index::write_index(layout, &idx).map_err(Error::WriteIndex)
+    finish_index(&mut group, layout, &previous, &idx, on_disk)
+}
+
+/// Stage the index of `next` unless it holds what the index file held, make
+/// the objects it names durable, and publish it. The caller has committed
+/// the objects into `group`, so their names are pending.
+fn finish_index(
+    group: &mut Group,
+    layout: &RepoLayout,
+    previous: &Index,
+    next: &Index,
+    previous_was_on_disk: bool,
+) -> Result<(), Error> {
+    let staged = if previous_was_on_disk && previous == next {
+        None
+    } else {
+        Some(index::stage_index(group, layout, next).map_err(Error::WriteIndex)?)
+    };
+    // The names of the objects, and the bytes of the index, are durable
+    // before the index is named.
+    let durable = group
+        .flush()
+        .map_err(|e| Error::Store(kit_core::store::StoreError::Io(e)))?;
+    if let Some(staged) = staged {
+        index::publish_staged_index(group, staged, &durable).map_err(Error::WriteIndex)?;
+        // The rename is durable before the command reports success.
+        let _named = group
+            .flush()
+            .map_err(|e| Error::WriteIndex(index::IndexError::Io(e)))?;
+    }
+    Ok(())
+}
+
+/// The index of the repository, or, when it holds no entry, the one that
+/// `HEAD` names. The flag is true when the entries came from the index file.
+fn read_index_or_seed(layout: &RepoLayout, store: &ObjectStore) -> Result<(Index, bool), String> {
+    let idx = index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    if idx.entries.is_empty() {
+        read_or_seed_index_from_head(layout, store).map(|seeded| (seeded, false))
+    } else {
+        Ok((idx, true))
+    }
 }
 
 /// Report to `observer` each entry of `next` that a real run would add, update
@@ -417,7 +465,7 @@ fn stage_tracked_observed(
     observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     let root = layout.worktree_root();
-    let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Refresh)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, store).map_err(Error::Refresh)?;
     check_size(&idx, index::MAX_INDEX_BYTES)?;
     let previous = idx.clone();
 
@@ -450,6 +498,14 @@ fn stage_tracked_observed(
                 return Err(Error::Refresh(format!("metadata {}: {e}", abs.display())));
             }
         };
+
+        if is_restore_temp_alias(root, &entry.path, &meta)
+            .map_err(|e| Error::Refresh(format!("metadata {}: {e}", abs.display())))?
+        {
+            entry.status = EntryStatus::Removed;
+            entry.object_hash = ZERO;
+            continue;
+        }
 
         // A file whose time, size and mode class match the entry keeps the
         // entry. No read, no hash, no store.
@@ -503,13 +559,18 @@ fn stage_tracked_observed(
     observer.event(&Event::HashProgress {
         bytes: progress_sink.bytes.load(Ordering::Relaxed),
     });
-    // The objects first, then the index that names them.
+    // The objects first, then the index that names them, on one group.
+    let mut group = store.group();
     batch
-        .commit()
+        .commit_in(&mut group)
         .map_err(|e| Error::Refresh(format!("store: {e}")))?;
     retain_content_identities(store, &previous, &mut idx)
         .map_err(|e| Error::Refresh(e.to_string()))?;
-    index::write_index(layout, &idx).map_err(|e| Error::Refresh(format!("write index: {e}")))
+    finish_index(&mut group, layout, &previous, &idx, on_disk).map_err(|e| match e {
+        Error::WriteIndex(e) => Error::Refresh(format!("write index: {e}")),
+        Error::Store(e) => Error::Refresh(format!("store: {e}")),
+        other => other,
+    })
 }
 
 fn is_gone(e: &io::Error) -> bool {
@@ -611,11 +672,21 @@ fn prepare(
         }
         if target == "." {
             let mut seen = HashSet::new();
-            add_tree(root, root, false, idx, &ignores, &mut seen, &mut pending)?;
+            let stats = TrackedStats::collect(root, idx);
+            add_tree(
+                root,
+                root,
+                false,
+                idx,
+                &stats,
+                &ignores,
+                &mut seen,
+                &mut pending,
+            )?;
             mark_missing_paths_removed(root, idx, &seen);
         } else {
             ensure_within_repo(root, &abs)?;
-            if let Routed::NeedsHash(p) = route_path(root, p, idx, &ignores, request.force)? {
+            if let Routed::NeedsHash(p) = route_path(root, p, None, idx, &ignores, request.force)? {
                 stage_hashed(
                     idx,
                     p.rel_str.clone(),
@@ -781,6 +852,20 @@ impl ObjectSink for HashProgressSink<'_> {
         self.note(parts);
         Ok(hash)
     }
+    fn put_hashed_chunk(
+        &self,
+        chunk: &kit_core::store::HashedChunk<'_>,
+    ) -> kit_core::store::StoreResult<Hash> {
+        let hash = self.inner.put_hashed_chunk(chunk)?;
+        self.note(&chunk.parts());
+        Ok(hash)
+    }
+    fn orders_chunks(&self) -> bool {
+        self.inner.orders_chunks()
+    }
+    fn chunk_buffers(&self) -> Option<&kit_core::chunker::ChunkBuffers> {
+        self.inner.chunk_buffers()
+    }
     fn has(&self, hash: &Hash) -> bool {
         self.inner.has(hash)
     }
@@ -821,6 +906,7 @@ enum Routed {
 fn route_path(
     root: &Path,
     rel: &Path,
+    walked_meta: Option<std::fs::Metadata>,
     idx: &mut Index,
     ignores: &IgnoreList,
     force: bool,
@@ -830,14 +916,16 @@ fn route_path(
     } else {
         root.join(rel)
     };
-    let meta = abs.symlink_metadata().map_err(|source| Error::Metadata {
-        path: abs.clone(),
-        source,
-    })?;
+    let named = walked_meta.is_none();
+    let meta = match walked_meta {
+        Some(meta) if rel.is_absolute() => meta,
+        _ => abs.symlink_metadata().map_err(|source| Error::Metadata {
+            path: abs.clone(),
+            source,
+        })?,
+    };
     let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
-    if !index::validate_index_path(&rel_str) {
-        return Err(Error::InvalidPath(rel_str));
-    }
+    validate_staging_path(root, idx, &rel_str, named.then_some(&meta))?;
     // One lookup serves every check below.
     let existing_pos = idx.find_entry(&rel_str);
     let previous_status = existing_pos.map_or(EntryStatus::Blob, |i| idx.entries[i].status);
@@ -897,10 +985,14 @@ type HashedFile = (EntryStatus, Hash, (u64, u64, u64, u64));
 /// chunks win the most, by 31 percent. 4 chunks per thread puts the crossover
 /// at 16 chunks on 4 threads, the first size with a clean win. From end to
 /// end, the files of 8, 32 and 128 MiB ran 1.7 to 2.2 times as fast.
+///
+/// A batch holds at most [`worktree::STREAM_HASH_BATCH`] chunks, so the
+/// threshold stops there. Past 16 threads, 4 chunks per thread would put it
+/// above the size of a full batch, and no batch would take the parallel path.
 const CHUNK_FANOUT_CHUNKS_PER_THREAD: usize = 4;
 
 fn chunk_fanout_threshold() -> usize {
-    fanout::threshold(CHUNK_FANOUT_CHUNKS_PER_THREAD)
+    fanout::threshold(CHUNK_FANOUT_CHUNKS_PER_THREAD).min(worktree::STREAM_HASH_BATCH)
 }
 
 /// Hash and store the content of one pending file. The function reads no index
@@ -926,9 +1018,19 @@ fn hash_pending(
     }
     let result = if chunk_fanout {
         worktree::hash_file_with_metadata_with(sink, &p.abs, |sink, batch| {
-            fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
-                worktree::store_chunk_blob(sink, chunk)
-            })
+            if sink.orders_chunks() {
+                // Hash the batch in parallel, then hand it over in file order
+                // on this thread, so a packing sink writes the file in order.
+                let hashed =
+                    fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                        worktree::hash_chunk(chunk)
+                    })?;
+                worktree::put_hashed_chunks(sink, &hashed)
+            } else {
+                fanout::try_map_seq_or_par(batch, chunk_fanout_threshold(), |chunk| {
+                    worktree::store_chunk_blob(sink, chunk)
+                })
+            }
         })
     } else {
         // Every file has a busy worker. Borrow each chunk from the reader,
@@ -971,6 +1073,123 @@ fn path_text(path: &Path) -> Result<String, Error> {
     Ok(components.join("/"))
 }
 
+fn validate_staging_path(
+    root: &Path,
+    idx: &Index,
+    path: &str,
+    named: Option<&std::fs::Metadata>,
+) -> Result<(), Error> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if !index::validate_index_path(path)
+        || (is_restore_temp_name(name) && idx.find_entry(path).is_none())
+    {
+        return Err(Error::InvalidPath(path.to_owned()));
+    }
+    if let Some(meta) = named
+        && is_restore_temp_alias(root, path, meta).map_err(|source| Error::Metadata {
+            path: root.join(path),
+            source,
+        })?
+    {
+        return Err(Error::InvalidPath(path.to_owned()));
+    }
+    Ok(())
+}
+
+/// Check the on-disk spelling of a named path that can alias a temporary
+/// name. Compare the entries on disk so the filesystem decides which
+/// non-ASCII names alias, and keep ordinary files with similar names.
+fn is_restore_temp_alias(root: &Path, path: &str, meta: &std::fs::Metadata) -> io::Result<bool> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if meta.is_dir() || !could_alias_restore_temp_name(name) {
+        return Ok(false);
+    }
+    let abs = root.join(path);
+    let parent = abs.parent().unwrap_or(root);
+    let names = match std::fs::read_dir(parent) {
+        Ok(names) => names,
+        // An explicit add can read a file in a searchable directory.
+        // Without a listing there is no evidence that its name is an alias.
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut aliases_temporary = false;
+    for entry in names {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        if file_name == name {
+            return if is_restore_temp_name(name) {
+                match has_exact_parent_spelling(root, path) {
+                    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Ok(false),
+                    exact => exact.map(|exact| !exact),
+                }
+            } else {
+                Ok(false)
+            };
+        }
+        if file_name.to_str().is_some_and(is_restore_temp_name)
+            && same_restore_entry(meta, &abs, &entry.path())?
+        {
+            aliases_temporary = true;
+        }
+    }
+    Ok(aliases_temporary)
+}
+
+/// Check whether a name could have the generated spelling after case and
+/// Unicode normalization. Use the filesystem to confirm any candidate.
+fn could_alias_restore_temp_name(name: &str) -> bool {
+    if name.is_ascii() {
+        return name.starts_with('.') && is_restore_temp_name(&name.to_ascii_lowercase());
+    }
+    if !name.bytes().any(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let folded = name.to_uppercase().to_lowercase();
+    let ascii: String = folded.chars().filter(char::is_ascii).collect();
+    is_restore_temp_name(&ascii)
+}
+
+/// A historical temporary-looking name is tracked only at its exact path.
+fn has_exact_parent_spelling(root: &Path, path: &str) -> io::Result<bool> {
+    let Some((parents, _)) = path.rsplit_once('/') else {
+        return Ok(true);
+    };
+    let mut parent = root.to_path_buf();
+    for component in parents.split('/') {
+        let mut found = false;
+        for entry in std::fs::read_dir(&parent)? {
+            let entry = entry?;
+            if entry.file_name() == component {
+                found = entry.file_type()?.is_dir();
+                break;
+            }
+        }
+        if !found {
+            return Ok(false);
+        }
+        parent.push(component);
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn same_restore_entry(meta: &std::fs::Metadata, _: &Path, actual: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    // A hard-linked inode can have a separate, ordinary name.
+    if meta.nlink() > 1 {
+        return Ok(false);
+    }
+    let actual = actual.symlink_metadata()?;
+    Ok(meta.dev() == actual.dev() && meta.ino() == actual.ino())
+}
+
+#[cfg(not(unix))]
+fn same_restore_entry(_: &std::fs::Metadata, requested: &Path, actual: &Path) -> io::Result<bool> {
+    Ok(requested.canonicalize()? == actual.canonicalize()?)
+}
+
 fn is_ignored_untracked(
     ignores: &IgnoreList,
     path: &Path,
@@ -991,6 +1210,7 @@ fn add_tree(
     dir: &Path,
     parent_ignored: bool,
     idx: &mut Index,
+    stats: &TrackedStats,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
     pending: &mut Vec<PendingHash>,
@@ -1008,11 +1228,6 @@ fn add_tree(
     })?;
     for ent in rd.flatten() {
         let p = ent.path();
-        let meta = p.symlink_metadata().map_err(|source| Error::Metadata {
-            path: p.clone(),
-            source,
-        })?;
-        let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
         let native_relative = p.strip_prefix(root).unwrap_or(&p);
@@ -1023,6 +1238,28 @@ fn add_tree(
             .map(|component| component.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
+        // A tracked file may have its stat from the pass already; any other
+        // path, or one the pass could not stat, is stat'ed here.
+        // A name that is not UTF-8 has only a lossy spelling here, which could
+        // match another tracked path, so it is never looked up.
+        let tracked_stat = native_relative.to_str().and_then(|_| stats.get(&rel_path));
+        let meta = match tracked_stat {
+            Some(meta) => meta.clone(),
+            None => p.symlink_metadata().map_err(|source| Error::Metadata {
+                path: p.clone(),
+                source,
+            })?,
+        };
+        let is_dir = meta.file_type().is_dir();
+        if !is_dir
+            && native_relative
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(is_restore_temp_name)
+            && idx.find_entry(&rel_path).is_none()
+        {
+            continue;
+        }
         // An ignore rule hides untracked content only. A tracked file stays
         // in view, and so does a directory that holds tracked content, so
         // `add .` and `add -A` refresh the tracked changes. The bit of an
@@ -1036,11 +1273,11 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;
+            add_tree(root, &p, entry_ignored, idx, stats, ignores, seen, pending)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The decision to include is made, so `force` skips the second
             // look at the ignore rules in `route_path`.
-            match route_path(root, &p, idx, ignores, true)? {
+            match route_path(root, &p, Some(meta), idx, ignores, true)? {
                 Routed::Done(rel) => {
                     seen.insert(rel);
                 }
@@ -1060,15 +1297,45 @@ fn add_tree(
 }
 
 fn mark_missing_paths_removed(root: &Path, idx: &mut Index, seen: &HashSet<String>) {
+    let mut directory_names = HashMap::new();
     for entry in &mut idx.entries {
         if entry.status != EntryStatus::Removed
             && !seen.contains(&entry.path)
-            && matches!(root.join(&entry.path).symlink_metadata(), Err(e) if is_gone(&e))
+            && match root.join(&entry.path).symlink_metadata() {
+                Ok(_) => has_exact_spelling(root, &entry.path, &mut directory_names) == Some(false),
+                Err(error) => is_gone(&error),
+            }
         {
             entry.status = EntryStatus::Removed;
             entry.object_hash = ZERO;
         }
     }
+}
+
+/// A case-insensitive lookup can succeed even after the name disappeared.
+fn has_exact_spelling(
+    root: &Path,
+    path: &str,
+    directory_names: &mut HashMap<PathBuf, Option<HashSet<OsString>>>,
+) -> Option<bool> {
+    let mut parent = root.to_path_buf();
+    for component in path.split('/') {
+        let names = directory_names
+            .entry(parent.clone())
+            .or_insert_with_key(|dir| {
+                std::fs::read_dir(dir)
+                    .ok()?
+                    .map(|entry| entry.map(|entry| entry.file_name()))
+                    .collect::<io::Result<_>>()
+                    .ok()
+            })
+            .as_ref()?;
+        if !names.contains(std::ffi::OsStr::new(component)) {
+            return Some(false);
+        }
+        parent.push(component);
+    }
+    Some(true)
 }
 
 /// Choose hunks across the named files. The index is seeded from `HEAD`, so a
@@ -1138,12 +1405,10 @@ fn patch_one_file(
         source,
     })?;
     let rel_str = path_text(abs.strip_prefix(root).unwrap_or(rel))?;
-    if !index::validate_index_path(&rel_str) {
-        return Err(Error::InvalidPath(rel_str));
-    }
     // A path behind a symlink could name a file outside the repository, and
     // the read would follow the link.
     ensure_within_repo(root, &abs)?;
+    validate_staging_path(root, idx, &rel_str, Some(&meta))?;
     // Hunks exist for a regular file. A directory, a symlink and a special
     // file are refused.
     if !meta.file_type().is_file() {
@@ -1332,6 +1597,48 @@ fn ensure_within_repo(root: &Path, abs: &Path) -> Result<(), Error> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_add_keeps_an_unseen_tracked_file_with_its_exact_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("present"), b"data").unwrap();
+        let mut index = Index::new();
+        let original = [3; 32];
+        for path in ["present", "gone"] {
+            stage_hashed(
+                &mut index,
+                path.to_owned(),
+                (EntryStatus::Blob, original, (0, 0, 0, 0)),
+            );
+        }
+
+        mark_missing_paths_removed(dir.path(), &mut index, &HashSet::new());
+
+        assert_eq!(index.entries[0].status, EntryStatus::Blob);
+        assert_eq!(index.entries[0].object_hash, original);
+        assert_eq!(index.entries[1].status, EntryStatus::Removed);
+        assert_eq!(index.entries[1].object_hash, ZERO);
+    }
+
+    #[test]
+    fn bulk_add_checks_exact_spelling_of_each_path_component() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("Folder")).unwrap();
+        std::fs::write(dir.path().join("Folder/foo"), b"data").unwrap();
+        let mut names = HashMap::new();
+
+        assert_eq!(
+            has_exact_spelling(dir.path(), "Folder/foo", &mut names),
+            Some(true)
+        );
+        for path in ["Folder/Foo", "folder/foo"] {
+            assert_eq!(
+                has_exact_spelling(dir.path(), path, &mut names),
+                Some(false)
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn native_path_text_preserves_boundaries_and_refuses_lossy_names() {
@@ -1363,6 +1670,21 @@ mod tests {
         out.sort();
         out
     }
+    #[test]
+    fn the_progress_sink_forwards_the_buffers_and_ordering_of_its_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let batch = store.batch();
+        let sink = HashProgressSink::new(&batch, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_some());
+        assert_eq!(sink.orders_chunks(), batch.orders_chunks());
+
+        let sink = HashProgressSink::new(&store, &crate::NoopObserver).unwrap();
+        assert!(sink.chunk_buffers().is_none());
+        assert!(!sink.orders_chunks());
+    }
+
     #[test]
     fn oversized_request_leaves_no_objects_temps_or_partial_index() {
         let dir = tempfile::tempdir().unwrap();
@@ -1417,6 +1739,107 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn routing_an_absolute_walk_path_reuses_its_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("file");
+        std::fs::write(&path, "content").unwrap();
+        let metadata = path.symlink_metadata().unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let routed = route_path(
+            root,
+            &path,
+            Some(metadata),
+            &mut Index::new(),
+            &IgnoreList::new(),
+            true,
+        )
+        .unwrap();
+
+        // The walker already observed this path. The hash step opens it later.
+        assert!(matches!(routed, Routed::NeedsHash(pending) if pending.abs == path));
+    }
+
+    #[test]
+    fn routing_a_relative_path_reads_metadata_at_the_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let observed = root.join("observed");
+        std::fs::write(&observed, "content").unwrap();
+        let metadata = observed.symlink_metadata().unwrap();
+        let relative = Path::new("missing");
+
+        let routed = route_path(
+            root,
+            relative,
+            Some(metadata),
+            &mut Index::new(),
+            &IgnoreList::new(),
+            true,
+        );
+
+        assert!(matches!(
+            routed,
+            Err(Error::Metadata { path, source })
+                if path == root.join(relative) && source.kind() == io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dot_add_refuses_a_file_replaced_by_a_symlink_before_hashing() {
+        use std::os::unix::fs::symlink;
+
+        struct ReplaceBeforeHash(PathBuf);
+        impl Observer<Event> for ReplaceBeforeHash {
+            fn event(&self, event: &Event) {
+                if matches!(event, Event::HashProgress { bytes: 0 }) && !self.0.is_symlink() {
+                    std::fs::remove_file(&self.0).unwrap();
+                    symlink("target", &self.0).unwrap();
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let layout = RepoLayout::single(root);
+        ObjectStore::init(&layout).unwrap();
+        kit_core::refs::init(&layout).unwrap();
+        kit_core::refs::write_head_branch(&layout, "main").unwrap();
+        std::fs::write(root.join(".kitignore"), "target\n").unwrap();
+        std::fs::write(root.join("target"), "ignored").unwrap();
+        std::fs::write(root.join("file"), "regular").unwrap();
+        drop(lock::acquire_worktree(&layout, &crate::NoopObserver).unwrap());
+        let before = snapshot(&root.join(".kit"));
+
+        let err = stage(
+            &layout,
+            &StoreConfig {
+                environment: &crate::Environment::new(root),
+                observer: &crate::NoopObserver,
+            },
+            root,
+            &Request {
+                all: false,
+                update: false,
+                patch: false,
+                force: false,
+                dry_run: false,
+                paths: &[".".to_owned()],
+            },
+            &mut NoChooser,
+            &crate::NoopObserver,
+            &ReplaceBeforeHash(root.join("file")),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Hash { path, .. } if path == root.join("file")));
+        assert_eq!(snapshot(&root.join(".kit")), before);
+    }
+
     #[test]
     fn repeated_paths_only_hash_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -1435,5 +1858,86 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(idx.entries.len(), 1);
         assert_eq!(idx.serialize().len(), 41 + 67 + 4);
+    }
+
+    fn in_pool<T: Send>(threads: usize, f: impl FnOnce() -> T + Send) -> T {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(f)
+    }
+
+    #[test]
+    fn chunk_fanout_threshold_never_exceeds_a_full_batch() {
+        for (threads, expected) in [
+            (1, 4),
+            (4, 16),
+            (8, 32),
+            (16, 64),
+            (17, 64),
+            (32, 64),
+            (128, 64),
+        ] {
+            assert_eq!(
+                in_pool(threads, chunk_fanout_threshold),
+                expected,
+                "{threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_full_batch_takes_the_parallel_path_on_a_large_pool() {
+        let full = vec![0u8; worktree::STREAM_HASH_BATCH];
+        let short = &full[..worktree::STREAM_HASH_BATCH - 1];
+        for threads in [4, 16, 17, 32, 64] {
+            let (full_par, short_par) = in_pool(threads, || {
+                let threshold = chunk_fanout_threshold();
+                let is_par = |items: &[u8]| fanout::map_seq_or_par(items, threshold, |_, p| p)[0];
+                (is_par(&full), is_par(short))
+            });
+            assert!(full_par, "a full batch on {threads} threads");
+            // A batch below the threshold stays in sequence, as before, on a
+            // pool whose threshold is under the batch size.
+            assert_eq!(short_par, threads * 4 <= short.len(), "{threads} threads");
+        }
+    }
+
+    #[test]
+    fn large_file_ids_match_the_serial_hash_on_a_large_pool() {
+        // Several full batches at the average chunk size.
+        let len = usize::try_from(worktree::CHUNK_THRESHOLD).unwrap() + 8 * 1024 * 1024;
+        let mut data = Vec::with_capacity(len);
+        let mut state: u64 = 0x5EED_0001;
+        while data.len() < len {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            data.extend_from_slice(&state.to_le_bytes());
+        }
+        data.truncate(len);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(&path, &data).unwrap();
+        let pending = PendingHash {
+            abs: path.clone(),
+            rel_str: "big.bin".to_owned(),
+            previous_status: EntryStatus::Blob,
+            symlink_target: None,
+        };
+        let store = |name: &str| {
+            let root = dir.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            ObjectStore::init(&RepoLayout::single(&root)).unwrap()
+        };
+
+        let serial = store("serial");
+        let (_, expected, _) = hash_pending(&serial, &pending, false).unwrap();
+        for threads in [4, 32] {
+            let fanned = store(&format!("fanned-{threads}"));
+            let (_, got, _) = in_pool(threads, || hash_pending(&fanned, &pending, true)).unwrap();
+            assert_eq!(got, expected, "{threads} threads");
+        }
     }
 }

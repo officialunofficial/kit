@@ -72,6 +72,13 @@ pub trait RemoteSource {
         let _ = (key, hint);
         Ok(false)
     }
+    /// The length of the pack stored under `key`, when the source can read
+    /// it without fetching the pack; `None` when the pack is not stored or
+    /// the length is not known. One attempt, never a retry ladder.
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        let _ = (key, hint);
+        Ok(None)
+    }
     /// Upload a sealed pack using the head ref as its authorization hint.
     /// A retry reads `pack` again from its start.
     fn upload_pack(
@@ -147,6 +154,12 @@ pub trait RemoteSource {
     /// How [`Self::list_refs`] answers, as [`Transport::ref_listing`].
     fn ref_listing(&self) -> kit_core::protocol::RefListing {
         kit_core::protocol::RefListing::Ordered
+    }
+    /// Whether a push may send a replacement chunk manifest as a delta, as
+    /// [`Transport::accepts_manifest_deltas`]. A source says `false` unless it
+    /// reaches a remote kit controls; a hosted source keeps full manifests.
+    fn accepts_manifest_deltas(&self) -> bool {
+        false
     }
     /// Both conditioned refs can advance atomically.
     fn supports_atomic_advance(&self) -> bool {
@@ -242,6 +255,9 @@ impl RemoteSource for TransportSource<'_> {
             .pack_exists(key, Some(hint))
             .map_err(Into::into)
     }
+    fn pack_len(&self, key: &PackKey, hint: &str) -> Result<Option<u64>, SourceError> {
+        self.transport.pack_len(key, Some(hint)).map_err(Into::into)
+    }
     fn supports_attestations(&self) -> bool {
         self.transport.supports_attestations()
     }
@@ -322,6 +338,9 @@ impl RemoteSource for TransportSource<'_> {
     }
     fn ref_listing(&self) -> kit_core::protocol::RefListing {
         self.transport.ref_listing()
+    }
+    fn accepts_manifest_deltas(&self) -> bool {
+        self.transport.accepts_manifest_deltas()
     }
     fn supports_atomic_advance(&self) -> bool {
         self.transport.supports_atomic_advance()
@@ -751,6 +770,8 @@ mod tests {
             &mut applied,
             false,
             &mut crate::apply::ChainApplied::default(),
+            &store.prune_guard().unwrap(),
+            |_| Ok(()),
         )
         else {
             panic!("wrong pack error")

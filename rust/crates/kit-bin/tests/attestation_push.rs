@@ -29,6 +29,9 @@ fn cli_push_opt_in_and_config_publish_on_up_to_date_branches() {
     let layout = kit_core::layout::RepoLayout::single(&dir);
     let bytes = attestation_fetch::envelope(tip);
     kit_attest::store::save(&layout, &tip, &bytes).unwrap();
+    let locator = "file:///private/example/repo";
+    let unsafe_envelope = attestation_fetch::git_locator_envelope(tip, "git-bridge", locator);
+    let (unsafe_id, _) = kit_attest::store::save(&layout, &tip, &unsafe_envelope).unwrap();
     run(&dir, &["push"]);
     assert!(
         tx.read_ref(kit_core::refs::ATTESTMAP_REF)
@@ -36,6 +39,12 @@ fn cli_push_opt_in_and_config_publish_on_up_to_date_branches() {
             .is_none()
     );
     let out = run(&dir, &["push", "--attestations"]);
+    let warnings = String::from_utf8_lossy(&out.stderr);
+    assert!(warnings.contains(&format!(
+        "skipped git-bridge attestation {}",
+        kit_core::hash::to_hex(&unsafe_id)
+    )));
+    assert!(!warnings.contains(locator));
     assert!(
         String::from_utf8_lossy(&out.stderr)
             .contains("warning: publishing attestations is permanent")
@@ -47,7 +56,10 @@ fn cli_push_opt_in_and_config_publish_on_up_to_date_branches() {
     );
     let out = run(&dir, &["push", "--attestations"]);
     assert!(!String::from_utf8_lossy(&out.stderr).contains("permanent"));
-    run(&dir, &["config", "push.attestations", "true"]);
+    let config = layout.config_file();
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\npush.attestations = TRUE\n");
+    std::fs::write(&config, text).unwrap();
     let mut env = kit_attest::envelope::decode(&bytes).unwrap();
     env.payload = String::from_utf8(env.payload)
         .unwrap()

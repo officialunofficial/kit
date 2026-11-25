@@ -26,7 +26,7 @@ use crate::ignore::{self, IgnoreList};
 use crate::index::{self, Index};
 use crate::object::{ChunkedBlob, EntryMode, Object, Tree, TreeEntry};
 use crate::serialize;
-use crate::store::{ChunkOrigin, ObjectSink, ObjectStore};
+use crate::store::{ChunkOrigin, HashedChunk, ObjectSink, ObjectStore};
 
 /// Files larger than this go through the chunker (1 MiB).
 pub const CHUNK_THRESHOLD: u64 = 1024 * 1024;
@@ -173,7 +173,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, None, dir, index, observations)
+    build_tree_snapshot(sink, None, dir, index, observations, false, None)
 }
 
 /// Build a snapshot with read access to newly written and indexed objects.
@@ -189,15 +189,44 @@ pub fn build_tree_filtered_observed_with_source<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_observed_impl(sink, Some(source), dir, index, observations)
+    build_tree_snapshot(sink, Some(source), dir, index, observations, false, None)
 }
 
-fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
+/// [`build_tree_filtered_observed_with_source`] that also records, in
+/// `listings`, what the walk read of each directory it entered. A caller that
+/// must list those directories again can read them from `listings` and spare
+/// the second pass over the disk.
+///
+/// # Errors
+/// See [`build_tree_filtered_observed_with_source`].
+pub fn build_tree_filtered_listed_with_source<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    source: &(dyn crate::store::ObjectSource + Sync),
+    dir: &Path,
+    index: Option<&Index>,
+    listings: &mut DirListings,
+) -> WorktreeResult<Hash> {
+    build_tree_snapshot(
+        sink,
+        Some(source),
+        dir,
+        index,
+        &mut Vec::new(),
+        false,
+        Some(listings),
+    )
+}
+
+// Status hides interrupted restore artifacts. Restore safety checks use
+// the complete snapshot so they can still protect a conflicting entry.
+pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
+    skip_restore_temps: bool,
+    listings: Option<&mut DirListings>,
 ) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
@@ -227,17 +256,38 @@ fn build_tree_observed_impl<S: ObjectSink + Sync + ?Sized>(
     // and the walk consults it once per regular file.
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
-    build_tree_inner(
+    let stats = TrackedStats::collect(dir, index);
+    let mut misses = Vec::new();
+    let pending = build_tree_inner(
         sink,
-        source,
         dir,
         "",
         &ignores,
         index,
         &by_path,
+        &stats,
         false,
+        skip_restore_temps,
+        &mut misses,
+        listings,
+    )?;
+    let mut hashed = vec![
+        TreeEntry {
+            name: Vec::new(),
+            mode: EntryMode::Blob,
+            object_hash: crate::hash::ZERO
+        };
+        misses.len()
+    ];
+    hash_pending_files(
+        sink,
+        source,
+        &misses,
+        &mut hashed,
         observations,
-    )
+        available_threads(),
+    )?;
+    pending.write(sink, &hashed)
 }
 
 fn retained_content_hash(
@@ -269,30 +319,92 @@ fn directory_ignores<'a>(
     }
 }
 
+/// The `lstat` of `path`, which is `rel_path` from the root: the stat pass's if
+/// it took one, else a fresh one, which does not follow symlinks. A path the
+/// pass could not stat is stat'ed here, so its error surfaces where the walk
+/// reaches it.
+fn stat_of<'a>(
+    stats: &'a TrackedStats,
+    rel_path: &str,
+    path: &Path,
+) -> io::Result<std::borrow::Cow<'a, fs::Metadata>> {
+    match stats.get(rel_path) {
+        Some(meta) => Ok(std::borrow::Cow::Borrowed(meta)),
+        None => path.symlink_metadata().map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Add the regular file `name`, whose stat is `meta`, to the tree being built.
+///
+/// Stat cache: when the staging index proves this file's content via
+/// mtime+size+ino+ctime (+exec class), reuse the staged hash without opening
+/// the file — O(stat) instead of O(content) for unchanged files. The object was
+/// stored at `add` time, so the tree reference stays resolvable. Any other
+/// file is a miss, to be hashed once the walk is done.
+#[allow(clippy::too_many_arguments)]
+fn push_file<'e>(
+    entries: &mut Vec<TreeEntry>,
+    files: &mut Vec<(usize, usize)>,
+    misses: &mut Vec<PendingFileHash<'e>>,
+    indexed: Option<&'e crate::index::IndexEntry>,
+    meta: &fs::Metadata,
+    name: String,
+    abs_path: PathBuf,
+    rel_path: String,
+) {
+    if let Some(e) = indexed.filter(|e| stat_matches(e, meta)) {
+        entries.push(TreeEntry {
+            name: name.into_bytes(),
+            mode: entry_mode_from_file_metadata(meta),
+            object_hash: e.object_hash,
+        });
+        return;
+    }
+    // Placeholder, overwritten by `hash_pending_files` below once every miss
+    // in this directory has been hashed — its slot is this entry's fixed
+    // position in `entries`.
+    let slot = entries.len();
+    entries.push(TreeEntry {
+        name: name.into_bytes(),
+        mode: EntryMode::Blob,
+        object_hash: crate::hash::ZERO,
+    });
+    files.push((slot, misses.len()));
+    misses.push(PendingFileHash {
+        slot: misses.len(),
+        abs_path,
+        rel_path,
+        indexed,
+        #[cfg(not(target_arch = "wasm32"))]
+        size: meta.len(),
+    });
+}
+
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
 /// root), so ignore patterns can be matched against full repo-relative paths
 /// rather than bare basenames. `parent_ignored` carries down whether an
 /// ancestor directory is ignored (git "everything under an excluded dir is
 /// excluded"); `index` is the tracked set used to exempt tracked content.
 #[allow(clippy::too_many_arguments)]
-fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
+fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     sink: &S,
-    source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     dir: &Path,
     rel_dir: &str,
     ignores: &IgnoreList,
     index: &Index,
-    by_path: &std::collections::HashMap<&str, &crate::index::IndexEntry>,
+    by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
+    stats: &TrackedStats,
     parent_ignored: bool,
-    observations: &mut Vec<StatObservation>,
-) -> WorktreeResult<Hash> {
+    skip_restore_temps: bool,
+    misses: &mut Vec<PendingFileHash<'e>>,
+    mut listings: Option<&mut DirListings>,
+) -> WorktreeResult<PendingTree> {
     let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
     let ignores = scoped.as_ref();
     let mut entries: Vec<TreeEntry> = Vec::new();
-    // Cache-miss regular files collected during the walk below, hashed
-    // together (sequentially or fanned out) once the walk finishes —
-    // see `hash_pending_files`.
-    let mut misses: Vec<PendingFileHash<'_>> = Vec::new();
+    let mut files = Vec::new();
+    let mut children = Vec::new();
+    let mut listing = listings.is_some().then(Vec::new);
 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -301,14 +413,26 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
             .to_str()
             .ok_or(WorktreeError::InvalidUtf8)?
             .to_string();
-        // `symlink_metadata` does not follow symlinks.
-        let meta = entry.path().symlink_metadata()?;
-        let is_dir = meta.is_dir();
         let rel_path = if rel_dir.is_empty() {
             name_str.clone()
         } else {
             format!("{rel_dir}/{name_str}")
         };
+        let stat = stat_of(stats, &rel_path, &entry.path())?;
+        let meta: &fs::Metadata = &stat;
+        let is_dir = meta.is_dir();
+        if let Some(listing) = &mut listing {
+            listing.push((name_str.clone(), is_dir));
+        }
+        // A historical entry, including a staged deletion, still has a path
+        // of its own. A scratch file cannot take the place of a tracked directory.
+        if skip_restore_temps
+            && !is_dir
+            && crate::ops::restore::is_restore_temp_name(&name_str)
+            && !by_path.contains_key(rel_path.as_str())
+        {
+            continue;
+        }
         // Exclude ignored content, but only when it is UNTRACKED — a tracked
         // path (or a dir holding tracked content) is always kept so status/
         // diff see it. An ignored dir with tracked content is descended into
@@ -327,36 +451,16 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
         }
 
         if meta.file_type().is_file() {
-            // Stat cache: when the staging index proves this file's
-            // content via mtime+size+ino+ctime (+exec class), reuse the
-            // staged hash without opening the file — O(stat) instead of
-            // O(content) for unchanged files. The object was stored at
-            // `add` time, so the tree reference stays resolvable.
-            let indexed = by_path.get(rel_path.as_str()).copied();
-            let cached = indexed.filter(|e| stat_matches(e, &meta));
-            if let Some(e) = cached {
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(&meta),
-                    object_hash: e.object_hash,
-                });
-            } else {
-                // Placeholder, overwritten by `hash_pending_files` below
-                // once every miss in this directory has been hashed —
-                // its slot is this entry's fixed position in `entries`.
-                let slot = entries.len();
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: EntryMode::Blob,
-                    object_hash: crate::hash::ZERO,
-                });
-                misses.push(PendingFileHash {
-                    slot,
-                    abs_path: entry.path(),
-                    rel_path,
-                    indexed,
-                });
-            }
+            push_file(
+                &mut entries,
+                &mut files,
+                misses,
+                by_path.get(rel_path.as_str()).copied(),
+                meta,
+                name_str,
+                entry.path(),
+                rel_path,
+            );
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
@@ -368,65 +472,187 @@ fn build_tree_inner<S: ObjectSink + Sync + ?Sized>(
             }
             let h = build_tree_inner(
                 sink,
-                source,
                 &entry.path(),
                 &rel_path,
                 ignores,
                 index,
                 by_path,
+                stats,
                 entry_ignored,
-                observations,
+                skip_restore_temps,
+                misses,
+                listings.as_deref_mut(),
             )?;
+            children.push((entries.len(), h));
             entries.push(TreeEntry {
                 name: name_str.into_bytes(),
                 mode: EntryMode::Tree,
-                object_hash: h,
+                object_hash: crate::hash::ZERO,
             });
         } else if meta.file_type().is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            let target_str = target
-                .to_str()
-                .ok_or(WorktreeError::InvalidUtf8)?
-                .to_string();
-            if !validate_symlink_target(&target_str) {
-                return Err(WorktreeError::InvalidSymlinkTarget(target_str));
-            }
-            let target_bytes = target_str.as_bytes();
-            let prologue = serialize::blob_prologue(target_bytes.len())?;
-            let h = sink.put_parts(&[&prologue, target_bytes])?;
-            entries.push(TreeEntry {
-                name: name_str.into_bytes(),
-                mode: EntryMode::Symlink,
-                object_hash: h,
-            });
+            entries.push(symlink_entry(sink, &entry.path(), name_str.into_bytes())?);
         } else {
             // Block / char / fifo / socket — silently skip.
         }
     }
 
-    if !misses.is_empty() {
-        hash_pending_files(sink, source, &misses, &mut entries, observations)?;
+    if let (Some(listings), Some(listing)) = (listings, listing) {
+        listings.dirs.insert(rel_dir.to_owned(), listing);
+    }
+    Ok(PendingTree {
+        entries,
+        files,
+        children,
+    })
+}
+
+fn symlink_entry<S: ObjectSink + ?Sized>(
+    sink: &S,
+    path: &Path,
+    name: Vec<u8>,
+) -> WorktreeResult<TreeEntry> {
+    let target = fs::read_link(path)?;
+    let target_str = target.to_str().ok_or(WorktreeError::InvalidUtf8)?;
+    if !validate_symlink_target(target_str) {
+        return Err(WorktreeError::InvalidSymlinkTarget(target_str.to_owned()));
+    }
+    let target_bytes = target_str.as_bytes();
+    let prologue = serialize::blob_prologue(target_bytes.len())?;
+    Ok(TreeEntry {
+        name,
+        mode: EntryMode::Symlink,
+        object_hash: sink.put_parts(&[&prologue, target_bytes])?,
+    })
+}
+
+/// Below this many tracked entries a walk stats each file as it reaches it:
+/// the dispatch to the thread pool costs more than the stats it spreads. A
+/// `lstat` of a cached path is a few microseconds, so about 500 of them cost
+/// as much as waking the pool.
+#[cfg(not(target_arch = "wasm32"))]
+const STAT_PASS_MIN_ENTRIES: usize = 512;
+
+/// The `lstat` of the files an index tracks, taken on the thread pool before
+/// a walk of the worktree that will ask for almost every one of them.
+///
+/// It is a cache the walk consults, never a replacement for the walk. The
+/// walk looks a path up only after it found the name in a directory it read,
+/// so a path behind a symlink or inside a directory the walk does not enter
+/// is never asked for, though `lstat("link/x")` would follow the link. A path
+/// the pass could not stat, because the file is gone or unreadable, has no
+/// entry: the walk stats it itself, so the error and its place in the walk
+/// stay what they were. Entries are looked up by path, so the order the pool
+/// finished them in changes nothing.
+///
+/// A file that changes between the pass and the walk is judged as it was at
+/// the pass, as git's `preloadindex` does; an edit made while the command
+/// runs has no defined side of it either way.
+#[derive(Debug, Default)]
+pub struct TrackedStats {
+    stats: std::collections::HashMap<String, fs::Metadata>,
+}
+
+/// Whether the stat pass is worth its fork: more than one thread to run it
+/// on, and at least [`STAT_PASS_MIN_ENTRIES`] tracked entries to stat.
+#[cfg(not(target_arch = "wasm32"))]
+fn stat_pass_runs(threads: usize, entries: usize) -> bool {
+    threads > 1 && entries >= STAT_PASS_MIN_ENTRIES
+}
+
+impl TrackedStats {
+    /// Stat every entry of `index` that is not a deletion, under `root`.
+    /// Below 512 entries, on one thread, and on wasm,
+    /// it takes none and leaves every stat to the walk.
+    #[must_use]
+    pub fn collect(root: &Path, index: &Index) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if stat_pass_runs(available_threads(), index.entries.len()) {
+            use rayon::prelude::*;
+            let stats = index
+                .entries
+                .par_iter()
+                .filter(|entry| entry.status != index::EntryStatus::Removed)
+                .filter_map(|entry| {
+                    let meta = fs::symlink_metadata(root.join(&entry.path)).ok()?;
+                    Some((entry.path.clone(), meta))
+                })
+                .collect();
+            return Self { stats };
+        }
+        let _ = (root, index);
+        Self::default()
     }
 
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-    let tree = Object::Tree(Tree { entries });
-    let bytes = serialize::serialize(&tree)?;
-    Ok(sink.put(&bytes)?)
+    /// The stat the pass took of the tracked path `path`, if it took one.
+    #[must_use]
+    pub fn get(&self, path: &str) -> Option<&fs::Metadata> {
+        self.stats.get(path)
+    }
+}
+
+/// What a walk read of each directory it entered: every name that is valid
+/// UTF-8 and whether it is a directory (not a symlink to one), in the order the
+/// file system listed them, under the directory's path from the root.
+///
+/// The directories a walk leaves out, as it does an ignored one, are not in
+/// it, so a caller reads those from the disk.
+#[derive(Debug, Default)]
+pub struct DirListings {
+    dirs: std::collections::HashMap<String, Vec<(String, bool)>>,
+}
+
+impl DirListings {
+    /// The listing of the directory `rel_dir` (empty for the root), if the
+    /// walk read it.
+    #[must_use]
+    pub fn get(&self, rel_dir: &str) -> Option<&[(String, bool)]> {
+        self.dirs.get(rel_dir).map(Vec::as_slice)
+    }
+}
+
+/// Directory entries retain their walk slots until every file has been hashed.
+struct PendingTree {
+    entries: Vec<TreeEntry>,
+    files: Vec<(usize, usize)>,
+    children: Vec<(usize, PendingTree)>,
+}
+
+impl PendingTree {
+    fn write<S: ObjectSink + ?Sized>(
+        mut self,
+        sink: &S,
+        hashed: &[TreeEntry],
+    ) -> WorktreeResult<Hash> {
+        for (slot, file) in self.files {
+            self.entries[slot].object_hash = hashed[file].object_hash;
+            self.entries[slot].mode = hashed[file].mode;
+        }
+        for (slot, child) in self.children {
+            self.entries[slot].object_hash = child.write(sink, hashed)?;
+        }
+        self.entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let bytes = serialize::serialize(&Object::Tree(Tree {
+            entries: self.entries,
+        }))?;
+        Ok(sink.put(&bytes)?)
+    }
 }
 
 /// One cache-miss regular file discovered by [`build_tree_inner`]'s walk
 /// (its stat cache was absent or racy-smudged): still needs
 /// [`hash_file_with_metadata`], off the main walk thread once there's
-/// enough of them in one directory to amortize the dispatch. `'e`
+/// enough of them across the walk to amortize the dispatch. `'e`
 /// borrows from the same [`Index`] `by_path` does.
 struct PendingFileHash<'e> {
-    /// This miss's fixed position in `build_tree_inner`'s `entries` —
+    /// This miss's fixed position in the global hashed-file slots —
     /// stable regardless of how the batch below is chunked or ordered,
     /// so results always land back on the right entry.
     slot: usize,
     abs_path: PathBuf,
     rel_path: String,
     indexed: Option<&'e crate::index::IndexEntry>,
+    #[cfg(not(target_arch = "wasm32"))]
+    size: u64,
 }
 
 /// Below this many cache-miss files per available thread, hashing them
@@ -443,35 +669,36 @@ const FILE_HASH_MISSES_PER_THREAD: usize = 8;
 /// Hash every cache-miss file in `misses` (see [`PendingFileHash`]),
 /// filling in `entries[slot]` and pushing a [`StatObservation`] for each
 /// one whose fresh hash proves the stat cache healable. Sequential
-/// below a thread-count-scaled threshold, fanned out across scoped
-/// worker threads at or above it — [`probe_staged_objects_parallel`]'s
-/// shape (`kit-core` stays dependency-neutral and wasm-clean, so this
-/// uses `std::thread::scope` directly rather than rayon). Every file's
+/// below a thread-count-scaled threshold, fanned out across shared
+/// workers at or above it. Native workers share Rayon's global pool
+/// with input-level BLAKE3 hashing; wasm uses the sequential path. Every file's
 /// hash result is written back to `entries`/`observations` in `misses`'
 /// original directory-walk order regardless of which thread computed
 /// it, so the output is byte-identical to the old fully-sequential
-/// loop; only which of several simultaneous I/O errors is reported can
-/// vary between runs — the same accepted nondeterminism
-/// `probe_staged_objects_parallel` already has.
+/// loop; the first error in slot order wins, independent of worker completion.
+/// Input-level hashing shares the same pool, including files that grow
+/// after their stat was read.
 fn hash_pending_files<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     misses: &[PendingFileHash<'_>],
     entries: &mut [TreeEntry],
     observations: &mut Vec<StatObservation>,
+    threads: usize,
 ) -> WorktreeResult<()> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = threads;
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let threads = available_threads();
         if threads > 1 && misses.len() >= FILE_HASH_MISSES_PER_THREAD.saturating_mul(threads) {
-            let results = hash_pending_files_parallel(sink, source, misses, threads)?;
+            let results = hash_pending_files_parallel(sink, source, misses)?;
             apply_hash_results(misses, results, entries, observations);
             return Ok(());
         }
     }
     let results = misses
         .iter()
-        .map(|m| hash_one_pending_file(sink, source, m))
+        .map(|m| hash_one_pending_file(sink, source, m, false))
         .collect::<WorktreeResult<Vec<_>>>()?;
     apply_hash_results(misses, results, entries, observations);
     Ok(())
@@ -485,8 +712,16 @@ fn hash_one_pending_file<S: ObjectSink + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     m: &PendingFileHash<'_>,
+    parallel_files: bool,
 ) -> WorktreeResult<(Hash, EntryMode, Option<StatObservation>)> {
-    let (mut h, opened_meta) = hash_file_with_metadata(sink, &m.abs_path)?;
+    let (mut h, opened_meta) = if parallel_files {
+        hash_file_with_metadata_using(sink, &m.abs_path, |sink, reader, path| {
+            let chunker = ChunkReader::with_threads(FastCdc::v1(), reader, 1);
+            store_large_file_chunks(sink, chunker, path, CHECKPOINT_CHUNKS)
+        })?
+    } else {
+        hash_file_with_metadata(sink, &m.abs_path)?
+    };
     h = retained_content_hash(source, m.indexed, h)?;
     // Cache miss that re-hashed back to the staged hash: report the
     // observation (stat captured from the opened fd BEFORE the content
@@ -509,16 +744,30 @@ fn hash_one_pending_file<S: ObjectSink + ?Sized>(
     Ok((h, entry_mode_from_file_metadata(&opened_meta), observation))
 }
 
-/// Parallel branch of [`hash_pending_files`]: [`chunked_scoped_map`]
+/// Parallel branch of [`hash_pending_files`]: an indexed parallel map
 /// over `misses`, hashing each one via [`hash_one_pending_file`].
 #[cfg(not(target_arch = "wasm32"))]
 fn hash_pending_files_parallel<S: ObjectSink + Sync + ?Sized>(
     sink: &S,
     source: Option<&(dyn crate::store::ObjectSource + Sync)>,
     misses: &[PendingFileHash<'_>],
-    threads: usize,
 ) -> WorktreeResult<Vec<(Hash, EntryMode, Option<StatObservation>)>> {
-    chunked_scoped_map(misses, threads, |m| hash_one_pending_file(sink, source, m))
+    use rayon::prelude::*;
+    // Indexed collection preserves slot order, including the first error.
+    // Nested BLAKE3 parallelism uses this same global pool.
+    let results: Vec<_> = misses
+        .par_iter()
+        .map(|m| (m.size <= CHUNK_THRESHOLD).then(|| hash_one_pending_file(sink, source, m, true)))
+        .collect();
+    // Large files use their normal cutter threads after the file pool has
+    // quiesced. A small file that grows still gets one cutter in its worker.
+    results
+        .into_iter()
+        .zip(misses)
+        .map(|(result, miss)| {
+            result.unwrap_or_else(|| hash_one_pending_file(sink, source, miss, false))
+        })
+        .collect()
 }
 
 /// Write [`hash_pending_files`]'s per-miss results back into `entries`
@@ -859,8 +1108,9 @@ impl IndexDir {
         // tree's length, the rule a `WriteBatch` dedups by. Otherwise the
         // tree is checked and written, whatever `base` says.
         if base == Some(self.id)
-            && fs::metadata(store.path_for(&self.id))
-                .is_ok_and(|m| u64::try_from(self.bytes.len()) == Ok(m.len()))
+            && store
+                .cached_object_size(&self.id)
+                .is_ok_and(|size| u64::try_from(self.bytes.len()) == Ok(size))
         {
             self.in_base = true;
             return;
@@ -922,22 +1172,30 @@ impl IndexDir {
 /// `std::thread::available_parallelism()`, cached process-wide — the
 /// core count never changes during a process's lifetime, so every
 /// native fan-out crossover check in this module (there are several,
-/// and [`build_tree_inner`]'s recurses once per directory) shares one
+/// and the tree walker recurses once per directory) shares one
 /// syscall instead of paying it again at every call site/recursion.
-#[cfg(not(target_arch = "wasm32"))]
+/// Always returns at least one worker, including on Wasm.
 fn available_threads() -> usize {
-    static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *THREADS
-        .get_or_init(|| std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *THREADS.get_or_init(|| {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        1
+    }
 }
 
 /// Shared chunk+scoped-thread+join scaffolding behind this module's two
 /// order-preserving, short-circuit-on-first-error native fan-outs
-/// ([`probe_staged_objects_parallel`], [`hash_pending_files_parallel`]):
+/// ([`probe_staged_objects_parallel`]):
 /// split `items` into `threads` contiguous chunks, run each chunk's
 /// items through `f` sequentially on its own scoped thread, and join.
 /// `std::thread::scope` (not a persistent pool) keeps `kit-core`
-/// dependency-neutral and wasm-clean.
+/// wasm-clean.
 ///
 /// (`pack::stage_raw_entries_parallel` looks similar but isn't folded
 /// in here: it *defers* rather than short-circuits on an item error, via
@@ -1296,7 +1554,7 @@ fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
         .take(CHUNK_THRESHOLD + 1)
         .read_to_end(&mut head)?;
     if u64::try_from(head.len()).unwrap_or(u64::MAX) <= CHUNK_THRESHOLD {
-        return store_file_object(sink, &head);
+        return store_chunk_blob_at(sink, &head, ChunkOrigin { path, offset: 0 });
     }
     // Hand the bytes already read, then the rest of the file, to the chunked
     // path.
@@ -1311,12 +1569,13 @@ fn hash_reader_using<S: ObjectSink + ?Sized, R: Read>(
 /// KiB `MAX_SIZE`) regardless of the file's total size — the same
 /// "independent of file size" bound that the streaming
 /// reader itself gives, just sized for a batch instead of one chunk.
-const STREAM_HASH_BATCH: usize = 64;
+pub const STREAM_HASH_BATCH: usize = 64;
 
 /// Number of chunks a large file stages before its sink makes them durable
 /// and visible with [`ObjectSink::checkpoint`]. A sink that stages a file per
 /// object then holds at most this many staged chunks of one file, whatever the
-/// file's size. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
+/// file's size. A chunk in an open local pack stays invisible until the pack
+/// seals or the batch commits. 4096 chunks are 256 MiB of file on average (64 KiB per chunk).
 const CHECKPOINT_CHUNKS: usize = 4096;
 
 /// Whether a file's chunk count passed a checkpoint boundary when it grew from
@@ -1338,8 +1597,33 @@ pub fn store_chunk_blob<S: ObjectSink + ?Sized>(sink: &S, chunk: &[u8]) -> Workt
     Ok(sink.put_parts(&[&prologue, chunk])?)
 }
 
-/// [`store_chunk_blob`] for a chunk cut from `origin`, which lets a sink keep
-/// the origin in place of the bytes.
+/// Hash one chunk into the token of [`ObjectSink::put_hashed_chunk`]. It is the
+/// per-chunk unit a caller fans out over, for a sink whose
+/// [`ObjectSink::orders_chunks`] is true.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn hash_chunk(chunk: &[u8]) -> WorktreeResult<HashedChunk<'_>> {
+    Ok(HashedChunk::new(chunk)?)
+}
+
+/// Hand hashed chunks to `sink` one by one, in order.
+///
+/// # Errors
+/// See [`WorktreeError`].
+pub fn put_hashed_chunks<S: ObjectSink + ?Sized>(
+    sink: &S,
+    chunks: &[HashedChunk<'_>],
+) -> WorktreeResult<Vec<Hash>> {
+    let mut ids = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        ids.push(sink.put_hashed_chunk(chunk)?);
+    }
+    Ok(ids)
+}
+
+/// Store a blob with its worktree location. An inline file is one blob at
+/// offset zero.
 fn store_chunk_blob_at<S: ObjectSink + ?Sized>(
     sink: &S,
     chunk: &[u8],
@@ -1366,9 +1650,20 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
     path: &Path,
     window: usize,
 ) -> WorktreeResult<Hash> {
-    let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+    store_large_file_chunks(sink, ChunkReader::new(FastCdc::v1(), reader), path, window)
+}
+
+fn store_large_file_chunks<S: ObjectSink + ?Sized, R: Read>(
+    sink: &S,
+    mut chunker: ChunkReader<R>,
+    path: &Path,
+    window: usize,
+) -> WorktreeResult<Hash> {
     let mut chunks = ChunkList::default();
     let mut total_size: u64 = 0;
+    // A sink that wants ordered chunks gets each one hashed once, as a token.
+    // Any other sink keeps its own hashing and sees no token.
+    let ordered = sink.orders_chunks();
     while let Some(chunk) = chunker.next_chunk_ref()? {
         let origin = ChunkOrigin {
             path,
@@ -1376,7 +1671,12 @@ fn store_large_file_streaming_windowed<S: ObjectSink + ?Sized, R: Read>(
         };
         total_size = add_within_chunked_bound(total_size, chunk.len(), path)?;
         let before = chunks.len();
-        chunks.ids.push(store_chunk_blob_at(sink, chunk, origin)?);
+        let id = if ordered {
+            sink.put_hashed_chunk(&HashedChunk::new(chunk)?.at(origin))?
+        } else {
+            store_chunk_blob_at(sink, chunk, origin)?
+        };
+        chunks.ids.push(id);
         chunks.ends.push(total_size);
         if checkpoint_due(before, chunks.len(), window) {
             sink.checkpoint()?;
@@ -1464,11 +1764,10 @@ fn checked_hash_chunks<S: ObjectSink + ?Sized>(
 /// error if `reader` yields more than [`serialize::MAX_CHUNKED_TOTAL_SIZE`].
 ///
 /// Takes an explicit `hash_chunks` batch callback in place of a built-in
-/// sequential loop over [`store_chunk_blob`] — `kit-core` has no
-/// thread-pool dependency of its own — it stays usable from wasm
-/// targets, which have no OS threads — so the fan-out decision lives
-/// with the caller instead of living in this function, the same shape
-/// as [`crate::transfer::plan_pack_with`]'s `encode_deltas` callback.
+/// sequential loop over [`store_chunk_blob`]. The caller chooses the
+/// scheduling policy, including a sequential callback on wasm targets
+/// without OS threads. This follows [`crate::transfer::plan_pack_with`]'s
+/// `encode_deltas` callback.
 /// `ChunkReader` cuts each window on several threads; once a batch of up to
 /// `STREAM_HASH_BATCH` chunks is in hand, hashing and storing each one
 /// is independent of every other chunk in the batch — `kit-bin`'s
@@ -1601,18 +1900,36 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::sync_channel::<WorktreeResult<Vec<Vec<u8>>>>(0);
+    // A sink that lends buffers gets the windows and chunks of a file back for
+    // the next one, so a sequence of large files holds one set. The reader is
+    // built here, not on the cutter's thread, so the windows are not allocated
+    // from the arena of a thread that ends with the file.
+    let buffers = sink.chunk_buffers();
+    let chunker = match buffers {
+        Some(buffers) => ChunkReader::with_buffers(FastCdc::v1(), reader, buffers),
+        None => ChunkReader::new(FastCdc::v1(), reader),
+    };
 
     let (chunks, total_size) = std::thread::scope(|scope| -> WorktreeResult<(ChunkList, u64)> {
         scope.spawn(move || {
-            let mut chunker = ChunkReader::new(FastCdc::v1(), reader);
+            let mut chunker = chunker;
             let mut batch: Vec<Vec<u8>> = Vec::with_capacity(STREAM_HASH_BATCH);
             let mut running_total: u64 = 0;
             loop {
-                let chunk = match chunker.next_chunk() {
-                    Ok(Some(chunk)) => chunk,
+                let chunk = match chunker.next_chunk_ref() {
+                    Ok(Some(chunk)) => {
+                        let mut owned = buffers
+                            .map(crate::chunker::ChunkBuffers::chunk)
+                            .unwrap_or_default();
+                        owned.extend_from_slice(chunk);
+                        owned
+                    }
                     Ok(None) => {
                         if !batch.is_empty() {
                             let _ = tx.send(Ok(batch));
+                        }
+                        if let Some(buffers) = buffers {
+                            chunker.recycle(buffers);
                         }
                         return;
                     }
@@ -1664,6 +1981,9 @@ fn store_large_file_streaming_pipelined<S: ObjectSink + ?Sized, R: Read + Send>(
                 Ok((hashes, batch)) => {
                     let before = chunks.len();
                     chunks.extend(hashes, &batch);
+                    if let Some(buffers) = buffers {
+                        buffers.give_chunks(batch);
+                    }
                     if checkpoint_due(before, chunks.len(), window)
                         && let Err(e) = sink.checkpoint()
                     {
@@ -1906,7 +2226,9 @@ pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 
     fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // A path can become a FIFO before open. Reach the type check
+        // without waiting for a writer.
+        .custom_flags(std::ops::BitOr::bitor(libc::O_NOFOLLOW, libc::O_NONBLOCK))
         .open(path)
 }
 
@@ -1926,7 +2248,7 @@ pub(crate) fn open_regular_file(path: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(unix)]
-fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
     use std::os::unix::fs::PermissionsExt;
 
     if meta.permissions().mode() & 0o111 != 0 {
@@ -1937,7 +2259,7 @@ fn entry_mode_from_file_metadata(meta: &fs::Metadata) -> EntryMode {
 }
 
 #[cfg(not(unix))]
-fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
+pub(crate) fn entry_mode_from_file_metadata(_meta: &fs::Metadata) -> EntryMode {
     EntryMode::Blob
 }
 
@@ -2468,11 +2790,19 @@ mod tests {
     }
 
     #[test]
-    fn a_checkpointed_chunk_is_visible_before_the_commit() {
+    fn a_checkpointed_chunk_is_visible_before_the_commit_in_a_loose_store() {
         let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
         let expected = chunked_blob_from_bytes(&data).unwrap();
         assert!(expected.chunks().len() > 8, "the file has several windows");
-        let (_dir, store) = fresh_store();
+        // A shared guard held elsewhere makes the one try at the packed marker
+        // miss, so this batch stays loose.
+        let (dir, _init) = fresh_store();
+        let layout = crate::layout::RepoLayout::single(dir.path());
+        fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+        let holder = ObjectStore::open(&layout).unwrap();
+        let _guard = holder.prune_guard().unwrap();
+        let store = ObjectStore::open(&layout).unwrap();
+        drop(holder);
         let batch = store.batch();
         let h = store_large_file_streaming_windowed(
             &batch,
@@ -2488,6 +2818,69 @@ mod tests {
         assert!(!store.contains(&h));
         batch.commit().unwrap();
         assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_checkpoint_keeps_the_chunks_of_an_open_pack_invisible_until_the_commit() {
+        let data = pseudo_random(2 * 1024 * 1024, 0xC0DE);
+        let expected = chunked_blob_from_bytes(&data).unwrap();
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        let h = store_large_file_streaming_windowed(
+            &batch,
+            io::Cursor::new(&data),
+            Path::new("windowed.bin"),
+            4,
+        )
+        .unwrap();
+        // The chunks are in the open pack and the manifest is staged, so none
+        // is visible, and the manifest cannot be visible before its chunks.
+        assert!(!store.contains(&expected.chunks()[0]));
+        assert!(!store.contains(&h));
+        batch.commit().unwrap();
+        assert!(store.contains(&expected.chunks()[0]));
+        assert_eq!(read_blob(&store, &h).unwrap(), data);
+    }
+
+    #[test]
+    fn a_batch_lends_its_buffers_to_each_large_file_and_the_ids_do_not_change() {
+        // The second file is shorter, so it starts in windows and chunk
+        // buffers that still hold the first file's bytes.
+        let first = pseudo_random(5 * 1024 * 1024, 0xB0F1);
+        let second = pseudo_random(3 * 1024 * 1024 + 17, 0xB0F2);
+        let (_dir, store) = fresh_store();
+        let batch = store.batch();
+        assert!(batch.chunk_buffers().is_some());
+        let ids: Vec<Hash> = [&first, &second, &first]
+            .into_iter()
+            .map(|data| {
+                store_large_file_streaming_with(
+                    &batch,
+                    io::Cursor::new(data.clone()),
+                    Path::new("lent.bin"),
+                    |sink, chunks| {
+                        chunks
+                            .iter()
+                            .map(|chunk| store_chunk_blob(sink, chunk))
+                            .collect()
+                    },
+                )
+                .unwrap()
+            })
+            .collect();
+        // Both windows and the chunk buffers of the last batches came back.
+        let (windows, chunks) = batch.chunk_buffers().unwrap().spare_counts();
+        assert_eq!(windows, 2);
+        assert!(chunks > 0, "no chunk buffer came back");
+        batch.commit().unwrap();
+
+        let (_plain_dir, plain) = fresh_store();
+        assert!(plain.chunk_buffers().is_none());
+        assert_eq!(ids[0], store_file_object(&plain, &first).unwrap());
+        assert_eq!(ids[1], store_file_object(&plain, &second).unwrap());
+        assert_eq!(ids[0], ids[2]);
+        assert_eq!(read_blob(&store, &ids[0]).unwrap(), first);
+        assert_eq!(read_blob(&store, &ids[1]).unwrap(), second);
     }
 
     #[test]
@@ -3862,8 +4255,174 @@ mod tests {
         assert_eq!(plain, tree_h, "cache hit must not change tree hashes");
     }
 
+    #[test]
+    fn available_threads_always_has_a_worker() {
+        assert!(available_threads() > 0);
+        #[cfg(not(target_arch = "wasm32"))]
+        assert_eq!(
+            available_threads(),
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        );
+        #[cfg(target_arch = "wasm32")]
+        assert_eq!(available_threads(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct HashThreads {
+        sink: crate::store::HashOnlySink,
+        small: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+        large: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ObjectSink for HashThreads {
+        fn put(&self, bytes: &[u8]) -> crate::store::StoreResult<Hash> {
+            self.sink.put(bytes)
+        }
+        fn put_parts(&self, parts: &[&[u8]]) -> crate::store::StoreResult<Hash> {
+            if let Some(data) = parts.get(1) {
+                let threads = if data.first() == Some(&17) {
+                    &self.large
+                } else {
+                    &self.small
+                };
+                threads.lock().unwrap().insert(std::thread::current().id());
+            }
+            self.sink.put_parts(parts)
+        }
+        fn has(&self, hash: &Hash) -> bool {
+            self.sink.has(hash)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl HashThreads {
+        fn clear(&self) {
+            self.small.lock().unwrap().clear();
+            self.large.lock().unwrap().clear();
+        }
+        fn assert_small(&self, pool: bool) {
+            let threads = self.small.lock().unwrap();
+            assert!(!threads.is_empty());
+            let main = std::thread::current().id();
+            if pool {
+                assert!(!threads.contains(&main));
+            } else {
+                assert_eq!(*threads, std::collections::HashSet::from([main]));
+            }
+        }
+        fn assert_large_outside_pool(&self) {
+            assert_eq!(
+                *self.large.lock().unwrap(),
+                std::collections::HashSet::from([std::thread::current().id()])
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn whole_walk_hashing_uses_workers_and_keeps_large_files_outside_the_pool() {
+        let work = TempDir::new().unwrap();
+        let count = FILE_HASH_MISSES_PER_THREAD * available_threads().max(2);
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let dir = work.path().join(format!("d{i}"));
+            fs::create_dir(&dir).unwrap();
+            let path = dir.join("file");
+            fs::write(&path, b"small").unwrap();
+            paths.push(path);
+        }
+        let large = work.path().join("large");
+        fs::write(&large, vec![17; 2 * 1024 * 1024]).unwrap();
+        paths.push(large);
+        let sink = HashThreads::default();
+        build_tree(&sink, work.path()).unwrap();
+        sink.assert_small(available_threads() > 1);
+        sink.assert_large_outside_pool();
+
+        let misses: Vec<_> = paths
+            .into_iter()
+            .enumerate()
+            .map(|(slot, abs_path)| PendingFileHash {
+                slot,
+                size: fs::metadata(&abs_path).unwrap().len(),
+                abs_path,
+                rel_path: slot.to_string(),
+                indexed: None,
+            })
+            .collect();
+        let mut entries = vec![
+            TreeEntry {
+                name: Vec::new(),
+                mode: EntryMode::Blob,
+                object_hash: crate::hash::ZERO
+            };
+            misses.len()
+        ];
+        for (length, threads, pool) in [
+            (1, 2, false),
+            (FILE_HASH_MISSES_PER_THREAD * 2 - 1, 2, false),
+            (FILE_HASH_MISSES_PER_THREAD * 2, 2, true),
+            (misses.len(), 1, false),
+            (misses.len(), 2, true),
+        ] {
+            sink.clear();
+            hash_pending_files(
+                &sink,
+                None,
+                &misses[..length],
+                &mut entries,
+                &mut Vec::new(),
+                threads,
+            )
+            .unwrap();
+            sink.assert_small(pool);
+            if length == misses.len() {
+                sink.assert_large_outside_pool();
+            }
+        }
+    }
+
+    #[test]
+    fn file_slots_survive_hashing_across_many_directories() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        for d in 0..32 {
+            let dir = work.path().join(format!("d{d:02}"));
+            fs::create_dir(&dir).unwrap();
+            for f in 0..32 {
+                fs::write(dir.join(format!("f{f:02}")), format!("{d}/{f}")).unwrap();
+            }
+        }
+        fs::write(work.path().join("root-file"), b"root").unwrap();
+        fs::write(work.path().join("zz-big"), vec![17; 2 * 1024 * 1024]).unwrap();
+        let hash = build_tree(&store, work.path()).unwrap();
+        let Object::Tree(root) = store.read_object(&hash).unwrap() else {
+            panic!("tree")
+        };
+        assert_eq!(root.entries.len(), 34);
+        let expected = hash_file_with_metadata(&store, &work.path().join("zz-big"))
+            .unwrap()
+            .0;
+        assert_eq!(root.entries.last().unwrap().object_hash, expected);
+        for (d, entry) in root.entries.iter().take(32).enumerate() {
+            let Object::Tree(tree) = store.read_object(&entry.object_hash).unwrap() else {
+                panic!("tree")
+            };
+            assert_eq!(tree.entries.len(), 32);
+            for (f, entry) in tree.entries.iter().enumerate() {
+                let bytes = serialize::serialize(&Object::Blob(crate::object::Blob {
+                    data: format!("{d}/{f}").into_bytes(),
+                }))
+                .unwrap();
+                assert_eq!(entry.object_hash, crate::hash::hash(&bytes));
+            }
+        }
+    }
+
     /// `hash_pending_files_parallel`'s fan-out branch only fires once a
-    /// single directory has at least `FILE_HASH_MISSES_PER_THREAD *`
+    /// whole walk has at least `FILE_HASH_MISSES_PER_THREAD *`
     /// the machine's thread count worth of cache-miss files — every
     /// other `build_tree` test in this module stays well under that, so
     /// none of them ever exercise it. 4096 distinct-content files is
@@ -4238,5 +4797,163 @@ mod tests {
             store.read_object(&id).unwrap(),
             crate::object::Object::ChunkedBlob(_)
         ));
+    }
+
+    /// `n` tracked files under eight directories, each with a stat cache that
+    /// matches, and an index holding them.
+    fn tracked_files(work: &Path, n: usize) -> Index {
+        let mut idx = Index::new();
+        for i in 0..n {
+            let rel = format!("d{:02}/f{i:04}.txt", i % 8);
+            let path = work.join(&rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let content = format!("content {i}");
+            fs::write(&path, &content).unwrap();
+            let (mtime_ns, size, ino, ctime_ns) =
+                stat_cache_fields(&fs::symlink_metadata(&path).unwrap());
+            idx.upsert_entry(crate::index::IndexEntry {
+                path: rel,
+                status: crate::index::EntryStatus::Blob,
+                object_hash: hash_file_object(content.as_bytes()).unwrap(),
+                mtime_ns,
+                size,
+                ino,
+                ctime_ns,
+            });
+        }
+        idx
+    }
+
+    /// Past the size the stat pass starts at, the walk builds the tree it
+    /// builds without the index: a changed file is hashed, an unchanged one
+    /// is not read, an untracked one is found.
+    #[test]
+    fn the_stat_pass_leaves_the_tree_the_walk_builds_as_it_was() {
+        let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
+        let work = TempDir::new().unwrap();
+        let idx = tracked_files(work.path(), 700);
+        fs::write(work.path().join("untracked.txt"), b"new").unwrap();
+        fs::write(work.path().join("d00/f0000.txt"), b"a longer, changed file").unwrap();
+        fs::remove_file(work.path().join("d01/f0001.txt")).unwrap();
+        let mut observed = Vec::new();
+        let with_index =
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
+    }
+
+    /// The pass runs only with a second thread and at least the minimum of entries.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_stat_pass_runs_only_with_threads_to_spare_and_enough_entries() {
+        assert!(!stat_pass_runs(1, STAT_PASS_MIN_ENTRIES));
+        assert!(!stat_pass_runs(1, 100_000));
+        assert!(!stat_pass_runs(8, STAT_PASS_MIN_ENTRIES - 1));
+        assert!(!stat_pass_runs(8, 0));
+        assert!(stat_pass_runs(2, STAT_PASS_MIN_ENTRIES));
+        assert!(stat_pass_runs(8, STAT_PASS_MIN_ENTRIES + 1));
+    }
+
+    /// The pass takes the `lstat` of each tracked file that is there, none for
+    /// a deletion or a file that is gone, and none below its size.
+    #[test]
+    fn the_stat_pass_stats_each_tracked_file_that_is_there() {
+        let work = TempDir::new().unwrap();
+        let mut idx = tracked_files(work.path(), STAT_PASS_MIN_ENTRIES);
+        let gone = "d00/f0000.txt";
+        fs::remove_file(work.path().join(gone)).unwrap();
+        let removed = "d01/f0001.txt";
+        let pos = idx.find_entry(removed).unwrap();
+        idx.entries[pos].status = crate::index::EntryStatus::Removed;
+        let stats = TrackedStats::collect(work.path(), &idx);
+        if available_threads() == 1 {
+            assert!(stats.get("d02/f0002.txt").is_none(), "one thread: no pass");
+            return;
+        }
+        for entry in &idx.entries {
+            let expected = fs::symlink_metadata(work.path().join(&entry.path)).ok();
+            let expected = expected.filter(|_| entry.path != removed);
+            assert_eq!(
+                stats.get(&entry.path).map(stat_cache_fields),
+                expected.as_ref().map(stat_cache_fields),
+                "{}",
+                entry.path
+            );
+        }
+        let small = Index::new();
+        assert!(
+            TrackedStats::collect(work.path(), &small)
+                .get(gone)
+                .is_none()
+        );
+    }
+
+    /// A directory replaced by a symlink to a directory with the same names is
+    /// a symlink to the walk, whatever `lstat("link/name")` finds through it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_not_entered_after_the_stat_pass() {
+        use crate::store::ObjectSource as _;
+        let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
+        let work = TempDir::new().unwrap();
+        let idx = tracked_files(work.path(), 700);
+        fs::rename(work.path().join("d03"), work.path().join("real")).unwrap();
+        std::os::unix::fs::symlink("real", work.path().join("d03")).unwrap();
+        let mut observed = Vec::new();
+        let with_index =
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
+        let Object::Tree(root) = snapshot.read_object(&with_index).unwrap() else {
+            panic!("expected tree");
+        };
+        let link = root.entries.iter().find(|e| e.name == b"d03").unwrap();
+        assert_eq!(link.mode, EntryMode::Symlink);
+    }
+
+    /// The walk keeps what it read of each directory it enters, in listing
+    /// order, with whether each name is a directory, and nothing of one it
+    /// leaves out.
+    #[test]
+    fn the_walk_keeps_a_listing_of_each_directory_it_enters() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        fs::create_dir_all(work.path().join("a/b")).unwrap();
+        fs::create_dir_all(work.path().join("skip")).unwrap();
+        fs::write(work.path().join(".gitignore"), "skip/\n*.log\n").unwrap();
+        fs::write(work.path().join("a/b/f"), b"f").unwrap();
+        fs::write(work.path().join("a/x.log"), b"x").unwrap();
+        fs::write(work.path().join("skip/k"), b"k").unwrap();
+        let mut listings = DirListings::default();
+        build_tree_filtered_listed_with_source(
+            &crate::store::EphemeralSink::new(&store),
+            &crate::store::EphemeralSink::new(&store),
+            work.path(),
+            None,
+            &mut listings,
+        )
+        .unwrap();
+        let sorted = |dir: &str| {
+            let mut names = listings.get(dir).unwrap().to_vec();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            sorted(""),
+            vec![
+                (".gitignore".to_owned(), false),
+                ("a".to_owned(), true),
+                ("skip".to_owned(), true),
+            ]
+        );
+        // The ignored file is listed, though the tree leaves it out.
+        assert_eq!(
+            sorted("a"),
+            vec![("b".to_owned(), true), ("x.log".to_owned(), false)]
+        );
+        assert_eq!(sorted("a/b"), vec![("f".to_owned(), false)]);
+        assert!(listings.get("skip").is_none());
     }
 }

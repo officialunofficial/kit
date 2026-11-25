@@ -52,6 +52,7 @@ mod pull;
 pub mod push;
 pub use push::{PushError, PushLease, PushOptions, PushReport, PushTarget, push};
 mod apply;
+mod publication;
 #[doc(hidden)]
 pub mod restore_fanout;
 mod source;
@@ -71,7 +72,8 @@ pub use clone::{
     clone, init_clone_dir,
 };
 pub use error::SyncError;
-pub use fetch::FetchReport;
+pub use fetch::{DownloadSavings, FetchReport};
+pub use kit_core::ops::gc::{Collection, MaintenanceReport};
 #[cfg(feature = "connect-native")]
 pub use native::{
     DEFAULT_METADATA_TIMEOUT, DEFAULT_TRANSFER_TIMEOUT, NativeClock, NativeHttp, NativeHttpError,
@@ -98,6 +100,8 @@ pub struct SyncOptions {
     /// The branch to land on (clone `-b`, pull). It must exist on the remote;
     /// there is no silent fallback. `None` selects by HEAD.
     pub target_branch: Option<String>,
+    /// Run best-effort local pack maintenance after publishing a fetch. Enabled by default.
+    pub auto_maintenance: bool,
     /// Object-store durability schedule.
     pub sync_policy: SyncPolicy,
     /// After a complete fetch, delete the remote-tracking refs whose branch
@@ -131,9 +135,22 @@ pub struct SyncOptions {
     pub remote_url: String,
     /// Maximum decoded attestation bytes per fetch, capped at 512 MiB.
     pub attestation_decode_bytes: u64,
+    /// Write the worktree and index after [`pull`] moves the branch. `true` by
+    /// default. With `false`, a pull that creates the branch (a clone) sets the
+    /// branch and HEAD and writes no file and no index (`kit clone
+    /// --no-checkout`), and `kit checkout` fills the worktree later. A pull
+    /// that moves an existing branch ignores it.
+    pub checkout: bool,
 }
 
 impl SyncOptions {
+    /// Set [`auto_maintenance`](Self::auto_maintenance).
+    #[must_use]
+    pub fn with_auto_maintenance(mut self, enabled: bool) -> Self {
+        self.auto_maintenance = enabled;
+        self
+    }
+
     /// Set [`tags`](Self::tags).
     #[must_use]
     pub fn with_tags(mut self, tags: bool) -> Self {
@@ -169,6 +186,13 @@ impl SyncOptions {
         self
     }
 
+    /// Set [`checkout`](Self::checkout).
+    #[must_use]
+    pub fn with_checkout(mut self, checkout: bool) -> Self {
+        self.checkout = checkout;
+        self
+    }
+
     /// Set [`sync_policy`](Self::sync_policy).
     #[must_use]
     pub fn with_sync_policy(mut self, policy: SyncPolicy) -> Self {
@@ -181,6 +205,7 @@ impl Default for SyncOptions {
     fn default() -> Self {
         Self {
             verify_signatures: true,
+            auto_maintenance: true,
             target_branch: None,
             sync_policy: SyncPolicy::Batch,
             prune: false,
@@ -190,6 +215,7 @@ impl Default for SyncOptions {
             refetch_attestations: false,
             remote_url: String::new(),
             attestation_decode_bytes: kit_attest::pack::MAX_FETCH_DECODED_BYTES,
+            checkout: true,
         }
     }
 }

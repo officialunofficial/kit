@@ -313,7 +313,7 @@ def check_chunk_header(hdr, chunk_id, leaf_id):
     if (index + 1 == leaf_count - 1) != (end == total):
         raise Reject("last index and end == total_size disagree")
     # 5. A fixed layout has one span for each index.
-    if size not in o.CONTENT_DEFINED:
+    if o.is_fixed_chunk_size(size):
         if start != index * size or end != min(start + size, total):
             raise Reject("a fixed-size chunk has the wrong span")
 

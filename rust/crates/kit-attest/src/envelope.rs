@@ -258,7 +258,7 @@ impl Parser<'_> {
         self.pos += 1;
         let start = self.pos;
         while self.pos < self.src.len() && self.src[self.pos] != b'"' {
-            if self.src[self.pos] == b'\\' {
+            if self.src[self.pos] == b'\\' || self.src[self.pos] < 0x20 {
                 return Err(Error::MalformedEnvelope);
             }
             self.pos += 1;
@@ -277,6 +277,32 @@ impl Parser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_rejects_unescaped_control_characters_in_strings() {
+        for template in [
+            br#"{"payload":"","payloadType":"tX","signatures":[{"keyid":"k","sig":""}]}"#
+                .as_slice(),
+            br#"{"payload":"","payloadType":"t","signatures":[{"keyid":"kX","sig":""}]}"#
+                .as_slice(),
+        ] {
+            for control in 0..0x20 {
+                let bytes: Vec<u8> = template
+                    .iter()
+                    .map(|&b| if b == b'X' { control } else { b })
+                    .collect();
+                assert!(
+                    matches!(decode(&bytes), Err(Error::MalformedEnvelope)),
+                    "control {control}"
+                );
+            }
+            let bytes: Vec<u8> = template
+                .iter()
+                .map(|&b| if b == b'X' { b' ' } else { b })
+                .collect();
+            assert!(decode(&bytes).is_ok());
+        }
+    }
 
     #[test]
     fn decode_rejects_input_over_the_size_cap() {

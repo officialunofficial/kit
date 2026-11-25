@@ -126,11 +126,10 @@ round-trips bit-exactly **iff** the source manifest is exactly what a
 conformant kit writer produces. A bridge MUST therefore refuse, with
 an actionable error naming the object, any manifest that:
 
-1. has `chunk_size != 0`: fixed-size chunking (legal under
-   SPEC-OBJECTS §7, never emitted by kit writers, no general inverse),
-   or `chunk_size = 0x8000_0002`, a FastCDC v2 manifest
-   (SPEC-FASTCDC §11), which the FastCDC v1 reconstruction below cannot
-   reproduce;
+1. uses a layout other than FastCDC v1 (`chunk_size = 0`). This includes
+   fixed-size layouts (`1..=0x7FFF_FFFF`) and FastCDC v2
+   (`0x8000_0002`). The manifest decoder already refuses unknown profile
+   IDs (SPEC-OBJECTS §7);
 2. has `total_size` at or below the 1 MiB chunking threshold (a
    conformant writer stores such content as a plain blob; the
    round-trip would change the object graph); or

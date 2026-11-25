@@ -68,7 +68,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
-const ENTRIES: u32 = 30_000;
+// Thousands of distinct objects expose per-entry bookkeeping without making
+// fixture teardown remove tens of thousands of files on APFS.
+const ENTRIES: u32 = 7_500;
 // The file reader has a separate per-entry charge and does not keep `stored`.
 const FILE_ENTRIES: u32 = 1_025;
 
@@ -365,16 +367,34 @@ fn a_file_read_of_commits_under_a_260_character_path_stays_inside_the_charge() {
     assert_file_read_inside_the_charge(Shape::Commits, FILE_ENTRIES, 260, FILE_ENTRIES);
 }
 
+/// Distinct objects behind the entries of the two reads of the growth check
+/// below: one window of entries, and two windows.
+///
+/// Every object is new, so state keyed by object that the reader keeps for the
+/// whole read (a batch's staged map, say) grows between the two reads. Each
+/// new loose object costs a file barrier of several milliseconds on macOS,
+/// where 196,608 of them took over twenty minutes. A macOS run, such as a
+/// laptop running the ignored lane, therefore uses a thousand and two
+/// thousand. That still catches state that grows with the entry count, but
+/// not state keyed by object, which holds too few objects to pass the slack.
+/// The heap counts do not depend on the platform, and the Linux ignored lane
+/// keeps the full check.
+#[cfg(target_os = "macos")]
+const GROWTH_DISTINCT: (u32, u32) = (1_024, 2_048);
+#[cfg(not(target_os = "macos"))]
+const GROWTH_DISTINCT: (u32, u32) = (WINDOW_OF_OBJECTS, 2 * WINDOW_OF_OBJECTS);
+
 /// Past one window, the only memory that grows with the entry count is what
 /// the reader reserves per entry before the first window: the report's
 /// `signed` list of `(Hash, u32)`. A read of two windows of distinct objects
 /// peaks at most that, plus 4 bytes per entry and 1 MiB of slack, above a
 /// read of one, so no state of the whole read (a map of every entry, say)
-/// can hide behind objects that repeat across windows.
+/// can hide behind objects that repeat across windows. A macOS run uses fewer
+/// objects (see `GROWTH_DISTINCT`).
 fn assert_only_the_reservation_grows_past_a_window(shape: Shape) {
     let n = WINDOW_OF_OBJECTS;
-    let one = assert_file_read_inside_the_charge(shape, n, 0, n);
-    let two = assert_file_read_inside_the_charge(shape, 2 * n, 0, 2 * n);
+    let one = assert_file_read_inside_the_charge(shape, n, 0, GROWTH_DISTINCT.0);
+    let two = assert_file_read_inside_the_charge(shape, 2 * n, 0, GROWTH_DISTINCT.1);
     let growth = two.saturating_sub(one);
     let per_entry = std::mem::size_of::<(kit_core::hash::Hash, u32)>() + 4;
     let allowed = per_entry * n as usize + (1 << 20);
@@ -386,14 +406,14 @@ fn assert_only_the_reservation_grows_past_a_window(shape: Shape) {
 }
 
 #[test]
-#[ignore = "writes 196,608 objects of each kind; run in the ignored lane"]
+#[ignore = "writes 196,608 objects of each kind (about 3,000 on macOS); run in the ignored lane"]
 fn past_one_window_of_raw_entries_and_commits_only_the_reservation_grows() {
     assert_only_the_reservation_grows_past_a_window(Shape::Raw);
     assert_only_the_reservation_grows_past_a_window(Shape::Commits);
 }
 
 #[test]
-#[ignore = "writes 196,608 objects and bases of each kind; run in the ignored lane"]
+#[ignore = "writes 196,608 objects and bases of each kind (about 3,000 on macOS); run in the ignored lane"]
 fn past_one_window_of_deltas_only_the_reservation_grows() {
     assert_only_the_reservation_grows_past_a_window(Shape::DeltaOnInPackBase);
     assert_only_the_reservation_grows_past_a_window(Shape::DeltaOnStoreBase);

@@ -14,9 +14,10 @@ use kit_rpc::kit::common::v1::RefExpectation;
 use kit_rpc::kit::rpc::v1::ErrorCode;
 use kit_rpc::kit::rpc::v1::ssh::DownloadPackHeader;
 use kit_serve::{
-    DOWNLOAD_CHUNK_MAX, FRAME_BUDGET_EXCEEDED, FrameIoError, MAX_BYTES_PER_CONN,
-    MAX_FRAMES_PER_CONN, MAX_REF_NAME_BYTES, REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig,
-    SessionEnd, UploadLimits, frame_byte_estimate, serve_session, upload_limits,
+    DOWNLOAD_CHUNK_MAX, FRAME_BUDGET_EXCEEDED, FrameIoError, LIST_NEEDS_PAGE_SIZE,
+    MAX_BYTES_PER_CONN, MAX_FRAMES_PER_CONN, MAX_LIST_PAGE_REFS, MAX_REF_NAME_BYTES,
+    REF_NAME_OUTSIDE_REFS, ReadFrames, SessionConfig, SessionEnd, UploadLimits,
+    frame_byte_estimate, serve_session, upload_limits,
 };
 use kit_transport_file::FileTransport;
 
@@ -176,10 +177,11 @@ fn frame_budget_exceeded_ends_protocol_error() {
 }
 
 /// The requests of a fetch that finds `branches` branches unchanged and no
-/// tags: one branch listing, a packmap read and a pack list node download per
-/// branch, then the tag listing.
+/// tags: a page of the branch listing for each 1,000 branches, a packmap read
+/// and a pack list node download per branch, then the tag listing.
 fn unchanged_fetch(branches: usize, node: &[u8]) -> Vec<Option<Body>> {
-    let mut bodies = vec![list_refs(Some("refs/heads/"))];
+    let pages = branches.div_ceil(MAX_LIST_PAGE_REFS).max(1);
+    let mut bodies = vec![list_refs(Some("refs/heads/")); pages];
     for _ in 0..branches {
         bodies.push(read_ref("refs/kit/packmap/b"));
         bodies.push(download(Some(node)));
@@ -188,13 +190,16 @@ fn unchanged_fetch(branches: usize, node: &[u8]) -> Vec<Option<Body>> {
     bodies
 }
 
-/// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,999 branches fits one
-/// session (10,000 frames); one of 5,000 branches (10,002 frames) is refused
-/// with the budget reply, and the session ends.
+/// SPEC-TRANSPORT §4.4: an unchanged fetch of 4,997 branches fits one
+/// session (10,000 frames: 5 listing pages, 9,994 branch frames and the tag
+/// listing); one of 4,998 branches (10,002 frames) is refused with the budget
+/// reply, and the session ends.
 #[test]
 fn the_largest_unchanged_fetch_fits_one_session_and_one_more_branch_does_not() {
-    let largest = (MAX_FRAMES_PER_CONN as usize - 2) / 2;
-    assert_eq!(largest, 4_999);
+    let largest = 4_997;
+    let frames_of = |branches: usize| branches.div_ceil(MAX_LIST_PAGE_REFS) + 2 * branches + 1;
+    assert_eq!(frames_of(largest), MAX_FRAMES_PER_CONN as usize);
+    assert_eq!(frames_of(largest + 1), MAX_FRAMES_PER_CONN as usize + 2);
     let fx = Fixture::new();
     let (pack, id) = valid_pack();
     fx.seed(&[("refs/kit/packmap/b", id)], &[&pack]);
@@ -417,6 +422,118 @@ fn read_and_list_refs() {
         ["refs/heads/main", "refs/tags/v1"]
     );
     assert_error(&frames[5], ErrorCode::Internal, "list refs failed");
+}
+
+/// A listing pages in name order. The token is the last name of the page
+/// before, so a token for a name that has gone starts after that name.
+#[test]
+fn a_listing_pages_in_name_order() {
+    let fx = Fixture::new();
+    let names = ["a", "b", "c", "d", "e"];
+    let refs: Vec<(String, [u8; 32])> = names
+        .iter()
+        .map(|n| (format!("refs/heads/{n}"), [1; 32]))
+        .collect();
+    let refs: Vec<(&str, [u8; 32])> = refs.iter().map(|(n, id)| (n.as_str(), *id)).collect();
+    fx.seed(&refs, &[]);
+    let heads = Some("refs/heads/");
+    let (end, frames) = fx.run([
+        list_refs_page(heads, Some(2), None),
+        list_refs_page(heads, Some(2), Some("b")),
+        list_refs_page(heads, Some(2), Some("d")),
+        list_refs_page(heads, Some(2), Some("bb")),
+        list_refs_page(heads, Some(2), Some("e")),
+        list_refs_page(heads, Some(10), None),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_eq!(listed_names(&frames[0]), ["a", "b"]);
+    assert_eq!(next_token(&frames[0]).as_deref(), Some("b"));
+    assert_eq!(listed_names(&frames[1]), ["c", "d"]);
+    assert_eq!(next_token(&frames[1]).as_deref(), Some("d"));
+    assert_eq!(listed_names(&frames[2]), ["e"]);
+    assert_eq!(
+        next_token(&frames[2]),
+        None,
+        "the last page ends the listing"
+    );
+    assert_eq!(listed_names(&frames[3]), ["c", "d"]);
+    assert!(listed_names(&frames[4]).is_empty());
+    assert_eq!(next_token(&frames[4]), None);
+    assert_eq!(listed_names(&frames[5]), names);
+    assert_eq!(
+        next_token(&frames[5]),
+        None,
+        "a page that holds all ends it"
+    );
+}
+
+/// A page size above the cap gets a page of the cap, and a listing of 1,001
+/// refs takes two pages. A page of the longest names still fits one frame.
+#[test]
+fn a_page_holds_at_most_the_cap_and_fits_a_frame() {
+    let fx = Fixture::new();
+    let count = MAX_LIST_PAGE_REFS + 1;
+    // A ref file as the transport writes it, copied to each name: a durable
+    // write per ref would take minutes. The names are of the longest length,
+    // in two components that a file name holds.
+    let seed = fx.root().join("refs/heads/seed");
+    FileTransport::new(fx.root())
+        .update_ref("refs/heads/seed", RefWriteCondition::Any, &[2; 32])
+        .unwrap();
+    let wire = std::fs::read(&seed).unwrap();
+    std::fs::remove_file(&seed).unwrap();
+    let first = "x".repeat(250);
+    let second = "y".repeat(MAX_REF_NAME_BYTES - "refs/heads/0000/".len() - first.len() - 1);
+    for i in 0..count {
+        let dir = fx
+            .root()
+            .join("refs/heads")
+            .join(format!("{i:04}"))
+            .join(&first);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(&second), &wire).unwrap();
+    }
+    let heads = Some("refs/heads/");
+    let (_, frames) = fx.run([list_refs_page(heads, Some(u32::MAX), None)]);
+    assert_eq!(listed_names(&frames[0]).len(), MAX_LIST_PAGE_REFS);
+    let token = next_token(&frames[0]).unwrap();
+    let mut encoded = Vec::new();
+    kit_rpc::write_frame(&mut encoded, &frames[0]).unwrap();
+    assert!(encoded.len() < kit_rpc::MAX_FRAME_BYTES as usize);
+    let (_, frames) = fx.run([list_refs_page(heads, Some(u32::MAX), Some(&token))]);
+    assert_eq!(listed_names(&frames[0]).len(), 1);
+    assert_eq!(next_token(&frames[0]), None);
+}
+
+/// A listing without a page size is refused, so a client from before
+/// listings paged fails loudly and never takes a first page for the whole.
+#[test]
+fn a_listing_without_a_page_size_is_refused() {
+    let fx = Fixture::new();
+    fx.seed(&[("refs/heads/main", [1; 32])], &[]);
+    let (end, frames) = fx.run([
+        list_refs_page(Some("refs/heads/"), None, None),
+        list_refs_page(Some("refs/heads/"), Some(0), None),
+        list_refs(Some("refs/heads/")),
+    ]);
+    assert_eq!(end, SessionEnd::Clean);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
+    assert_error(&frames[1], ErrorCode::InvalidRequest, LIST_NEEDS_PAGE_SIZE);
+    assert_eq!(listed_names(&frames[2]), ["main"]);
+}
+
+/// A page token over the name limit cannot be a name, so it is refused.
+#[test]
+fn a_page_token_over_the_name_limit_is_refused() {
+    let fx = Fixture::new();
+    let long = "a".repeat(MAX_REF_NAME_BYTES + 1);
+    let fits = "a".repeat(MAX_REF_NAME_BYTES);
+    let (_, frames) = fx.run([
+        list_refs_page(None, Some(10), Some(&long)),
+        list_refs_page(None, Some(10), Some(&fits)),
+    ]);
+    assert_error(&frames[0], ErrorCode::InvalidRequest, "invalid page token");
+    assert!(listed_names(&frames[1]).is_empty());
 }
 
 /// Two writers race a create-only update. The loser's reply carries the

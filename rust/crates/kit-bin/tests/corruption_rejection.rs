@@ -369,6 +369,36 @@ fn a_log_range_over_an_unreadable_commit_fails_and_prints_nothing() {
 }
 
 #[test]
+fn reverse_blame_preserves_diagnostics_that_name_an_unreadable_commit() {
+    let repo = Repo::new();
+    repo.commit_file("f.txt", b"start\n", "start");
+    let start = rev(&repo, "HEAD");
+    repo.commit_file("f.txt", b"middle\n", "middle");
+    let middle = rev(&repo, "HEAD");
+    repo.commit_file("f.txt", b"end\n", "end");
+    let range = format!("{start}..HEAD");
+
+    let assert_diagnostic = |message: &str| {
+        let out = repo.run(&["blame", "--reverse", &range, "f.txt"]);
+        assert_eq!(out.status.code(), Some(66));
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(out.stderr).unwrap(),
+            format!("error: blame: {message}\n")
+        );
+    };
+    corrupt_object(&repo, &middle);
+    let file = object_file(&repo, &middle);
+    let actual = to_hex(&hash::hash(&fs::read(&file).unwrap()));
+    assert_diagnostic(&format!(
+        "on-disk bytes hash to {actual}, expected {middle}"
+    ));
+
+    fs::remove_file(file).unwrap();
+    assert_diagnostic(&format!("object {middle} not found"));
+}
+
+#[test]
 fn bisect_over_an_unreadable_commit_fails_and_offers_nothing() {
     let bisect = |repo: &Repo, good: &str| {
         repo.ok(&["bisect", "start"]);

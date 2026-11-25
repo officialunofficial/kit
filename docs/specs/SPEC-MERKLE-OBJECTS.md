@@ -77,9 +77,9 @@ list finalizes `BLAKE3("")` with `N = 0`.
 The result equals §1.1 for every `N`. kit computes every object id this
 way (`kit_core::merkle::ChunkedIdFold` for a `ChunkedBlob`, which takes
 the header fields and then each chunk's id and end offset, one at a time or
-as the whole 40-byte entries of a manifest). The fold builds each chunk leaf
-of §3.1 and checks each entry with the entry check of SPEC-OBJECTS §7, so it
-refuses the entries that a manifest decoder refuses and at the same entry.
+as the whole 40-byte entries of a manifest). The fold refuses unknown
+chunker profile IDs at the header check (SPEC-OBJECTS §7). It builds each
+chunk leaf of §3.1 and applies the same entry check as the manifest decoder.
 Tests compare the
 fold with the level build for every `N` up to 1,024, around each power of
 two up to 2^14, and at 1,000,001 and 8,388,608 chunks; the two large
@@ -383,5 +383,5 @@ fixed big- or little-endian as specified; no host-endian leakage).
 The serialized **byte layout** of `Tree` and `ChunkedBlob` is given in
 SPEC-OBJECTS §4/§7. `schema_version` is `0x01` for a `Tree` and `0x02` for a
 `ChunkedBlob`. A conformant store MUST refuse to open a repository whose
-on-disk format marker is not `bmt-v2`, the marker of the leaves in §3,
-rather than silently mis-reading it (SPEC-OBJECTS §10).
+on-disk marker lacks the `bmt-v2` addressing scheme for the leaves in §3
+or requires an unsupported storage capability (SPEC-OBJECTS §10).

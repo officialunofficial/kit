@@ -237,6 +237,9 @@ JCS-canonical key order. Note `predicate` precedes `predicateType`
 - The `kit attest` CLI defaults to a `{}` predicate body when
   `--predicate-file` is omitted.
 
+Readers MUST ignore unrecognized Statement fields, and a predicate type that
+adds an expiry or validity window MUST use a new `predicateType` URI.
+
 ### 4.3 Canonicalization
 
 Both the outer DSSE envelope and the inner Statement are serialized

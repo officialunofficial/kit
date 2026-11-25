@@ -20,11 +20,10 @@
 //! no `anyhow`, no panics on unchecked input.
 
 // `deny(unsafe_code)` rather than `forbid` so a small, justified set of
-// `#[allow(unsafe_code)]` callsites can call into libc. There are three
+// `#[allow(unsafe_code)]` callsites can call into libc. There are two
 // today: `sign::load_key` uses `libc::geteuid()` for the POSIX uid check,
-// `batch::RealSyncer::file_barrier` uses `libc::fcntl(.., F_BARRIERFSYNC)`
-// on macOS/iOS, and `batch::soft_open_file_limit` uses
-// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Linux. Every other module
+// and `batch::soft_open_file_limit` uses
+// `libc::getrlimit(RLIMIT_NOFILE, ..)` on Unix. Every other module
 // remains under the same prohibition; a code-review gate (CONTRIBUTING)
 // requires SAFETY notes on any new `unsafe` block.
 #![deny(unsafe_code)]
@@ -71,8 +70,9 @@ pub mod write_auth;
 pub mod layout;
 
 // Refs, index, worktree, ignore, and repo_lock.
-pub(crate) mod atomic;
 pub mod bounded_read;
+#[doc(hidden)]
+pub mod durable;
 pub mod ignore;
 pub mod index;
 pub mod ref_listing;
@@ -130,7 +130,8 @@ pub use sign::{
     verify_object_signature, verify_remix, verify_tag,
 };
 pub use store::{
-    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, OBJECTS_DIR, ObjectStore, StoreError, StoreResult,
+    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MAX_TREE_LEAVES, OBJECTS_DIR, ObjectStore,
+    StoreError, StoreResult, check_tree_leaves,
 };
 
 /// The name of the implicit flat remote, spelled `remote_endpoint` /
@@ -205,3 +206,6 @@ pub use ops::{
     diff_trees, find_merge_base, find_merge_base_strict, is_ancestor, is_ancestor_strict,
     merge_trees, reachable_objects, reachable_snapshot, status_diff,
 };
+
+#[cfg(test)]
+mod test_support;
