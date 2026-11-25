@@ -3587,8 +3587,13 @@ mod tests {
             let mut budget = DiffBudget::with_limit(1_000_000);
             diff_entries_recursive(&store, old, new, "", &mut out, false, 0, &mut budget)
         };
-        assert!(matches!(walk(&with, &without), Err(StoreError::TreeTooDeep)));
-        assert!(matches!(walk(&without, &with), Err(StoreError::TreeTooDeep)));
+        assert!(matches!(
+            walk(&with, &without),
+            Err(StoreError::TreeTooDeep)
+        ));
+        assert!(matches!(
+            walk(&without, &with),
+            Err(StoreError::TreeTooDeep)
+        ));
     }
-
 }
