@@ -16,7 +16,7 @@ use std::path::Path;
 use crate::hash::Hash;
 use crate::index::{Index, IndexError};
 use crate::object::{EntryMode, Object, TreeEntry};
-use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectSource, ObjectStore, StoreError, WalkBudget};
 use crate::worktree::{self, WorktreeError};
 
 /// What kind of change a [`DiffEntry`] represents.
@@ -186,7 +186,9 @@ fn pair_renames<K: Eq + std::hash::Hash>(entries: &mut Vec<DiffEntry>, key: impl
 /// # Errors
 ///
 /// Propagates [`StoreError`] when an expected tree object is missing or
-/// fails its read-time hash check.
+/// fails its read-time hash check, and returns [`StoreError::TreeTooLarge`]
+/// when a subtree only one side has, or the pairs the walk compares, expand
+/// past [`crate::store::MAX_TREE_LEAVES`].
 pub fn diff_trees<S: ObjectSource + ?Sized>(
     store: &S,
     old_hash: Option<Hash>,
@@ -212,6 +214,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     let new_entries = load_entries(store, new_hash)?;
 
     let mut out: Vec<DiffEntry> = Vec::new();
+    let mut budget = DiffBudget::new();
     diff_entries_recursive(
         store,
         &old_entries,
@@ -220,6 +223,7 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
         &mut out,
         ignore_regular_executable_mode,
         0,
+        &mut budget,
     )?;
     // git orders diff entries by pathname. The name-sorted walk is already
     // sorted for the common cases; sort to also cover a dir/file replacement
@@ -229,7 +233,63 @@ fn diff_trees_inner<S: ObjectSource + ?Sized>(
     Ok(DiffResult { entries: out })
 }
 
+/// The length of the path of an entry named by `name_len` bytes under `prefix`.
+fn entry_path_len(prefix: &str, name_len: usize) -> usize {
+    if prefix.is_empty() {
+        name_len
+    } else {
+        prefix.len() + 1 + name_len
+    }
+}
+
+/// The budgets of one diff: the entry pairs compared, and the leaves of the
+/// subtrees only the old side or only the new side has. A renamed directory
+/// is removed on one side and added on the other, so each side has its own
+/// cap.
+struct DiffBudget {
+    pairs: WalkBudget,
+    removed: WalkBudget,
+    added: WalkBudget,
+}
+
+impl DiffBudget {
+    fn new() -> Self {
+        Self {
+            pairs: WalkBudget::new(),
+            removed: WalkBudget::new(),
+            added: WalkBudget::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_byte_limit(byte_limit: u64) -> Self {
+        Self {
+            pairs: WalkBudget::with_byte_limit(byte_limit),
+            removed: WalkBudget::with_byte_limit(byte_limit),
+            added: WalkBudget::with_byte_limit(byte_limit),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_limit(limit: u64) -> Self {
+        Self {
+            pairs: WalkBudget::with_limit(limit),
+            removed: WalkBudget::with_limit(limit),
+            added: WalkBudget::with_limit(limit),
+        }
+    }
+}
+
 /// Lockstep walk of two name-sorted entry arrays.
+///
+/// `budget` counts the entry pairs the walk compares, and the entries of the
+/// subtrees each side has alone, over the whole diff, files and directories
+/// both, and caps each at twice [`crate::store::MAX_TREE_LEAVES`] entries and
+/// twice an index file's bytes of paths. Two trees whose every shared subtree
+/// differs expand as far as a tree bomb does, and so does a wide tree of names that all share one
+/// large subtree. A walk costs what the change costs, and no pass over the
+/// unchanged trees is added.
+#[allow(clippy::too_many_arguments)]
 fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     store: &S,
     old_entries: &[TreeEntry],
@@ -238,6 +298,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     out: &mut Vec<DiffEntry>,
     ignore_regular_executable_mode: bool,
     depth: usize,
+    budget: &mut DiffBudget,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -248,13 +309,15 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     while i < old_entries.len() && j < new_entries.len() {
         let o = &old_entries[i];
         let n = &new_entries[j];
+        let name = o.name.len().max(n.name.len());
+        budget.pairs.visit(entry_path_len(prefix, name))?;
         match o.name.as_slice().cmp(n.name.as_slice()) {
             std::cmp::Ordering::Less => {
-                add_removed_entries(store, o, prefix, out, depth)?;
+                add_removed_entries(store, o, prefix, out, depth, budget)?;
                 i += 1;
             }
             std::cmp::Ordering::Greater => {
-                add_added_entries(store, n, prefix, out, depth)?;
+                add_added_entries(store, n, prefix, out, depth, budget)?;
                 j += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -271,6 +334,7 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                             out,
                             ignore_regular_executable_mode,
                             depth + 1,
+                            budget,
                         )?;
                     }
                     // identical subtree hashes -> nothing changed below
@@ -280,8 +344,8 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
                     // the new entry added — never a single Modified blob whose
                     // tree hash would be misread as a blob by the patch
                     // renderer.
-                    add_removed_entries(store, o, prefix, out, depth)?;
-                    add_added_entries(store, n, prefix, out, depth)?;
+                    add_removed_entries(store, o, prefix, out, depth, budget)?;
+                    add_added_entries(store, n, prefix, out, depth, budget)?;
                 } else if worktree::content_eq(store, &o.object_hash, &n.object_hash)? {
                     if o.mode == n.mode {
                         i += 1;
@@ -317,11 +381,11 @@ fn diff_entries_recursive<S: ObjectSource + ?Sized>(
     }
 
     while i < old_entries.len() {
-        add_removed_entries(store, &old_entries[i], prefix, out, depth)?;
+        add_removed_entries(store, &old_entries[i], prefix, out, depth, budget)?;
         i += 1;
     }
     while j < new_entries.len() {
-        add_added_entries(store, &new_entries[j], prefix, out, depth)?;
+        add_added_entries(store, &new_entries[j], prefix, out, depth, budget)?;
         j += 1;
     }
     Ok(())
@@ -340,6 +404,25 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
+    budget: &mut DiffBudget,
+) -> Result<(), StoreError> {
+    let path_len = entry_path_len(prefix, entry.name.len());
+    if entry.mode == EntryMode::Tree {
+        budget
+            .removed
+            .take_subtree(store, entry.object_hash, path_len)?;
+    } else {
+        budget.removed.visit(path_len)?;
+    }
+    walk_removed_entries(store, entry, prefix, out, depth)
+}
+
+fn walk_removed_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    entry: &TreeEntry,
+    prefix: &str,
+    out: &mut Vec<DiffEntry>,
+    depth: usize,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -348,7 +431,7 @@ fn add_removed_entries<S: ObjectSource + ?Sized>(
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_removed_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
+            walk_removed_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
@@ -370,6 +453,25 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
     prefix: &str,
     out: &mut Vec<DiffEntry>,
     depth: usize,
+    budget: &mut DiffBudget,
+) -> Result<(), StoreError> {
+    let path_len = entry_path_len(prefix, entry.name.len());
+    if entry.mode == EntryMode::Tree {
+        budget
+            .added
+            .take_subtree(store, entry.object_hash, path_len)?;
+    } else {
+        budget.added.visit(path_len)?;
+    }
+    walk_added_entries(store, entry, prefix, out, depth)
+}
+
+fn walk_added_entries<S: ObjectSource + ?Sized>(
+    store: &S,
+    entry: &TreeEntry,
+    prefix: &str,
+    out: &mut Vec<DiffEntry>,
+    depth: usize,
 ) -> Result<(), StoreError> {
     if depth > MAX_TREE_DEPTH {
         return Err(StoreError::TreeTooDeep);
@@ -378,7 +480,7 @@ fn add_added_entries<S: ObjectSource + ?Sized>(
         let sub_prefix = join_path(prefix, &entry.name);
         let sub = load_tree(store, entry.object_hash)?;
         for sub_entry in &sub {
-            add_added_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
+            walk_added_entries(store, sub_entry, &sub_prefix, out, depth + 1)?;
         }
     } else {
         out.push(DiffEntry {
@@ -3368,5 +3470,206 @@ mod tests {
         assert!(!changes.minimal);
         assert_eq!(changes.old, vec![false]);
         assert_eq!(changes.new, vec![true, true, true, false]);
+    }
+
+    /// `levels` doubling trees over one file holding `leaf`.
+    fn doubling(store: &ObjectStore, levels: usize, leaf: &[u8]) -> Hash {
+        let mut cur = put_tree(
+            store,
+            vec![entry(b"f", EntryMode::Blob, put_blob(store, leaf))],
+        );
+        for _ in 0..levels {
+            cur = put_tree(
+                store,
+                vec![
+                    entry(b"a", EntryMode::Tree, cur),
+                    entry(b"b", EntryMode::Tree, cur),
+                ],
+            );
+        }
+        cur
+    }
+
+    #[test]
+    fn two_trees_that_differ_at_every_path_stop_at_the_walk_budget() {
+        let (_dir, store) = fresh_store();
+        // Every subtree pair differs, so the walk would compare 2^12 leaves.
+        let old = load_entries(&store, Some(doubling(&store, 12, b"one"))).unwrap();
+        let new = load_entries(&store, Some(doubling(&store, 12, b"two"))).unwrap();
+        let walk = |limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(100_000).unwrap(), 4096);
+        assert!(matches!(walk(1000), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn many_names_over_one_shared_subtree_share_one_budget() {
+        let (_dir, store) = fresh_store();
+        // Each name holds 2^10 leaves, which is under any one subtree's cap.
+        let shared = doubling(&store, 10, b"x");
+        let wide = |names: usize| {
+            (0..names)
+                .map(|i| entry(format!("d{i:04}").as_bytes(), EntryMode::Tree, shared))
+                .collect::<Vec<_>>()
+        };
+        let added = |names, limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(limit);
+            diff_entries_recursive(
+                &store,
+                &[],
+                &wide(names),
+                "",
+                &mut out,
+                false,
+                0,
+                &mut budget,
+            )
+            .map(|()| out.len())
+        };
+        assert_eq!(added(10, 100_000).unwrap(), 10 * 1024);
+        assert!(matches!(added(100, 100_000), Err(StoreError::TreeTooLarge)));
+    }
+
+    /// `levels` doubling trees whose bottom tree holds `bottom`.
+    fn doubling_over(store: &ObjectStore, levels: usize, bottom: Vec<TreeEntry>) -> Hash {
+        let mut cur = put_tree(store, bottom);
+        for _ in 0..levels {
+            cur = put_tree(
+                store,
+                vec![
+                    entry(b"a", EntryMode::Tree, cur),
+                    entry(b"b", EntryMode::Tree, cur),
+                ],
+            );
+        }
+        cur
+    }
+
+    #[test]
+    fn files_only_one_side_has_are_charged_each_time_their_directory_is_reached() {
+        let (_dir, store) = fresh_store();
+        // The bottom directory is compared 2^8 times. The new side has extra
+        // files there, and those land in the tail loop of each comparison.
+        let first = |data: &[u8]| entry(b"a", EntryMode::Blob, put_blob(&store, data));
+        let shared = put_blob(&store, b"extra");
+        let new_side = |n: usize| {
+            let mut bottom = vec![first(b"new")];
+            bottom.extend(
+                (0..n).map(|i| entry(format!("b{i:03}").as_bytes(), EntryMode::Blob, shared)),
+            );
+            load_entries(&store, Some(doubling_over(&store, 8, bottom))).unwrap()
+        };
+        let old =
+            load_entries(&store, Some(doubling_over(&store, 8, vec![first(b"old")]))).unwrap();
+        let walk = |n| {
+            let new = new_side(n);
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(5000);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(5).unwrap(), 256 * 6);
+        assert!(matches!(walk(100), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn a_renamed_directory_is_charged_once_on_each_side() {
+        let (_dir, store) = fresh_store();
+        // 2^11 files removed and the same added, 6142 entries each with their
+        // directories: each is under the cap of 7000, the two together are not.
+        let big = doubling(&store, 11, b"x");
+        let old = vec![entry(b"src", EntryMode::Tree, big)];
+        let new = vec![entry(b"lib", EntryMode::Tree, big)];
+        let walk = |limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+                .map(|()| out.len())
+        };
+        assert_eq!(walk(7000).unwrap(), 2 * 2048);
+        assert!(matches!(walk(5000), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn a_long_prefix_counts_against_the_byte_budget() {
+        let (_dir, store) = fresh_store();
+        // 2^10 leaves taken whole under a 100 KiB path: well under any leaf
+        // cap, and over an index file's bytes.
+        let tree = doubling(&store, 10, b"x");
+        let mut budget = WalkBudget::new();
+        let long = 100 * 1024;
+        assert!(budget.take_subtree(&store, tree, 10).is_ok());
+        assert!(matches!(
+            WalkBudget::new().take_subtree(&store, tree, long * 6),
+            Err(StoreError::TreeTooLarge)
+        ));
+        assert!(matches!(
+            (0..6000).try_for_each(|_| WalkBudget::visit(&mut budget, long)),
+            Err(StoreError::TreeTooLarge)
+        ));
+    }
+    /// A chain of `levels` directories named `c` over `bottom`.
+    fn chain_over(store: &ObjectStore, levels: usize, bottom: Vec<TreeEntry>) -> Hash {
+        let mut cur = put_tree(store, bottom);
+        for _ in 0..levels {
+            cur = put_tree(store, vec![entry(b"c", EntryMode::Tree, cur)]);
+        }
+        cur
+    }
+
+    #[test]
+    fn a_one_sided_directory_counts_its_depth_from_where_the_walk_reached_it() {
+        let (_dir, store) = fresh_store();
+        let file = |name: &[u8]| entry(name, EntryMode::Blob, put_blob(&store, name));
+        // The directory `r` is 126 levels deep and the shared chain above it
+        // is 4 levels deep. Each is under the nesting limit, the two together
+        // are not.
+        let deep = chain_over(&store, 126, vec![file(b"leaf")]);
+        let with_r = vec![entry(b"r", EntryMode::Tree, deep), file(b"z")];
+        let without_r = vec![file(b"y"), file(b"z")];
+        let with = load_entries(&store, Some(chain_over(&store, 4, with_r))).unwrap();
+        let without = load_entries(&store, Some(chain_over(&store, 4, without_r))).unwrap();
+        let walk = |old: &[TreeEntry], new: &[TreeEntry]| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_limit(1_000_000);
+            diff_entries_recursive(&store, old, new, "", &mut out, false, 0, &mut budget)
+        };
+        assert!(matches!(
+            walk(&with, &without),
+            Err(StoreError::TreeTooDeep)
+        ));
+        assert!(matches!(
+            walk(&without, &with),
+            Err(StoreError::TreeTooDeep)
+        ));
+    }
+
+    #[test]
+    fn a_long_directory_name_counts_against_the_byte_budget_at_each_path() {
+        let (_dir, store) = fresh_store();
+        // A directory with a 100 byte name holds a file `a` that differs. The
+        // walk compares the directory (100 bytes), then the file (102 bytes),
+        // at 67 bytes of index entry each.
+        let side = |data: &[u8]| {
+            let tree = put_tree(
+                &store,
+                vec![entry(b"a", EntryMode::Blob, put_blob(&store, data))],
+            );
+            vec![entry(&[b'd'; 100], EntryMode::Tree, tree)]
+        };
+        let (old, new) = (side(b"old"), side(b"new"));
+        let walk = |byte_limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_byte_limit(byte_limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+        };
+        let exact = (67 + 100) + (67 + 102);
+        walk(exact).unwrap();
+        assert!(matches!(walk(exact - 1), Err(StoreError::TreeTooLarge)));
     }
 }

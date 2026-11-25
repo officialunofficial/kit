@@ -32,7 +32,7 @@ use crate::durable::Parents;
 use crate::hash::{self, HASH_LEN, Hash};
 use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
-use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError};
+use crate::store::{MAX_TREE_DEPTH, ObjectStore, StoreError, check_tree_leaves};
 
 /// Magic bytes — ASCII `"KIDX"`.
 pub const MAGIC: [u8; 4] = *b"KIDX";
@@ -633,8 +633,15 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
 ///
 /// # Errors
 /// Propagates object-store errors and returns [`IndexError::NotTree`]
-/// if `tree_hash` does not point at a tree object.
+/// if `tree_hash` does not point at a tree object. A tree that expands to
+/// more than [`crate::store::MAX_TREE_LEAVES`] files, or to paths an index
+/// file could not hold, fails with
+/// [`StoreError::TreeTooLarge`] before any entry is built.
 pub fn from_tree(store: &ObjectStore, tree_hash: Hash) -> IndexResult<Index> {
+    check_tree_leaves(store, tree_hash).map_err(|e| match e {
+        StoreError::TreeTooDeep => IndexError::TreeTooDeep,
+        e => IndexError::Store(e),
+    })?;
     let mut entries = Vec::new();
     push_tree_entries(store, tree_hash, "", &mut entries, 0)?;
     Ok(Index::from_entries(entries))

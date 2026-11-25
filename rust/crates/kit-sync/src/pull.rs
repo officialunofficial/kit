@@ -220,6 +220,26 @@ fn land_pull(
         refs::RefWriteCondition::Missing
     };
 
+    if !options.checkout && local_tip.is_none() {
+        // A clone without a checkout: the branch and HEAD, no worktree, no
+        // index and no pending restore. The commit must still be one.
+        load_tree_hash(store, remote_tip)?;
+        write_ref_recording_history(layout, &branch, ref_condition, &remote_tip)?;
+        if let Err(e) = refs::write_head_branch(layout, &branch) {
+            rollback_pull_ref(layout, &branch, local_tip, remote_tip)?;
+            return Err(e.into());
+        }
+        return Ok(PullReport {
+            fetch,
+            maintenance: None,
+            outcome: PullOutcome::FastForwarded {
+                branch,
+                old: None,
+                new: remote_tip,
+            },
+        });
+    }
+
     let tree = load_tree_hash(store, remote_tip)?;
     // Recovery may have changed the worktree and index. Read HEAD afterwards.
     let base_tree = current_head_tree(layout, store).map_err(SyncError::RestoreSafety)?;

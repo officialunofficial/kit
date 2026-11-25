@@ -130,7 +130,8 @@ pub use sign::{
     verify_object_signature, verify_remix, verify_tag,
 };
 pub use store::{
-    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, OBJECTS_DIR, ObjectStore, StoreError, StoreResult,
+    KIT_DIR, MAX_RAW_OBJECT_SIZE, MAX_TREE_DEPTH, MAX_TREE_LEAVES, OBJECTS_DIR, ObjectStore,
+    StoreError, StoreResult, check_tree_leaves,
 };
 
 /// The name of the implicit flat remote, spelled `remote_endpoint` /

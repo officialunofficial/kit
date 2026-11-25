@@ -7,8 +7,13 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `kit clone --no-checkout` (`-n`) fetches, sets the branch and HEAD, and writes no worktree file and no index; `kit checkout <branch>` fills the worktree later. `kit_sync::SyncOptions` gains `checkout`, set with `with_checkout`.
+
 ### Changed
 
+- `kit checkout` in a repository with no `.kit/index` file, as `kit clone --no-checkout` leaves it, is the first checkout, as in git: nothing is tracked yet, so no file counts as a local change and no tracked path is removed. A file the checkout would write over still refuses it.
 - **Breaking:** the ssh `ListRefs` request and reply page, as Connect's do (SPEC-TRANSPORT §4.2.3): `kit serve` returns at most 1,000 refs a page, and `kit+ssh` remotes read every page. A new `kit serve` refuses a `ListRefs` with no `page_size`, so a client from before this change cannot list refs on it and has to be upgraded; a new client against an old `kit serve` works as before, up to the old limit of one frame.
 - `kit_core::protocol::RefListing::OneFrame`, `kit_sync::push::MAX_TAG_LISTING_BYTES` and `TagPushRejection::TooManyTags` are removed: no remote lists in one frame any more, so a tag push no longer refuses a create over a listing bound. A push of tags to a `kit serve` that predates paging is not bounded either, so a tag listing there that grows past one frame fails for every client until that server is upgraded. The `tag listing failed` message no longer says "possibly too many tags".
 - `kit commit` of a plain commit no longer reads every tree of the new commit to rebuild the index it already holds, and no longer writes it again; a commit with a staged removal, a merge or an amend still rebuilds it.
@@ -23,6 +28,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A tree that expands to more than 2,000,000 files (or 4,000,000 entries counting directories, so a chain of empty directories too), or to paths an index file could not hold, such as a chain of trees that each name the level below twice, is now refused before anything is built or written, by `index::from_tree`, the restore and `check_nested_repositories`, and so by `kit clone`, `kit pull`, `kit checkout` and `kit status`. `diff_trees` and `merge_trees` add no pass over unchanged trees: each walk counts the entries it compares, and the entries of the subtrees only one side has (a diff counts the old side's and the new side's separately, so a renamed directory counts once on each side), files and directories both, and stops at 4,000,000 entries or twice an index file's bytes of paths, so two trees that differ at every path, or a wide tree of names that share one large subtree, are refused too. The size is memoised per tree, so a chain of 40 trees fails in milliseconds and not after a walk of every path. `kit_core::StoreError` gains `TreeTooLarge`, and `kit_core::{MAX_TREE_LEAVES, check_tree_leaves}` are public.
 - `kit gc` no longer stops on a recovery log whose last line was cut short by a crash or a full disk: readers ignore a last line without its newline, `record` cuts it off before it appends, and a tab in the branch field fails the parse, and appends from linked trees take a `recovery-log.lock`, so a later entry is no longer glued to the torn bytes and left out of the gc roots.
 - `.kit/config` is written with an fsync of the file and of its directory, and `kit remote`, `kit config` and the upstream a push or `kit branch` records read and write it under one `config.lock`, so commands that run at once keep every change.
 - An unreadable `gc-auto` stamp is replaced by the stamp of a step that never ran, so the next automatic maintenance step is due again at the floor and not a week later.
