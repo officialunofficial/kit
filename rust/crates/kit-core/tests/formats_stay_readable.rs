@@ -474,7 +474,7 @@ fn stash_manifest_vector_keeps_reading() {
 }
 
 /// A stash that kit 0.8.1 saved with `kit stash push -m wip`: a staged change
-/// to `a.txt`, an unstaged change to `b.txt`, and no `p` scope blob in the
+/// to `a.txt`, an unstaged change to `b.txt`, an untracked `c.txt`, and no `p` scope blob in the
 /// index wrapper, which 0.9 added. The manifest and the 13 loose objects of
 /// that repository are committed as `formats/stash-08-*`. Nothing in them
 /// was written by this checkout.
@@ -535,6 +535,12 @@ fn stash_entry_of_0_8_keeps_applying() {
     stash::apply(&store, &layout, 0).unwrap();
     assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"two\n");
     assert_eq!(fs::read(dir.path().join("b.txt")).unwrap(), b"changed\n");
+    // The stash also holds the untracked `c.txt`. Pop refuses to overwrite it,
+    // so put the worktree back as it was and pop.
+    assert_eq!(fs::read(dir.path().join("c.txt")).unwrap(), b"new\n");
+    fs::remove_file(dir.path().join("c.txt")).unwrap();
+    fs::write(dir.path().join("a.txt"), b"one\n").unwrap();
+    fs::write(dir.path().join("b.txt"), b"keep\n").unwrap();
     stash::pop(&store, &layout, 0).unwrap();
     assert!(stash::list(&layout).unwrap().entries.is_empty());
 }

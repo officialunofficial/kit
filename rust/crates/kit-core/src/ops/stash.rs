@@ -1458,8 +1458,8 @@ mod tests {
 
     #[test]
     fn only_the_exact_0_8_and_current_wrapper_shapes_are_read() {
-        let (_tmp, store) = fresh_store();
         type Shape = fn(Hash, Hash, Hash) -> Vec<TreeEntry>;
+        let (_tmp, store) = fresh_store();
         let shapes: [Shape; 5] = [
             // 0.8 names with a wrong mode
             |i, _, t| {
