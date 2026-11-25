@@ -720,7 +720,10 @@ pub(super) struct Route {
 /// Check that each row's first id byte is the shard whose fanout bucket holds
 /// that row. `fanout` is the 256 bucket ends, already checked to be in order
 /// and within the row count.
-fn check_buckets(fanout: &[u8], first_bytes: impl Iterator<Item = u8>) -> StoreResult<()> {
+pub(super) fn check_buckets(
+    fanout: &[u8],
+    first_bytes: impl Iterator<Item = u8>,
+) -> StoreResult<()> {
     let mut shard = 0;
     for (row, first) in first_bytes.enumerate() {
         while shard < 256 && le_u32(&fanout[shard * 4..shard * 4 + 4]) as usize <= row {

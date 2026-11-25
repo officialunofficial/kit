@@ -487,6 +487,16 @@ fn a_wrong_version_in_one_file_is_damage_to_that_pair_and_repair_rebuilds_the_in
             "{text}"
         );
         assert!(text.contains("version 2"), "{text}");
+        assert!(
+            text.contains("does not match the other file of the pair"),
+            "{text}"
+        );
+        let named = if index_is_wrong {
+            "local index"
+        } else {
+            "local pack"
+        };
+        assert!(text.contains(named), "the differing file is named: {text}");
         assert!(!text.contains("Update kit"), "{text}");
         assert_eq!(
             text.contains("repair-indexes"),
@@ -505,6 +515,23 @@ fn a_wrong_version_in_one_file_is_damage_to_that_pair_and_repair_rebuilds_the_in
                 "{error}"
             );
         }
+    }
+}
+
+#[test]
+fn a_version_error_on_a_pair_with_valid_versions_keeps_its_own_reason() {
+    let (_dir, _layout, pairs) = packed_store(&[vec![1]]);
+    for (found, reason) in [
+        (Some("odd version".to_owned()), "odd version"),
+        (None, "unknown"),
+    ] {
+        let error = pairs[0].context(StoreError::IncompatibleRepoFormat { found });
+        assert_damage(&error, &pairs[0], reason);
+        let StoreError::LocalPackDamaged { reason: text, .. } = &error else {
+            unreachable!("asserted above");
+        };
+        assert!(!text.contains("does not match"), "{text}");
+        assert!(!text.contains("not one this kit reads"), "{text}");
     }
 }
 
@@ -826,6 +853,17 @@ fn a_read_that_ends_early_is_damage_and_other_read_errors_are_not() {
         &pair.context(index::invalid("bad frame")),
         &pair,
         "bad frame",
+    );
+    // An index that ends early is damage to the index, so it names the repair;
+    // a file that ends early elsewhere in the pair does not.
+    let early = pair.index_context(Error::from(ErrorKind::UnexpectedEof));
+    assert_damage(&early, &pair, "ends early");
+    assert!(early.to_string().contains("repair-indexes"), "{early}");
+    assert!(
+        !pair
+            .context(Error::from(ErrorKind::UnexpectedEof))
+            .to_string()
+            .contains("repair-indexes")
     );
     let other = index::invalid_at(std::path::Path::new("other.pack"), "named elsewhere");
     assert!(matches!(
@@ -1905,6 +1943,24 @@ fn dropping_loose_duplicates_takes_the_lock_in_batches_and_counts_the_holds() {
     for (id, bytes) in &objects {
         assert_eq!(&store.read(id).unwrap(), bytes);
     }
+}
+
+#[test]
+fn checking_the_buckets_of_a_short_fanout_reports_damage() {
+    use super::reader::check_buckets;
+
+    let fanout = |ends: &dyn Fn(usize) -> u32| -> Vec<u8> {
+        (0..256)
+            .flat_map(|shard| ends(shard).to_le_bytes())
+            .collect()
+    };
+    // Every bucket ends at 2 rows: ids that start with 0 fit, others do not.
+    let whole = fanout(&|_| 2);
+    check_buckets(&whole, [0, 0].into_iter()).unwrap();
+    assert!(check_buckets(&whole, [0, 1].into_iter()).is_err());
+    // No bucket reaches the first row: damage, with no bucket left to read.
+    let short = fanout(&|_| 0);
+    assert!(check_buckets(&short, [0].into_iter()).is_err());
 }
 
 #[test]
