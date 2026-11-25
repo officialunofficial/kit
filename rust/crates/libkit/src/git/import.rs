@@ -552,13 +552,17 @@ fn translate_upstream(
     let mut retain = |id: &Sha1Id, raw: &[u8]| -> Result<(), BridgeError> {
         let hex = sha1_hex(id);
         let dir = raw_dir.join(&hex[..2]);
+        map::check_plain_dir(&raw_dir)?;
+        map::check_plain_dir(&dir)?;
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(&hex[2..]);
+        let tmp = dir.join(format!(".{}.tmp", &hex[2..]));
+        map::check_plain(&path)?;
+        map::check_plain(&tmp)?;
         // Temp + content-fsync + rename: a torn final file would be
         // permanent (the exists() short-circuit is what makes re-runs
         // cheap, so the final path must never hold partial bytes).
         if !path.exists() {
-            let tmp = dir.join(format!(".{}.tmp", &hex[2..]));
             {
                 use std::io::Write as _;
                 let mut f = std::fs::File::create(&tmp)?;

@@ -89,11 +89,31 @@ impl Direction {
 /// files sit in a directory the repository controls, so a link there would
 /// send a read or a write to another file. A file that does not exist is
 /// fine.
-fn check_plain(path: &Path) -> Result<(), BridgeError> {
+///
+/// # Errors
+/// [`BridgeError::Source`] when `path` is a link or not a plain file.
+pub fn check_plain(path: &Path) -> Result<(), BridgeError> {
+    check_kind(path, std::fs::Metadata::is_file, "a plain file")
+}
+
+/// Refuse a state directory that is a link or anything but a plain
+/// directory. A directory that does not exist is fine.
+///
+/// # Errors
+/// [`BridgeError::Source`] when `path` is a link or not a plain directory.
+pub fn check_plain_dir(path: &Path) -> Result<(), BridgeError> {
+    check_kind(path, std::fs::Metadata::is_dir, "a plain directory")
+}
+
+fn check_kind(
+    path: &Path,
+    ok: fn(&std::fs::Metadata) -> bool,
+    what: &str,
+) -> Result<(), BridgeError> {
     match std::fs::symlink_metadata(path) {
-        Ok(m) if m.is_file() => Ok(()),
+        Ok(m) if ok(&m) => Ok(()),
         Ok(_) => Err(BridgeError::Source(format!(
-            "refusing the bridge state file {}: it is a link or not a plain file. \
+            "refusing the bridge state entry {}: it is a link or not {what}. \
              Delete it and rerun",
             path.display()
         ))),
@@ -562,6 +582,28 @@ mod tests {
         assert!(map_is_intact(dir.path()).unwrap());
         store_ref_state(dir.path(), &[]).unwrap();
         store_ref_state(dir.path(), &[]).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_checks_refuse_links_and_wrong_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        let sub = dir.path().join("d");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir(&sub).unwrap();
+        assert!(check_plain(&file).is_ok());
+        assert!(check_plain_dir(&sub).is_ok());
+        assert!(check_plain(&dir.path().join("missing")).is_ok());
+        assert!(check_plain_dir(&dir.path().join("missing")).is_ok());
+        assert!(check_plain(&sub).is_err());
+        assert!(check_plain_dir(&file).is_err());
+        let link = dir.path().join("l");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(check_plain(&link).is_err());
+        let dlink = dir.path().join("dl");
+        std::os::unix::fs::symlink(&sub, &dlink).unwrap();
+        assert!(check_plain_dir(&dlink).is_err());
     }
 
     #[test]

@@ -31,7 +31,7 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- The git bridge refuses a state file that is a link or not a plain file (`map`, `refs`, `refs-import`, the stamps and their temporary files), in place of reading or writing through it; delete the file and rerun.
+- The git bridge refuses a state file that is a link or not a plain file (`map`, `refs`, `refs-import`, the stamps, the retained `raw/` objects and their temporary files), in place of reading or writing through it; delete the file and rerun.
 - `kit git fetch`, `pull`, `export` and `verify` refuse a staging mirror under `.kit/git/<name>/repo.git` whose git config or layout is not one kit wrote: a link or special file anywhere in it, a `commondir`, `config.worktree`, `gitdir` or alternates file, a repeated config key, or a config key that `git clone --bare` and `git init --bare` do not write. Delete the mirror and run the command again to rebuild it; a mirror that an `init.templateDir` added keys to needs this once, and new mirrors are created with an empty template.
 - A linked worktree must be registered under the repository's `.kit/worktrees/` and point back to the tree. Run `kit worktree repair <path>` after moving one by hand. For library users, `kit_core::layout::discover_unverified` is the lookup without this check, for `worktree repair`, and `DiscoverError` gains `NotRegistered` and `BackpointerMismatch`.
 - `kit closure repair-indexes` no longer stops at the first damaged pack: it rebuilds the indexes of the healthy packs, and then reports every damaged pack, a damaged pack that lost its index included, in one error.

@@ -20,9 +20,10 @@ pub const MAX_STAMP_BYTES: u64 = 4096;
 /// Read a short stamp file from a state directory.
 ///
 /// # Errors
-/// An I/O error when the file is missing, or when it is longer than
+/// An I/O error when the file is missing, is a link, or is longer than
 /// [`MAX_STAMP_BYTES`].
 pub fn read_stamp(path: &Path) -> std::io::Result<String> {
+    kit_git_bridge::map::check_plain(path).map_err(std::io::Error::other)?;
     kit_core::bounded_read::read_capped_string(path, MAX_STAMP_BYTES)
 }
 
@@ -147,4 +148,25 @@ pub fn status(cwd: &Path) -> Result<Vec<State>, Error> {
         });
     }
     Ok(states)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_linked_stamp_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("elsewhere");
+        std::fs::write(&other, "secret\n").unwrap();
+        std::os::unix::fs::symlink(&other, dir.path().join("dest")).unwrap();
+        std::fs::write(dir.path().join("source"), "origin\n").unwrap();
+        let err = read_stamp(&dir.path().join("dest")).unwrap_err();
+        assert!(err.to_string().contains("Delete it and rerun"), "{err}");
+        assert_eq!(read_stamp(&dir.path().join("source")).unwrap(), "origin\n");
+        assert_eq!(
+            read_stamp(&dir.path().join("missing")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
 }
