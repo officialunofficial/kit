@@ -193,8 +193,7 @@ sends each object at most once per base. A remote tag with another value is
 refused unless `force`, which conditions on the value it read and keeps that
 value in the new tag map. Before reading the remote, a push refuses a tag whose
 tag map name is not a valid ref, an annotated tag named for another tag, and an
-unsigned annotated tag. On a remote that lists in one frame, a create past
-`MAX_TAG_LISTING_BYTES` is refused. A refused tag does not stop the others.
+unsigned annotated tag. A refused tag does not stop the others.
 
 ### Incremental fetch checkpoints
 
@@ -233,10 +232,10 @@ reads and the concurrent re-baseline retry retain their existing behavior.
 
 New packs still pass digest and signature verification. Only after successful
 application and closure verification does fetch durably publish the tracking
-ref, then atomically write and fsync the checkpoint, under the same worktree
-lock. Tracking directories now sync per branch before checkpoint publication.
-A crash before the checkpoint write leaves the old record; the next fetch
-walks more nodes. Cache write failure does not fail an otherwise successful fetch.
+ref, then write the checkpoint with a temporary file and a rename and no device
+flush, under the same worktree lock. Tracking directories sync per branch before
+checkpoint publication. A crash before the checkpoint write, or one that loses
+the write, leaves the old record or none; the next fetch walks more nodes. Cache write failure does not fail an otherwise successful fetch.
 
 For a single branch, one listing page, one pack per node, and no retries,
 let `N` be the total chain length after the operation. Count each ListRefs,

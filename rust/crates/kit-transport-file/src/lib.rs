@@ -55,8 +55,8 @@ use std::io::{self, ErrorKind, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError, RwLock};
 
-/// Open the pack at `path` for reading, never through a link, and check
-/// on the open handle that it is a regular file.
+/// Open the pack at `path` for reading, never through a link and never
+/// waiting on a FIFO, and check on the open handle that it is a regular file.
 ///
 /// # Errors
 /// The open fails, which includes a link at `path`. A file that is not
@@ -67,7 +67,11 @@ fn open_pack_file(path: &Path) -> io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // `O_NONBLOCK`: the open of a FIFO returns at once, so the check
+        // below refuses it, and a plain open would wait for a writer.
+        // `O_NOCTTY`: a terminal device opened here never becomes the
+        // controlling terminal of the process.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     #[cfg(windows)]
     {
@@ -114,6 +118,42 @@ fn open_lock_file(path: &Path) -> io::Result<fs::File> {
         ));
     }
     Ok(file)
+}
+
+/// Read the file at `path` as [`bounded_read::read_capped`] does, but open it
+/// without blocking and refuse a file that is not regular before any read: a
+/// FIFO, a device or a socket at a ref or pack-map path would otherwise make
+/// a read wait for a writer that never comes. The check reads the open
+/// handle, so a swap of the path after the open changes nothing. Unlike
+/// [`open_pack_file`] the open follows a link: [`FileTransport::guard_ref_path`]
+/// decides which links a ref path may cross.
+///
+/// # Errors
+/// The open or the read fails, or the file is over `limit` bytes
+/// ([`ErrorKind::InvalidData`]). A directory fails as a read of one does. Any
+/// other file that is not regular has kind [`ErrorKind::InvalidInput`].
+fn read_regular_capped(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    let kind = file.metadata()?.file_type();
+    if kind.is_dir() {
+        // As a read of a directory fails, so a directory of other refs is no
+        // ref file ([`no_ref_file`]).
+        return Err(io::Error::from(ErrorKind::IsADirectory));
+    }
+    if !kind.is_file() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "ref file is not a regular file",
+        ));
+    }
+    bounded_read::read_capped_from(file, limit)
 }
 
 use kit_core::bounded_read;
@@ -230,7 +270,7 @@ fn write_temp_from(
             file.write_all(&buf[..n]).map_err(StreamError::Dest)?;
             left -= n as u64;
         }
-        file.sync_all().map_err(StreamError::Dest)
+        kit_core::flush::file(&file).map_err(StreamError::Dest)
     };
     if let Err(e) = copy() {
         drop(file);
@@ -346,7 +386,7 @@ fn write_create_new(dest: &Path, bytes: &[u8], make_parents: bool) -> io::Result
 #[cfg(unix)]
 fn sync_parent(dir: &Path) -> io::Result<()> {
     match fs::File::open(dir) {
-        Ok(d) => d.sync_all(),
+        Ok(d) => kit_core::flush::file(&d),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
@@ -993,7 +1033,7 @@ impl FileTransport {
         if path.exists() {
             self.guard_ref_path(&path)?;
         }
-        match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
+        match read_regular_capped(&path, REF_FILE_MAX_BYTES) {
             Ok(bytes) => decode_ref_wire(&bytes)
                 .map(Some)
                 .ok_or_else(|| RefFileError::Corrupt(name.to_owned())),
@@ -1020,6 +1060,25 @@ impl FileTransport {
         &self,
         prefix: &str,
     ) -> Result<Vec<(String, Option<Hash>)>, RefFileError> {
+        let mut out = Vec::new();
+        for name in self.list_ref_file_names(prefix)? {
+            match read_regular_capped(&self.root.join(&name), REF_FILE_MAX_BYTES) {
+                Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
+                // An oversized file is malformed content, like a bad hash.
+                Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
+                Err(e) => return Err(RefFileError::Io(e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The names that [`Self::list_ref_files`] lists, sorted, without reading
+    /// any file. A caller that pages a listing reads only the files of one
+    /// page, with [`Self::read_listed_ref_file`].
+    ///
+    /// # Errors
+    /// [`RefFileError::InvalidName`] for an invalid prefix, or I/O.
+    pub fn list_ref_file_names(&self, prefix: &str) -> Result<Vec<String>, RefFileError> {
         let trimmed = prefix.trim_end_matches('/');
         if !validate_ref_name(trimmed) {
             return Err(RefFileError::InvalidName(prefix.to_owned()));
@@ -1050,16 +1109,25 @@ impl FileTransport {
                 if !file_type.is_file() || !validate_ref_name_grammar(&name) {
                     continue; // a symlink, a temp or lock file, or no ref name
                 }
-                match bounded_read::read_capped(&path, REF_FILE_MAX_BYTES) {
-                    Ok(bytes) => out.push((name, decode_ref_wire(&bytes))),
-                    // An oversized file is malformed content, like a bad hash.
-                    Err(e) if e.kind() == ErrorKind::InvalidData => out.push((name, None)),
-                    Err(e) => return Err(RefFileError::Io(e)),
-                }
+                out.push(name);
             }
         }
         out.sort();
         Ok(out)
+    }
+
+    /// The id in the ref file that [`Self::list_ref_file_names`] listed as
+    /// `name`: `None` when the file holds no ref wire, or is gone since.
+    ///
+    /// # Errors
+    /// [`RefFileError::Io`], including for a file that is not regular.
+    pub fn read_listed_ref_file(&self, name: &str) -> Result<Option<Hash>, RefFileError> {
+        match read_regular_capped(&self.root.join(name), REF_FILE_MAX_BYTES) {
+            Ok(bytes) => Ok(decode_ref_wire(&bytes)),
+            // An oversized file is malformed content, like a bad hash.
+            Err(e) if e.kind() == ErrorKind::InvalidData || no_ref_file(&e) => Ok(None),
+            Err(e) => Err(RefFileError::Io(e)),
+        }
     }
 
     /// The path of a server-owned file: `rel` must be a plain relative path
@@ -1363,8 +1431,7 @@ impl FileTransport {
         // Exactly one creator wins the exclusive create; every caller then
         // reads the winner's id.
         write_create_new(&path, &fresh, true).map_err(RefFileError::Io)?;
-        let bytes =
-            bounded_read::read_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
+        let bytes = read_regular_capped(&path, REPO_ID_LEN as u64).map_err(RefFileError::Io)?;
         bytes
             .try_into()
             .map_err(|_| RefFileError::Corrupt(REPO_ID_FILE.to_owned()))
@@ -1666,7 +1733,7 @@ fn condition_holds(path: &Path, condition: RefWriteCondition) -> io::Result<bool
 /// The bytes of the ref file at `path`, bounded like every ref read, or
 /// `None` when there is no file.
 fn read_previous(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    match bounded_read::read_capped(path, REF_FILE_MAX_BYTES) {
+    match read_regular_capped(path, REF_FILE_MAX_BYTES) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -1910,12 +1977,6 @@ impl Transport for FileTransport {
             .map_err(|e| TransportError::RemoteError(format!("read_ref I/O error: {e}")))
     }
 
-    /// A file root may also be served by `kit serve`, whose listing is one
-    /// frame.
-    fn ref_listing(&self) -> kit_core::protocol::RefListing {
-        kit_core::protocol::RefListing::OneFrame
-    }
-
     fn list_refs(&self, prefix: &str) -> TransportResult<Vec<Ref>> {
         if !validate_ref_prefix(prefix) {
             return Err(TransportError::InvalidRef(prefix.to_owned()));
@@ -1942,7 +2003,7 @@ impl Transport for FileTransport {
 /// Read and decode the hash from a ref file. Returns `None` if no ref
 /// file is there ([`no_ref_file`]); propagates other I/O errors.
 fn read_ref_raw(path: &Path) -> io::Result<Option<Hash>> {
-    ref_from_read(bounded_read::read_capped(path, REF_FILE_MAX_BYTES))
+    ref_from_read(read_regular_capped(path, REF_FILE_MAX_BYTES))
 }
 
 /// The ref a capped read of a ref file yields.
@@ -2009,7 +2070,7 @@ fn collect_refs(root_dir: &Path, current_dir: &Path, out: &mut Vec<Ref>) -> Tran
                 continue;
             }
 
-            if let Ok(bytes) = bounded_read::read_capped(&path, REF_FILE_MAX_BYTES)
+            if let Ok(bytes) = read_regular_capped(&path, REF_FILE_MAX_BYTES)
                 && let Some(hash) = decode_ref_wire(&bytes)
             {
                 out.push(Ref {
@@ -2139,6 +2200,118 @@ mod tests {
         assert!(
             open_pack_file(dir.path()).is_err(),
             "a directory is no pack"
+        );
+    }
+
+    /// Make a FIFO at `path`.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "mkfifo");
+    }
+
+    /// The result of `work`, which must come back within 20 s. A read that
+    /// waits on the FIFO at `fifo` is let go, by opening its write end, so a
+    /// failing test does not leave its thread stuck.
+    #[cfg(unix)]
+    fn returns_at_once<T: Send + 'static>(
+        fifo: &Path,
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(work());
+        });
+        if let Ok(value) = result.recv_timeout(std::time::Duration::from_secs(20)) {
+            value
+        } else {
+            drop(fs::OpenOptions::new().write(true).open(fifo));
+            panic!("a read waited on the FIFO at {}", fifo.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_pack_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let key = pack_key_for(b"a pack that is a FIFO");
+        let (root, fifo) = (
+            dir.path().to_path_buf(),
+            FileTransport::new(dir.path()).pack_path(&key),
+        );
+        make_fifo(&fifo);
+        let err = returns_at_once(&fifo.clone(), move || {
+            let mut sink = kit_core::protocol::MemorySink::new(99);
+            FileTransport::new(root).download_pack(&key, None, &mut sink)
+        })
+        .unwrap_err();
+        assert!(
+            matches!(&err, TransportError::RemoteError(m) if m.contains("not a regular file")),
+            "{err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_a_ref_path_is_refused_without_waiting() {
+        let dir = tmp();
+        let fifo = dir.path().join("refs/heads/main");
+        make_fifo(&fifo);
+        let root = dir.path().to_path_buf();
+        let (read, strict, listed, update) = returns_at_once(&fifo.clone(), move || {
+            let t = FileTransport::new(root);
+            (
+                t.read_ref("refs/heads/main"),
+                t.read_ref_strict("refs/heads/main"),
+                t.list_refs("refs/heads/"),
+                t.update_ref(
+                    "refs/heads/main",
+                    RefWriteCondition::Match([1; 32]),
+                    &[2; 32],
+                ),
+            )
+        });
+        assert!(read.is_err(), "{read:?}");
+        assert!(matches!(strict, Err(RefFileError::Io(_))), "{strict:?}");
+        assert!(listed.unwrap().is_empty(), "a listing skips a FIFO");
+        assert!(update.is_err(), "{update:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_ref_file_is_read_only_when_it_is_regular() {
+        let dir = tmp();
+        let file = dir.path().join("ref");
+        fs::write(&file, b"abcd").unwrap();
+        assert_eq!(read_regular_capped(&file, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(&file, 3).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_regular_capped(&link, 4).unwrap(), b"abcd");
+        assert_eq!(
+            read_regular_capped(Path::new("/dev/null"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput,
+            "a device is no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(dir.path(), 4).unwrap_err().kind(),
+            ErrorKind::IsADirectory,
+            "a directory of refs reads as no ref file"
+        );
+        assert_eq!(
+            read_regular_capped(&dir.path().join("absent"), 4)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::NotFound
         );
     }
 

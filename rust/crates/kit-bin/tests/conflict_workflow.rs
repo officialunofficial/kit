@@ -136,6 +136,30 @@ fn diverge_modify(repo: &Repo, path: &str) {
     repo.commit_file(path, b"ours\n", "ours change");
 }
 
+/// A conflicted file whose name holds an escape byte is quoted in the conflict
+/// line and in the unresolved-marker error, so it cannot reach the terminal raw.
+#[test]
+fn conflict_messages_quote_a_name_with_a_control_character() {
+    let repo = Repo::new();
+    diverge_modify(&repo, "x\u{1b}[2Jy.txt");
+
+    let out = fail(repo.path(), repo.xdg(), &["merge", "feature"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains('\u{1b}'), "raw escape byte: {stderr:?}");
+    assert!(
+        stderr.contains(r#"Merge conflict in "x\033[2Jy.txt""#),
+        "{stderr}"
+    );
+
+    let out = fail(repo.path(), repo.xdg(), &["merge", "--continue"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains('\u{1b}'), "raw escape byte: {stderr:?}");
+    assert!(
+        stderr.contains(r"markers remain in 'x\u{1b}[2Jy.txt'"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn merge_text_conflict_continue_uses_resolved_index() {
     let repo = Repo::new();

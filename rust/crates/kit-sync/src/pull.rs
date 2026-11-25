@@ -9,6 +9,7 @@ use kit_core::object::Object;
 use kit_core::ops::graph::AncestorError;
 use kit_core::ops::merge::is_ancestor_strict;
 use kit_core::ops::pull_state::PullState;
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 
@@ -249,7 +250,7 @@ fn land_pull(
     }
     write_pull_head(layout, store, remote_tip)?;
     write_ref_recording_history(layout, &branch, ref_condition, &remote_tip)?;
-    if let Err(e) = refs::write_head_branch(layout, &branch) {
+    if let Err(e) = point_head_at_branch(layout, &branch) {
         rollback_pull_ref(layout, &branch, local_tip, remote_tip)?;
         clear_pull_head(layout)?;
         return Err(e.into());
@@ -474,14 +475,16 @@ fn ensure_pull_restore_safe(
 /// The refusal for a path the unfinished pull would overwrite.
 fn pull_recovery_changes_message(path: &str) -> String {
     format!(
-        "pull recovery would overwrite local changes at '{path}'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
+        "pull recovery would overwrite local changes at '{}'; copy it elsewhere or run `kit restore -f <path>`, then pull again",
+        escape_terminal_text(path, false)
     )
 }
 
 /// The refusal for an untracked path the unfinished pull would remove.
 fn pull_recovery_untracked_message(path: &str) -> String {
     format!(
-        "pull recovery would remove untracked path '{path}'; move or remove it, then pull again"
+        "pull recovery would remove untracked path '{}'; move or remove it, then pull again",
+        escape_terminal_text(path, false)
     )
 }
 
@@ -510,6 +513,16 @@ fn write_pull_head(
     Ok(())
 }
 
+/// Make `HEAD` name `branch`. A `HEAD` that already does is left alone: the
+/// flush of the `PULL_HEAD` write just before made its directory entry
+/// durable, so a `HEAD` an earlier killed process left unflushed is covered.
+fn point_head_at_branch(layout: &RepoLayout, branch: &str) -> refs::RefResult<()> {
+    if matches!(refs::read_head(layout), Ok(refs::Head::Branch(held)) if held == branch) {
+        return Ok(());
+    }
+    refs::write_head_branch(layout, branch)
+}
+
 fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
     fs::remove_file(layout.pull_head_file())?;
     crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
@@ -524,6 +537,19 @@ mod recovery_message_tests {
             super::pull_recovery_changes_message("a b"),
             "pull recovery would overwrite local changes at 'a b'; copy it elsewhere or run `kit restore -f <path>`, then pull again"
         );
+    }
+
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::pull_recovery_changes_message("a\u{1b}b"),
+            super::pull_recovery_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
+        }
     }
 }
 

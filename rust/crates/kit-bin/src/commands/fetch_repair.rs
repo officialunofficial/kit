@@ -64,6 +64,10 @@ fn forget_broken_remotes(
         }
         AppliedPacks::remove_record(layout, &remote)?;
     }
+    // The removals are durable before the repair returns: a record that came
+    // back after a power loss would stand for objects that are gone.
+    kit_transport_file::sync_dir(&records.join(".verified"))?;
+    kit_transport_file::sync_dir(&records)?;
     Ok(())
 }
 

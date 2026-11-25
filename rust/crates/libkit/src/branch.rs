@@ -340,6 +340,7 @@ pub fn set_upstream(
         remote: remote.to_owned(),
         branch: name.to_owned(),
     };
+    let _lock = config::lock(layout)?;
     let mut repo = config::read_layered(layout, environment, observer)?.repo;
     repo.branch_upstreams
         .insert(branch.clone(), upstream.clone());
@@ -362,6 +363,7 @@ pub fn unset_upstream(
     branch: Option<&str>,
 ) -> Result<String, Error> {
     let branch = existing_branch(layout, branch)?;
+    let _lock = config::lock(layout)?;
     let mut repo = config::read_layered(layout, environment, observer)?.repo;
     if repo.branch_upstreams.remove(&branch).is_none() {
         return Err(Error::NoUpstream(branch));

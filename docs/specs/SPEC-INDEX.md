@@ -135,9 +135,11 @@ read. Consumers that *heal* the cache after verifying an entry clean
 (for example, `status`) MUST likewise record the hash-time observation, never
 a stat taken after verification &mdash; verify-then-stat can pair a fresh
 stat with a stale hash.
-Commands that rebuild the index from a tree (commit's post-commit sync,
-checkout) SHOULD carry the cache over from the outgoing index for
-entries whose path, status, and `object_hash` are unchanged.
+Commands that rebuild the index from a tree (checkout, and a commit that
+concludes a merge, amends, or has a staged removal) SHOULD carry the cache over
+from the outgoing index for entries whose path, status, and `object_hash` are
+unchanged. A plain commit leaves the index as it is, because the index already
+holds the entries of the tree it built.
 
 ---
 

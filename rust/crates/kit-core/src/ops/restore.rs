@@ -504,6 +504,7 @@ pub fn restore_tree_to_worktree(
         &sequential_read_chunks,
         None,
         None,
+        true,
     )
 }
 
@@ -633,6 +634,7 @@ where
         read_chunks,
         observed,
         None,
+        true,
     )
 }
 
@@ -666,6 +668,54 @@ where
         read_chunks,
         observed,
         Some(progress),
+        true,
+    )
+}
+
+/// [`restore_tree_to_worktree_progress`] for a caller whose safety gate has
+/// already refused every untracked path outside the ignore rules in the whole
+/// worktree, so the restore does not walk the directories it skips to look for
+/// one again.
+///
+/// A path that appeared after the gate stays where it is: the restore never
+/// enters a directory it skips, so it does not remove it. Without this
+/// guarantee from the caller, use [`restore_tree_to_worktree_progress`]. With
+/// `progress` `None`, no completed file is reported, as in
+/// [`restore_tree_to_worktree_observed`].
+///
+/// # Errors
+/// Same as [`restore_tree_to_worktree_progress`], except
+/// [`RestoreError::UnsweptPath`], which it never returns.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_tree_to_worktree_gated<F>(
+    store: &ObjectStore,
+    tree: &Hash,
+    base_tree: Option<Hash>,
+    root: &Path,
+    opts: &RestoreOptions,
+    read_chunks: &F,
+    observed: Option<&mut Vec<worktree::StatObservation>>,
+    progress: Option<&mut dyn FnMut(usize, usize)>,
+) -> RestoreResult<RestoreReport>
+where
+    F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
+{
+    let base = if opts.sparse_patterns.is_some() {
+        None
+    } else {
+        base_tree
+    };
+    restore_tree_to_worktree_impl(
+        store,
+        tree,
+        root,
+        opts,
+        RESTORE_CHUNK_BATCH,
+        base,
+        read_chunks,
+        observed,
+        progress,
+        false,
     )
 }
 
@@ -685,6 +735,7 @@ fn restore_tree_to_worktree_impl<F>(
     read_chunks: &F,
     observed: Option<&mut Vec<worktree::StatObservation>>,
     mut progress: Option<&mut dyn FnMut(usize, usize)>,
+    check_skipped: bool,
 ) -> RestoreResult<RestoreReport>
 where
     F: Fn(&ObjectStore, &[Hash]) -> RestoreResult<Vec<Vec<u8>>> + Sync,
@@ -698,6 +749,7 @@ where
         IgnoreList::new()
     };
     if opts.clean
+        && check_skipped
         && let Some(base) = base_tree
     {
         let mut skipped = Vec::new();
@@ -5836,6 +5888,25 @@ mod tests {
         assert!(
             matches!(&err, RestoreError::UnsweptPath(p) if p == "kept/deep/notes.txt"),
             "{err:?}"
+        );
+        // A caller whose safety gate refused such a path asks for no second
+        // walk of the directories the restore leaves alone: the restore
+        // changes the directories it enters and leaves the file where it is.
+        restore_tree_to_worktree_gated(
+            &store,
+            &base,
+            Some(next),
+            target.path(),
+            &opts,
+            &rd,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(fs::read(target.path().join("a")).unwrap(), b"a-old");
+        assert_eq!(
+            fs::read(target.path().join("kept/deep/notes.txt")).unwrap(),
+            b"mine"
         );
     }
 

@@ -73,6 +73,18 @@ pub enum Error {
     /// A remote of the new name exists already.
     #[error("remote '{0}' already exists")]
     AlreadyExists(String),
+    /// The name is a path prefix of another remote's name, or the reverse.
+    /// The two would share a directory of tracking refs, so a fetch or prune
+    /// of one would change the other's refs.
+    #[error(
+        "remote '{name}' overlaps remote '{other}': one name is a path prefix of the other, so they would share tracking refs"
+    )]
+    OverlappingName {
+        /// The name that was refused.
+        name: String,
+        /// The configured remote it overlaps.
+        other: String,
+    },
     /// The config could not be written.
     #[error("write: {0}")]
     Write(ConfigError),
@@ -185,6 +197,30 @@ pub fn validate_name(name: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// Refuse `name` when it is a path prefix of a configured remote's name, or
+/// the reverse. `ignore` is the remote that `name` replaces or renames, which
+/// stops counting once it does.
+fn check_no_overlap(
+    remotes: &BTreeMap<String, RemoteEntry>,
+    name: &str,
+    ignore: &str,
+) -> Result<(), Error> {
+    let is_prefix = |short: &str, long: &str| {
+        long.strip_prefix(short)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    match remotes
+        .keys()
+        .find(|k| k.as_str() != ignore && (is_prefix(k, name) || is_prefix(name, k)))
+    {
+        Some(other) => Err(Error::OverlappingName {
+            name: name.to_owned(),
+            other: other.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
 fn write(layout: &RepoLayout, repo: &Config) -> Result<(), Error> {
     // A remote change retires disposable sync records, never provenance.
     match std::fs::remove_dir_all(layout.applied_packs_dir().join(".cursors")) {
@@ -198,12 +234,13 @@ fn write(layout: &RepoLayout, repo: &Config) -> Result<(), Error> {
 /// Add or replace a remote. With no `name`, set the flat default remote.
 ///
 /// `repo` is the repo layer of the config. The operation changes it and writes
-/// it back.
+/// it back. The caller holds [`config::lock`] from before it read `repo`, so a
+/// change made at the same time is kept.
 ///
 /// # Errors
 /// [`Error::UrlControlCharacters`], [`Error::UnsupportedScheme`],
-/// [`Error::NameControlCharacters`], [`Error::InvalidName`] or
-/// [`Error::Write`].
+/// [`Error::NameControlCharacters`], [`Error::InvalidName`],
+/// [`Error::OverlappingName`] or [`Error::Write`].
 pub fn add(
     layout: &RepoLayout,
     repo: &mut Config,
@@ -213,6 +250,7 @@ pub fn add(
     let transport = validate_url(url)?;
     if let Some(name) = name {
         validate_name(name)?;
+        check_no_overlap(&repo.remotes, name, name)?;
         repo.remotes.insert(
             name.to_owned(),
             RemoteEntry {
@@ -234,6 +272,8 @@ pub fn add(
 /// [`Error::UrlControlCharacters`] or [`Error::UnsupportedScheme`] for the
 /// address. [`Error::NoDefault`] or [`Error::NotFound`] when the remote does
 /// not exist. [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn set_url(layout: &RepoLayout, repo: &mut Config, name: &str, url: &str) -> Result<(), Error> {
     let transport = validate_url(url)?;
     if name == DEFAULT_REMOTE_NAME {
@@ -299,6 +339,8 @@ pub fn list(merged: &Config) -> Listing {
 /// # Errors
 /// [`Error::NoDefault`] or [`Error::NotFound`] when the remote does not
 /// exist. [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn remove(
     layout: &RepoLayout,
     repo: &mut Config,
@@ -341,8 +383,10 @@ pub fn remove(
 ///
 /// # Errors
 /// [`Error::RenameDefault`], [`Error::NameControlCharacters`],
-/// [`Error::InvalidName`], [`Error::NotFound`], [`Error::AlreadyExists`] or
-/// [`Error::Write`].
+/// [`Error::InvalidName`], [`Error::NotFound`], [`Error::AlreadyExists`],
+/// [`Error::OverlappingName`] or [`Error::Write`].
+///
+/// `repo` is the repo layer read under [`config::lock`], which the caller holds.
 pub fn rename(
     layout: &RepoLayout,
     repo: &mut Config,
@@ -360,6 +404,7 @@ pub fn rename(
     if repo.remotes.contains_key(new) {
         return Err(Error::AlreadyExists(new.to_owned()));
     }
+    check_no_overlap(&repo.remotes, new, old)?;
     // Remotes nested under `old`, found before `new` joins the map, so that
     // `new` is never one of them even when it extends `old` (`rename a a/sub`).
     let siblings = nested_sibling_names(&repo.remotes, old);

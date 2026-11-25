@@ -564,7 +564,8 @@ fn dropped_paths_guarded(
     match super::locally_modified_dropped_path(layout.worktree_root(), store, &dropped) {
         Ok(Some(path)) => Err(emit_err(
             &format!(
-                "restore would overwrite local changes; commit, stash, or reset '{path}' first"
+                "restore would overwrite local changes; commit, stash, or reset '{}' first",
+                super::display_path(&path)
             ),
             exit::GENERAL_ERROR,
         )),

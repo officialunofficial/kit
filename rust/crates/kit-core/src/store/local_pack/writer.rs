@@ -436,7 +436,7 @@ impl Staged {
         }
         let dir = store.pack_dir();
         let pair = Pair::new(&dir, key);
-        pack.as_file().sync_all()?;
+        crate::flush::file(pack.as_file())?;
         let idx = stage_index(&dir, &pair, pack.path(), &rows)?;
         Ok(Self { pair, pack, idx })
     }
@@ -460,7 +460,7 @@ impl Staged {
             match scan_pair(&pair) {
                 Ok(_) => {
                     crate::store::refresh_mtime(&pair.pack)?;
-                    existing.sync_all()?;
+                    crate::flush::file(&existing)?;
                 }
                 // The staged copy's layout was checked against the writer's
                 // rows and it has this exact key. Replace a damaged member
@@ -477,7 +477,7 @@ impl Staged {
             let existing = open_regular(&pair.index)?;
             let rows = scan_pair(&pair)?;
             if matching_index(&pair, &rows)? {
-                existing.sync_all()?;
+                crate::flush::file(&existing)?;
             } else {
                 staged.persist(&pair.index).map_err(|e| e.error)?;
             }

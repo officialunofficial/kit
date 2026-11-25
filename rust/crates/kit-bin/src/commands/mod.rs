@@ -400,6 +400,12 @@ pub(crate) fn c_quote_path(path: &str) -> Option<String> {
     Some(out)
 }
 
+/// `path` as a human listing shows it: C-quoted by [`c_quote_path`] when it
+/// holds a control or non-ASCII byte, else unchanged.
+pub(crate) fn display_path(path: &str) -> String {
+    c_quote_path(path).unwrap_or_else(|| path.to_string())
+}
+
 /// Resolve a CLI path argument to a repo-relative, `/`-separated index
 /// path, validating it. Shared by `rm` and `mv` so both resolve and
 /// validate pathspecs identically. The rules are in

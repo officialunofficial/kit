@@ -323,13 +323,11 @@ fn run(
         // A step that has never run is due once the store holds the floor,
         // so a repository that never fetches is maintained too.
         None if file.metadata().is_ok_and(|meta| meta.len() == 0) => Stamp::NEVER,
+        // An unreadable stamp is replaced by the stamp of a step that never
+        // ran, which the next step finds due at the floor. It costs one
+        // attempt, not the week that a stamp of this step's own would wait.
         None => {
-            let _ = Stamp {
-                attempted: now,
-                outcome: Collection::NotDue,
-                complete_pairs: 0,
-            }
-            .write(&mut file);
+            let _ = Stamp::NEVER.write(&mut file);
             return Collection::NotDue;
         }
     };

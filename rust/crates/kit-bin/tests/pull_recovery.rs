@@ -168,13 +168,47 @@ fn recovery_checks_the_index_even_when_the_worktree_is_safe() {
 fn recovery_refuses_soft_reset_work_with_a_stale_marker() {
     let pending = Pending::new();
     let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    let marker = fs::read(layout.pull_head_file()).unwrap();
     ok(dir, &["reset", "--hard", "-f", "HEAD"]);
+    // The reset ends the pull. The marker is put back to stand for a pull
+    // that began again and left a stale record behind.
+    fs::write(layout.pull_head_file(), marker).unwrap();
     fs::write(dir.join("w.txt"), b"new work\n").unwrap();
     ok(dir, &["add", "w.txt"]);
     ok(dir, &["commit", "-m", "local"]);
     ok(dir, &["reset", "--soft", "HEAD~1"]);
     pending.refuses_without_changes();
     assert_eq!(fs::read(dir.join("w.txt")).unwrap(), b"new work\n");
+}
+
+#[test]
+fn a_reset_that_moves_the_index_ends_an_unfinished_pull() {
+    for args in [
+        ["reset", "--hard", "-f"].as_slice(),
+        ["reset", "--mixed"].as_slice(),
+        ["reset"].as_slice(),
+    ] {
+        let pending = Pending::new();
+        let dir = pending.local.path();
+        let layout = RepoLayout::single(dir);
+        assert!(layout.pull_head_file().exists());
+        ok(dir, args);
+        assert!(!layout.pull_head_file().exists(), "{args:?}");
+        // The pre-pull version of a pulled file can be committed on purpose.
+        fs::write(dir.join("a.txt"), b"one\n").unwrap();
+        ok(dir, &["add", "a.txt"]);
+        ok(dir, &["commit", "-m", "deliberate undo"]);
+    }
+}
+
+#[test]
+fn a_soft_reset_keeps_the_unfinished_pull_record() {
+    let pending = Pending::new();
+    let dir = pending.local.path();
+    let layout = RepoLayout::single(dir);
+    ok(dir, &["reset", "--soft"]);
+    assert!(layout.pull_head_file().exists());
 }
 
 #[test]
