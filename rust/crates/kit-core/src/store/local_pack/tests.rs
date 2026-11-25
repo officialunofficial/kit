@@ -1072,7 +1072,7 @@ fn a_flipped_payload_byte_names_the_local_pack() {
     ] {
         match &error {
             StoreError::HashMismatch { pack, .. } => {
-                assert_eq!(pack.as_deref(), Some(named.as_str()));
+                assert_eq!(pack.as_deref(), Some(&pair.pack));
             }
             other => panic!("expected HashMismatch, got {other:?}"),
         }

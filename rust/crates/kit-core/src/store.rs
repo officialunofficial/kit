@@ -221,12 +221,13 @@ pub enum StoreError {
     /// A caller-selected in-memory operation budget was exhausted.
     #[error("object operation exceeded {0} limit")]
     OperationLimitExceeded(&'static str),
-    #[error("on-disk bytes hash to {actual}, expected {expected}{}", in_pack(.pack))]
+    #[error("on-disk bytes hash to {actual}, expected {expected}{}", in_pack(.pack.as_deref()))]
     HashMismatch {
         expected: String,
         actual: String,
         /// The local pack that holds the bytes, when they were read from one.
-        pack: Option<Box<str>>,
+        /// Boxed so the error stays small.
+        pack: Option<Box<PathBuf>>,
     },
     /// A local pack or its index failed a check: a bad header, size,
     /// checksum, frame, extent or key. A failed read stays [`Self::Io`].
@@ -404,9 +405,10 @@ pub struct PruneGuard {
 pub type StoreResult<T> = Result<T, StoreError>;
 
 /// The tail of a hash-mismatch message that names the local pack.
-fn in_pack(pack: &Option<Box<str>>) -> String {
-    pack.as_deref()
-        .map_or_else(String::new, |pack| format!(" (in local pack {pack})"))
+fn in_pack(pack: Option<&PathBuf>) -> String {
+    pack.map_or_else(String::new, |pack| {
+        format!(" (in local pack {})", pack.display())
+    })
 }
 
 #[derive(Debug, Default)]

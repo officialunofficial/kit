@@ -569,7 +569,7 @@ pub(in crate::store) fn named(path: &Path, error: StoreError) -> StoreError {
         } => StoreError::HashMismatch {
             expected,
             actual,
-            pack: Some(path.display().to_string().into()),
+            pack: Some(Box::new(path.to_path_buf())),
         },
         other => other,
     }
