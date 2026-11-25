@@ -92,7 +92,7 @@ pub(crate) fn load(path: &Path) -> Option<Hash> {
 pub(crate) fn persist(path: &Path, tip: &Hash) -> std::io::Result<()> {
     let body = format!("{VERIFIED_TIP_TAG}\n{}", to_hex(tip));
     let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
-    crate::applied_packs::write_cache_record(path, bytes.as_bytes())
+    kit_core::durable::write_cache(path, bytes.as_bytes(), kit_core::durable::Parents::Create)
 }
 
 /// Whether the record of `branch` of `remote` names `tip`: a fetch that

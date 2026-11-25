@@ -529,7 +529,7 @@ pub fn rename(
 ///
 /// A crash between phases leaves a `.rename.tmp.<pid>.0` directory
 /// orphaned directly under `root` (the same temp-name convention as
-/// `atomic::write_atomic` of `kit-core`, so crash debris is
+/// `durable::write_pointer` of `kit-core`, so crash debris is
 /// grep-able by one pattern across the codebase). Unlike an empty
 /// directory that this warn-only path can leave, this one may be
 /// fully populated — but a dot-leading path component is invalid per

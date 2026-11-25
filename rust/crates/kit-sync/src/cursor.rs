@@ -192,7 +192,7 @@ impl CursorRecord {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::applied_packs::write_cache_record(path, bytes.as_bytes())
+        kit_core::durable::write_cache(path, bytes.as_bytes(), kit_core::durable::Parents::Create)
     }
 }
 

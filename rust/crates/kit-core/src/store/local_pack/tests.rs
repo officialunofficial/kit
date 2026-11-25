@@ -1148,10 +1148,10 @@ fn gc_counts_packed_payload_and_retires_only_wholly_dead_old_packs() {
     assert_eq!(preview.packs_retired, 1);
     assert!(old.pack.exists() && old.index.exists());
 
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(report.packs_retired, 1);
-    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+    assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
     assert_eq!(report.bytes_reclaimed, preview.bytes_reclaimed);
     assert!(report.bytes_reclaimed > dead.len() as u64);
     assert!(!old.pack.exists() && !old.index.exists());
@@ -1263,11 +1263,11 @@ fn gc_sweeps_only_aged_recognized_pack_leftovers() {
     assert_eq!(preview_totals.pack_leftovers_pruned, 3);
     assert_eq!(preview_totals.bytes_reclaimed, expected_bytes);
     assert!(retired.index.exists());
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let totals = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
     assert_eq!(totals.pack_leftovers_pruned, 3);
     assert_eq!(totals.bytes_reclaimed, expected_bytes);
-    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+    assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
     assert!(!retired.index.exists() && !unpublished.pack.exists() && !staging.exists());
     assert!(recent.exists() && sidecar.exists() && non_hex.exists() && directory.is_dir());
 }
@@ -1302,11 +1302,11 @@ fn a_retirement_interrupted_after_the_pack_sync_leaves_only_the_index() {
     let sweep = store
         .plan_pack_sweep(&LiveSet::default(), u64::MAX, 0, &mut report)
         .unwrap();
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let result = sweep.run_with(&store, &mut report, || {
         assert!(!pair.pack.exists());
         assert!(pair.index.is_file());
-        assert_eq!(crate::atomic::testing::dir_sync_calls(), 1);
+        assert_eq!(crate::durable::testing::dir_sync_calls(), 1);
         Err(std::io::Error::other("interrupted between pack and index removal").into())
     });
     assert!(result.is_err());
@@ -1361,7 +1361,7 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         assert_eq!(blocked.loose_duplicates_pruned, 0);
         assert!(loose.is_file());
         drop(guard);
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let totals = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
         assert_eq!(
             totals.loose_duplicates_pruned,
@@ -1371,7 +1371,7 @@ fn gc_drops_only_loose_duplicates_that_have_verified_packed_replacements() {
         assert_eq!(loose.is_file(), keep, "{label}");
         assert_eq!(totals.bytes_reclaimed, expected_bytes, "{label}");
         assert_eq!(
-            crate::atomic::testing::dir_sync_calls(),
+            crate::durable::testing::dir_sync_calls(),
             if keep { 0 } else { 2 },
             "{label}"
         );

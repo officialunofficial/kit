@@ -45,8 +45,8 @@ use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Seek as _, SeekFrom, Write as _};
 
-use crate::atomic::{sync_parent_dir, write_atomic};
 use crate::bounded_read;
+use crate::durable::Parents;
 use crate::hash::{self, Hash};
 use crate::layout::RepoLayout;
 use crate::repo_lock;
@@ -157,8 +157,8 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
     f.write_all(line.as_bytes())?;
     // fsync the data, then the directory entry (cheap — records happen
     // only on history rewrites, and durability is the whole point).
-    crate::flush::file(&f)?;
-    sync_parent_dir(layout.common_dir())?;
+    crate::durable::flush_file(&f, &path)?;
+    crate::durable::flush_dir(layout.common_dir())?;
     Ok(())
 }
 
@@ -261,7 +261,7 @@ pub fn would_expire(layout: &RepoLayout, now: u64, policy: &RetentionPolicy) -> 
 
 /// Drop entries that are both older than `policy.grace_secs` (relative to
 /// `now`, unix seconds) and not among the most recent `policy.keep_last`.
-/// Rewrites the log atomically (durably, via `write_atomic`). Returns
+/// Rewrites the log atomically (durably, via `write_pointer`). Returns
 /// the number of entries pruned.
 ///
 /// Must be called under the repo lock — see the module concurrency note;
@@ -296,7 +296,7 @@ pub fn expire(layout: &RepoLayout, now: u64, policy: &RetentionPolicy) -> Result
             e.branch
         );
     }
-    write_atomic(&layout.recovery_log_file(), buf.as_bytes(), true)?;
+    crate::durable::write_pointer(&layout.recovery_log_file(), buf.as_bytes(), Parents::Create)?;
     Ok(pruned)
 }
 

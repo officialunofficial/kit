@@ -38,8 +38,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::atomic::{write_atomic, write_create_new};
 use crate::bounded_read;
+use crate::durable::Parents;
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
 use crate::layout::RepoLayout;
 
@@ -395,7 +395,7 @@ fn check_existing_ref_name(name: &str) -> RefResult<()> {
 ///   and `..` segments) — git's `check-ref-format` rule, kept for
 ///   parity: a dot-leading component is invalid in both grammars, so
 ///   nothing on-disk under a dot-leading directory (e.g. crash debris
-///   from a temp-directory rename, or an in-flight `atomic::write_atomic`
+///   from a temp-directory rename, or an in-flight `durable::write_pointer`
 ///   temp file) can ever surface as a ref in `collect_refs` / listings.
 ///   No empty segments (no `//`, no leading `/`, no trailing `/`).
 /// - No `\\` or NUL bytes.
@@ -583,7 +583,7 @@ pub fn init(layout: &RepoLayout) -> RefResult<()> {
     let head_path = layout.head_file();
     if !head_path.exists() {
         let body = format!("{HEAD_REF_PREFIX}main\n");
-        write_atomic(&head_path, body.as_bytes(), false)?;
+        crate::durable::write_pointer(&head_path, body.as_bytes(), Parents::Existing)?;
     }
     Ok(())
 }
@@ -670,10 +670,10 @@ pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
         Head::Branch(branch) => format!("{HEAD_REF_PREFIX}{branch}\n"),
         Head::Detached(h) => format!("{}\n", crate::hash::to_hex(h)),
     };
-    write_atomic(
+    crate::durable::write_pointer(
         &layout.worktree_state_dir().join("PREVIOUS_HEAD"),
         body.as_bytes(),
-        false,
+        Parents::Existing,
     )?;
     Ok(())
 }
@@ -687,7 +687,7 @@ pub fn write_previous_head(layout: &RepoLayout, head: &Head) -> RefResult<()> {
 pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
     check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
     let body = format!("{HEAD_REF_PREFIX}{branch}\n");
-    write_atomic(&layout.head_file(), body.as_bytes(), false)?;
+    crate::durable::write_pointer(&layout.head_file(), body.as_bytes(), Parents::Existing)?;
     Ok(())
 }
 
@@ -697,7 +697,7 @@ pub fn write_head_branch(layout: &RepoLayout, branch: &str) -> RefResult<()> {
 /// - [`RefError::Io`] for filesystem failures.
 pub fn write_head_detached(layout: &RepoLayout, h: &Hash) -> RefResult<()> {
     let wire = encode_ref_wire(h);
-    write_atomic(&layout.head_file(), &wire, false)?;
+    crate::durable::write_pointer(&layout.head_file(), &wire, Parents::Existing)?;
     Ok(())
 }
 
@@ -954,14 +954,14 @@ pub fn write_remote_ref(
 ///
 /// `push`/`fetch` publish one tracking ref per branch
 /// (`refs/remotes/<remote>/<branch>`) in a loop; each individual
-/// [`write_remote_ref`] call goes through `write_atomic`'s
+/// [`write_remote_ref`] call goes through `write_pointer`'s
 /// temp+fsync+rename+**dirsync** pattern, so N branches cost N serial
 /// directory fsyncs even though every write lands under the same
 /// `refs/remotes/<remote>/` tree. `RemoteRefBatch` instead:
 ///
 /// 1. [`Self::write`]s each ref durable-content-before-visible (fsyncs
 ///    the wire bytes, then renames — same invariant
-///    `crate::atomic::write_content_synced` gives object writes: a
+///    `crate::durable::write_content_synced` gives object writes: a
 ///    reader can never observe a torn file), immediately, one call at a
 ///    time, deferring only the directory fsync that makes the RENAME
 ///    itself crash-durable;
@@ -971,7 +971,7 @@ pub fn write_remote_ref(
 ///    exactly one fsync for the whole batch.
 ///
 /// This is deliberately scoped to `refs/remotes/*` ONLY — see
-/// `atomic.rs`'s module docs for why branch heads (`refs/heads/*`,
+/// `durable`'s module docs for why branch heads (`refs/heads/*`,
 /// [`write_ref`]/[`update_ref`]) keep the unbatched per-write contract:
 /// tracking refs are a locally-cached, recomputable-from-a-re-fetch
 /// view of another repository, not a pointer anything else orders
@@ -1041,7 +1041,7 @@ impl<'a> RemoteRefBatch<'a> {
             .to_path_buf();
         fs::create_dir_all(&parent)?;
         let wire = encode_ref_wire(h);
-        crate::atomic::write_content_synced(&path, &wire)?;
+        crate::durable::write_content_synced(&path, &wire)?;
         self.touched_dirs.insert(parent);
         Ok(())
     }
@@ -1061,7 +1061,7 @@ impl<'a> RemoteRefBatch<'a> {
     /// matching [`Self::write`]'s partial-failure contract).
     pub fn commit(self) -> RefResult<()> {
         for dir in &self.touched_dirs {
-            crate::atomic::sync_dir(dir)?;
+            crate::durable::flush_dir(dir)?;
         }
         Ok(())
     }
@@ -1224,7 +1224,7 @@ pub fn write_shallow_boundaries(layout: &RepoLayout, boundaries: &[Hash]) -> Ref
         for h in boundaries {
             out.extend_from_slice(&encode_ref_wire(h));
         }
-        write_atomic(&path, &out, true)?;
+        crate::durable::write_pointer(&path, &out, Parents::Create)?;
         Ok(())
     }
 }
@@ -1345,11 +1345,11 @@ impl RefMutation {
     ) -> RefResult<()> {
         self.check(condition)?;
         if matches!(condition, RefWriteCondition::Missing) {
-            if !write_create_new(&self.path, wire, true)? {
+            if !crate::durable::write_pointer_new(&self.path, wire, Parents::Create)? {
                 return Err(RefError::Conflict(self.name.clone()));
             }
         } else {
-            write_atomic(&self.path, wire, true)?;
+            crate::durable::write_pointer(&self.path, wire, Parents::Create)?;
         }
         Ok(())
     }
@@ -1361,7 +1361,7 @@ impl RefMutation {
         self.invalidate_history()?;
         match fs::remove_file(&self.path) {
             Ok(()) => {
-                crate::atomic::sync_dir(self.path.parent().expect("ref path has parent"))?;
+                crate::durable::flush_dir(self.path.parent().expect("ref path has parent"))?;
                 Ok(())
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -2974,8 +2974,8 @@ mod tests {
     // `push`/`fetch` publish one remote-tracking ref per branch in a loop
     // (`kit-bin`'s `remote_dispatch::push_all_with` /
     // `kit-sync`'s `fetch_objects_inner`). Each `write_remote_ref` call goes through
-    // `cas_write` → `write_atomic`, which pays a parent-directory fsync
-    // EVERY call (`atomic.rs`'s `sync_parent_dir`) — so N branches cost N
+    // `cas_write` → `write_pointer`, which pays a parent-directory fsync
+    // EVERY call (`durable::flush_dir`) — so N branches cost N
     // directory fsyncs, serially, even though they all land in the same
     // `refs/remotes/<remote>/` directory. `RemoteRefBatch` amortises that
     // into one fsync per distinct directory touched, however many refs
@@ -2992,11 +2992,11 @@ mod tests {
     fn write_remote_ref_loop_pays_one_dir_sync_per_ref_today() {
         let (_dir, kit) = fresh_repo();
         let n: u64 = 25;
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         for i in 0..n {
             write_remote_ref(&kit, "origin", &format!("branch-{i}"), &h(&format!("c{i}"))).unwrap();
         }
-        let calls = crate::atomic::testing::dir_sync_calls();
+        let calls = crate::durable::testing::dir_sync_calls();
         assert_eq!(
             calls, n,
             "the current per-ref write path must cost exactly one directory \
@@ -3016,14 +3016,14 @@ mod tests {
             .map(|i| (format!("branch-{i}"), h(&format!("c{i}"))))
             .collect();
 
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let mut batch = RemoteRefBatch::new(&kit, "origin").unwrap();
         for (branch, hash) in &entries {
             batch.write(branch, hash).unwrap();
         }
         batch.commit().unwrap();
 
-        let calls = crate::atomic::testing::dir_sync_calls();
+        let calls = crate::durable::testing::dir_sync_calls();
         assert_eq!(
             calls, 1,
             "batching {n} tracking-ref writes into one flat remote \
@@ -3106,11 +3106,11 @@ mod tests {
     #[test]
     fn remote_ref_batch_of_zero_entries_is_a_noop_commit() {
         let (_dir, kit) = fresh_repo();
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let batch = RemoteRefBatch::new(&kit, "origin").unwrap();
         batch.commit().unwrap();
         assert_eq!(
-            crate::atomic::testing::dir_sync_calls(),
+            crate::durable::testing::dir_sync_calls(),
             0,
             "an empty batch must not touch any directory"
         );

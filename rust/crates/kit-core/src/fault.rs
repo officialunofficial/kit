@@ -1,13 +1,15 @@
 //! Injected write failures, for tests of how a full disk ends a transfer, a
-//! hook on the store's dirent flushes, for tests of what is durable before a
-//! ref names it, and a count of full flushes.
+//! hook on the device operations of the store and of every durable write, for
+//! tests of what is durable before a ref names it, and a count of full
+//! flushes.
 //!
 //! Built with the `fault-injection` feature,
 //! which only test builds turn on. A failure applies to every thread of the
 //! process until its guard drops, so a test that injects one runs alone.
 
 use std::io;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 /// Where a write fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,8 +49,8 @@ pub(crate) fn check(site: Site) -> io::Result<()> {
     }
 }
 
-/// A step that makes the store's directory entries durable, as
-/// [`on_sync`] reports it once the step has completed.
+/// A device operation, as [`on_sync`] reports it once the operation has
+/// completed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncStep {
     /// The dirents of one shard directory were barriered.
@@ -56,6 +58,13 @@ pub enum SyncStep {
     /// The terminal device flush that makes the barriers durable, anchored
     /// at the store's `objects/` directory.
     DeviceFlush(std::path::PathBuf),
+    /// A file or a directory was written out: its data was handed to the
+    /// drive, with no flush of the drive's cache. Every command reports this,
+    /// not only the object batches.
+    Writeout(std::path::PathBuf),
+    /// A file or a directory was flushed with a full flush. The step of the
+    /// flush that [`flushes`] counts; every command reports it.
+    Flush(std::path::PathBuf),
 }
 
 type SyncHook = Box<dyn Fn(&SyncStep) + Send + Sync>;
@@ -66,7 +75,7 @@ static SYNC_HOOK: std::sync::Mutex<Option<SyncHook>> = std::sync::Mutex::new(Non
 /// the process, until the guard drops. A test keeps only the steps under its
 /// own objects directory. One hook is set at a time, so tests that set one
 /// run one per process, as nextest runs them, or not concurrently. The hook
-/// must not flush a store: it runs under the hook's lock.
+/// must not flush or write anything durable: it runs under the hook's lock.
 #[must_use = "the hook ends when the guard drops"]
 pub fn on_sync(hook: impl Fn(&SyncStep) + Send + Sync + 'static) -> SyncHookGuard {
     *SYNC_HOOK
@@ -102,7 +111,7 @@ thread_local! {
 }
 
 /// How many full flushes the calling thread has made, counting every file and
-/// directory that [`crate::flush::file`] flushed. A test takes the count
+/// directory that [`crate::durable::flush_file`] flushed. A test takes the count
 /// before and after a call and compares them. Another thread's flush is not
 /// counted, so tests run in parallel do not disturb each other.
 #[must_use]
@@ -112,6 +121,57 @@ pub fn flushes() -> u64 {
 
 pub(crate) fn count_flush() {
     FLUSHES.with(|count| count.set(count.get() + 1));
+}
+
+/// The device operations under one directory, counted by [`count_flushes`].
+#[derive(Debug)]
+pub struct Counter {
+    flushes: Arc<AtomicUsize>,
+    writeouts: Arc<AtomicUsize>,
+    _hook: SyncHookGuard,
+}
+
+impl Counter {
+    /// The full flushes of files and directories under the directory since the
+    /// counter was made.
+    #[must_use]
+    pub fn flushes(&self) -> usize {
+        self.flushes.load(Ordering::SeqCst)
+    }
+
+    /// The writeouts under the directory since the counter was made.
+    #[must_use]
+    pub fn writeouts(&self) -> usize {
+        self.writeouts.load(Ordering::SeqCst)
+    }
+}
+
+/// Count the [`SyncStep::Flush`] and [`SyncStep::Writeout`] steps whose path
+/// lies under `under`, of every thread, until the counter drops. It sets the
+/// [`on_sync`] hook, so a test that uses it runs one per process, as nextest
+/// runs them.
+#[must_use = "the count ends when the counter drops"]
+pub fn count_flushes(under: &std::path::Path) -> Counter {
+    let flushes = Arc::new(AtomicUsize::new(0));
+    let writeouts = Arc::new(AtomicUsize::new(0));
+    let hook = {
+        let (flushes, writeouts) = (Arc::clone(&flushes), Arc::clone(&writeouts));
+        let under = under.to_path_buf();
+        on_sync(move |step| match step {
+            SyncStep::Flush(path) if path.starts_with(&under) => {
+                flushes.fetch_add(1, Ordering::SeqCst);
+            }
+            SyncStep::Writeout(path) if path.starts_with(&under) => {
+                writeouts.fetch_add(1, Ordering::SeqCst);
+            }
+            _ => {}
+        })
+    };
+    Counter {
+        flushes,
+        writeouts,
+        _hook: hook,
+    }
 }
 
 static LOOSE: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
@@ -167,6 +227,7 @@ mod tests {
                 let ours = match step {
                     SyncStep::DirBarrier(dir) => dir.starts_with(&root),
                     SyncStep::DeviceFlush(at) => *at == root,
+                    SyncStep::Writeout(_) | SyncStep::Flush(_) => false,
                 };
                 if ours {
                     seen.lock().unwrap().push(step.clone());

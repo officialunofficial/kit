@@ -20,6 +20,7 @@
 //! `.kit/keys/default.key`, mode 0600. Public-key derivation is
 //! deterministic from the seed.
 
+use crate::durable::Parents;
 use crate::hash::{HASH_LEN, Hash};
 use crate::object::{
     Commit, Identity, KitError, MAGIC, Object, ObjectType, Remix, SCHEMA_VERSION, Tag,
@@ -931,7 +932,7 @@ pub fn save_raw_32_create_new(path: &Path, secret: &[u8; 32]) -> Result<bool, Ki
     std::fs::create_dir_all(parent)
         .map_err(|e| KitError::KeyIo(format!("mkdir {}: {e}", parent.display())))?;
 
-    crate::atomic::write_create_new(path, secret, false)
+    crate::durable::write_pointer_new(path, secret, Parents::Existing)
         .map_err(|e| KitError::KeyIo(format!("create key: {e}")))
 }
 

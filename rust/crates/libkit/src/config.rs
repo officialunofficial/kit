@@ -29,6 +29,7 @@
 //! the XDG config directory and the `-c` overrides.
 
 use kit_core::bounded_read;
+use kit_core::durable::Parents;
 use kit_core::hash::from_hex_bytes;
 use kit_core::layout::RepoLayout;
 use kit_core::observer::{NoopObserver, Observer};
@@ -36,7 +37,6 @@ use kit_core::repo_lock::{self, CONFIG_LOCK, LockError, RepoLock};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -1036,7 +1036,8 @@ pub fn write(layout: &RepoLayout, cfg: &Config) -> Result<(), ConfigError> {
     }
     // Atomic replace: a crash mid-write can never leave a truncated config
     // (which would silently drop remotes / upstream tracking).
-    write_atomic_config(&path, out.as_bytes())
+    kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)
+        .map_err(ConfigError::Io)
 }
 
 /// Take the lock that serialises read-modify-write of the repo config.
@@ -1199,7 +1200,7 @@ pub fn write_user_kv(environment: &Environment, key: &str, value: &str) -> Resul
     // Atomic temp + fsync + rename so a crash mid-write can't leave the
     // security-sensitive user config half-written. A reader either
     // sees the old contents or the fully-updated file, never a torn one.
-    write_atomic_config(&path, out.as_bytes())?;
+    kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)?;
     Ok(())
 }
 
@@ -1235,28 +1236,9 @@ pub fn remove_user_kv(environment: &Environment, key: &str) -> Result<bool, Conf
         out.push('\n');
     }
     if removed {
-        write_atomic_config(&path, out.as_bytes())?;
+        kit_core::durable::write_pointer(&path, out.as_bytes(), Parents::Existing)?;
     }
     Ok(removed)
-}
-
-/// Atomically write `bytes` to `path`: write into a sibling temp file,
-/// fsync it, rename it over the destination, then fsync the directory so the
-/// rename survives a power loss. Mirrors the key-save path's temp+rename
-/// hardening.
-fn write_atomic_config(path: &Path, bytes: &[u8]) -> Result<(), ConfigError> {
-    use tempfile::NamedTempFile;
-    let parent = path.parent().ok_or(ConfigError::Io(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "config path has no parent",
-    )))?;
-    let mut tmp = NamedTempFile::new_in(parent)?;
-    tmp.as_file_mut().write_all(bytes)?;
-    kit_core::flush::file(tmp.as_file())?;
-    tmp.persist(path).map_err(|e| ConfigError::Io(e.error))?;
-    #[cfg(unix)]
-    kit_core::flush::file(&fs::File::open(parent)?)?;
-    Ok(())
 }
 
 /// Expand a user-typed `user.identity` into the canonical hex form

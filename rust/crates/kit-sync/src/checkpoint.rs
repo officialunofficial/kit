@@ -102,7 +102,7 @@ impl Checkpoint {
             self.nodes
         );
         let bytes = format!("{body}\n{}", to_hex(&hash(body.as_bytes())));
-        crate::applied_packs::write_cache_record(path, bytes.as_bytes())
+        kit_core::durable::write_cache(path, bytes.as_bytes(), kit_core::durable::Parents::Create)
     }
 }
 
