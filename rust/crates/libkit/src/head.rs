@@ -1,5 +1,6 @@
 //! Moving the current branch or a detached HEAD.
 
+use kit_core::durable::{Flushed, Group};
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
 use kit_core::refs::{self, Head, RefError, RefWriteCondition};
@@ -53,6 +54,104 @@ pub fn advance(
                 .map_err(|source| Error::WriteRef { branch, source })
         }
         Head::Detached(_) => refs::write_head_detached(layout, new_head).map_err(Error::WriteHead),
+    }
+}
+
+/// A move of `HEAD` staged in a [`Group`]: its temp file is written out and
+/// invisible until [`publish_advance`].
+#[derive(Debug)]
+#[must_use = "a staged move is invisible until it is published"]
+pub struct StagedAdvance {
+    kind: Kind,
+}
+
+#[derive(Debug)]
+enum Kind {
+    #[cfg(not(feature = "history-mmr"))]
+    Branch {
+        branch: String,
+        staged: refs::StagedRef,
+    },
+    Detached(refs::StagedHead),
+    /// A build with `history-mmr` writes the branch with its ancestry in one
+    /// step, which has its own flushes.
+    #[cfg(feature = "history-mmr")]
+    OneShot { new_head: Hash },
+}
+
+/// The lock of a moved branch, held until its rename is durable.
+#[derive(Debug)]
+#[must_use = "flush the group, then drop this"]
+pub struct Published {
+    _lock: Option<refs::PublishedRef>,
+}
+
+/// Stage the move of the current branch, or a detached `HEAD`, to `new_head`.
+/// The temp file's bytes share the flush of the objects that `new_head`
+/// names. See [`advance`] for what the move does.
+///
+/// # Errors
+/// [`Error::ReadHead`] when `HEAD` is unreadable or missing. [`Error::WriteRef`]
+/// or [`Error::WriteHead`] when the temp file cannot be written.
+#[cfg_attr(feature = "history-mmr", allow(unused_variables))]
+pub fn stage_advance(
+    layout: &RepoLayout,
+    group: &mut Group,
+    new_head: &Hash,
+) -> Result<StagedAdvance, Error> {
+    let kind = match refs::read_head(layout).map_err(Error::ReadHead)? {
+        #[cfg(feature = "history-mmr")]
+        Head::Branch(_) => Kind::OneShot {
+            new_head: *new_head,
+        },
+        #[cfg(not(feature = "history-mmr"))]
+        Head::Branch(branch) => {
+            let staged = refs::stage_ref_update(group, layout, &branch, new_head).map_err(
+                |source| Error::WriteRef {
+                    branch: branch.clone(),
+                    source,
+                },
+            )?;
+            Kind::Branch { branch, staged }
+        }
+        Head::Detached(_) => Kind::Detached(
+            refs::stage_head_detached(group, layout, new_head).map_err(Error::WriteHead)?,
+        ),
+    };
+    Ok(StagedAdvance { kind })
+}
+
+/// Publish a staged move: the branch condition is checked and the rename
+/// made under the ref lock. `after` must come from a flush of `group` that
+/// covers the objects of the new head. The rename is durable when the caller
+/// flushes `group` again; it then drops the returned lock.
+///
+/// # Errors
+/// As [`advance`].
+#[cfg_attr(not(feature = "history-mmr"), allow(unused_variables))]
+pub fn publish_advance(
+    layout: &RepoLayout,
+    group: &mut Group,
+    staged: StagedAdvance,
+    condition: RefWriteCondition,
+    after: &Flushed,
+) -> Result<Published, Error> {
+    match staged.kind {
+        #[cfg(not(feature = "history-mmr"))]
+        Kind::Branch { branch, staged } => {
+            let lock = refs::publish_staged_ref(group, staged, condition, after)
+                .map_err(|source| Error::WriteRef { branch, source })?;
+            Ok(Published { _lock: Some(lock) })
+        }
+        Kind::Detached(staged) => {
+            refs::publish_staged_head(group, staged, after).map_err(Error::WriteHead)?;
+            Ok(Published { _lock: None })
+        }
+        #[cfg(feature = "history-mmr")]
+        Kind::OneShot { new_head } => {
+            advance(layout, &new_head, condition)?;
+            Ok(Published { _lock: None })
+        }
     }
 }
 

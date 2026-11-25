@@ -577,6 +577,34 @@ pub fn clear_merge_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     Ok(())
 }
 
+/// [`clear_merge_state`], then a writeout of the directory on `group`. The
+/// removals are durable when the caller flushes `group`, so a commit that
+/// concludes a merge makes them durable after the ref that records it.
+///
+/// # Errors
+/// As [`clear_merge_state`], or the group is poisoned.
+pub fn clear_merge_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_merge_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
+    Ok(())
+}
+
+/// [`clear_operation_state`], then a writeout of the directory on `group`.
+///
+/// # Errors
+/// As [`clear_operation_state`], or the group is poisoned.
+pub fn clear_operation_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_operation_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
+    Ok(())
+}
+
 /// Remove all cherry-pick state files (idempotent).
 ///
 /// # Errors

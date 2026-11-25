@@ -20,6 +20,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kit_core::durable::Group;
 use kit_core::hash::{self, Hash};
 use kit_core::index;
 use kit_core::layout::RepoLayout;
@@ -32,7 +33,7 @@ use kit_core::refs::{self, Head, RefError, RefWriteCondition};
 use kit_core::serialize;
 use kit_core::store::{MAX_TREE_DEPTH, ObjectStore};
 use kit_core::worktree;
-use kit_sync::worktree::sync_index_to_tree;
+use kit_sync::worktree::sync_index_to_tree_staged;
 
 use crate::signer::{self, Signer};
 use crate::{add, head, lock};
@@ -553,18 +554,42 @@ pub fn create(
     unsigned.signature = signer.sign_commit(&unsigned)?;
     let bytes = serialize::serialize(&Object::Commit(unsigned)).map_err(Error::Serialize)?;
     let commit = batch.write(&bytes).map_err(Error::Store)?;
-    // The tree and the commit are durable before the recovery log, the ref
-    // and the index name them.
-    batch.commit().map_err(Error::Store)?;
+
+    // One group of writes shares the flushes of this commit (SPEC-OBJECTS
+    // §10.1, "Shared flush points"). The temp file of the ref is staged
+    // before the objects become visible, so its bytes ride the same flush.
+    let mut group = store.group();
+    let staged_head = head::stage_advance(layout, &mut group, &commit).map_err(Error::Head)?;
+    // The bytes of the trees, the commit and the ref are durable (flush 1),
+    // then the objects are renamed into place and their directories written
+    // out. Their names are not durable until the next flush.
+    batch.commit_in(&mut group).map_err(Error::Store)?;
 
     // An amend replaces `HEAD`. The log records the old tip before the branch
-    // moves, so the replaced commit stays recoverable. A log that cannot be
+    // moves, so the replaced commit stays recoverable: its line is written
+    // out before the flush that licenses the ref rename. A log that cannot be
     // written stops the amend.
     if pending.amend.is_some()
         && let Some(old_head) = refs::resolve_head(layout).map_err(Error::ReadHead)?
     {
-        record_superseded(layout, old_head)?;
+        record_superseded(layout, old_head, &mut group)?;
     }
+    // A plain commit leaves the index as it was: the tree came from these
+    // entries, so rebuilding them from the tree would read every tree object
+    // and write the same index again. A staged removal is not in the tree, so
+    // it rebuilds the index. So does a merge or an amend, which keep their
+    // own rebuild. The new trees are visible now, so the rebuild reads them,
+    // and its bytes ride the next flush.
+    let staged_index = if pending.merge.is_some() || pending.amend.is_some() || !index_is_the_tree(&idx)
+    {
+        Some(sync_index_to_tree_staged(&mut group, layout, store, tree).map_err(Error::SyncIndex)?)
+    } else {
+        None
+    };
+    // Flush 2: the names of the objects, the recovery line and the bytes of
+    // the index are durable before a ref or the index names them.
+    let durable = group.flush().map_err(store_io)?;
+
     // The tip that the commit was built on is the condition of the move.
     // - Amend: the commit that was replaced, which was checked against `HEAD`
     //   above. `parents` is one generation further back.
@@ -579,25 +604,34 @@ pub fn create(
     } else {
         first_parent
     };
-    advance_head(layout, &commit, expected_tip)?;
+    let condition = match expected_tip {
+        Some(h) => RefWriteCondition::Match(h),
+        None => RefWriteCondition::Missing,
+    };
+    let ref_lock = head::publish_advance(layout, &mut group, staged_head, condition, &durable)
+        .map_err(|e| branch_moved(e, &commit))?;
+    if let Some(staged_index) = staged_index {
+        index::publish_staged_index(&mut group, staged_index, &durable).map_err(|e| {
+            Error::SyncIndex(format!("write index: {e}"))
+        })?;
+    }
+    // Flush 3: the ref and the index names. The ref lock is held until then.
+    let _named = group.flush().map_err(store_io)?;
+    drop(ref_lock);
+
     // The merge is recorded, so the repository is no longer merging. This
-    // goes right after the head moves: a command stopped before the index
-    // sync below leaves the index holding the committed tree already.
+    // goes after the ref name is durable: a crash before it leaves the merge
+    // state over the new commit, never a commit that lost its second parent.
     if pending.merge.is_some() {
-        conflict_state::clear_merge_state(layout).map_err(Error::ClearMergeState)?;
+        conflict_state::clear_merge_state_in(layout, &mut group).map_err(Error::ClearMergeState)?;
+        group.finish().map_err(store_io)?;
     } else if picking {
         // A cherry-pick or a revert that the commit concludes is over, as in
         // git. Left behind, a later `--abort` would move the branch back over
         // this commit.
-        conflict_state::clear_operation_state(layout).map_err(Error::ClearMergeState)?;
-    }
-    // A plain commit leaves the index as it was: the tree came from these
-    // entries, so rebuilding them from the tree would read every tree object
-    // and write the same index again. A staged removal is not in the tree, so
-    // it rebuilds the index. So does a merge or an amend, which keep their
-    // own rebuild.
-    if pending.merge.is_some() || pending.amend.is_some() || !index_is_the_tree(&idx) {
-        sync_index_to_tree(layout, store, tree).map_err(Error::SyncIndex)?;
+        conflict_state::clear_operation_state_in(layout, &mut group)
+            .map_err(Error::ClearMergeState)?;
+        group.finish().map_err(store_io)?;
     }
 
     let branch = match refs::read_head(layout) {
@@ -695,7 +729,11 @@ fn refuse_discarded_merge(
     Ok(())
 }
 
-fn record_superseded(layout: &RepoLayout, superseded: Hash) -> Result<(), Error> {
+fn record_superseded(
+    layout: &RepoLayout,
+    superseded: Hash,
+    group: &mut Group,
+) -> Result<(), Error> {
     let branch = match refs::read_head(layout) {
         Ok(Head::Branch(name)) => name,
         _ => String::new(),
@@ -703,7 +741,7 @@ fn record_superseded(layout: &RepoLayout, superseded: Hash) -> Result<(), Error>
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    recovery::record(
+    recovery::record_in(
         layout,
         &RecoveryEntry {
             timestamp,
@@ -711,6 +749,7 @@ fn record_superseded(layout: &RepoLayout, superseded: Hash) -> Result<(), Error>
             superseded,
             branch,
         },
+        group,
     )
     .map_err(Error::Recovery)
 }
@@ -722,12 +761,19 @@ fn record_superseded(layout: &RepoLayout, superseded: Hash) -> Result<(), Error>
 /// branch. It is the condition of the move, so a writer that landed in the
 /// meantime is never overwritten. A detached `HEAD` has no branch, and the
 /// condition does not apply to it.
+#[cfg(test)]
 fn advance_head(layout: &RepoLayout, commit: &Hash, expected: Option<Hash>) -> Result<(), Error> {
     let condition = match expected {
         Some(h) => RefWriteCondition::Match(h),
         None => RefWriteCondition::Missing,
     };
-    head::advance(layout, commit, condition).map_err(|e| match e {
+    head::advance(layout, commit, condition).map_err(|e| branch_moved(e, commit))
+}
+
+/// A move of `HEAD` that lost the race is [`Error::BranchMoved`]. Any other
+/// failure is [`Error::Head`].
+fn branch_moved(error: head::Error, commit: &Hash) -> Error {
+    match error {
         head::Error::WriteRef {
             branch,
             source: RefError::Conflict(_),
@@ -736,7 +782,12 @@ fn advance_head(layout: &RepoLayout, commit: &Hash, expected: Option<Hash>) -> R
             commit: *commit,
         },
         other => Error::Head(other),
-    })
+    }
+}
+
+/// A failed flush of the commit's group.
+fn store_io(error: std::io::Error) -> Error {
+    Error::Store(kit_core::store::StoreError::Io(error))
 }
 
 /// The tree of a commit or a remix. `None` for any other object, and for a

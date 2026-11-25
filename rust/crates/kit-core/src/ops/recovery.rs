@@ -128,6 +128,43 @@ impl Default for RetentionPolicy {
 /// [`RecoveryError::InvalidField`] if `op`/`branch` contain a tab or
 /// newline; [`RecoveryError::Io`] on filesystem failure.
 pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
+    append(layout, entry, |file, path| {
+        // fsync the data, then the directory entry (cheap — records happen
+        // only on history rewrites, and durability is the whole point).
+        crate::durable::flush_file(file, path)?;
+        crate::durable::flush_dir(layout.common_dir())?;
+        Ok(())
+    })
+}
+
+/// [`record`] on the flushes of `group`: the appended line and the directory
+/// are written out, and the caller's next `group.flush()` makes them durable.
+/// The caller publishes the ref rewrite that the entry protects only with a
+/// token from a flush that came after this call (SPEC-GC, "Recovery log"). The
+/// lock and the cut of a torn tail are those of [`record`]; the lock is
+/// released before the flush, which is safe because the line is whole.
+///
+/// # Errors
+/// As [`record`], or the group is poisoned.
+pub fn record_in(
+    layout: &RepoLayout,
+    entry: &RecoveryEntry,
+    group: &mut crate::durable::Group,
+) -> Result<()> {
+    append(layout, entry, |_, path| {
+        group.note_file(path)?;
+        group.note_dir(layout.common_dir())?;
+        Ok(())
+    })
+}
+
+/// Append `entry` under the log lock, cutting a torn tail first, and hand the
+/// file to `make_durable` while the lock is held.
+fn append(
+    layout: &RepoLayout,
+    entry: &RecoveryEntry,
+    make_durable: impl FnOnce(&File, &std::path::Path) -> io::Result<()>,
+) -> Result<()> {
     if entry.op.contains(['\t', '\n']) {
         return Err(RecoveryError::InvalidField("op"));
     }
@@ -155,10 +192,7 @@ pub fn record(layout: &RepoLayout, entry: &RecoveryEntry) -> Result<()> {
         .open(&path)?;
     cut_unterminated_tail(&mut f)?;
     f.write_all(line.as_bytes())?;
-    // fsync the data, then the directory entry (cheap — records happen
-    // only on history rewrites, and durability is the whole point).
-    crate::durable::flush_file(&f, &path)?;
-    crate::durable::flush_dir(layout.common_dir())?;
+    make_durable(&f, &path)?;
     Ok(())
 }
 

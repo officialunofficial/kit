@@ -45,6 +45,36 @@ pub fn sync_index_to_tree_observed(
     tree_hash: Hash,
     observed: &[core_worktree::StatObservation],
 ) -> Result<(), String> {
+    let idx = index_for_tree(layout, store, tree_hash, observed)?;
+    write_index_settled(layout, &idx)
+}
+
+/// [`sync_index_to_tree`] with the index staged on `group`, not written: the
+/// caller publishes it with a token from a flush of the group that covers the
+/// objects of the tree, and flushes the group again for the rename. The racy
+/// window is settled before the staged file is returned, as for the written
+/// index.
+///
+/// # Errors
+/// The text of the failed step.
+pub fn sync_index_to_tree_staged(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let idx = index_for_tree(layout, store, tree_hash, &[])?;
+    stage_index_settled(group, layout, &idx)
+}
+
+/// The index of `tree_hash`, with the stat cache of the current index kept
+/// wherever path and object agree, and `observed` applied.
+fn index_for_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    observed: &[core_worktree::StatObservation],
+) -> Result<Index, String> {
     let mut idx =
         kit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     // Tree-derived entries carry no stat cache. Carry it over from the
@@ -82,7 +112,7 @@ pub fn sync_index_to_tree_observed(
             }
         }
     }
-    write_index_settled(layout, &idx)
+    Ok(idx)
 }
 
 /// The longest wait for the racy window to pass, in nanoseconds. A recorded
@@ -154,6 +184,53 @@ fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
         write()?;
     }
     Ok(())
+}
+
+/// [`write_index_settled`] for a staged index: the wait and the rewrite of
+/// the temp file, so its mtime is judged where the index's would be.
+fn stage_index_settled(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let mut stage = || {
+        kit_core::index::stage_index(group, layout, idx).map_err(|e| format!("write index: {e}"))
+    };
+    let Some(newest) = idx
+        .entries
+        .iter()
+        .map(|e| e.mtime_ns)
+        .filter(|m| *m != 0 && !m.is_multiple_of(1_000_000_000))
+        .max()
+    else {
+        return stage();
+    };
+    let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
+    let now = now_nanos();
+    let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
+    if ready > now && ready - now > SETTLE_MAX_WAIT_NS {
+        return stage();
+    }
+    if ready > now {
+        std::thread::sleep(std::time::Duration::from_nanos(ready - now));
+    }
+    let mut staged = stage()?;
+    for _ in 0..SETTLE_REWRITES {
+        let Ok(meta) = std::fs::metadata(staged.temp_path()) else {
+            break;
+        };
+        let stamp = core_worktree::mtime_nanos(&meta);
+        if stamp == 0
+            || stamp.is_multiple_of(1_000_000_000)
+            || newest < stamp.saturating_sub(window)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_nanos(SETTLE_TICK_NS));
+        // The earlier temp file is dropped, and unlinked, as it is replaced.
+        staged = stage()?;
+    }
+    Ok(staged)
 }
 
 fn now_nanos() -> u64 {

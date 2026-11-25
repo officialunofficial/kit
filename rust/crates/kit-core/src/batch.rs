@@ -72,6 +72,7 @@ use std::thread::JoinHandle;
 
 use tempfile::TempPath;
 
+use crate::durable::Group;
 use crate::hash::Hash;
 use crate::store::{
     ChunkOrigin, HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore,
@@ -834,7 +835,31 @@ impl<'s> WriteBatch<'s> {
     /// # Errors
     /// A failed barrier, flush or rename.
     pub fn commit(self) -> StoreResult<()> {
-        self.flush(true)
+        self.flush(true, None)
+    }
+
+    /// [`Self::commit`] on the flushes of `group`, with the names left
+    /// pending: the objects are renamed into place and their directories are
+    /// written out, but no flush follows. The caller flushes `group` (one
+    /// ordering point) before it publishes anything that names these objects,
+    /// and may stage more writes of its own first, so they share that flush.
+    ///
+    /// The caller stages the temp files that must be durable before the
+    /// objects become visible, for example a ref's, before this call: the
+    /// one flush it makes covers them with the objects' bytes. A batch with no
+    /// staged object makes no flush and no rename. An open local pack is
+    /// published first, with its own flushes, so loose objects that name its
+    /// chunks stay behind it.
+    ///
+    /// On `Ok` every hash this batch returned is visible. It is durable
+    /// after the caller's next `group.flush()`. After `Err`, or a failed
+    /// flush, the group is poisoned or the batch is: no hash it returned may
+    /// be named by a pointer.
+    ///
+    /// # Errors
+    /// As [`Self::commit`]. A failed flush of the group poisons the group.
+    pub fn commit_in(self, group: &mut Group) -> StoreResult<()> {
+        self.flush(true, Some(group))
     }
 
     /// [`Self::commit`] for the objects staged so far, keeping the batch
@@ -861,15 +886,15 @@ impl<'s> WriteBatch<'s> {
     ///
     /// Panics only if a previous write panicked while holding a batch lock.
     pub fn checkpoint(&self) -> StoreResult<()> {
-        self.flush(false)
+        self.flush(false, None)
     }
 
     /// [`Self::checkpoint`], or the flush of [`Self::commit`] when
     /// `seal_pack` is set, which always seals the open local pack.
-    fn flush(&self, seal_pack: bool) -> StoreResult<()> {
+    fn flush(&self, seal_pack: bool, group: Option<&mut Group>) -> StoreResult<()> {
         let _gate = self.gate.write().expect("batch gate poisoned");
         self.check_not_failed()?;
-        let result = self.flush_staged(seal_pack);
+        let result = self.flush_staged(seal_pack, group);
         if result.is_err() {
             self.failed.store(true, Ordering::Relaxed);
         }
@@ -886,7 +911,7 @@ impl<'s> WriteBatch<'s> {
     }
 
     /// The flush of [`Self::checkpoint`], with the gate held.
-    fn flush_staged(&self, seal_pack: bool) -> StoreResult<()> {
+    fn flush_staged(&self, seal_pack: bool, group: Option<&mut Group>) -> StoreResult<()> {
         // A pack seals before the loose objects become visible when they may
         // name its chunks: a manifest, tree or commit is never visible before
         // the chunks it names. Chunks are loose-invisible-safe on their own,
@@ -926,6 +951,15 @@ impl<'s> WriteBatch<'s> {
         }
         if sync_pack_parent {
             touched_shards.insert(store.objects_root().to_path_buf());
+        }
+        if let Some(group) = group {
+            return self.flush_in_group(
+                group,
+                leftover,
+                staged,
+                small_staged,
+                touched_shards,
+            );
         }
         match self.policy {
             // New loose objects are already durable.
@@ -974,6 +1008,55 @@ impl<'s> WriteBatch<'s> {
         flush_dirents(store, touched_shards)?;
         if sync_pack_parent {
             store.mark_pack_parent_synced();
+        }
+        Ok(())
+    }
+
+    /// The flush of [`Self::commit_in`]: one flush of `group` for the bytes,
+    /// the renames, and the directories written out, with the names pending.
+    /// The batch's own early writeouts and the caller's staged temp files
+    /// share that flush.
+    fn flush_in_group(
+        &self,
+        group: &mut Group,
+        leftover: Vec<PathBuf>,
+        staged: HashMap<Hash, TempPath>,
+        small_staged: usize,
+        touched: HashSet<PathBuf>,
+    ) -> StoreResult<()> {
+        let store = self.store;
+        let syncer = store.syncer();
+        let mut touched = touched;
+        if self.policy == SyncPolicy::Batch {
+            let staged: Vec<(Hash, TempPath)> = staged.into_iter().collect();
+            // Every staged file is written out before the flush: the early
+            // workers did most, the rest are done here.
+            parallel_io(leftover.len(), |i| {
+                barrier_path(syncer.as_ref(), &leftover[i])
+            })?;
+            if !staged.is_empty() {
+                // The bytes of the objects and of what the caller staged are
+                // durable before any object is named.
+                group.note_written(store.objects_root());
+                let _bytes_durable = group.flush()?;
+                if parallel_renames(small_staged) {
+                    rename_parallel(store, syncer.as_ref(), staged)?;
+                } else {
+                    for (h, tmp) in staged {
+                        syncer.rename(tmp, &store.path_for(&h))?;
+                    }
+                }
+                group.note_renamed();
+            }
+        }
+        // The names and every location this batch reused are written out;
+        // the caller's flush makes them durable. `objects/` is written out
+        // whenever a shard or `pack/` was touched, so a shard that another
+        // process made and has not flushed is covered too.
+        if !touched.is_empty() {
+            touched.insert(store.objects_root().to_path_buf());
+            write_out_dirents(store, touched)?;
+            group.note_written(store.objects_root());
         }
         Ok(())
     }
@@ -1092,18 +1175,32 @@ pub(crate) fn flush_dirents(
         return Ok(());
     }
     shards.sort();
-    parallel_io(shards.len(), |i| {
-        syncer.dir_writeout(&shards[i])?;
-        #[cfg(feature = "fault-injection")]
-        crate::fault::sync_step(|| crate::fault::SyncStep::DirBarrier(shards[i].clone()));
-        Ok(())
-    })?;
+    write_out_sorted(syncer.as_ref(), &shards)?;
     syncer.flush(store.objects_root())?;
     #[cfg(feature = "fault-injection")]
     crate::fault::sync_step(|| {
         crate::fault::SyncStep::DeviceFlush(store.objects_root().to_path_buf())
     });
     Ok(())
+}
+
+/// Write out the dirents of `shards`, concurrently, with no flush.
+fn write_out_dirents(
+    store: &ObjectStore,
+    shards: impl IntoIterator<Item = PathBuf>,
+) -> io::Result<()> {
+    let mut shards: Vec<PathBuf> = shards.into_iter().collect();
+    shards.sort();
+    write_out_sorted(store.syncer().as_ref(), &shards)
+}
+
+fn write_out_sorted(syncer: &dyn Syncer, shards: &[PathBuf]) -> io::Result<()> {
+    parallel_io(shards.len(), |i| {
+        syncer.dir_writeout(&shards[i])?;
+        #[cfg(feature = "fault-injection")]
+        crate::fault::sync_step(|| crate::fault::SyncStep::DirBarrier(shards[i].clone()));
+        Ok(())
+    })
 }
 
 /// Whether a checkpoint that took `small_staged` small objects renames

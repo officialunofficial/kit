@@ -574,6 +574,15 @@ impl ObjectStore {
         self.batch_with_policy(self.default_policy)
     }
 
+    /// A group of writes that share flushes, on this store's device calls, so
+    /// a test double of the store sees them too. See [`crate::durable`] and
+    /// [`WriteBatch::commit_in`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn group(&self) -> crate::durable::Group {
+        crate::durable::Group::with_syncer(Arc::clone(self.syncer()))
+    }
+
     /// Start a batched write with an explicit [`SyncPolicy`].
     #[must_use]
     pub fn batch_with_policy(&self, policy: SyncPolicy) -> WriteBatch<'_> {
