@@ -31,6 +31,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
+use crate::durable::Parents;
 use crate::hash::{self, HEX_LEN, Hash, ZERO};
 use crate::layout::RepoLayout;
 use crate::store::ObjectStore;
@@ -237,7 +238,7 @@ pub fn write_state(layout: &RepoLayout, state: &BisectState) -> BisectResult<()>
     // dir) so a crash mid-write cannot leave a truncated bisect state file
     // that `read_state` would reject as InvalidBisectState. Matches the
     // rest of the ops state writers (stash/recovery/restore).
-    crate::atomic::write_atomic(&layout.bisect_file(), buf.as_bytes(), true)?;
+    crate::durable::write_pointer(&layout.bisect_file(), buf.as_bytes(), Parents::Create)?;
     Ok(())
 }
 

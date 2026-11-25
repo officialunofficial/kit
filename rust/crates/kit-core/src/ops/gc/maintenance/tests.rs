@@ -173,11 +173,11 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
     assert_eq!(blocked.leftovers_removed, 0);
     assert!(old.exists());
     drop(guard);
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let report = repo.run();
     assert_eq!(report.leftovers_removed, 2);
     assert_eq!(report.bytes_reclaimed, 12);
-    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+    assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
     assert!(!old.exists());
     assert!(!old_index.exists());
     assert!(young.exists());
@@ -593,6 +593,25 @@ fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
     assert!(old.exists());
     assert_eq!(repo.run().leftovers_removed, 1);
     assert!(!old.exists());
+}
+
+/// A stamp that cannot be read must cost one more attempt, not a week of
+/// waiting: a torn stamp can only cause a new attempt.
+#[test]
+fn an_unreadable_stamp_does_not_postpone_the_next_collection() {
+    let repo = Repo::new();
+    for n in 0..MIN_PAIRS {
+        repo.pack(&[format!("young {n}").as_bytes()]);
+    }
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    fs::write(&stamp, [7; 5]).unwrap();
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_ne!(
+        repo.run().collection,
+        Collection::NotDue,
+        "a store at the floor is due again after a torn stamp is replaced"
+    );
 }
 
 /// A step that has never run is due as soon as the store holds the floor, so
@@ -1600,4 +1619,66 @@ fn a_complete_step_that_merged_nothing_waits_for_32_more_pairs() {
     assert_eq!(repo.run().collection, Collection::NotDue);
     repo.pack(&[b"later last"]);
     assert_eq!(repo.run().collection, Collection::Complete);
+}
+
+#[test]
+fn an_old_lone_pack_that_a_live_object_needs_survives_the_step_and_is_repaired() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, ids) = repo.old_pack(&[b"only copy"]);
+    repo.pin("only", &ids[0]);
+    let index = pack.with_extension("idx");
+    fs::remove_file(&index).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Failed);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(
+        pack.exists(),
+        "the step must not delete a pack it cannot read"
+    );
+
+    assert_eq!(repo.store.check_local_packs(true).unwrap(), 1);
+    assert!(index.exists());
+    assert!(repo.store.read(&ids[0]).is_ok());
+}
+
+#[test]
+fn an_old_lone_pack_nothing_live_needs_is_swept_by_a_step_that_marked() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, _) = repo.old_pack(&[b"abandoned"]);
+    fs::remove_file(pack.with_extension("idx")).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::Complete);
+    assert_eq!(report.leftovers_removed, 1);
+    assert!(!pack.exists());
+}
+
+#[test]
+fn an_old_lone_pack_stays_while_the_step_does_not_mark() {
+    let repo = Repo::new();
+    let (pack, _) = repo.old_pack(&[b"abandoned"]);
+    fs::remove_file(pack.with_extension("idx")).unwrap();
+
+    let report = repo.run();
+    assert_eq!(report.collection, Collection::NotDue);
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(pack.exists());
+}
+
+#[test]
+fn a_pack_that_loses_its_index_during_the_step_survives() {
+    let repo = Repo::new();
+    repo.due();
+    let (pack, ids) = repo.old_pack(&[b"served the mark"]);
+    repo.pin("served", &ids[0]);
+    let index = pack.with_extension("idx");
+
+    let report = maintain_with(&repo.layout, &repo.store, &|| false, BUDGET, || {
+        fs::remove_file(&index).unwrap();
+    });
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(pack.exists());
 }

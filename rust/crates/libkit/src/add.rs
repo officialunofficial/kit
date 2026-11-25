@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use kit_core::KitError;
+use kit_core::durable::Group;
 use kit_core::hash::{self, Hash, ZERO};
 use kit_core::ignore::{self, IgnoreError, IgnoreList};
 use kit_core::index::{self, EntryStatus, Index, IndexEntry, IndexError};
@@ -33,7 +34,7 @@ use kit_core::ops::restore::is_restore_temp_name;
 use kit_core::ops::{BINARY_SNIFF_LEN, apply_hunks_subset, enumerate_hunks, is_binary};
 use kit_core::serialize;
 use kit_core::store::{HashOnlySink, ObjectSink, ObjectStore, StoreError};
-use kit_core::worktree::{self, LoadedBlob, WorktreeError};
+use kit_core::worktree::{self, LoadedBlob, TrackedStats, WorktreeError};
 use kit_sync::fanout;
 use kit_sync::worktree::{index_tracks_path_or_descendant, read_or_seed_index_from_head};
 
@@ -327,7 +328,7 @@ fn stage_with_limit(
         return stage_tracked_observed(layout, &store, observer);
     }
 
-    let mut idx = read_or_seed_index_from_head(layout, &store).map_err(Error::ReadIndex)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, &store).map_err(Error::ReadIndex)?;
     let previous = idx.clone();
 
     // One durability batch for the whole call. A staged object costs no full
@@ -358,10 +359,55 @@ fn stage_with_limit(
         return Ok(());
     }
 
-    // The objects become durable before the index that names them.
-    batch.commit().map_err(Error::Store)?;
+    // The objects become durable before the index that names them, on the
+    // flushes of one group: the bytes of the objects (flush 1), then their
+    // names and the bytes of the index (flush 2), then the name of the index
+    // (flush 3).
+    let mut group = store.group();
+    batch.commit_in(&mut group).map_err(Error::Store)?;
     retain_content_identities(&store, &previous, &mut idx)?;
-    index::write_index(layout, &idx).map_err(Error::WriteIndex)
+    finish_index(&mut group, layout, &previous, &idx, on_disk)
+}
+
+/// Stage the index of `next` unless it holds what the index file held, make
+/// the objects it names durable, and publish it. The caller has committed
+/// the objects into `group`, so their names are pending.
+fn finish_index(
+    group: &mut Group,
+    layout: &RepoLayout,
+    previous: &Index,
+    next: &Index,
+    previous_was_on_disk: bool,
+) -> Result<(), Error> {
+    let staged = if previous_was_on_disk && previous == next {
+        None
+    } else {
+        Some(index::stage_index(group, layout, next).map_err(Error::WriteIndex)?)
+    };
+    // The names of the objects, and the bytes of the index, are durable
+    // before the index is named.
+    let durable = group
+        .flush()
+        .map_err(|e| Error::Store(kit_core::store::StoreError::Io(e)))?;
+    if let Some(staged) = staged {
+        index::publish_staged_index(group, staged, &durable).map_err(Error::WriteIndex)?;
+        // The rename is durable before the command reports success.
+        let _named = group
+            .flush()
+            .map_err(|e| Error::WriteIndex(index::IndexError::Io(e)))?;
+    }
+    Ok(())
+}
+
+/// The index of the repository, or, when it holds no entry, the one that
+/// `HEAD` names. The flag is true when the entries came from the index file.
+fn read_index_or_seed(layout: &RepoLayout, store: &ObjectStore) -> Result<(Index, bool), String> {
+    let idx = index::read_index(layout).map_err(|e| format!("read index: {e}"))?;
+    if idx.entries.is_empty() {
+        read_or_seed_index_from_head(layout, store).map(|seeded| (seeded, false))
+    } else {
+        Ok((idx, true))
+    }
 }
 
 /// Report to `observer` each entry of `next` that a real run would add, update
@@ -419,7 +465,7 @@ fn stage_tracked_observed(
     observer: &dyn Observer<Event>,
 ) -> Result<(), Error> {
     let root = layout.worktree_root();
-    let mut idx = read_or_seed_index_from_head(layout, store).map_err(Error::Refresh)?;
+    let (mut idx, on_disk) = read_index_or_seed(layout, store).map_err(Error::Refresh)?;
     check_size(&idx, index::MAX_INDEX_BYTES)?;
     let previous = idx.clone();
 
@@ -513,13 +559,18 @@ fn stage_tracked_observed(
     observer.event(&Event::HashProgress {
         bytes: progress_sink.bytes.load(Ordering::Relaxed),
     });
-    // The objects first, then the index that names them.
+    // The objects first, then the index that names them, on one group.
+    let mut group = store.group();
     batch
-        .commit()
+        .commit_in(&mut group)
         .map_err(|e| Error::Refresh(format!("store: {e}")))?;
     retain_content_identities(store, &previous, &mut idx)
         .map_err(|e| Error::Refresh(e.to_string()))?;
-    index::write_index(layout, &idx).map_err(|e| Error::Refresh(format!("write index: {e}")))
+    finish_index(&mut group, layout, &previous, &idx, on_disk).map_err(|e| match e {
+        Error::WriteIndex(e) => Error::Refresh(format!("write index: {e}")),
+        Error::Store(e) => Error::Refresh(format!("store: {e}")),
+        other => other,
+    })
 }
 
 fn is_gone(e: &io::Error) -> bool {
@@ -621,7 +672,17 @@ fn prepare(
         }
         if target == "." {
             let mut seen = HashSet::new();
-            add_tree(root, root, false, idx, &ignores, &mut seen, &mut pending)?;
+            let stats = TrackedStats::collect(root, idx);
+            add_tree(
+                root,
+                root,
+                false,
+                idx,
+                &stats,
+                &ignores,
+                &mut seen,
+                &mut pending,
+            )?;
             mark_missing_paths_removed(root, idx, &seen);
         } else {
             ensure_within_repo(root, &abs)?;
@@ -1149,6 +1210,7 @@ fn add_tree(
     dir: &Path,
     parent_ignored: bool,
     idx: &mut Index,
+    stats: &TrackedStats,
     ignores: &IgnoreList,
     seen: &mut HashSet<String>,
     pending: &mut Vec<PendingHash>,
@@ -1166,11 +1228,6 @@ fn add_tree(
     })?;
     for ent in rd.flatten() {
         let p = ent.path();
-        let meta = p.symlink_metadata().map_err(|source| Error::Metadata {
-            path: p.clone(),
-            source,
-        })?;
-        let is_dir = meta.file_type().is_dir();
         // The patterns match the path from the root, so a pattern with a
         // leading slash or a middle slash works. The name alone is not enough.
         let native_relative = p.strip_prefix(root).unwrap_or(&p);
@@ -1181,6 +1238,19 @@ fn add_tree(
             .map(|component| component.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
+        // A tracked file may have its stat from the pass already; any other
+        // path, or one the pass could not stat, is stat'ed here.
+        // A name that is not UTF-8 has only a lossy spelling here, which could
+        // match another tracked path, so it is never looked up.
+        let tracked_stat = native_relative.to_str().and_then(|_| stats.get(&rel_path));
+        let meta = match tracked_stat {
+            Some(meta) => meta.clone(),
+            None => p.symlink_metadata().map_err(|source| Error::Metadata {
+                path: p.clone(),
+                source,
+            })?,
+        };
+        let is_dir = meta.file_type().is_dir();
         if !is_dir
             && native_relative
                 .file_name()
@@ -1203,7 +1273,7 @@ fn add_tree(
             continue;
         }
         if meta.file_type().is_dir() {
-            add_tree(root, &p, entry_ignored, idx, ignores, seen, pending)?;
+            add_tree(root, &p, entry_ignored, idx, stats, ignores, seen, pending)?;
         } else if meta.file_type().is_file() || meta.file_type().is_symlink() {
             // The decision to include is made, so `force` skips the second
             // look at the ignore rules in `route_path`.

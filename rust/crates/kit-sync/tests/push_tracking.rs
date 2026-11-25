@@ -213,6 +213,7 @@ fn a_push_flushes_no_object_directory() {
             let at = match step {
                 SyncStep::DirBarrier(dir) => dir,
                 SyncStep::DeviceFlush(root) => root,
+                SyncStep::Writeout(_) | SyncStep::Flush(_) => return,
             };
             if at.starts_with(&objects) {
                 steps

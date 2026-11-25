@@ -128,13 +128,16 @@ pub fn run(args: &[String]) -> u8 {
     let mut out = std::io::stdout().lock();
     for v in &victims {
         if opts.dry_run {
-            let _ = writeln!(out, "Would remove {}", v.display);
+            let _ = writeln!(out, "Would remove {}", super::display_path(&v.display));
             continue;
         }
         if let Err(e) = remove(&v.abs, v.is_dir) {
-            return emit_err(&format!("remove {}: {e}", v.display), exit::GENERAL_ERROR);
+            return emit_err(
+                &format!("remove {}: {e}", super::display_path(&v.display)),
+                exit::GENERAL_ERROR,
+            );
         }
-        let _ = writeln!(out, "Removing {}", v.display);
+        let _ = writeln!(out, "Removing {}", super::display_path(&v.display));
     }
     exit::OK
 }

@@ -7,9 +7,10 @@ mod common;
 use std::cell::RefCell;
 
 use common::{Fixture, TestSigning, init};
+use kit_core::index;
 use kit_core::layout::RepoLayout;
 use kit_core::observer::{NoopObserver, Observer};
-use kit_core::ops::conflict_state::is_merge_in_progress;
+use kit_core::ops::conflict_state::{self, MergeState, is_merge_in_progress};
 use kit_core::refs;
 use kit_core::sign;
 use libkit::conflict::{self, ConflictClass};
@@ -551,4 +552,184 @@ fn clean_merges_leave_unchanged_files_in_place() {
         );
         assert_eq!(f.read("b"), "new");
     }
+}
+
+/// Notes, for each path of a conflict, whether the state of the merge was on
+/// disk when the material of that path was written.
+struct StateWhenWritten<'a> {
+    layout: &'a RepoLayout,
+    seen: RefCell<Vec<(bool, bool)>>,
+}
+
+impl Observer<conflict::Event> for StateWhenWritten<'_> {
+    fn event(&self, _event: &conflict::Event) {
+        self.seen.borrow_mut().push((
+            is_merge_in_progress(self.layout),
+            self.layout.conflicts_file().is_file(),
+        ));
+    }
+}
+
+#[test]
+fn a_paused_merge_is_recorded_before_its_markers_and_its_list_comes_last() {
+    let f = init();
+    diverged(&f);
+    let observer = StateWhenWritten {
+        layout: &f.layout,
+        seen: RefCell::default(),
+    };
+    merge::start(
+        &f.layout,
+        &f.store,
+        &merge_request("topic"),
+        &TestSigning,
+        &observer,
+    )
+    .unwrap();
+    // A stop after the markers and before the state would leave markers and
+    // no merge to abort. The list comes after the material, so a stop before
+    // it leaves a merge that a continue refuses.
+    assert_eq!(observer.seen.into_inner(), [(true, false)]);
+    assert!(f.layout.conflicts_file().is_file());
+}
+
+#[test]
+fn a_merge_without_its_list_is_not_continued() {
+    let f = init();
+    diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    // The stop came after the merge was recorded and before its list was.
+    std::fs::remove_file(f.layout.conflicts_file()).unwrap();
+
+    let err = merge::resume(&f.layout, &f.store, &TestSigning).unwrap_err();
+    assert!(matches!(err, Error::ReadConflicts(_)), "{err:?}");
+    assert!(is_merge_in_progress(&f.layout));
+}
+
+#[test]
+fn abort_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
+    let f = init();
+    let (ours, theirs) = diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    f.write("a.txt", "resolved\n");
+    f.stage("a.txt");
+    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    // The stop came after the branch moved and before the state was cleared.
+    let state = MergeState {
+        merge_head: theirs,
+        orig_head: ours,
+        message: b"Merge branch 'topic'".to_vec(),
+    };
+    conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
+    assert!(is_merge_in_progress(&f.layout));
+
+    assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), merged.commit);
+    assert!(!is_merge_in_progress(&f.layout));
+    // The branch stays on the merge, so `gc` has nothing to reclaim.
+    assert_eq!(
+        refs::read_ref(&f.layout, "main").unwrap(),
+        Some(merged.commit)
+    );
+    assert_eq!(f.read("a.txt"), "resolved\n");
+}
+
+#[test]
+fn abort_still_moves_the_branch_when_head_is_not_the_merge() {
+    let f = init();
+    let (ours, theirs) = diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    // A commit with the same parents but another order is not this merge.
+    let other = f.commit(
+        &[("a.txt", "ours\n"), ("b.txt", "b\n")],
+        &[theirs, ours],
+        "other",
+        9,
+    );
+    refs::write_ref(&f.layout, "main", &other).unwrap();
+
+    assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
+    assert_eq!(refs::read_ref(&f.layout, "main").unwrap(), Some(ours));
+}
+
+#[test]
+fn abort_keeps_a_file_that_the_user_untracked() {
+    let f = init();
+    let base = f.commit(&[("a.txt", "one\n")], &[], "base", 1);
+    let ours = f.commit(&[("a.txt", "ours\n")], &[base], "ours", 2);
+    let theirs = f.commit(
+        &[("a.txt", "theirs\n"), ("t.txt", "added\n")],
+        &[base],
+        "theirs",
+        3,
+    );
+    refs::write_ref(&f.layout, "topic", &theirs).unwrap();
+    f.checkout("main", ours);
+    start(&f, &merge_request("topic")).unwrap();
+    assert_eq!(f.read("t.txt"), "added\n");
+    // The user edits the file the merge added, then stops tracking it.
+    f.write("t.txt", "mine\n");
+    let mut idx = index::read_index(&f.layout).unwrap();
+    idx.remove_path("t.txt");
+    index::write_index(&f.layout, &idx).unwrap();
+
+    // The file is untracked work now. The abort keeps it, and the restore
+    // refuses as it does for any untracked file that is not in the target.
+    let err = merge::abort(&f.layout, &f.store).unwrap_err();
+    assert!(
+        matches!(err, Error::Worktree(ref m) if m.contains("'t.txt'")),
+        "{err:?}"
+    );
+    assert_eq!(f.read("t.txt"), "mine\n");
+
+    // With the file moved out of the tree, the abort goes through.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let kept = elsewhere.path().join("kept.txt");
+    std::fs::copy(f.path("t.txt"), &kept).unwrap();
+    std::fs::remove_file(f.path("t.txt")).unwrap();
+    assert_eq!(merge::abort(&f.layout, &f.store).unwrap(), ours);
+    assert_eq!(f.read("a.txt"), "ours\n");
+    assert_eq!(std::fs::read_to_string(kept).unwrap(), "mine\n");
+    assert!(!is_merge_in_progress(&f.layout));
+}
+
+#[test]
+fn abort_removes_an_added_file_that_the_user_untracked_without_a_change() {
+    let f = init();
+    let base = f.commit(&[("a.txt", "one\n")], &[], "base", 1);
+    let ours = f.commit(&[("a.txt", "ours\n")], &[base], "ours", 2);
+    let theirs = f.commit(
+        &[("a.txt", "theirs\n"), ("t.txt", "added\n")],
+        &[base],
+        "theirs",
+        3,
+    );
+    refs::write_ref(&f.layout, "topic", &theirs).unwrap();
+    f.checkout("main", ours);
+    start(&f, &merge_request("topic")).unwrap();
+    // A stop in the restore leaves a file of the merge with no index entry.
+    let mut idx = index::read_index(&f.layout).unwrap();
+    idx.remove_path("t.txt");
+    index::write_index(&f.layout, &idx).unwrap();
+
+    merge::abort(&f.layout, &f.store).unwrap();
+    assert!(!f.path("t.txt").exists());
+}
+
+#[test]
+fn abort_still_removes_a_file_that_the_merge_added() {
+    let f = init();
+    let base = f.commit(&[("a.txt", "one\n")], &[], "base", 1);
+    let ours = f.commit(&[("a.txt", "ours\n")], &[base], "ours", 2);
+    let theirs = f.commit(
+        &[("a.txt", "theirs\n"), ("t.txt", "added\n")],
+        &[base],
+        "theirs",
+        3,
+    );
+    refs::write_ref(&f.layout, "topic", &theirs).unwrap();
+    f.checkout("main", ours);
+    start(&f, &merge_request("topic")).unwrap();
+
+    merge::abort(&f.layout, &f.store).unwrap();
+    assert!(!f.path("t.txt").exists());
 }

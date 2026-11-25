@@ -828,12 +828,12 @@ pub struct GcReport {
     /// batches. Earlier batches stay done. Survivors that gc already copied
     /// stay as duplicates, and the next gc retires what is left.
     pub pack_retirement_cut_short: bool,
-    /// Milliseconds that pack retirement held the exclusive `format` lock,
-    /// from the successful try to the release; the longest of the holds. A
-    /// writer that starts then waits that long.
+    /// Milliseconds that pack retirement or the drop of loose duplicates held
+    /// the exclusive `format` lock, from the successful try to the release;
+    /// the longest of the holds. A writer that starts then waits that long.
     pub retire_hold_ms: u64,
-    /// How many exclusive holds retirement took: one per batch of at most 32
-    /// items (SPEC-GC).
+    /// How many exclusive holds retirement and the drop of loose duplicates
+    /// took: one per batch of at most 32 items (SPEC-GC).
     pub retire_batches: usize,
     /// Damage found in aged packs that were left in place because their body failed verification.
     pub skipped_pack_errors: Vec<String>,

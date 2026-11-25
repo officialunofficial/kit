@@ -16,6 +16,7 @@
 
 use kit_core::hash::Hash;
 use kit_core::layout::RepoLayout;
+use kit_core::object::ObjectType;
 use kit_core::refs;
 use kit_core::store::{ClosureSource, ObjectStore, PruneGuard};
 
@@ -335,6 +336,26 @@ fn check_tip(
         verify_history_signatures(view, observer, tip, verified)?;
     }
     Ok(())
+}
+
+/// Refuse to publish a tracking ref for a branch whose fetched tip is not a
+/// commit or a remix. The closure check and the signature walk treat a tree
+/// or a blob as a leaf and pass it, so a remote could otherwise make a tree
+/// the tip of `origin/main`, and the commands that read the branch later
+/// would fail on it one by one.
+fn ensure_commit_tip(store: &ObjectStore, branch: &str, tip: &Hash) -> Result<(), SyncError> {
+    let found = match store.object_type(tip)? {
+        ObjectType::Commit | ObjectType::Remix => return Ok(()),
+        ObjectType::Blob => "blob",
+        ObjectType::Tree => "tree",
+        ObjectType::ChunkedBlob => "chunked blob",
+        ObjectType::Delta => "delta",
+        ObjectType::Tag => "tag",
+    };
+    Err(SyncError::BranchTipNotCommit {
+        branch: branch.to_owned(),
+        found,
+    })
 }
 
 /// Flush the applied-pack record or publish its pending rewrite. A write
@@ -698,6 +719,7 @@ fn fetch_objects_inner(
             };
 
             stop.extend(keys);
+            ensure_commit_tip(store, &r.name, &completed.tip)?;
 
             // Publish under a worktree lock acquired fresh for this
             // branch and released once this loop iteration ends. The wait

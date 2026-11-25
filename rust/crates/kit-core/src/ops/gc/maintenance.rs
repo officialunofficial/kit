@@ -323,13 +323,11 @@ fn run(
         // A step that has never run is due once the store holds the floor,
         // so a repository that never fetches is maintained too.
         None if file.metadata().is_ok_and(|meta| meta.len() == 0) => Stamp::NEVER,
+        // An unreadable stamp is replaced by the stamp of a step that never
+        // ran, which the next step finds due at the floor. It costs one
+        // attempt, not the week that a stamp of this step's own would wait.
         None => {
-            let _ = Stamp {
-                attempted: now,
-                outcome: Collection::NotDue,
-                complete_pairs: 0,
-            }
-            .write(&mut file);
+            let _ = Stamp::NEVER.write(&mut file);
             return Collection::NotDue;
         }
     };
@@ -564,6 +562,9 @@ fn collect(
 ) -> Result<Outcome, GcRootsError> {
     let now = now_secs();
     budget.check()?;
+    // Listed before the mark: a pack that loses its index during the mark
+    // may have served it.
+    let lone = store.plan_lone_packs(now, DEFAULT_GRACE_SECS)?;
     let (hard, mut soft) = collect_root_sets(layout, &mut |_| {})?;
     soft.sort_unstable();
     let mut roots = hard.clone();
@@ -588,6 +589,9 @@ fn collect(
         // The budget ended before one pack was verified: no progress.
         return Ok(Outcome::same(Collection::OverBudget));
     }
+    // The mark above read every live object while these packs were already
+    // without an index, so none holds an object that a live one needs.
+    retire.absorb_leftovers(lone);
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
     // wholly dead retirement planned above still runs, as it does today.

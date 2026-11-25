@@ -376,7 +376,9 @@ in-process read-write lock may: a writer that took its stripe first would wait
 behind that request, which waits for a shared holder, which waits for the
 stripe. Every write condition takes
 these locks, `.any` included. A write holds them from its read of the
-current value until its rename and directory fsync complete.
+current value until its rename is durable: its directory flush, or the shared
+flush that covers it (SPEC-OBJECTS §10.1, "Shared flush points"), has
+completed. The same holds for a local `refs/heads/*` write.
 
 Two writes to one ref serialize. Writes to refs in different stripes run in
 parallel. Writes to two refs in one stripe serialize. A step that holds the

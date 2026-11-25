@@ -147,7 +147,7 @@ rebuildable locator. All integer fields are unsigned little-endian.
 | Field | Size | Meaning |
 |---|---|---|
 | Magic | 4 bytes | ASCII `KITX` |
-| Index version | 4 bytes | `1`, independent of the pack header version |
+| Index version | 4 bytes | `1`, the same version as the pack header |
 | Count | 4 bytes | Number of frames, `N` |
 | Fanout | 256 × 4 bytes | Bucket `i` counts ids with first byte ≤ `i` |
 | Object ids | `N` × 32 bytes | Binary ids in strictly increasing byte order |
@@ -164,10 +164,14 @@ and `bmt-v2\nP`. The zero-tail form represents a lost activation and
 selects loose storage. See
 [SPEC-OBJECTS §10](SPEC-OBJECTS.md#10-storage).
 
-On a live pair, an unknown pack header version or index version MUST
-raise `IncompatibleRepoFormat` and tell the user to update kit. Readers
-check the version before using its declared layout. Repair MUST preserve
-a pair with an unknown version.
+On a live pair whose pack header version and index version are the same
+unknown version, readers MUST raise `IncompatibleRepoFormat` and tell the
+user to update kit. Readers check the version before using its declared
+layout. Repair MUST preserve such a pair. A pair in which only one file has
+an unknown version, or in which the two versions differ, is damage to that
+pair, reported as such (SPEC-OBJECTS, "Object lookup"). A change to either
+format therefore bumps both versions together, so that an older reader can
+tell a newer pair from damage.
 
 The exact version-1 index size is `1,100 + 44 × N` bytes. Before
 allocating or following an offset, check the magic, version, key, count,

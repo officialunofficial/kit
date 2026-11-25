@@ -16,6 +16,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{EntryMode, Object};
 use kit_core::ops::diff::{DiffEntry, DiffKind, diff_trees};
 use kit_core::ops::restore::{RestoreOptions, matches_sparse, nested_repository};
+use kit_core::protocol::escape_terminal_text;
 use kit_core::refs::{self, RefError};
 use kit_core::store::ObjectStore;
 use kit_core::worktree as core_worktree;
@@ -44,6 +45,36 @@ pub fn sync_index_to_tree_observed(
     tree_hash: Hash,
     observed: &[core_worktree::StatObservation],
 ) -> Result<(), String> {
+    let idx = index_for_tree(layout, store, tree_hash, observed)?;
+    write_index_settled(layout, &idx)
+}
+
+/// [`sync_index_to_tree`] with the index staged on `group`, not written: the
+/// caller publishes it with a token from a flush of the group that covers the
+/// objects of the tree, and flushes the group again for the rename. The racy
+/// window is settled before the staged file is returned, as for the written
+/// index.
+///
+/// # Errors
+/// The text of the failed step.
+pub fn sync_index_to_tree_staged(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let idx = index_for_tree(layout, store, tree_hash, &[])?;
+    stage_index_settled(group, layout, &idx)
+}
+
+/// The index of `tree_hash`, with the stat cache of the current index kept
+/// wherever path and object agree, and `observed` applied.
+fn index_for_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    observed: &[core_worktree::StatObservation],
+) -> Result<Index, String> {
     let mut idx =
         kit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     // Tree-derived entries carry no stat cache. Carry it over from the
@@ -81,7 +112,7 @@ pub fn sync_index_to_tree_observed(
             }
         }
     }
-    write_index_settled(layout, &idx)
+    Ok(idx)
 }
 
 /// The longest wait for the racy window to pass, in nanoseconds. A recorded
@@ -155,6 +186,53 @@ fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
     Ok(())
 }
 
+/// [`write_index_settled`] for a staged index: the wait and the rewrite of
+/// the temp file, so its mtime is judged where the index's would be.
+fn stage_index_settled(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let mut stage = || {
+        kit_core::index::stage_index(group, layout, idx).map_err(|e| format!("write index: {e}"))
+    };
+    let Some(newest) = idx
+        .entries
+        .iter()
+        .map(|e| e.mtime_ns)
+        .filter(|m| *m != 0 && !m.is_multiple_of(1_000_000_000))
+        .max()
+    else {
+        return stage();
+    };
+    let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
+    let now = now_nanos();
+    let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
+    if ready > now && ready - now > SETTLE_MAX_WAIT_NS {
+        return stage();
+    }
+    if ready > now {
+        std::thread::sleep(std::time::Duration::from_nanos(ready - now));
+    }
+    let mut staged = stage()?;
+    for _ in 0..SETTLE_REWRITES {
+        let Ok(meta) = std::fs::metadata(staged.temp_path()) else {
+            break;
+        };
+        let stamp = core_worktree::mtime_nanos(&meta);
+        if stamp == 0
+            || stamp.is_multiple_of(1_000_000_000)
+            || newest < stamp.saturating_sub(window)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_nanos(SETTLE_TICK_NS));
+        // The earlier temp file is dropped, and unlinked, as it is replaced.
+        staged = stage()?;
+    }
+    Ok(staged)
+}
+
 fn now_nanos() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -199,6 +277,14 @@ pub fn restore_worktree_and_index_from(
     sync_index_to_tree_observed(layout, store, tree_hash, &stats)
 }
 
+/// [`restore_worktree_and_index_from`] for a pull, which reports its progress
+/// to `observer` when the observer can take it from other threads.
+///
+/// A restore with a `base_tree` is one the pull's safety check over the whole
+/// worktree has cleared, which refuses every untracked path outside the ignore
+/// rules, so the restore does not walk the directories it leaves alone to look
+/// for one again. A restore with no `base_tree`, as when a pull resumes after a
+/// stop, rewrites every entry and never walked them.
 pub(crate) fn restore_worktree_and_index_progress(
     layout: &RepoLayout,
     store: &ObjectStore,
@@ -206,11 +292,14 @@ pub(crate) fn restore_worktree_and_index_progress(
     base_tree: Option<Hash>,
     observer: &dyn crate::Observer<crate::SyncEvent>,
 ) -> Result<(), String> {
-    if observer.concurrent().is_none() {
-        return restore_worktree_and_index_from(layout, store, tree_hash, base_tree);
-    }
     let mut stats = Vec::new();
-    kit_core::ops::restore::restore_tree_to_worktree_progress(
+    let mut report =
+        |done, total| observer.event(&crate::SyncEvent::RestoreProgress { done, total });
+    let progress = observer
+        .concurrent()
+        .is_some()
+        .then_some(&mut report as &mut dyn FnMut(usize, usize));
+    kit_core::ops::restore::restore_tree_to_worktree_gated(
         store,
         &tree_hash,
         base_tree,
@@ -218,7 +307,7 @@ pub(crate) fn restore_worktree_and_index_progress(
         &RestoreOptions::default(),
         &crate::restore_fanout::read_chunks_fanout,
         Some(&mut stats),
-        &mut |done, total| observer.event(&crate::SyncEvent::RestoreProgress { done, total }),
+        progress,
     )
     .map_err(|e| format!("restore worktree: {e}"))?;
     sync_index_to_tree_observed(layout, store, tree_hash, &stats)
@@ -245,7 +334,7 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
     {
         return Err(format!(
             "restore would lose '{}': its object {} is not found in the store",
-            entry.path,
+            escape_terminal_text(&entry.path, false),
             kit_core::hash::to_hex(&h)
         ));
     }
@@ -254,7 +343,7 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
     {
         return Err(format!(
             "restore cannot write '{}': its object {} is not found in the store",
-            entry.path,
+            escape_terminal_text(&entry.path, false),
             kit_core::hash::to_hex(&h)
         ));
     }
@@ -263,19 +352,31 @@ fn ensure_restore_objects_present(store: &ObjectStore, entry: &DiffEntry) -> Res
 
 /// The refusal for a tracked path that differs from the index.
 fn local_changes_message(path: &str) -> String {
-    format!("restore would overwrite local changes; commit, stash, or reset '{path}' first")
+    format!(
+        "restore would overwrite local changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn staged_changes_message(path: &str) -> String {
-    format!("restore would overwrite staged changes; commit, stash, or reset '{path}' first")
+    format!(
+        "restore would overwrite staged changes; commit, stash, or reset '{}' first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn overwrite_untracked_message(path: &str) -> String {
-    format!("restore would overwrite untracked path '{path}'; move or remove it first")
+    format!(
+        "restore would overwrite untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
 }
 
 fn remove_untracked_message(path: &str) -> String {
-    format!("restore would remove untracked path '{path}'; move or remove it first")
+    format!(
+        "restore would remove untracked path '{}'; move or remove it first",
+        escape_terminal_text(path, false)
+    )
 }
 
 /// The texts one caller of [`check_restore_safe`] refuses with, each given
@@ -363,6 +464,32 @@ pub fn ensure_restore_safe_from(
     )
 }
 
+/// [`ensure_restore_safe_from`] for the first checkout of a repository that
+/// has no index file, as a clone with no checkout leaves it (git's initial
+/// checkout). Nothing is tracked yet, so no path is local work; an untracked
+/// path the restore would write over still refuses it.
+pub fn ensure_initial_checkout_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    target_tree: Hash,
+    options: &RestoreOptions,
+) -> Result<(), String> {
+    check_restore_safe(
+        layout,
+        store,
+        &Index::new(),
+        target_tree,
+        options,
+        &Expected {
+            trees: &[None],
+            unchanged_base: None,
+            restore_temp_files: false,
+            refuse_untracked_dirs: false,
+            refusals: &RESTORE_REFUSALS,
+        },
+    )
+}
+
 /// The one restore-safety check: refuse a restore of `target_tree` with
 /// `options` that would destroy work, which is anything in the index or the
 /// worktree that is not as one of `expected.trees` has it, an untracked path
@@ -398,12 +525,16 @@ pub(crate) fn check_restore_safe(
     }
 
     let tracked = tracked_paths(idx, &staged.missing, &affects);
-    let worktree_tree = core_worktree::build_tree_filtered_observed_with_source(
+    // The one walk of the worktree: it builds the snapshot and keeps what it
+    // read of each directory, so the untracked paths are listed from that and
+    // not from a second pass over the disk.
+    let mut listings = core_worktree::DirListings::default();
+    let worktree_tree = core_worktree::build_tree_filtered_listed_with_source(
         &snapshot,
         &snapshot,
         root,
         Some(&tracked),
-        &mut Vec::new(),
+        &mut listings,
     )
     .map_err(|e| format!("check working tree changes: {e}"))?;
     let unstaged = differ_from_every(&snapshot, expected.trees, worktree_tree, &affects)
@@ -440,7 +571,7 @@ pub(crate) fn check_restore_safe(
         return Ok(());
     }
 
-    let (ignore, worktree_paths) = restore_paths(root, &target_writes, options.clean)?;
+    let (ignore, worktree_paths) = restore_paths(root, &target_writes, options.clean, &listings)?;
     // A real directory that only holds a target path is no conflict: the
     // restore writes beside its contents. Its descendants are checked as
     // paths of their own.
@@ -502,6 +633,7 @@ fn restore_paths(
     root: &Path,
     targets: &[String],
     clean: bool,
+    listings: &core_worktree::DirListings,
 ) -> Result<(kit_core::ignore::IgnoreList, Vec<String>), String> {
     let ignore = kit_core::ignore::load(root).map_err(|e| format!("read ignore file: {e}"))?;
     let mut paths = Vec::new();
@@ -511,6 +643,7 @@ fn restore_paths(
         "",
         &mut paths,
         clean.then_some((&ignore, targets)),
+        Some(listings),
     )
     .map_err(|e| format!("check untracked paths: {e}"))?;
     Ok((ignore, paths))
@@ -770,44 +903,66 @@ pub fn collect_worktree_paths(
     prefix: &str,
     out: &mut Vec<String>,
 ) -> std::io::Result<()> {
-    collect_restore_paths(root, dir, prefix, out, None)
+    collect_restore_paths(root, dir, prefix, out, None, None)
+}
+
+/// The names of `dir` that are valid UTF-8 and whether each is a directory
+/// (a symlink to one is not), in the order the file system lists them. A
+/// directory that is gone has none.
+fn read_listing(dir: &Path) -> std::io::Result<Vec<(String, bool)>> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut listing = Vec::new();
+    for entry in read {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        listing.push((name, entry.file_type()?.is_dir()));
+    }
+    Ok(listing)
 }
 
 /// An ignored subtree matters only when a target enters it or replaces one
 /// of its ancestors. The directory itself stays in the list for the sweep.
+///
+/// A directory `listings` holds, because the walk of the safety check read it,
+/// is not read again.
 fn collect_restore_paths(
     root: &Path,
     dir: &Path,
     prefix: &str,
     out: &mut Vec<String>,
     filter: Option<(&kit_core::ignore::IgnoreList, &[String])>,
+    listings: Option<&core_worktree::DirListings>,
 ) -> std::io::Result<()> {
     let local_ignore = filter
         .map(|(ignore, _)| ignore.load_directory(dir))
         .transpose()
         .map_err(std::io::Error::other)?;
-    let read = match fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    for entry in read {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
+    let read;
+    let listing: &[(String, bool)] =
+        if let Some(listing) = listings.and_then(|listings| listings.get(prefix)) {
+            listing
+        } else {
+            read = read_listing(dir)?;
+            &read
         };
+    for (name, is_dir) in listing {
         if name.eq_ignore_ascii_case(".kit") || name.eq_ignore_ascii_case(".git") {
             continue;
         }
         let path = if prefix.is_empty() {
-            name.to_string()
+            name.clone()
         } else {
             format!("{prefix}/{name}")
         };
         out.push(path.clone());
         let full_path = root.join(&path);
-        if entry.file_type()?.is_dir() {
+        if *is_dir {
             if let (Some(ignore), Some((_, targets))) = (&local_ignore, filter)
                 && ignore.is_ignored_with_ancestors(&path, true)
                 && !targets.iter().any(|target| paths_overlap(&path, target))
@@ -822,6 +977,7 @@ fn collect_restore_paths(
                 local_ignore
                     .as_ref()
                     .zip(filter.map(|(_, targets)| targets)),
+                listings,
             )?;
         }
     }
@@ -1029,6 +1185,104 @@ mod tests {
         }
     }
 
+    /// The staged index publishes to the entries the written one has, and the
+    /// stat cache of the old index is kept where path and object agree.
+    #[test]
+    fn the_staged_index_matches_the_written_one_and_keeps_the_stat_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let blob = |data: &[u8]| {
+            put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            )
+        };
+        let (a, b) = (blob(b"a"), blob(b"b"));
+        let entry = |name: &str, hash: Hash| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: hash,
+        };
+        let one = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a)],
+            }),
+        );
+        let two = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a), entry("b", b)],
+            }),
+        );
+        // An old index whose entry for `a` has a stat cache.
+        sync_index_to_tree(&layout, &store, one).unwrap();
+        let mut old = kit_core::index::read_index(&layout).unwrap();
+        let at = old.find_entry("a").unwrap();
+        old.entries[at].mtime_ns = 5_000_000_001;
+        old.entries[at].size = 1;
+        old.entries[at].ino = 9;
+        kit_core::index::write_index(&layout, &old).unwrap();
+
+        let mut group = store.group();
+        let staged = sync_index_to_tree_staged(&mut group, &layout, &store, two).unwrap();
+        // Nothing is published until the group is flushed and the token used.
+        assert_eq!(
+            kit_core::index::read_index(&layout).unwrap().entries.len(),
+            1
+        );
+        let token = group.flush().unwrap();
+        kit_core::index::publish_staged_index(&mut group, staged, &token).unwrap();
+        let _named = group.flush().unwrap();
+
+        let idx = kit_core::index::read_index(&layout).unwrap();
+        assert_eq!(idx.entries.len(), 2);
+        let ea = &idx.entries[idx.find_entry("a").unwrap()];
+        assert_eq!(
+            (ea.object_hash, ea.mtime_ns, ea.size, ea.ino),
+            (a, 5_000_000_001, 1, 9)
+        );
+        let eb = &idx.entries[idx.find_entry("b").unwrap()];
+        assert_eq!((eb.object_hash, eb.mtime_ns, eb.size, eb.ino), (b, 0, 0, 0));
+
+        // The written path gives the same entries.
+        let other = tempfile::tempdir().unwrap();
+        let layout2 = RepoLayout::single(other.path());
+        let store2 = ObjectStore::init(&layout2).unwrap();
+        let (a2, b2) = (
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"a".to_vec(),
+                }),
+            ),
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"b".to_vec(),
+                }),
+            ),
+        );
+        let two2 = put(
+            &store2,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a2), entry("b", b2)],
+            }),
+        );
+        sync_index_to_tree(&layout2, &store2, two2).unwrap();
+        let written = kit_core::index::read_index(&layout2).unwrap();
+        let names = |i: &Index| {
+            i.entries
+                .iter()
+                .map(|e| (e.path.clone(), e.object_hash))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&idx), names(&written));
+    }
+
     /// A recorded mtime far ahead of the clock is skew: the write does not
     /// wait for it.
     #[test]
@@ -1086,14 +1340,136 @@ mod path_walk_tests {
             (vec!["sub/cache".to_owned()], true),
         ] {
             let mut paths = Vec::new();
-            super::collect_restore_paths(root, root, "", &mut paths, Some((&ignore, &targets)))
-                .unwrap();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut paths,
+                Some((&ignore, &targets)),
+                None,
+            )
+            .unwrap();
             assert!(paths.contains(&"sub/cache".to_owned()));
             assert_eq!(paths.contains(&"sub/cache/deep/keep".to_owned()), enters);
         }
         let mut paths = Vec::new();
         super::collect_worktree_paths(root, root, "", &mut paths).unwrap();
         assert!(paths.contains(&"sub/cache/deep/keep".to_owned()));
+    }
+
+    /// What the safety check's walk read of each directory gives the same list
+    /// as reading the disk again, also when the list enters a directory the walk
+    /// left out (an ignored one a target reaches, and one that hides a tracked
+    /// file), which it reads from the disk.
+    #[test]
+    fn the_walks_listings_give_the_list_a_second_pass_gives() {
+        use kit_core::object::{Blob, Object};
+        use kit_core::store::{EphemeralSink, ObjectSink, ObjectStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let layout = kit_core::layout::RepoLayout::single(root);
+        let store = ObjectStore::init(&layout).unwrap();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::create_dir_all(root.join("cache/deep")).unwrap();
+        std::fs::create_dir_all(root.join("shadow")).unwrap();
+        std::fs::create_dir_all(root.join("nested/.git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "cache/\n*.log\n").unwrap();
+        std::fs::write(root.join("a/b/f"), "f").unwrap();
+        std::fs::write(root.join("a/x.log"), "x").unwrap();
+        std::fs::write(root.join("cache/deep/k"), "k").unwrap();
+        std::fs::write(root.join("shadow/inner"), "i").unwrap();
+        std::fs::write(root.join("nested/file"), "n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a", root.join("link")).unwrap();
+
+        // `shadow` is a tracked file in the index while the disk holds a
+        // directory there, which the walk leaves out.
+        let blob = store
+            .put(
+                &kit_core::serialize::serialize(&Object::Blob(Blob {
+                    data: b"s".to_vec(),
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let mut idx = kit_core::index::Index::new();
+        idx.upsert_entry(kit_core::index::IndexEntry {
+            path: "shadow".to_owned(),
+            status: kit_core::index::EntryStatus::Blob,
+            object_hash: blob,
+            mtime_ns: 0,
+            size: 0,
+            ino: 0,
+            ctime_ns: 0,
+        });
+
+        let snapshot = EphemeralSink::new(&store);
+        let mut listings = kit_core::worktree::DirListings::default();
+        kit_core::worktree::build_tree_filtered_listed_with_source(
+            &snapshot,
+            &snapshot,
+            root,
+            Some(&idx),
+            &mut listings,
+        )
+        .unwrap();
+        assert!(
+            listings.get("a/b").is_some(),
+            "a directory the walk entered"
+        );
+        assert!(listings.get("cache").is_none(), "an ignored one it did not");
+        assert!(
+            listings.get("shadow").is_none(),
+            "one that hides a tracked file"
+        );
+
+        let ignore = kit_core::ignore::load(root).unwrap();
+        for targets in [
+            vec!["other".to_owned()],
+            vec!["cache/deep/new".to_owned()],
+            vec!["shadow/inner".to_owned()],
+        ] {
+            let mut again = Vec::new();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut again,
+                Some((&ignore, &targets)),
+                None,
+            )
+            .unwrap();
+            let mut listed = Vec::new();
+            super::collect_restore_paths(
+                root,
+                root,
+                "",
+                &mut listed,
+                Some((&ignore, &targets)),
+                Some(&listings),
+            )
+            .unwrap();
+            assert_eq!(listed, again, "targets {targets:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    #[test]
+    fn a_control_character_in_a_path_is_escaped() {
+        for text in [
+            super::local_changes_message("a\u{1b}b"),
+            super::staged_changes_message("a\u{1b}b"),
+            super::overwrite_untracked_message("a\u{1b}b"),
+            super::remove_untracked_message("a\u{1b}b"),
+        ] {
+            assert!(
+                text.contains("a\\u{1b}b") && !text.contains('\u{1b}'),
+                "{text:?}"
+            );
+        }
     }
 }
 
@@ -1103,7 +1479,13 @@ mod nonclean_walk_tests {
     fn nonclean_walk_does_not_parse_untracked_directory_ignore_files() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("untracked/.gitignore")).unwrap();
-        let (_, paths) = super::restore_paths(dir.path(), &["new".to_owned()], false).unwrap();
+        let (_, paths) = super::restore_paths(
+            dir.path(),
+            &["new".to_owned()],
+            false,
+            &kit_core::worktree::DirListings::default(),
+        )
+        .unwrap();
         assert!(paths.contains(&"untracked/.gitignore".to_owned()));
     }
 }

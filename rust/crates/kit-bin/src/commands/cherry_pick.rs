@@ -21,7 +21,7 @@ use kit_core::layout::RepoLayout;
 use kit_core::object::{Commit, Object};
 use kit_core::ops::cherry_pick::{CherryPickError, cherry_pick};
 use kit_core::ops::conflict_state::{
-    self, CherryPickState, in_progress_op_name, is_cherry_pick_in_progress,
+    self, CherryPickState, ConflictRecord, in_progress_op_name, is_cherry_pick_in_progress,
 };
 use kit_core::refs::{self, Head};
 use kit_core::serialize;
@@ -185,16 +185,8 @@ fn start(
         if let Err(e) = super::ensure_restore_safe(layout, store, result.tree_hash) {
             return emit_err(&e, exit::GENERAL_ERROR);
         }
-        let records = match libkit::conflict::materialize(
-            layout,
-            store,
-            result.tree_hash,
-            &result.conflicts,
-            &super::conflict::Notes,
-        ) {
-            Ok(r) => r,
-            Err(e) => return super::fail(e),
-        };
+        let records: Vec<ConflictRecord> =
+            result.conflicts.iter().map(ConflictRecord::from).collect();
         let state = CherryPickState {
             cherry_pick_head: target,
             orig_head: ours,
@@ -208,14 +200,34 @@ fn start(
         {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
-        if let Err(e) = conflict_state::write_cherry_pick_state(layout, &state, &records) {
+        if let Err(e) = conflict_state::begin_cherry_pick_state(layout, &state) {
+            return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
+        }
+        // The operation is recorded before the material, and its conflict
+        // list after. A stop in between leaves an operation that `--abort`
+        // can undo, never markers with no operation behind them, and one
+        // that `--continue` and a commit refuse, because they need the list.
+        if let Err(e) = libkit::conflict::materialize(
+            layout,
+            store,
+            result.tree_hash,
+            &result.conflicts,
+            &super::conflict::Notes,
+        ) {
+            return super::fail(e);
+        }
+        if let Err(e) = conflict_state::write_conflicts(layout.worktree_state_dir(), &records) {
             return emit_err(&format!("write cherry-pick state: {e}"), exit::CANTCREAT);
         }
         let mut stderr = std::io::stderr().lock();
         // git-shaped per-path conflict lines (additive), then kit's
         // resumable-flow hint.
         for rec in &records {
-            let _ = writeln!(stderr, "CONFLICT (content): Merge conflict in {}", rec.path);
+            let _ = writeln!(
+                stderr,
+                "CONFLICT (content): Merge conflict in {}",
+                super::display_path(&rec.path)
+            );
         }
         let _ = writeln!(
             stderr,
@@ -354,7 +366,8 @@ fn cont(layout: &RepoLayout, store: &ObjectStore, json: bool) -> u8 {
         Ok(Some(path)) => {
             return emit_err(
                 &format!(
-                    "unresolved conflict markers remain in '{path}'; resolve and `kit add` it"
+                    "unresolved conflict markers remain in '{}'; resolve and `kit add` it",
+                    super::display_path(&path)
                 ),
                 exit::GENERAL_ERROR,
             );
@@ -471,7 +484,7 @@ fn restore_to(
     layout: &RepoLayout,
     store: &ObjectStore,
     target: Hash,
-    records: &[kit_core::ops::conflict_state::ConflictRecord],
+    records: &[ConflictRecord],
 ) -> Result<(), u8> {
     let target_tree = load_tree_hash(store, target)?;
     // The operation's result tree lets the guards treat its clean hunks (not

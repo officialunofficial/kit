@@ -9,7 +9,7 @@
 //! * [`spec`] turns the spellings of a person into the canonical statements
 //!   of SPEC-WRITE-GRANTS §3, §5.1 and §9.1.
 //! * [`store`] keeps one file for each grant and re-verifies each on load.
-//! * [`connect`] chooses the grant that a Connect client presents, and checks
+//! * `connect` (with the `sync` and `transport-connect` features) chooses the grant that a Connect client presents, and checks
 //!   that the stored grants cover every advance of a split push.
 //! * This module checks a header against the rules of the specification.
 

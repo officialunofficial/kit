@@ -184,17 +184,25 @@ logged hash is a GC root (clock-free, strict/fail-closed parse), and
 (default: younger than 90 days **or** among the most recent 50) so they
 stop pinning objects. A gc run expires first, then computes roots.
 
-`record` is durable &mdash; it `fsync`s the log file and its parent directory
-before returning &mdash; so a crash cannot leave a ref rewrite persisted while
-its recovery entry is lost. `record` and `expire` are **not** internally
+The entry is durable before the ref rewrite that it protects is published, so
+a crash cannot leave a ref rewrite persisted while its recovery entry is lost.
+`record` makes it durable before it returns (it `fsync`s the log file and its
+parent directory). `record_in` writes the line out and leaves it to the
+caller's shared flush, which MUST come before the ref rename (SPEC-OBJECTS
+§10.1, "Shared flush points"). A last line without its newline is an append that a
+crash or a full disk cut short: readers ignore it, and `record` cuts the file
+back to its last newline before it appends. The caller moves the ref only after
+`record` returns, so a cut entry protects nothing that moved. A tab in the
+branch field is two entries glued together and fails the parse. `record`
+takes the leaf `recovery-log.lock` for its append, so two trees that record at
+once cannot cut each other's line off. `expire` is **not** internally
 synchronized: `ops::recovery`'s own concurrency note requires callers to
 hold "the repo lock" &mdash; in practice each producer's per-tree
 `worktree.lock` (see SPEC-CONCURRENCY §3.2). gc's "expire → collect
 roots → prune" sequence runs under the full lock set SPEC-CONCURRENCY §4
 assigns to `gc` &mdash; every registered tree's `worktree.lock`, a superset of
 any single producer's one tree &mdash; so a producer append can never race an
-`expire` rewrite and vanish, without either side needing a distinct,
-dedicated recovery-log lock.
+`expire` rewrite and vanish, without `expire` needing the recovery-log lock.
 
 **Status:** complete. The recovery log and its producers
 are implemented &mdash; `commit --amend`, `reset`, and `rebase` each
@@ -399,7 +407,7 @@ Gc publishes every output durably (SPEC-OBJECTS §10.1) under the shared
 before retiring any input. Under the exclusive `format` try-lock, before
 the first input unlink, gc checks that both members of every output and
 covering pair are present under their final names with unchanged stamps. It
-then flushes those files, the pack directory and the objects directory.
+then makes those files, the pack directory and the objects directory durable.
 A missed try-lock retires nothing. The outputs stay as duplicates, and
 the next run takes them as coverage for the live entries. It copies again
 only the entries that coverage may not drop. If the copy itself fails, gc
@@ -448,7 +456,11 @@ rediscover the replacements.
 
 Gc also drops a loose duplicate, including one left by a push, after
 verifying a durable packed copy of the same id. It rechecks the loose
-candidate and replacement under the exclusive `format` try-lock. Keep
+candidate and replacement under the exclusive `format` try-lock, once per
+batch of at most 32 duplicates and 256 MiB of loose files in one pair, and
+counts each batch in the reported hold like a retirement batch. The pair is
+made durable before its first unlink, and a later batch rechecks the pair's
+stamps. Keep
 a loose copy still within grace when the packed copy is older. A
 duplicate can be reachable because the operation leaves a verified,
 usable copy. Gc keeps the loose copy when
@@ -499,7 +511,9 @@ The stamp is advisory and never authorizes deletion.
 
 **Sweep.** List `objects/pack/` by name to count published pairs and
 find recognized staging files and lone final members. Apply the manual
-orphan rule above at the default grace. Under the exclusive `format`
+orphan rule above at the default grace, except that the sweep leaves a lone
+pack alone: a pack without its index is invisible to readers, so the
+automatic step removes one only in its collection, after the mark (step 3). Under the exclusive `format`
 try-lock, recheck the candidate's name, counterpart, file identity and
 age. Keep the manual sweep's directory flush before unlinking the
 leftovers and its second flush after the unlinks. The sweep reads no object
@@ -566,7 +580,11 @@ than 32 packs, and the step costs a mark of the whole history.
    copy planning that follows defers only the copy. If every verified pack
    fails its recheck before retirement, the step reports `over_budget` and
    keeps the 7-day interval of a finished step. A damaged pair or
-   cancellation ends collection before retirement. Then plan
+   cancellation ends collection before retirement. Also plan each pack
+   that was already lone, and past grace, before the mark began: the mark
+   read every live object without it, so a live object that only such a pack
+   held would have stopped collection at step 2, and what is left in it is
+   not needed. Retirement rechecks that it is still lone. Then plan
    copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
    keep only the inputs whose survivors fit in one output pack: at most
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
@@ -619,7 +637,9 @@ or invalidates fetch records. Collection stops on an
 integrity error without retiring a pair or repairing anything. A
 completed orphan sweep stands. An interruption during retirement can
 leave a lone index. The orphan rule removes it on a later sweep. A
-torn stamp can only cause a new attempt.
+torn stamp can only cause a new attempt: a step that finds a stamp it cannot
+read replaces it with the stamp of a step that never ran, which is due as soon
+as the store holds the floor.
 
 ### Integrity checks and repair
 
@@ -631,8 +651,9 @@ the same pack is still present, scan and verify it independently of
 the old index, and make its name durable before publishing a staged
 replacement index under SPEC-OBJECTS §10.1. If the pack changed, restart
 validation. A lone index is a crash leftover and cannot be rebuilt.
-Ordinary repair leaves a lone pack invisible. Gc handles recognized
-leftovers after grace.
+Repair also gives a lone pack its index: under the same try-lock it checks
+that the pack is still lone, scans and verifies the whole pack, and
+publishes the index as above. Gc handles recognized leftovers after grace.
 
 If the payload cannot be verified, report the damage. Invalidate the
 affected applied-pack records and fetch shortcuts, conservatively
@@ -659,7 +680,7 @@ remains an error.
 | A chunk that is not a blob aborts gc | the mark reads the type of each distinct chunk and returns `GcRootsError::ChunkNotBlob` before the sweep lists an object ("Fail-closed requirement") |
 | gc holds neither every loose object nor an uncompacted chunk buffer | the sweep lists one `objects/<2 hex>/` directory at a time, and the chunk ids are compacted before the buffer grows past its threshold ("Retention roots") |
 | A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.kit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
-| A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
+| A crash cannot persist a ref rewrite while losing its recovery entry | the entry is durable before the ref rename: `record` flushes the log file and its parent directory before returning, and `record_in` leaves a flush that comes before the ref rename ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
 | A writer outside gc's lock set never publishes a dangling ref | when every newly reachable object has an on-disk `mtime` strictly within `grace` of publication; import refreshes writes and complete cached closures, and the final sweep check is excluded from refresh ("Concurrent writers and the grace window") |

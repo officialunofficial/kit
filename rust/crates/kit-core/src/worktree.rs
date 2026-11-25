@@ -173,7 +173,7 @@ pub fn build_tree_filtered_observed<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_snapshot(sink, None, dir, index, observations, false)
+    build_tree_snapshot(sink, None, dir, index, observations, false, None)
 }
 
 /// Build a snapshot with read access to newly written and indexed objects.
@@ -189,7 +189,32 @@ pub fn build_tree_filtered_observed_with_source<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
 ) -> WorktreeResult<Hash> {
-    build_tree_snapshot(sink, Some(source), dir, index, observations, false)
+    build_tree_snapshot(sink, Some(source), dir, index, observations, false, None)
+}
+
+/// [`build_tree_filtered_observed_with_source`] that also records, in
+/// `listings`, what the walk read of each directory it entered. A caller that
+/// must list those directories again can read them from `listings` and spare
+/// the second pass over the disk.
+///
+/// # Errors
+/// See [`build_tree_filtered_observed_with_source`].
+pub fn build_tree_filtered_listed_with_source<S: ObjectSink + Sync + ?Sized>(
+    sink: &S,
+    source: &(dyn crate::store::ObjectSource + Sync),
+    dir: &Path,
+    index: Option<&Index>,
+    listings: &mut DirListings,
+) -> WorktreeResult<Hash> {
+    build_tree_snapshot(
+        sink,
+        Some(source),
+        dir,
+        index,
+        &mut Vec::new(),
+        false,
+        Some(listings),
+    )
 }
 
 // Status hides interrupted restore artifacts. Restore safety checks use
@@ -201,6 +226,7 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     index: Option<&Index>,
     observations: &mut Vec<StatObservation>,
     skip_restore_temps: bool,
+    listings: Option<&mut DirListings>,
 ) -> WorktreeResult<Hash> {
     let ignores = ignore::load(dir).map_err(|e| match e {
         crate::ignore::IgnoreError::Io(io) => WorktreeError::Io(io),
@@ -230,6 +256,7 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
     // and the walk consults it once per regular file.
     let by_path: std::collections::HashMap<&str, &crate::index::IndexEntry> =
         index.entries.iter().map(|e| (e.path.as_str(), e)).collect();
+    let stats = TrackedStats::collect(dir, index);
     let mut misses = Vec::new();
     let pending = build_tree_inner(
         sink,
@@ -238,9 +265,11 @@ pub(crate) fn build_tree_snapshot<S: ObjectSink + Sync + ?Sized>(
         &ignores,
         index,
         &by_path,
+        &stats,
         false,
         skip_restore_temps,
         &mut misses,
+        listings,
     )?;
     let mut hashed = vec![
         TreeEntry {
@@ -290,6 +319,67 @@ fn directory_ignores<'a>(
     }
 }
 
+/// The `lstat` of `path`, which is `rel_path` from the root: the stat pass's if
+/// it took one, else a fresh one, which does not follow symlinks. A path the
+/// pass could not stat is stat'ed here, so its error surfaces where the walk
+/// reaches it.
+fn stat_of<'a>(
+    stats: &'a TrackedStats,
+    rel_path: &str,
+    path: &Path,
+) -> io::Result<std::borrow::Cow<'a, fs::Metadata>> {
+    match stats.get(rel_path) {
+        Some(meta) => Ok(std::borrow::Cow::Borrowed(meta)),
+        None => path.symlink_metadata().map(std::borrow::Cow::Owned),
+    }
+}
+
+/// Add the regular file `name`, whose stat is `meta`, to the tree being built.
+///
+/// Stat cache: when the staging index proves this file's content via
+/// mtime+size+ino+ctime (+exec class), reuse the staged hash without opening
+/// the file — O(stat) instead of O(content) for unchanged files. The object was
+/// stored at `add` time, so the tree reference stays resolvable. Any other
+/// file is a miss, to be hashed once the walk is done.
+#[allow(clippy::too_many_arguments)]
+fn push_file<'e>(
+    entries: &mut Vec<TreeEntry>,
+    files: &mut Vec<(usize, usize)>,
+    misses: &mut Vec<PendingFileHash<'e>>,
+    indexed: Option<&'e crate::index::IndexEntry>,
+    meta: &fs::Metadata,
+    name: String,
+    abs_path: PathBuf,
+    rel_path: String,
+) {
+    if let Some(e) = indexed.filter(|e| stat_matches(e, meta)) {
+        entries.push(TreeEntry {
+            name: name.into_bytes(),
+            mode: entry_mode_from_file_metadata(meta),
+            object_hash: e.object_hash,
+        });
+        return;
+    }
+    // Placeholder, overwritten by `hash_pending_files` below once every miss
+    // in this directory has been hashed — its slot is this entry's fixed
+    // position in `entries`.
+    let slot = entries.len();
+    entries.push(TreeEntry {
+        name: name.into_bytes(),
+        mode: EntryMode::Blob,
+        object_hash: crate::hash::ZERO,
+    });
+    files.push((slot, misses.len()));
+    misses.push(PendingFileHash {
+        slot: misses.len(),
+        abs_path,
+        rel_path,
+        indexed,
+        #[cfg(not(target_arch = "wasm32"))]
+        size: meta.len(),
+    });
+}
+
 /// `rel_dir` is the path of `dir` relative to the repo root (empty at the
 /// root), so ignore patterns can be matched against full repo-relative paths
 /// rather than bare basenames. `parent_ignored` carries down whether an
@@ -303,15 +393,18 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
     ignores: &IgnoreList,
     index: &Index,
     by_path: &std::collections::HashMap<&str, &'e crate::index::IndexEntry>,
+    stats: &TrackedStats,
     parent_ignored: bool,
     skip_restore_temps: bool,
     misses: &mut Vec<PendingFileHash<'e>>,
+    mut listings: Option<&mut DirListings>,
 ) -> WorktreeResult<PendingTree> {
     let scoped = directory_ignores(dir, ignores, rel_dir.is_empty() || parent_ignored)?;
     let ignores = scoped.as_ref();
     let mut entries: Vec<TreeEntry> = Vec::new();
     let mut files = Vec::new();
     let mut children = Vec::new();
+    let mut listing = listings.is_some().then(Vec::new);
 
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -320,14 +413,17 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
             .to_str()
             .ok_or(WorktreeError::InvalidUtf8)?
             .to_string();
-        // `symlink_metadata` does not follow symlinks.
-        let meta = entry.path().symlink_metadata()?;
-        let is_dir = meta.is_dir();
         let rel_path = if rel_dir.is_empty() {
             name_str.clone()
         } else {
             format!("{rel_dir}/{name_str}")
         };
+        let stat = stat_of(stats, &rel_path, &entry.path())?;
+        let meta: &fs::Metadata = &stat;
+        let is_dir = meta.is_dir();
+        if let Some(listing) = &mut listing {
+            listing.push((name_str.clone(), is_dir));
+        }
         // A historical entry, including a staged deletion, still has a path
         // of its own. A scratch file cannot take the place of a tracked directory.
         if skip_restore_temps
@@ -355,39 +451,16 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         }
 
         if meta.file_type().is_file() {
-            // Stat cache: when the staging index proves this file's
-            // content via mtime+size+ino+ctime (+exec class), reuse the
-            // staged hash without opening the file — O(stat) instead of
-            // O(content) for unchanged files. The object was stored at
-            // `add` time, so the tree reference stays resolvable.
-            let indexed = by_path.get(rel_path.as_str()).copied();
-            let cached = indexed.filter(|e| stat_matches(e, &meta));
-            if let Some(e) = cached {
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: entry_mode_from_file_metadata(&meta),
-                    object_hash: e.object_hash,
-                });
-            } else {
-                // Placeholder, overwritten by `hash_pending_files` below
-                // once every miss in this directory has been hashed —
-                // its slot is this entry's fixed position in `entries`.
-                let slot = entries.len();
-                entries.push(TreeEntry {
-                    name: name_str.into_bytes(),
-                    mode: EntryMode::Blob,
-                    object_hash: crate::hash::ZERO,
-                });
-                files.push((slot, misses.len()));
-                misses.push(PendingFileHash {
-                    slot: misses.len(),
-                    abs_path: entry.path(),
-                    rel_path,
-                    indexed,
-                    #[cfg(not(target_arch = "wasm32"))]
-                    size: meta.len(),
-                });
-            }
+            push_file(
+                &mut entries,
+                &mut files,
+                misses,
+                by_path.get(rel_path.as_str()).copied(),
+                meta,
+                name_str,
+                entry.path(),
+                rel_path,
+            );
         } else if meta.file_type().is_dir() {
             // A directory on disk at a path tracked as a *file* shadows that
             // tracked entry. git reports only the tracked-side deletion and
@@ -404,9 +477,11 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
                 ignores,
                 index,
                 by_path,
+                stats,
                 entry_ignored,
                 skip_restore_temps,
                 misses,
+                listings.as_deref_mut(),
             )?;
             children.push((entries.len(), h));
             entries.push(TreeEntry {
@@ -421,6 +496,9 @@ fn build_tree_inner<'e, S: ObjectSink + Sync + ?Sized>(
         }
     }
 
+    if let (Some(listings), Some(listing)) = (listings, listing) {
+        listings.dirs.insert(rel_dir.to_owned(), listing);
+    }
     Ok(PendingTree {
         entries,
         files,
@@ -445,6 +523,91 @@ fn symlink_entry<S: ObjectSink + ?Sized>(
         mode: EntryMode::Symlink,
         object_hash: sink.put_parts(&[&prologue, target_bytes])?,
     })
+}
+
+/// Below this many tracked entries a walk stats each file as it reaches it:
+/// the dispatch to the thread pool costs more than the stats it spreads. A
+/// `lstat` of a cached path is a few microseconds, so about 500 of them cost
+/// as much as waking the pool.
+#[cfg(not(target_arch = "wasm32"))]
+const STAT_PASS_MIN_ENTRIES: usize = 512;
+
+/// The `lstat` of the files an index tracks, taken on the thread pool before
+/// a walk of the worktree that will ask for almost every one of them.
+///
+/// It is a cache the walk consults, never a replacement for the walk. The
+/// walk looks a path up only after it found the name in a directory it read,
+/// so a path behind a symlink or inside a directory the walk does not enter
+/// is never asked for, though `lstat("link/x")` would follow the link. A path
+/// the pass could not stat, because the file is gone or unreadable, has no
+/// entry: the walk stats it itself, so the error and its place in the walk
+/// stay what they were. Entries are looked up by path, so the order the pool
+/// finished them in changes nothing.
+///
+/// A file that changes between the pass and the walk is judged as it was at
+/// the pass, as git's `preloadindex` does; an edit made while the command
+/// runs has no defined side of it either way.
+#[derive(Debug, Default)]
+pub struct TrackedStats {
+    stats: std::collections::HashMap<String, fs::Metadata>,
+}
+
+/// Whether the stat pass is worth its fork: more than one thread to run it
+/// on, and at least [`STAT_PASS_MIN_ENTRIES`] tracked entries to stat.
+#[cfg(not(target_arch = "wasm32"))]
+fn stat_pass_runs(threads: usize, entries: usize) -> bool {
+    threads > 1 && entries >= STAT_PASS_MIN_ENTRIES
+}
+
+impl TrackedStats {
+    /// Stat every entry of `index` that is not a deletion, under `root`.
+    /// Below 512 entries, on one thread, and on wasm,
+    /// it takes none and leaves every stat to the walk.
+    #[must_use]
+    pub fn collect(root: &Path, index: &Index) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if stat_pass_runs(available_threads(), index.entries.len()) {
+            use rayon::prelude::*;
+            let stats = index
+                .entries
+                .par_iter()
+                .filter(|entry| entry.status != index::EntryStatus::Removed)
+                .filter_map(|entry| {
+                    let meta = fs::symlink_metadata(root.join(&entry.path)).ok()?;
+                    Some((entry.path.clone(), meta))
+                })
+                .collect();
+            return Self { stats };
+        }
+        let _ = (root, index);
+        Self::default()
+    }
+
+    /// The stat the pass took of the tracked path `path`, if it took one.
+    #[must_use]
+    pub fn get(&self, path: &str) -> Option<&fs::Metadata> {
+        self.stats.get(path)
+    }
+}
+
+/// What a walk read of each directory it entered: every name that is valid
+/// UTF-8 and whether it is a directory (not a symlink to one), in the order the
+/// file system listed them, under the directory's path from the root.
+///
+/// The directories a walk leaves out, as it does an ignored one, are not in
+/// it, so a caller reads those from the disk.
+#[derive(Debug, Default)]
+pub struct DirListings {
+    dirs: std::collections::HashMap<String, Vec<(String, bool)>>,
+}
+
+impl DirListings {
+    /// The listing of the directory `rel_dir` (empty for the root), if the
+    /// walk read it.
+    #[must_use]
+    pub fn get(&self, rel_dir: &str) -> Option<&[(String, bool)]> {
+        self.dirs.get(rel_dir).map(Vec::as_slice)
+    }
 }
 
 /// Directory entries retain their walk slots until every file has been hashed.
@@ -4634,5 +4797,163 @@ mod tests {
             store.read_object(&id).unwrap(),
             crate::object::Object::ChunkedBlob(_)
         ));
+    }
+
+    /// `n` tracked files under eight directories, each with a stat cache that
+    /// matches, and an index holding them.
+    fn tracked_files(work: &Path, n: usize) -> Index {
+        let mut idx = Index::new();
+        for i in 0..n {
+            let rel = format!("d{:02}/f{i:04}.txt", i % 8);
+            let path = work.join(&rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let content = format!("content {i}");
+            fs::write(&path, &content).unwrap();
+            let (mtime_ns, size, ino, ctime_ns) =
+                stat_cache_fields(&fs::symlink_metadata(&path).unwrap());
+            idx.upsert_entry(crate::index::IndexEntry {
+                path: rel,
+                status: crate::index::EntryStatus::Blob,
+                object_hash: hash_file_object(content.as_bytes()).unwrap(),
+                mtime_ns,
+                size,
+                ino,
+                ctime_ns,
+            });
+        }
+        idx
+    }
+
+    /// Past the size the stat pass starts at, the walk builds the tree it
+    /// builds without the index: a changed file is hashed, an unchanged one
+    /// is not read, an untracked one is found.
+    #[test]
+    fn the_stat_pass_leaves_the_tree_the_walk_builds_as_it_was() {
+        let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
+        let work = TempDir::new().unwrap();
+        let idx = tracked_files(work.path(), 700);
+        fs::write(work.path().join("untracked.txt"), b"new").unwrap();
+        fs::write(work.path().join("d00/f0000.txt"), b"a longer, changed file").unwrap();
+        fs::remove_file(work.path().join("d01/f0001.txt")).unwrap();
+        let mut observed = Vec::new();
+        let with_index =
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
+    }
+
+    /// The pass runs only with a second thread and at least the minimum of entries.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_stat_pass_runs_only_with_threads_to_spare_and_enough_entries() {
+        assert!(!stat_pass_runs(1, STAT_PASS_MIN_ENTRIES));
+        assert!(!stat_pass_runs(1, 100_000));
+        assert!(!stat_pass_runs(8, STAT_PASS_MIN_ENTRIES - 1));
+        assert!(!stat_pass_runs(8, 0));
+        assert!(stat_pass_runs(2, STAT_PASS_MIN_ENTRIES));
+        assert!(stat_pass_runs(8, STAT_PASS_MIN_ENTRIES + 1));
+    }
+
+    /// The pass takes the `lstat` of each tracked file that is there, none for
+    /// a deletion or a file that is gone, and none below its size.
+    #[test]
+    fn the_stat_pass_stats_each_tracked_file_that_is_there() {
+        let work = TempDir::new().unwrap();
+        let mut idx = tracked_files(work.path(), STAT_PASS_MIN_ENTRIES);
+        let gone = "d00/f0000.txt";
+        fs::remove_file(work.path().join(gone)).unwrap();
+        let removed = "d01/f0001.txt";
+        let pos = idx.find_entry(removed).unwrap();
+        idx.entries[pos].status = crate::index::EntryStatus::Removed;
+        let stats = TrackedStats::collect(work.path(), &idx);
+        if available_threads() == 1 {
+            assert!(stats.get("d02/f0002.txt").is_none(), "one thread: no pass");
+            return;
+        }
+        for entry in &idx.entries {
+            let expected = fs::symlink_metadata(work.path().join(&entry.path)).ok();
+            let expected = expected.filter(|_| entry.path != removed);
+            assert_eq!(
+                stats.get(&entry.path).map(stat_cache_fields),
+                expected.as_ref().map(stat_cache_fields),
+                "{}",
+                entry.path
+            );
+        }
+        let small = Index::new();
+        assert!(
+            TrackedStats::collect(work.path(), &small)
+                .get(gone)
+                .is_none()
+        );
+    }
+
+    /// A directory replaced by a symlink to a directory with the same names is
+    /// a symlink to the walk, whatever `lstat("link/name")` finds through it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_is_not_entered_after_the_stat_pass() {
+        use crate::store::ObjectSource as _;
+        let (_sd, store) = fresh_store();
+        let snapshot = crate::store::EphemeralSink::new(&store);
+        let work = TempDir::new().unwrap();
+        let idx = tracked_files(work.path(), 700);
+        fs::rename(work.path().join("d03"), work.path().join("real")).unwrap();
+        std::os::unix::fs::symlink("real", work.path().join("d03")).unwrap();
+        let mut observed = Vec::new();
+        let with_index =
+            build_tree_filtered_observed(&snapshot, work.path(), Some(&idx), &mut observed)
+                .unwrap();
+        assert_eq!(with_index, build_tree(&snapshot, work.path()).unwrap());
+        let Object::Tree(root) = snapshot.read_object(&with_index).unwrap() else {
+            panic!("expected tree");
+        };
+        let link = root.entries.iter().find(|e| e.name == b"d03").unwrap();
+        assert_eq!(link.mode, EntryMode::Symlink);
+    }
+
+    /// The walk keeps what it read of each directory it enters, in listing
+    /// order, with whether each name is a directory, and nothing of one it
+    /// leaves out.
+    #[test]
+    fn the_walk_keeps_a_listing_of_each_directory_it_enters() {
+        let (_sd, store) = fresh_store();
+        let work = TempDir::new().unwrap();
+        fs::create_dir_all(work.path().join("a/b")).unwrap();
+        fs::create_dir_all(work.path().join("skip")).unwrap();
+        fs::write(work.path().join(".gitignore"), "skip/\n*.log\n").unwrap();
+        fs::write(work.path().join("a/b/f"), b"f").unwrap();
+        fs::write(work.path().join("a/x.log"), b"x").unwrap();
+        fs::write(work.path().join("skip/k"), b"k").unwrap();
+        let mut listings = DirListings::default();
+        build_tree_filtered_listed_with_source(
+            &crate::store::EphemeralSink::new(&store),
+            &crate::store::EphemeralSink::new(&store),
+            work.path(),
+            None,
+            &mut listings,
+        )
+        .unwrap();
+        let sorted = |dir: &str| {
+            let mut names = listings.get(dir).unwrap().to_vec();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            sorted(""),
+            vec![
+                (".gitignore".to_owned(), false),
+                ("a".to_owned(), true),
+                ("skip".to_owned(), true),
+            ]
+        );
+        // The ignored file is listed, though the tree leaves it out.
+        assert_eq!(
+            sorted("a"),
+            vec![("b".to_owned(), true), ("x.log".to_owned(), false)]
+        );
+        assert_eq!(sorted("a/b"), vec![("f".to_owned(), false)]);
+        assert!(listings.get("skip").is_none());
     }
 }

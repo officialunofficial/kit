@@ -33,7 +33,7 @@
 //! `SQLite`'s macOS sync strategy:
 //!
 //! Every staged file gets a real per-file writeback before the batch's
-//! full flush — Apple `fcntl(F_BARRIERFSYNC)`, Linux `fdatasync`,
+//! full flush — Apple `fsync(2)`, Linux `fdatasync`,
 //! Windows `FlushFileBuffers`. Each barrier is issued from a background
 //! worker pool as soon as its file is staged, so device latency overlaps
 //! the caller's chunking and hashing and runs at queue depth, not
@@ -72,6 +72,7 @@ use std::thread::JoinHandle;
 
 use tempfile::TempPath;
 
+use crate::durable::Group;
 use crate::hash::Hash;
 use crate::store::{
     ChunkOrigin, HashedChunk, LocalPackWriter, MAX_RAW_OBJECT_SIZE, ObjectSink, ObjectStore,
@@ -104,31 +105,92 @@ pub enum SyncPolicy {
 /// flushes per batch claim. Distinct from [`SyncPolicy`], which is a
 /// production knob deciding *whether* to flush; the syncer decides
 /// *how*.
+///
+/// A **writeout** hands a file's or a directory's dirty data to the drive
+/// and waits for the call to return. A **flush** (a `full` flush of one
+/// file, or [`Syncer::flush`] of a device) also empties the drive's volatile
+/// cache. [`crate::durable`] builds its pointer writes and its [`Group`]
+/// on these calls.
+///
+/// [`Group`]: crate::durable::Group
 pub(crate) trait Syncer: Send + Sync + fmt::Debug {
-    /// Writeback + ordering barrier for one staged file. Must guarantee
-    /// the file's bytes reach the device before any later
-    /// [`Syncer::full`] completes, without forcing a device cache
-    /// flush.
-    fn barrier(&self, file: &File, path: &Path) -> io::Result<()>;
+    /// Writeout of one staged file. Must guarantee the file's bytes reach
+    /// the device before any later [`Syncer::full`] or [`Syncer::flush`]
+    /// completes, without forcing a device cache flush.
+    fn writeout(&self, file: &File, path: &Path) -> io::Result<()>;
     /// Full durable flush (device cache included) of `file`.
     fn full(&self, file: &File, path: &Path) -> io::Result<()>;
     /// Atomically rename a staged temp file into its final path,
     /// replacing any existing file.
     fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()>;
+    /// Rename a staged temp file into its final path unless the path
+    /// exists. `Ok(false)` leaves the existing file and drops the temp
+    /// file.
+    fn rename_new(&self, tmp: TempPath, final_path: &Path) -> io::Result<bool> {
+        match tmp.persist_noclobber(final_path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e.error),
+        }
+    }
     /// Durably flush the directory entry updates of `dir` — the per-object
     /// schedule ([`SyncPolicy::PerObject`] and
     /// `ObjectStore::write`).
     fn dir_sync(&self, dir: &Path) -> io::Result<()>;
-    /// Writeback + ordering barrier for the dirent updates of `dir`,
-    /// without forcing a device cache flush. Must guarantee the dirents
-    /// reach the device before a later [`Syncer::device_flush`]
-    /// completes. Batched schedule only; needs the trailing
-    /// `device_flush` to be durable.
-    fn dir_barrier(&self, dir: &Path) -> io::Result<()>;
+    /// Writeout of the dirent updates of `dir`, without forcing a device
+    /// cache flush. Must guarantee the dirents reach the device before a
+    /// later [`Syncer::flush`] completes. Batched schedule only; needs the
+    /// trailing `flush` to be durable.
+    fn dir_writeout(&self, dir: &Path) -> io::Result<()>;
     /// Terminal full flush of the device write cache, anchored at the
-    /// store's `objects/` root. Makes everything previously
-    /// barrier-ordered (file data and dirents alike) durable.
-    fn device_flush(&self, objects_root: &Path) -> io::Result<()>;
+    /// directory `anchor` (the store's `objects/` root for a batch). Makes
+    /// everything previously written out on that device (file data and
+    /// dirents alike) durable.
+    fn flush(&self, anchor: &Path) -> io::Result<()>;
+    /// Whether a writeout needs a later [`Syncer::flush`] to be durable.
+    /// False where every writeout is durable on its own (Linux, Windows), so
+    /// a [`Group`] makes no flush call there.
+    ///
+    /// [`Group`]: crate::durable::Group
+    fn writeouts_need_flush(&self) -> bool;
+    /// The device that holds the open `file`, which lives in `dir`: the device
+    /// its writeout went to, whatever happens to its directory meanwhile. A
+    /// file that cannot be inspected is on device zero, which no flush anchor
+    /// matches, so the flush that needs it fails.
+    fn device_of_file(&self, file: &File, _dir: &Path) -> Option<u64> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Some(file.metadata().map_or(0, |meta| meta.dev()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Some(0)
+        }
+    }
+    /// The device that holds the directory `dir`, or `None` when it is gone.
+    /// A [`Group`] flushes once for each device it wrote to. Zero where the
+    /// platform has no device numbers.
+    ///
+    /// [`Group`]: crate::durable::Group
+    fn device_of(&self, dir: &Path) -> Option<u64> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            match fs::metadata(dir) {
+                Ok(meta) => Some(meta.dev()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                // A directory that cannot be inspected is not one that is gone:
+                // keep it in the flush, which then fails for it.
+                Err(_) => Some(0),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            dir.exists().then_some(0)
+        }
+    }
 }
 
 /// Production [`Syncer`].
@@ -136,30 +198,26 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
 pub(crate) struct RealSyncer;
 
 impl RealSyncer {
-    /// Per-file write barrier: order this file's writeback ahead of the
-    /// batch's terminal device flush, as cheaply as the platform allows.
+    /// Per-file writeback: send this file's bytes to the drive ahead of the
+    /// batch's terminal device flush.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn file_barrier(file: &File) -> io::Result<()> {
-        use std::os::unix::io::AsRawFd;
         // Apple: `File::sync_data()`/`sync_all()` both map to
-        // `fcntl(F_FULLFSYNC)` — a full device-cache flush. F_BARRIERFSYNC
-        // is the cheaper primitive the module docs assume: it forces this
-        // file's writeback and orders it ahead of later writes WITHOUT a
-        // device flush. The single terminal `device_flush` (one
-        // F_FULLFSYNC) still makes the whole batch durable, so the per-
-        // file step stays a true barrier rather than N full flushes.
-        //
-        // SAFETY: `fcntl(2)` with `F_BARRIERFSYNC` takes only the fd and
-        // the command — it reads/writes no user memory, and the fd is
-        // valid for the borrow of `file`.
-        #[allow(unsafe_code)]
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) };
-        if rc == -1 {
-            // Some filesystems reject the fcntl — fall back to the full
-            // flush rather than weaken durability.
-            return file.sync_data();
+        // `fcntl(F_FULLFSYNC)`, a full device-cache flush. `fsync(2)` is the
+        // writeout: it hands the file's bytes to the drive and does not flush
+        // the drive's cache. The single terminal `flush` (one
+        // F_FULLFSYNC) drains that cache and makes every earlier writeout of
+        // the batch durable, so the per-file step is a writeout and not N
+        // full flushes. A `F_BARRIERFSYNC` per file costs as much as a full
+        // flush on an Apple SSD and adds nothing here, because a full flush
+        // always follows before a ref or the index names the objects.
+        match rustix::fs::fsync(file) {
+            Ok(()) => Ok(()),
+            // Some filesystems reject it: fall back to the full flush rather
+            // than weaken durability.
+            Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOTSUP) => file.sync_data(),
+            Err(error) => Err(error.into()),
         }
-        Ok(())
     }
 
     /// Linux: `fdatasync`. Windows: `FlushFileBuffers` (requires the
@@ -168,41 +226,12 @@ impl RealSyncer {
     fn file_barrier(file: &File) -> io::Result<()> {
         file.sync_data()
     }
-}
 
-impl Syncer for RealSyncer {
-    fn barrier(&self, file: &File, _path: &Path) -> io::Result<()> {
-        // Per-file writeback on EVERY platform — Apple: fcntl
-        // F_BARRIERFSYNC (writeback + ordering barrier, no device-cache
-        // flush); Linux: fdatasync; Windows: FlushFileBuffers. This is
-        // what makes a committed batch durable on all filesystems, not
-        // just metadata-journaling ones in ordered-data mode — XFS,
-        // btrfs, ext4 data=writeback, and NTFS get the same guarantee.
-        // The cost is bounded: barriers are issued concurrently from a
-        // background pool while the batch is staged, so wall-clock is
-        // latency/queue-depth, overlapped with the caller's work.
-        Self::file_barrier(file)
-    }
-
-    fn full(&self, file: &File, _path: &Path) -> io::Result<()> {
-        file.sync_all()
-    }
-
-    fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
-        // Cross-platform atomic replace: rename(2) on Unix, MoveFileExW
-        // with MOVEFILE_REPLACE_EXISTING on Windows.
-        tmp.persist(final_path).map_err(|e| e.error)?;
-        Ok(())
-    }
-
-    fn dir_sync(&self, dir: &Path) -> io::Result<()> {
-        crate::atomic::sync_dir(dir)
-    }
-
+    /// Writeout of the dirents of `dir`, without a device cache flush.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     // Linux does not compile this implementation.
     #[cfg_attr(false, mutants::skip)]
-    fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
+    fn dir_barrier(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::MetadataExt;
 
         match File::open(dir) {
@@ -233,23 +262,60 @@ impl Syncer for RealSyncer {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
+    fn dir_barrier(dir: &Path) -> io::Result<()> {
         // Linux: the directory fsync IS the durability mechanism (the
         // journal commit orders ordered-mode file data ahead of the
         // dirents), so the "barrier" must stay a real fsync. Windows:
-        // no directory flush primitive — no-op, the device_flush
+        // no directory flush primitive — no-op, the flush
         // covers what the OS exposes.
-        crate::atomic::sync_dir(dir)
+        crate::durable::flush_dir(dir)
+    }
+}
+
+impl Syncer for RealSyncer {
+    fn writeout(&self, file: &File, path: &Path) -> io::Result<()> {
+        // Per-file writeback on EVERY platform — Apple: fsync(2) (writeout,
+        // no device-cache flush); Linux: fdatasync; Windows: FlushFileBuffers. This is
+        // what makes a committed batch durable on all filesystems, not
+        // just metadata-journaling ones in ordered-data mode — XFS,
+        // btrfs, ext4 data=writeback, and NTFS get the same guarantee.
+        // The cost is bounded: writeouts are issued concurrently from a
+        // background pool while the batch is staged, so wall-clock is
+        // latency/queue-depth, overlapped with the caller's work.
+        Self::file_barrier(file)?;
+        crate::durable::note_writeout(path);
+        Ok(())
+    }
+
+    fn full(&self, file: &File, path: &Path) -> io::Result<()> {
+        crate::durable::flush_file(file, path)
+    }
+
+    fn rename(&self, tmp: TempPath, final_path: &Path) -> io::Result<()> {
+        // Cross-platform atomic replace: rename(2) on Unix, MoveFileExW
+        // with MOVEFILE_REPLACE_EXISTING on Windows.
+        tmp.persist(final_path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    fn dir_sync(&self, dir: &Path) -> io::Result<()> {
+        crate::durable::flush_dir(dir)
+    }
+
+    fn dir_writeout(&self, dir: &Path) -> io::Result<()> {
+        Self::dir_barrier(dir)?;
+        crate::durable::note_writeout(dir);
+        Ok(())
     }
 
     #[cfg(unix)]
-    fn device_flush(&self, objects_root: &Path) -> io::Result<()> {
+    fn flush(&self, anchor: &Path) -> io::Result<()> {
         // macOS: sync_all on any fd is F_FULLFSYNC — flushes the whole
-        // device write cache, making every prior barrier durable.
-        // Linux: fsync of the objects root; cheap insurance on top of
+        // device write cache, making every prior writeout durable.
+        // Linux: fsync of the anchor; cheap insurance on top of
         // the per-dir fsyncs above.
-        match File::open(objects_root) {
-            Ok(d) => d.sync_all(),
+        match File::open(anchor) {
+            Ok(d) => crate::durable::flush_file(&d, anchor),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }
@@ -257,8 +323,12 @@ impl Syncer for RealSyncer {
 
     #[cfg(not(unix))]
     #[allow(clippy::unnecessary_wraps)]
-    fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
+    fn flush(&self, _anchor: &Path) -> io::Result<()> {
         Ok(())
+    }
+
+    fn writeouts_need_flush(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "ios"))
     }
 }
 
@@ -470,7 +540,7 @@ impl<'s> WriteBatch<'s> {
         // No flush on this thread: the barrier is queued to the
         // background pool below — sequential per-file barriers
         // would re-serialise the batch on device latency
-        // (measured ~4.6ms per F_BARRIERFSYNC on Apple SSDs,
+        // (measured ~4.6ms per full flush on Apple SSDs,
         // ~8s for a 100 MiB ingest).
         let mut guard = self.inner.lock().expect("batch state mutex poisoned");
         let st = &mut *guard;
@@ -553,7 +623,7 @@ impl<'s> WriteBatch<'s> {
         if need_mkdir {
             fs::create_dir_all(&shard_dir)?;
         }
-        let mut tmp = crate::atomic::temp_file_in(&shard_dir)?;
+        let mut tmp = crate::durable::temp_file_in(&shard_dir)?;
         for p in parts {
             #[cfg(feature = "fault-injection")]
             crate::fault::check(crate::fault::Site::Store)?;
@@ -566,6 +636,11 @@ impl<'s> WriteBatch<'s> {
                 syncer.full(tmp.as_file(), tmp.path())?;
                 syncer.rename(tmp.into_temp_path(), &final_path)?;
                 syncer.dir_sync(&shard_dir)?;
+                // A shard made by this batch is an entry of `objects/`, as in
+                // `ObjectStore::write`.
+                if need_mkdir {
+                    syncer.dir_sync(self.store.objects_root())?;
+                }
                 let mut st = self.inner.lock().expect("batch state mutex poisoned");
                 st.created_shards.insert(shard_dir);
             }
@@ -760,7 +835,31 @@ impl<'s> WriteBatch<'s> {
     /// # Errors
     /// A failed barrier, flush or rename.
     pub fn commit(self) -> StoreResult<()> {
-        self.flush(true)
+        self.flush(true, None)
+    }
+
+    /// [`Self::commit`] on the flushes of `group`, with the names left
+    /// pending: the objects are renamed into place and their directories are
+    /// written out, but no flush follows. The caller flushes `group` (one
+    /// ordering point) before it publishes anything that names these objects,
+    /// and may stage more writes of its own first, so they share that flush.
+    ///
+    /// The caller stages the temp files that must be durable before the
+    /// objects become visible, for example a ref's, before this call: the
+    /// one flush it makes covers them with the objects' bytes. A batch with no
+    /// staged object makes no flush and no rename. An open local pack is
+    /// published first, with its own flushes, so loose objects that name its
+    /// chunks stay behind it.
+    ///
+    /// On `Ok` every hash this batch returned is visible. It is durable
+    /// after the caller's next `group.flush()`. After `Err`, or a failed
+    /// flush, the group is poisoned or the batch is: no hash it returned may
+    /// be named by a pointer.
+    ///
+    /// # Errors
+    /// As [`Self::commit`]. A failed flush of the group poisons the group.
+    pub fn commit_in(self, group: &mut Group) -> StoreResult<()> {
+        self.flush(true, Some(group))
     }
 
     /// [`Self::commit`] for the objects staged so far, keeping the batch
@@ -787,15 +886,15 @@ impl<'s> WriteBatch<'s> {
     ///
     /// Panics only if a previous write panicked while holding a batch lock.
     pub fn checkpoint(&self) -> StoreResult<()> {
-        self.flush(false)
+        self.flush(false, None)
     }
 
     /// [`Self::checkpoint`], or the flush of [`Self::commit`] when
     /// `seal_pack` is set, which always seals the open local pack.
-    fn flush(&self, seal_pack: bool) -> StoreResult<()> {
+    fn flush(&self, seal_pack: bool, group: Option<&mut Group>) -> StoreResult<()> {
         let _gate = self.gate.write().expect("batch gate poisoned");
         self.check_not_failed()?;
-        let result = self.flush_staged(seal_pack);
+        let result = self.flush_staged(seal_pack, group);
         if result.is_err() {
             self.failed.store(true, Ordering::Relaxed);
         }
@@ -812,7 +911,7 @@ impl<'s> WriteBatch<'s> {
     }
 
     /// The flush of [`Self::checkpoint`], with the gate held.
-    fn flush_staged(&self, seal_pack: bool) -> StoreResult<()> {
+    fn flush_staged(&self, seal_pack: bool, group: Option<&mut Group>) -> StoreResult<()> {
         // A pack seals before the loose objects become visible when they may
         // name its chunks: a manifest, tree or commit is never visible before
         // the chunks it names. Chunks are loose-invisible-safe on their own,
@@ -852,6 +951,9 @@ impl<'s> WriteBatch<'s> {
         }
         if sync_pack_parent {
             touched_shards.insert(store.objects_root().to_path_buf());
+        }
+        if let Some(group) = group {
+            return self.flush_in_group(group, &leftover, staged, small_staged, touched_shards);
         }
         match self.policy {
             // New loose objects are already durable.
@@ -900,6 +1002,55 @@ impl<'s> WriteBatch<'s> {
         flush_dirents(store, touched_shards)?;
         if sync_pack_parent {
             store.mark_pack_parent_synced();
+        }
+        Ok(())
+    }
+
+    /// The flush of [`Self::commit_in`]: one flush of `group` for the bytes,
+    /// the renames, and the directories written out, with the names pending.
+    /// The batch's own early writeouts and the caller's staged temp files
+    /// share that flush.
+    fn flush_in_group(
+        &self,
+        group: &mut Group,
+        leftover: &[PathBuf],
+        staged: HashMap<Hash, TempPath>,
+        small_staged: usize,
+        touched: HashSet<PathBuf>,
+    ) -> StoreResult<()> {
+        let store = self.store;
+        let syncer = store.syncer();
+        let mut touched = touched;
+        if self.policy == SyncPolicy::Batch {
+            let staged: Vec<(Hash, TempPath)> = staged.into_iter().collect();
+            // Every staged file is written out before the flush: the early
+            // workers did most, the rest are done here.
+            parallel_io(leftover.len(), |i| {
+                barrier_path(syncer.as_ref(), &leftover[i])
+            })?;
+            if !staged.is_empty() {
+                // The bytes of the objects and of what the caller staged are
+                // durable before any object is named.
+                group.note_written(store.objects_root());
+                let _bytes_durable = group.flush()?;
+                if parallel_renames(small_staged) {
+                    rename_parallel(store, syncer.as_ref(), staged)?;
+                } else {
+                    for (h, tmp) in staged {
+                        syncer.rename(tmp, &store.path_for(&h))?;
+                    }
+                }
+                group.note_renamed();
+            }
+        }
+        // The names and every location this batch reused are written out;
+        // the caller's flush makes them durable. `objects/` is written out
+        // whenever a shard or `pack/` was touched, so a shard that another
+        // process made and has not flushed is covered too.
+        if !touched.is_empty() {
+            touched.insert(store.objects_root().to_path_buf());
+            write_out_dirents(store, touched)?;
+            group.note_written(store.objects_root());
         }
         Ok(())
     }
@@ -1018,18 +1169,32 @@ pub(crate) fn flush_dirents(
         return Ok(());
     }
     shards.sort();
-    parallel_io(shards.len(), |i| {
-        syncer.dir_barrier(&shards[i])?;
-        #[cfg(feature = "fault-injection")]
-        crate::fault::sync_step(|| crate::fault::SyncStep::DirBarrier(shards[i].clone()));
-        Ok(())
-    })?;
-    syncer.device_flush(store.objects_root())?;
+    write_out_sorted(syncer.as_ref(), &shards)?;
+    syncer.flush(store.objects_root())?;
     #[cfg(feature = "fault-injection")]
     crate::fault::sync_step(|| {
         crate::fault::SyncStep::DeviceFlush(store.objects_root().to_path_buf())
     });
     Ok(())
+}
+
+/// Write out the dirents of `shards`, concurrently, with no flush.
+fn write_out_dirents(
+    store: &ObjectStore,
+    shards: impl IntoIterator<Item = PathBuf>,
+) -> io::Result<()> {
+    let mut shards: Vec<PathBuf> = shards.into_iter().collect();
+    shards.sort();
+    write_out_sorted(store.syncer().as_ref(), &shards)
+}
+
+fn write_out_sorted(syncer: &dyn Syncer, shards: &[PathBuf]) -> io::Result<()> {
+    parallel_io(shards.len(), |i| {
+        syncer.dir_writeout(&shards[i])?;
+        #[cfg(feature = "fault-injection")]
+        crate::fault::sync_step(|| crate::fault::SyncStep::DirBarrier(shards[i].clone()));
+        Ok(())
+    })
 }
 
 /// Whether a checkpoint that took `small_staged` small objects renames
@@ -1077,7 +1242,7 @@ fn barrier_path(syncer: &dyn Syncer, path: &Path) -> io::Result<()> {
     // Windows, which rejects a read-only handle. `write(true)` opens the
     // existing temp without truncating it.
     let f = OpenOptions::new().write(true).open(path)?;
-    syncer.barrier(&f, path)
+    syncer.writeout(&f, path)
 }
 
 /// Background pool that issues each staged file's write barrier as soon
@@ -1504,8 +1669,17 @@ pub(crate) mod testing {
     pub(crate) struct RecordingSyncer {
         events: Mutex<Vec<Ev>>,
         fail_barriers: std::sync::atomic::AtomicBool,
+        fail_flushes: std::sync::atomic::AtomicBool,
+        /// Writeouts that are durable on their own, as on Linux.
+        durable_writeouts: std::sync::atomic::AtomicBool,
+        /// Directories under a path prefix, with the device each one reports.
+        devices: Mutex<Vec<(PathBuf, u64)>>,
         /// Renames still allowed to succeed; `None` allows every one.
         renames_left: Mutex<Option<usize>>,
+        /// A directory to move after the next writeout, with its new name.
+        move_after_writeout: Mutex<Option<(PathBuf, PathBuf)>>,
+        /// Remove the anchor of the next flush once it has been recorded.
+        remove_anchor_in_next_flush: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingSyncer {
@@ -1513,10 +1687,50 @@ pub(crate) mod testing {
             self.events.lock().unwrap().clone()
         }
 
-        /// Make every later [`Syncer::barrier`] call fail.
+        /// Make every later [`Syncer::writeout`] call fail.
         pub(crate) fn fail_barriers(&self) {
             self.fail_barriers
                 .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Report writeouts as durable on their own, so a group flushes never.
+        pub(crate) fn durable_writeouts(&self) {
+            self.durable_writeouts
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Report every directory under `prefix` as on device `device`.
+        pub(crate) fn set_device(&self, prefix: &Path, device: u64) {
+            self.devices
+                .lock()
+                .unwrap()
+                .push((prefix.to_path_buf(), device));
+        }
+
+        /// Make every later [`Syncer::flush`] call fail, after it is recorded.
+        pub(crate) fn fail_flushes(&self) {
+            self.fail_flushes
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Rename the directory `from` to `to` right after the next writeout
+        /// of a file or a directory.
+        pub(crate) fn move_after_writeout(&self, from: &Path, to: &Path) {
+            *self.move_after_writeout.lock().unwrap() =
+                Some((from.to_path_buf(), to.to_path_buf()));
+        }
+
+        /// Make the next [`Syncer::flush`] remove its anchor directory after
+        /// it is recorded, and succeed: the open of a gone anchor does.
+        pub(crate) fn remove_anchor_in_next_flush(&self) {
+            self.remove_anchor_in_next_flush
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn run_move(&self) {
+            if let Some((from, to)) = self.move_after_writeout.lock().unwrap().take() {
+                fs::rename(from, to).unwrap();
+            }
         }
 
         /// Let `n` more renames succeed, then fail every later one: a
@@ -1527,7 +1741,7 @@ pub(crate) mod testing {
     }
 
     impl Syncer for RecordingSyncer {
-        fn barrier(&self, _file: &File, path: &Path) -> io::Result<()> {
+        fn writeout(&self, _file: &File, path: &Path) -> io::Result<()> {
             if self.fail_barriers.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(io::Error::other("injected barrier failure"));
             }
@@ -1535,6 +1749,7 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push(Ev::Barrier(path.to_path_buf()));
+            self.run_move();
             Ok(())
         }
 
@@ -1569,20 +1784,64 @@ pub(crate) mod testing {
             Ok(())
         }
 
-        fn dir_barrier(&self, dir: &Path) -> io::Result<()> {
+        fn dir_writeout(&self, dir: &Path) -> io::Result<()> {
             self.events
                 .lock()
                 .unwrap()
                 .push(Ev::DirBarrier(dir.to_path_buf()));
+            self.run_move();
             Ok(())
         }
 
-        fn device_flush(&self, objects_root: &Path) -> io::Result<()> {
+        fn flush(&self, anchor: &Path) -> io::Result<()> {
             self.events
                 .lock()
                 .unwrap()
-                .push(Ev::Full(objects_root.to_path_buf()));
+                .push(Ev::Full(anchor.to_path_buf()));
+            if self.fail_flushes.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("injected flush failure"));
+            }
+            if self
+                .remove_anchor_in_next_flush
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                fs::remove_dir(anchor).unwrap();
+            }
             Ok(())
+        }
+
+        fn writeouts_need_flush(&self) -> bool {
+            !self
+                .durable_writeouts
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn device_of_file(&self, file: &File, dir: &Path) -> Option<u64> {
+            let devices = self.devices.lock().unwrap();
+            match devices.iter().find(|(prefix, _)| dir.starts_with(prefix)) {
+                Some((_, device)) => Some(*device),
+                None => RealSyncer.device_of_file(file, dir),
+            }
+        }
+
+        fn device_of(&self, dir: &Path) -> Option<u64> {
+            let devices = self.devices.lock().unwrap();
+            match devices.iter().find(|(prefix, _)| dir.starts_with(prefix)) {
+                Some((_, device)) => Some(*device),
+                None => RealSyncer.device_of(dir),
+            }
+        }
+
+        fn rename_new(&self, tmp: TempPath, final_path: &Path) -> io::Result<bool> {
+            self.events.lock().unwrap().push(Ev::Rename {
+                tmp: tmp.to_path_buf(),
+                dst: final_path.to_path_buf(),
+            });
+            match tmp.persist_noclobber(final_path) {
+                Ok(()) => Ok(true),
+                Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(e.error),
+            }
         }
     }
 }
@@ -1601,6 +1860,28 @@ mod tests {
         let store =
             ObjectStore::init(&crate::layout::RepoLayout::single(dir.path())).expect("init");
         (dir, store)
+    }
+
+    /// The real syncer makes the full flushes the batch is pinned to: one for
+    /// a file and one for the objects root, none for a store that is not there.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn the_real_syncer_makes_counted_full_flushes() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("f");
+        let file = File::create(&path).expect("create");
+        let before = crate::fault::flushes();
+        RealSyncer.full(&file, &path).expect("full");
+        assert_eq!(crate::fault::flushes(), before + 1);
+        #[cfg(unix)]
+        {
+            RealSyncer.flush(dir.path()).expect("device flush");
+            assert_eq!(crate::fault::flushes(), before + 2);
+            RealSyncer
+                .flush(&dir.path().join("missing"))
+                .expect("a store that is not there");
+            assert_eq!(crate::fault::flushes(), before + 2);
+        }
     }
 
     /// Store with a shared `RecordingSyncer` injected.
@@ -1912,7 +2193,7 @@ mod tests {
             .iter()
             .rposition(|e| matches!(e, Ev::Rename { .. }))
             .expect("renames recorded");
-        let dir_barriers: Vec<(usize, &PathBuf)> = evs
+        let dir_writeouts: Vec<(usize, &PathBuf)> = evs
             .iter()
             .enumerate()
             .filter_map(|(i, e)| match e {
@@ -1921,14 +2202,14 @@ mod tests {
             })
             .collect();
 
-        let synced: HashSet<PathBuf> = dir_barriers.iter().map(|(_, p)| (*p).clone()).collect();
+        let synced: HashSet<PathBuf> = dir_writeouts.iter().map(|(_, p)| (*p).clone()).collect();
         assert_eq!(
-            dir_barriers.len(),
+            dir_writeouts.len(),
             synced.len(),
             "each shard dir must be flushed exactly once"
         );
         assert_eq!(synced, shards, "exactly the touched shards are flushed");
-        for (i, p) in &dir_barriers {
+        for (i, p) in &dir_writeouts {
             assert!(
                 *i > last_rename,
                 "dir barrier of {} at {i} must come after the last rename at {last_rename}",
@@ -1941,10 +2222,10 @@ mod tests {
             .iter()
             .rposition(|e| matches!(e, Ev::Full(_)))
             .expect("device flush recorded");
-        let last_dir_barrier = dir_barriers.last().expect("dir barriers recorded").0;
+        let last_dir_writeout = dir_writeouts.last().expect("dir barriers recorded").0;
         assert!(
-            last_full > last_dir_barrier,
-            "device flush at {last_full} must follow the last dir barrier at {last_dir_barrier}"
+            last_full > last_dir_writeout,
+            "device flush at {last_full} must follow the last dir barrier at {last_dir_writeout}"
         );
     }
 
@@ -2142,7 +2423,11 @@ mod tests {
     }
 
     impl Syncer for GatedSyncer {
-        fn barrier(&self, _file: &File, _path: &Path) -> io::Result<()> {
+        fn writeouts_need_flush(&self) -> bool {
+            true
+        }
+
+        fn writeout(&self, _file: &File, _path: &Path) -> io::Result<()> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut closed = self.closed.lock().unwrap();
@@ -2167,11 +2452,11 @@ mod tests {
             Ok(())
         }
 
-        fn dir_barrier(&self, _dir: &Path) -> io::Result<()> {
+        fn dir_writeout(&self, _dir: &Path) -> io::Result<()> {
             Ok(())
         }
 
-        fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
+        fn flush(&self, _anchor: &Path) -> io::Result<()> {
             Ok(())
         }
     }
@@ -2368,7 +2653,11 @@ mod tests {
     }
 
     impl Syncer for FirstRenameFails {
-        fn barrier(&self, _file: &File, _path: &Path) -> io::Result<()> {
+        fn writeouts_need_flush(&self) -> bool {
+            true
+        }
+
+        fn writeout(&self, _file: &File, _path: &Path) -> io::Result<()> {
             Ok(())
         }
 
@@ -2389,11 +2678,11 @@ mod tests {
             Ok(())
         }
 
-        fn dir_barrier(&self, _dir: &Path) -> io::Result<()> {
+        fn dir_writeout(&self, _dir: &Path) -> io::Result<()> {
             Ok(())
         }
 
-        fn device_flush(&self, _objects_root: &Path) -> io::Result<()> {
+        fn flush(&self, _anchor: &Path) -> io::Result<()> {
             Ok(())
         }
     }
@@ -2802,7 +3091,7 @@ mod tests {
             let bytes = crate::serialize::serialize(&object).unwrap();
             let shard = store.path_for(&id).parent().unwrap().to_path_buf();
             fs::create_dir_all(&shard).unwrap();
-            let mut file = crate::atomic::temp_file_in(&shard).unwrap();
+            let mut file = crate::durable::temp_file_in(&shard).unwrap();
             file.as_file_mut().write_all(&bytes).unwrap();
             batch.stage_temp(id, file.into_temp_path(), len).unwrap();
             assert_eq!(batch.inner.lock().unwrap().small_staged, small, "{len}");
@@ -2826,7 +3115,7 @@ mod tests {
             // A damaged copy is already there: the temporary file replaces it.
             fs::write(&path, b"damaged").unwrap();
             let staged = || {
-                let mut file = crate::atomic::temp_file_in(shard).unwrap();
+                let mut file = crate::durable::temp_file_in(shard).unwrap();
                 file.as_file_mut().write_all(&bytes).unwrap();
                 file.into_temp_path()
             };
@@ -2909,3 +3198,6 @@ mod pack_sink_tests;
 
 #[cfg(test)]
 mod small_pack_tests;
+
+#[cfg(test)]
+mod commit_in_tests;

@@ -102,7 +102,7 @@ pub(super) fn activate(path: &Path) -> StoreResult<()> {
     if !parse(&read_marker(&file)?)? {
         crate::pack::write_at(&file, LEGACY.len() as u64, b"P")?;
     }
-    file.sync_all()?;
+    crate::durable::flush_file(&file, path)?;
     Ok(())
 }
 
@@ -129,8 +129,8 @@ pub(super) fn require_packed(guard: &super::PruneGuard) -> StoreResult<()> {
 
 pub(super) fn sync_packed(path: &Path, guard: &super::PruneGuard) -> StoreResult<()> {
     require_packed(guard)?;
-    guard.format.sync_all()?;
-    crate::atomic::sync_dir(path.parent().expect("format marker has a parent"))?;
+    crate::durable::flush_file(&guard.format, path)?;
+    crate::durable::flush_dir(path.parent().expect("format marker has a parent"))?;
     Ok(())
 }
 
@@ -341,11 +341,11 @@ mod tests {
     fn init_writes_the_packed_marker_through_a_synced_rename() {
         let dir = tempfile::tempdir().unwrap();
         let layout = RepoLayout::single(dir.path());
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
 
         let store = ObjectStore::init(&layout).unwrap();
 
-        assert!(crate::atomic::testing::dir_sync_calls() >= 1);
+        assert!(crate::durable::testing::dir_sync_calls() >= 1);
         assert_eq!(fs::read(layout.format_file()).unwrap(), PACKED);
         assert!(store.local_packs_enabled().unwrap());
         assert!(
