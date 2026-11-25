@@ -398,7 +398,7 @@ mod tests {
         assert!(is_upload_temp_name(".kit.tmp.1.2"));
         // A temp file of `kit_core::durable` has six random characters after
         // its sequence.
-        assert!(is_upload_temp_name(".kit.tmp.123.0aB3xQ"));
+        assert!(is_upload_temp_name(".kit.tmp.123.0aB3xQz"));
         assert!(is_upload_temp_name(".kit.tmp.123.17zzzzzz"));
         assert!(!is_upload_temp_name(".kit.tmp.123.aB3xQz"));
         assert!(!is_upload_temp_name(".kit.tmp.123.0aB3x-"));
