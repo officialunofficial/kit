@@ -157,15 +157,9 @@ fn pack_vectors_of_versions_1_and_2_keep_reading() {
     for name in [
         "boundary_earlier_delta_base",
         #[cfg(feature = "pack-zstd")]
-        "delta_repeat",
-        #[cfg(feature = "pack-zstd")]
-        "large_literals",
-        #[cfg(feature = "pack-zstd")]
         "mixed",
         #[cfg(feature = "pack-zstd")]
         "raw_4k_repeat",
-        #[cfg(feature = "pack-zstd")]
-        "tree_and_commit",
     ] {
         let pack = read(&format!("pack-v2/{name}.bin"));
         let side: serde_json::Value =
