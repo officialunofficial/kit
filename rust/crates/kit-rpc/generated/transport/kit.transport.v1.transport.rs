@@ -41,94 +41,97 @@ impl ::core::default::Default for RefExpectation {
         Self::REF_EXPECTATION_UNSPECIFIED
     }
 }
-impl ::serde::Serialize for RefExpectation {
-    fn serialize<S: ::serde::Serializer>(
-        &self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        s.serialize_str(::buffa::Enumeration::proto_name(self))
-    }
-}
-impl<'de> ::serde::Deserialize<'de> for RefExpectation {
-    fn deserialize<D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        struct _V;
-        impl ::serde::de::Visitor<'_> for _V {
-            type Value = RefExpectation;
-            fn expecting(
-                &self,
-                f: &mut ::core::fmt::Formatter<'_>,
-            ) -> ::core::fmt::Result {
-                f.write_str(
-                    concat!(
-                        "a string, integer, or null for ", stringify!(RefExpectation)
-                    ),
-                )
-            }
-            fn visit_str<E: ::serde::de::Error>(
-                self,
-                v: &str,
-            ) -> ::core::result::Result<RefExpectation, E> {
-                <RefExpectation as ::buffa::Enumeration>::from_proto_name(v)
-                    .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
-            }
-            fn visit_i64<E: ::serde::de::Error>(
-                self,
-                v: i64,
-            ) -> ::core::result::Result<RefExpectation, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <RefExpectation as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_u64<E: ::serde::de::Error>(
-                self,
-                v: u64,
-            ) -> ::core::result::Result<RefExpectation, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <RefExpectation as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_unit<E: ::serde::de::Error>(
-                self,
-            ) -> ::core::result::Result<RefExpectation, E> {
-                ::core::result::Result::Ok(::core::default::Default::default())
-            }
+#[cfg(feature = "json")]
+const _: () = {
+    impl ::serde::Serialize for RefExpectation {
+        fn serialize<S: ::serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            s.serialize_str(::buffa::Enumeration::proto_name(self))
         }
-        d.deserialize_any(_V)
     }
-}
-impl ::buffa::json_helpers::ProtoElemJson for RefExpectation {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
+    impl<'de> ::serde::Deserialize<'de> for RefExpectation {
+        fn deserialize<D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            struct _V;
+            impl ::serde::de::Visitor<'_> for _V {
+                type Value = RefExpectation;
+                fn expecting(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.write_str(
+                        concat!(
+                            "a string, integer, or null for ", stringify!(RefExpectation)
+                        ),
+                    )
+                }
+                fn visit_str<E: ::serde::de::Error>(
+                    self,
+                    v: &str,
+                ) -> ::core::result::Result<RefExpectation, E> {
+                    <RefExpectation as ::buffa::Enumeration>::from_proto_name(v)
+                        .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
+                }
+                fn visit_i64<E: ::serde::de::Error>(
+                    self,
+                    v: i64,
+                ) -> ::core::result::Result<RefExpectation, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <RefExpectation as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_u64<E: ::serde::de::Error>(
+                    self,
+                    v: u64,
+                ) -> ::core::result::Result<RefExpectation, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <RefExpectation as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_unit<E: ::serde::de::Error>(
+                    self,
+                ) -> ::core::result::Result<RefExpectation, E> {
+                    ::core::result::Result::Ok(::core::default::Default::default())
+                }
+            }
+            d.deserialize_any(_V)
+        }
     }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
+    impl ::buffa::json_helpers::ProtoElemJson for RefExpectation {
+        fn serialize_proto_json<S: ::serde::Serializer>(
+            v: &Self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            ::serde::Serialize::serialize(v, s)
+        }
+        fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            <Self as ::serde::Deserialize>::deserialize(d)
+        }
     }
-}
+};
 impl ::buffa::Enumeration for RefExpectation {
     fn from_i32(value: i32) -> ::core::option::Option<Self> {
         match value {
@@ -214,94 +217,97 @@ impl ::core::default::Default for AdvanceOutcome {
         Self::ADVANCE_OUTCOME_UNSPECIFIED
     }
 }
-impl ::serde::Serialize for AdvanceOutcome {
-    fn serialize<S: ::serde::Serializer>(
-        &self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        s.serialize_str(::buffa::Enumeration::proto_name(self))
-    }
-}
-impl<'de> ::serde::Deserialize<'de> for AdvanceOutcome {
-    fn deserialize<D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        struct _V;
-        impl ::serde::de::Visitor<'_> for _V {
-            type Value = AdvanceOutcome;
-            fn expecting(
-                &self,
-                f: &mut ::core::fmt::Formatter<'_>,
-            ) -> ::core::fmt::Result {
-                f.write_str(
-                    concat!(
-                        "a string, integer, or null for ", stringify!(AdvanceOutcome)
-                    ),
-                )
-            }
-            fn visit_str<E: ::serde::de::Error>(
-                self,
-                v: &str,
-            ) -> ::core::result::Result<AdvanceOutcome, E> {
-                <AdvanceOutcome as ::buffa::Enumeration>::from_proto_name(v)
-                    .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
-            }
-            fn visit_i64<E: ::serde::de::Error>(
-                self,
-                v: i64,
-            ) -> ::core::result::Result<AdvanceOutcome, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <AdvanceOutcome as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_u64<E: ::serde::de::Error>(
-                self,
-                v: u64,
-            ) -> ::core::result::Result<AdvanceOutcome, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <AdvanceOutcome as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_unit<E: ::serde::de::Error>(
-                self,
-            ) -> ::core::result::Result<AdvanceOutcome, E> {
-                ::core::result::Result::Ok(::core::default::Default::default())
-            }
+#[cfg(feature = "json")]
+const _: () = {
+    impl ::serde::Serialize for AdvanceOutcome {
+        fn serialize<S: ::serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            s.serialize_str(::buffa::Enumeration::proto_name(self))
         }
-        d.deserialize_any(_V)
     }
-}
-impl ::buffa::json_helpers::ProtoElemJson for AdvanceOutcome {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
+    impl<'de> ::serde::Deserialize<'de> for AdvanceOutcome {
+        fn deserialize<D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            struct _V;
+            impl ::serde::de::Visitor<'_> for _V {
+                type Value = AdvanceOutcome;
+                fn expecting(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.write_str(
+                        concat!(
+                            "a string, integer, or null for ", stringify!(AdvanceOutcome)
+                        ),
+                    )
+                }
+                fn visit_str<E: ::serde::de::Error>(
+                    self,
+                    v: &str,
+                ) -> ::core::result::Result<AdvanceOutcome, E> {
+                    <AdvanceOutcome as ::buffa::Enumeration>::from_proto_name(v)
+                        .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
+                }
+                fn visit_i64<E: ::serde::de::Error>(
+                    self,
+                    v: i64,
+                ) -> ::core::result::Result<AdvanceOutcome, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <AdvanceOutcome as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_u64<E: ::serde::de::Error>(
+                    self,
+                    v: u64,
+                ) -> ::core::result::Result<AdvanceOutcome, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <AdvanceOutcome as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_unit<E: ::serde::de::Error>(
+                    self,
+                ) -> ::core::result::Result<AdvanceOutcome, E> {
+                    ::core::result::Result::Ok(::core::default::Default::default())
+                }
+            }
+            d.deserialize_any(_V)
+        }
     }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
+    impl ::buffa::json_helpers::ProtoElemJson for AdvanceOutcome {
+        fn serialize_proto_json<S: ::serde::Serializer>(
+            v: &Self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            ::serde::Serialize::serialize(v, s)
+        }
+        fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            <Self as ::serde::Deserialize>::deserialize(d)
+        }
     }
-}
+};
 impl ::buffa::Enumeration for AdvanceOutcome {
     fn from_i32(value: i32) -> ::core::option::Option<Self> {
         match value {
@@ -373,94 +379,97 @@ impl ::core::default::Default for RepoVisibility {
         Self::REPO_VISIBILITY_UNSPECIFIED
     }
 }
-impl ::serde::Serialize for RepoVisibility {
-    fn serialize<S: ::serde::Serializer>(
-        &self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        s.serialize_str(::buffa::Enumeration::proto_name(self))
-    }
-}
-impl<'de> ::serde::Deserialize<'de> for RepoVisibility {
-    fn deserialize<D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        struct _V;
-        impl ::serde::de::Visitor<'_> for _V {
-            type Value = RepoVisibility;
-            fn expecting(
-                &self,
-                f: &mut ::core::fmt::Formatter<'_>,
-            ) -> ::core::fmt::Result {
-                f.write_str(
-                    concat!(
-                        "a string, integer, or null for ", stringify!(RepoVisibility)
-                    ),
-                )
-            }
-            fn visit_str<E: ::serde::de::Error>(
-                self,
-                v: &str,
-            ) -> ::core::result::Result<RepoVisibility, E> {
-                <RepoVisibility as ::buffa::Enumeration>::from_proto_name(v)
-                    .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
-            }
-            fn visit_i64<E: ::serde::de::Error>(
-                self,
-                v: i64,
-            ) -> ::core::result::Result<RepoVisibility, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <RepoVisibility as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_u64<E: ::serde::de::Error>(
-                self,
-                v: u64,
-            ) -> ::core::result::Result<RepoVisibility, E> {
-                let v32 = i32::try_from(v)
-                    .map_err(|_| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("enum value {v} out of i32 range"),
-                        )
-                    })?;
-                <RepoVisibility as ::buffa::Enumeration>::from_i32(v32)
-                    .ok_or_else(|| {
-                        ::serde::de::Error::custom(
-                            ::buffa::alloc::format!("unknown enum value {v32}"),
-                        )
-                    })
-            }
-            fn visit_unit<E: ::serde::de::Error>(
-                self,
-            ) -> ::core::result::Result<RepoVisibility, E> {
-                ::core::result::Result::Ok(::core::default::Default::default())
-            }
+#[cfg(feature = "json")]
+const _: () = {
+    impl ::serde::Serialize for RepoVisibility {
+        fn serialize<S: ::serde::Serializer>(
+            &self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            s.serialize_str(::buffa::Enumeration::proto_name(self))
         }
-        d.deserialize_any(_V)
     }
-}
-impl ::buffa::json_helpers::ProtoElemJson for RepoVisibility {
-    fn serialize_proto_json<S: ::serde::Serializer>(
-        v: &Self,
-        s: S,
-    ) -> ::core::result::Result<S::Ok, S::Error> {
-        ::serde::Serialize::serialize(v, s)
+    impl<'de> ::serde::Deserialize<'de> for RepoVisibility {
+        fn deserialize<D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            struct _V;
+            impl ::serde::de::Visitor<'_> for _V {
+                type Value = RepoVisibility;
+                fn expecting(
+                    &self,
+                    f: &mut ::core::fmt::Formatter<'_>,
+                ) -> ::core::fmt::Result {
+                    f.write_str(
+                        concat!(
+                            "a string, integer, or null for ", stringify!(RepoVisibility)
+                        ),
+                    )
+                }
+                fn visit_str<E: ::serde::de::Error>(
+                    self,
+                    v: &str,
+                ) -> ::core::result::Result<RepoVisibility, E> {
+                    <RepoVisibility as ::buffa::Enumeration>::from_proto_name(v)
+                        .ok_or_else(|| { ::serde::de::Error::unknown_variant(v, &[]) })
+                }
+                fn visit_i64<E: ::serde::de::Error>(
+                    self,
+                    v: i64,
+                ) -> ::core::result::Result<RepoVisibility, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <RepoVisibility as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_u64<E: ::serde::de::Error>(
+                    self,
+                    v: u64,
+                ) -> ::core::result::Result<RepoVisibility, E> {
+                    let v32 = i32::try_from(v)
+                        .map_err(|_| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("enum value {v} out of i32 range"),
+                            )
+                        })?;
+                    <RepoVisibility as ::buffa::Enumeration>::from_i32(v32)
+                        .ok_or_else(|| {
+                            ::serde::de::Error::custom(
+                                ::buffa::alloc::format!("unknown enum value {v32}"),
+                            )
+                        })
+                }
+                fn visit_unit<E: ::serde::de::Error>(
+                    self,
+                ) -> ::core::result::Result<RepoVisibility, E> {
+                    ::core::result::Result::Ok(::core::default::Default::default())
+                }
+            }
+            d.deserialize_any(_V)
+        }
     }
-    fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
-        d: D,
-    ) -> ::core::result::Result<Self, D::Error> {
-        <Self as ::serde::Deserialize>::deserialize(d)
+    impl ::buffa::json_helpers::ProtoElemJson for RepoVisibility {
+        fn serialize_proto_json<S: ::serde::Serializer>(
+            v: &Self,
+            s: S,
+        ) -> ::core::result::Result<S::Ok, S::Error> {
+            ::serde::Serialize::serialize(v, s)
+        }
+        fn deserialize_proto_json<'de, D: ::serde::Deserializer<'de>>(
+            d: D,
+        ) -> ::core::result::Result<Self, D::Error> {
+            <Self as ::serde::Deserialize>::deserialize(d)
+        }
     }
-}
+};
 impl ::buffa::Enumeration for RepoVisibility {
     fn from_i32(value: i32) -> ::core::option::Option<Self> {
         match value {
@@ -505,25 +514,31 @@ impl ::buffa::Enumeration for RepoVisibility {
 /// A single ref and the object it points at. Matches ssh.proto /
 /// repo.proto RefEntry byte-for-byte.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct RefEntry {
     /// e.g. "refs/heads/main" (SPEC-REFS §3 grammar)
     ///
     /// Field 1: `name`
-    #[serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
     /// raw 32-byte BLAKE3 digest
     ///
     /// Field 2: `object_id`
-    #[serde(
-        rename = "objectId",
-        alias = "object_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "objectId",
+            alias = "object_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub object_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -661,6 +676,7 @@ impl ::buffa::ExtensionSet for RefEntry {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for RefEntry {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -674,6 +690,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RefEntry {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __REF_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.RefEntry",
@@ -686,43 +703,55 @@ pub const __REF_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
 /// layout exactly (same field numbers 1-4, same types) so chunk bytes are
 /// wire-identical to the SSH/enc framing — no new chunking format.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct PackChunk {
     /// raw 32-byte BLAKE3 digest
     ///
     /// Field 1: `pack_id`
-    #[serde(
-        rename = "packId",
-        alias = "pack_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// MUST equal the next expected byte offset (no gaps)
     ///
     /// Field 2: `offset`
-    #[serde(
-        rename = "offset",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "offset",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub offset: ::core::option::Option<u64>,
     /// chunk payload
     ///
     /// Field 3: `data`
-    #[serde(
-        rename = "data",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "data",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub data: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// true on the final chunk of the stream
     ///
     /// Field 4: `last`
-    #[serde(rename = "last", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "last", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub last: ::core::option::Option<bool>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -905,6 +934,7 @@ impl ::buffa::ExtensionSet for PackChunk {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for PackChunk {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -918,6 +948,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PackChunk {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __PACK_CHUNK_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.PackChunk",
@@ -927,42 +958,54 @@ pub const __PACK_CHUNK_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
 };
 /// Namespace listing; grant holders receive the public listing view.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ListReposRequest {
     /// Field 1: `namespace`
-    #[serde(
-        rename = "namespace",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namespace",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub namespace: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `page_token`
-    #[serde(
-        rename = "pageToken",
-        alias = "page_token",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "pageToken",
+            alias = "page_token",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub page_token: ::core::option::Option<::buffa::alloc::string::String>,
     /// 0 means 100; values above 100 are invalid.
     ///
     /// Field 3: `page_size`
-    #[serde(
-        rename = "pageSize",
-        alias = "page_size",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "pageSize",
+            alias = "page_size",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub page_size: ::core::option::Option<u32>,
     /// Raw ASCII name prefix, not stripped in responses.
     ///
     /// Field 4: `name_prefix`
-    #[serde(
-        rename = "namePrefix",
-        alias = "name_prefix",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namePrefix",
+            alias = "name_prefix",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub name_prefix: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -1158,6 +1201,7 @@ impl ::buffa::ExtensionSet for ListReposRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ListReposRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -1171,6 +1215,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ListReposRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __LIST_REPOS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ListReposRequest",
@@ -1179,20 +1224,26 @@ pub const __LIST_REPOS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct RepoEntry {
     /// Field 1: `name`
-    #[serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `visibility`
-    #[serde(
-        rename = "visibility",
-        with = "::buffa::json_helpers::opt_enum",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "visibility",
+            with = "::buffa::json_helpers::opt_enum",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub visibility: ::core::option::Option<::buffa::EnumValue<RepoVisibility>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -1329,6 +1380,7 @@ impl ::buffa::ExtensionSet for RepoEntry {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for RepoEntry {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -1342,6 +1394,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RepoEntry {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __REPO_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.RepoEntry",
@@ -1350,24 +1403,30 @@ pub const __REPO_ENTRY_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa:
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ListReposResponse {
     /// Field 1: `repos`
-    #[serde(
-        rename = "repos",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "repos",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub repos: ::buffa::alloc::vec::Vec<RepoEntry>,
     /// Field 2: `next_page_token`
-    #[serde(
-        rename = "nextPageToken",
-        alias = "next_page_token",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "nextPageToken",
+            alias = "next_page_token",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -1509,6 +1568,7 @@ impl ::buffa::ExtensionSet for ListReposResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ListReposResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -1522,6 +1582,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ListReposResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __LIST_REPOS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ListReposResponse",
@@ -1532,32 +1593,41 @@ pub const __LIST_REPOS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 /// ----------------------------------------------------------------------------
 /// Refs.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ListRefsRequest {
     /// Field 1: `prefix`
-    #[serde(rename = "prefix", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "prefix", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub prefix: ::core::option::Option<::buffa::alloc::string::String>,
     /// Requested page bound, capped by the server (SPEC-TRANSPORT-CONNECT §7.9).
     ///
     /// Field 2: `page_size`
-    #[serde(
-        rename = "pageSize",
-        alias = "page_size",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "pageSize",
+            alias = "page_size",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub page_size: ::core::option::Option<u32>,
     /// Opaque continuation token; empty starts a listing (SPEC-TRANSPORT-CONNECT §7.9).
     ///
     /// Field 3: `page_token`
-    #[serde(
-        rename = "pageToken",
-        alias = "page_token",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "pageToken",
+            alias = "page_token",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub page_token: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -1721,6 +1791,7 @@ impl ::buffa::ExtensionSet for ListRefsRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ListRefsRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -1734,6 +1805,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ListRefsRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __LIST_REFS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ListRefsRequest",
@@ -1742,36 +1814,45 @@ pub const __LIST_REFS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ListRefsResponse {
     /// Field 1: `refs`
-    #[serde(
-        rename = "refs",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "refs",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub refs: ::buffa::alloc::vec::Vec<RefEntry>,
     /// Empty ends the listing (SPEC-TRANSPORT-CONNECT §7.9).
     ///
     /// Field 2: `next_page_token`
-    #[serde(
-        rename = "nextPageToken",
-        alias = "next_page_token",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "nextPageToken",
+            alias = "next_page_token",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub next_page_token: ::core::option::Option<::buffa::alloc::string::String>,
     /// Active notices associated with visible refs on this page.
     ///
     /// Field 3: `ref_redactions`
-    #[serde(
-        rename = "refRedactions",
-        alias = "ref_redactions",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "refRedactions",
+            alias = "ref_redactions",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub ref_redactions: ::buffa::alloc::vec::Vec<RefRedaction>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -1943,6 +2024,7 @@ impl ::buffa::ExtensionSet for ListRefsResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ListRefsResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -1956,6 +2038,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ListRefsResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __LIST_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ListRefsResponse",
@@ -1965,21 +2048,27 @@ pub const __LIST_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
 };
 /// Notice associated with one visible ref; RefEntry's pinned wire layout is unchanged.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct RefRedaction {
     /// Full ref name, not the prefix-stripped ListRefs display name.
     ///
     /// Field 1: `ref`
-    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `notice`
-    #[serde(
-        rename = "notice",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "notice",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_unset_message_field"
+        )
     )]
     pub notice: ::buffa::MessageField<RedactionNotice, ::buffa::Inline<RedactionNotice>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -2115,6 +2204,7 @@ impl ::buffa::ExtensionSet for RefRedaction {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for RefRedaction {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -2128,6 +2218,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RefRedaction {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __REF_REDACTION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.RefRedaction",
@@ -2136,13 +2227,16 @@ pub const __REF_REDACTION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ReadRefRequest {
     /// Field 1: `name`
-    #[serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -2250,6 +2344,7 @@ impl ::buffa::ExtensionSet for ReadRefRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ReadRefRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -2263,6 +2358,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ReadRefRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __READ_REF_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ReadRefRequest",
@@ -2271,33 +2367,42 @@ pub const __READ_REF_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct ReadRefResponse {
     /// Field 1: `exists`
-    #[serde(rename = "exists", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "exists", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub exists: ::core::option::Option<bool>,
     /// 32-byte BLAKE3 digest; meaningful only when exists
     ///
     /// Field 2: `object_id`
-    #[serde(
-        rename = "objectId",
-        alias = "object_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "objectId",
+            alias = "object_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub object_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Active notices for this visible ref; empty when absent.
     ///
     /// Field 3: `redaction_notices`
-    #[serde(
-        rename = "redactionNotices",
-        alias = "redaction_notices",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "redactionNotices",
+            alias = "redaction_notices",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub redaction_notices: ::buffa::alloc::vec::Vec<RedactionNotice>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -2461,6 +2566,7 @@ impl ::buffa::ExtensionSet for ReadRefResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for ReadRefResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -2474,6 +2580,7 @@ impl ::buffa::json_helpers::ProtoElemJson for ReadRefResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __READ_REF_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.ReadRefResponse",
@@ -2482,57 +2589,75 @@ pub const __READ_REF_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = :
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UpdateRefRequest {
     /// Field 1: `name`
-    #[serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "name", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
     /// REQUIRED; UNSPECIFIED is a protocol error
     ///
     /// Field 2: `expectation`
-    #[serde(
-        rename = "expectation",
-        with = "::buffa::json_helpers::opt_enum",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expectation",
+            with = "::buffa::json_helpers::opt_enum",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expectation: ::core::option::Option<::buffa::EnumValue<RefExpectation>>,
     /// 32 bytes for MATCH; empty for ANY/MISSING
     ///
     /// Field 3: `expected_id`
-    #[serde(
-        rename = "expectedId",
-        alias = "expected_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expectedId",
+            alias = "expected_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expected_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// 32-byte BLAKE3 digest to write
     ///
     /// Field 4: `new_id`
-    #[serde(
-        rename = "newId",
-        alias = "new_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "newId",
+            alias = "new_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Delete the ref under its CAS precondition (SPEC-TRANSPORT-CONNECT §7.8).
     ///
     /// Field 5: `delete`
-    #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub delete: ::core::option::Option<bool>,
     /// Uploaded pack and node reservations consumed by an attestmap CAS (STC §4.2).
     ///
     /// Field 6: `ticket_ids`
-    #[serde(
-        rename = "ticketIds",
-        alias = "ticket_ids",
-        with = "::buffa::json_helpers::proto_seq",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ticketIds",
+            alias = "ticket_ids",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
     )]
     pub ticket_ids: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -2768,6 +2893,7 @@ impl ::buffa::ExtensionSet for UpdateRefRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UpdateRefRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -2781,6 +2907,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UpdateRefRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPDATE_REF_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UpdateRefRequest",
@@ -2789,20 +2916,23 @@ pub const __UPDATE_REF_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UpdateRefResponse {
     /// DSSE storage-receipt envelope JSON; empty when receipts are disabled.
     /// CAS and validation failures remain Connect errors (STC §3).
     ///
     /// Field 1: `receipt`
-    #[serde(
-        rename = "receipt",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receipt",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -2910,6 +3040,7 @@ impl ::buffa::ExtensionSet for UpdateRefResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UpdateRefResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -2923,6 +3054,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UpdateRefResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPDATE_REF_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UpdateRefResponse",
@@ -2931,108 +3063,144 @@ pub const __UPDATE_REF_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct AdvanceRefsRequest {
     /// Field 1: `head_ref`
-    #[serde(
-        rename = "headRef",
-        alias = "head_ref",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "headRef",
+            alias = "head_ref",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub head_ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `head_expectation`
-    #[serde(
-        rename = "headExpectation",
-        alias = "head_expectation",
-        with = "::buffa::json_helpers::opt_enum",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "headExpectation",
+            alias = "head_expectation",
+            with = "::buffa::json_helpers::opt_enum",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub head_expectation: ::core::option::Option<::buffa::EnumValue<RefExpectation>>,
     /// Field 3: `head_expected_id`
-    #[serde(
-        rename = "headExpectedId",
-        alias = "head_expected_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "headExpectedId",
+            alias = "head_expected_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub head_expected_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Field 4: `head_new_id`
-    #[serde(
-        rename = "headNewId",
-        alias = "head_new_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "headNewId",
+            alias = "head_new_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub head_new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Field 5: `packmap_ref`
-    #[serde(
-        rename = "packmapRef",
-        alias = "packmap_ref",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packmapRef",
+            alias = "packmap_ref",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub packmap_ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 6: `packmap_expectation`
-    #[serde(
-        rename = "packmapExpectation",
-        alias = "packmap_expectation",
-        with = "::buffa::json_helpers::opt_enum",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packmapExpectation",
+            alias = "packmap_expectation",
+            with = "::buffa::json_helpers::opt_enum",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub packmap_expectation: ::core::option::Option<::buffa::EnumValue<RefExpectation>>,
     /// Field 7: `packmap_expected_id`
-    #[serde(
-        rename = "packmapExpectedId",
-        alias = "packmap_expected_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packmapExpectedId",
+            alias = "packmap_expected_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub packmap_expected_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Field 8: `packmap_new_id`
-    #[serde(
-        rename = "packmapNewId",
-        alias = "packmap_new_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packmapNewId",
+            alias = "packmap_new_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub packmap_new_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Upload tickets consumed by this advance (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 9: `ticket_ids`
-    #[serde(
-        rename = "ticketIds",
-        alias = "ticket_ids",
-        with = "::buffa::json_helpers::proto_seq",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ticketIds",
+            alias = "ticket_ids",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
     )]
     pub ticket_ids: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
     /// Delete both refs under their CAS preconditions (SPEC-TRANSPORT-CONNECT §7.8).
     ///
     /// Field 10: `delete`
-    #[serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "delete", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub delete: ::core::option::Option<bool>,
     /// Copy this repository's authoritative published branch pair. When set,
     /// head_ref is the destination; all other explicit update fields, tickets
     /// and delete must be absent. Both destination refs use MISSING.
     ///
     /// Field 11: `source_ref`
-    #[serde(
-        rename = "sourceRef",
-        alias = "source_ref",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "sourceRef",
+            alias = "source_ref",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub source_ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Optional source-tip CAS, meaningful only with source_ref (32 bytes).
     ///
     /// Field 12: `expected_tip`
-    #[serde(
-        rename = "expectedTip",
-        alias = "expected_tip",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expectedTip",
+            alias = "expected_tip",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expected_tip: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -3447,6 +3615,7 @@ impl ::buffa::ExtensionSet for AdvanceRefsRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for AdvanceRefsRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -3460,6 +3629,7 @@ impl ::buffa::json_helpers::ProtoElemJson for AdvanceRefsRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ADVANCE_REFS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.AdvanceRefsRequest",
@@ -3468,26 +3638,32 @@ pub const __ADVANCE_REFS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct AdvanceRefsResponse {
     /// Field 1: `outcome`
-    #[serde(
-        rename = "outcome",
-        with = "::buffa::json_helpers::opt_enum",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "outcome",
+            with = "::buffa::json_helpers::opt_enum",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub outcome: ::core::option::Option<::buffa::EnumValue<AdvanceOutcome>>,
     /// DSSE storage-receipt envelope JSON; empty on conflict or when disabled.
     ///
     /// Field 2: `receipt`
-    #[serde(
-        rename = "receipt",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receipt",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -3624,6 +3800,7 @@ impl ::buffa::ExtensionSet for AdvanceRefsResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for AdvanceRefsResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -3637,6 +3814,7 @@ impl ::buffa::json_helpers::ProtoElemJson for AdvanceRefsResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ADVANCE_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.AdvanceRefsResponse",
@@ -3646,12 +3824,12 @@ pub const __ADVANCE_REFS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
 };
 /// A signed, writer-view read. Exactly one selector is required (STC §2.2).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetReceiptRequest {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub selector: ::core::option::Option<__buffa::oneof::get_receipt_request::Selector>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -3815,6 +3993,7 @@ impl ::buffa::ExtensionSet for GetReceiptRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for GetReceiptRequest {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -3899,6 +4078,7 @@ impl<'de> ::serde::Deserialize<'de> for GetReceiptRequest {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetReceiptRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -3912,6 +4092,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetReceiptRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_RECEIPT_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetReceiptRequest",
@@ -3924,29 +4105,36 @@ pub mod get_receipt_request {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::get_receipt_request::Selector;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::get_receipt_request::Selector as SelectorView;
 }
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct AdvanceReceiptSelector {
     /// full ref name
     ///
     /// Field 1: `ref`
-    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// 0 selects the latest committed advance
     ///
     /// Field 2: `advance_sequence`
-    #[serde(
-        rename = "advanceSequence",
-        alias = "advance_sequence",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "advanceSequence",
+            alias = "advance_sequence",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub advance_sequence: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4077,6 +4265,7 @@ impl ::buffa::ExtensionSet for AdvanceReceiptSelector {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for AdvanceReceiptSelector {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4090,6 +4279,7 @@ impl ::buffa::json_helpers::ProtoElemJson for AdvanceReceiptSelector {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ADVANCE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.AdvanceReceiptSelector",
@@ -4098,34 +4288,43 @@ pub const __ADVANCE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEn
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct LeaseReceiptSelector {
     /// empty selects the repository or namespace lease scope
     ///
     /// Field 1: `ref`
-    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// 0 selects the latest committed version
     ///
     /// Field 2: `lease_version`
-    #[serde(
-        rename = "leaseVersion",
-        alias = "lease_version",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "leaseVersion",
+            alias = "lease_version",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub lease_version: ::core::option::Option<u64>,
     /// with empty ref, selects signed repository's namespace
     ///
     /// Field 3: `namespace_scope`
-    #[serde(
-        rename = "namespaceScope",
-        alias = "namespace_scope",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namespaceScope",
+            alias = "namespace_scope",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub namespace_scope: ::core::option::Option<bool>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4280,6 +4479,7 @@ impl ::buffa::ExtensionSet for LeaseReceiptSelector {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for LeaseReceiptSelector {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4293,6 +4493,7 @@ impl ::buffa::json_helpers::ProtoElemJson for LeaseReceiptSelector {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __LEASE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.LeaseReceiptSelector",
@@ -4301,19 +4502,22 @@ pub const __LEASE_RECEIPT_SELECTOR_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetReceiptResponse {
     /// complete DSSE storage-receipt envelope JSON
     ///
     /// Field 1: `receipt`
-    #[serde(
-        rename = "receipt",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receipt",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4421,6 +4625,7 @@ impl ::buffa::ExtensionSet for GetReceiptResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetReceiptResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4434,6 +4639,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetReceiptResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_RECEIPT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetReceiptResponse",
@@ -4444,18 +4650,21 @@ pub const __GET_RECEIPT_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 /// ----------------------------------------------------------------------------
 /// Packs.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct PackExistsRequest {
     /// Field 1: `pack_id`
-    #[serde(
-        rename = "packId",
-        alias = "pack_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4563,6 +4772,7 @@ impl ::buffa::ExtensionSet for PackExistsRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for PackExistsRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4576,6 +4786,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PackExistsRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __PACK_EXISTS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.PackExistsRequest",
@@ -4584,13 +4795,16 @@ pub const __PACK_EXISTS_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct PackExistsResponse {
     /// Field 1: `exists`
-    #[serde(rename = "exists", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "exists", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub exists: ::core::option::Option<bool>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4694,6 +4908,7 @@ impl ::buffa::ExtensionSet for PackExistsResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for PackExistsResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4707,6 +4922,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PackExistsResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __PACK_EXISTS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.PackExistsResponse",
@@ -4718,36 +4934,45 @@ pub const __PACK_EXISTS_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 /// server uses it to reject oversized uploads before storage and to verify
 /// the following PackChunk stream ends exactly at the declared byte count.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPackHeader {
     /// Field 1: `pack_id`
-    #[serde(
-        rename = "packId",
-        alias = "pack_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Field 2: `total_bytes`
-    #[serde(
-        rename = "totalBytes",
-        alias = "total_bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "totalBytes",
+            alias = "total_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub total_bytes: ::core::option::Option<u64>,
     /// Opaque authenticated upload ticket (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 3: `ticket_token`
-    #[serde(
-        rename = "ticketToken",
-        alias = "ticket_token",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ticketToken",
+            alias = "ticket_token",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -4909,6 +5134,7 @@ impl ::buffa::ExtensionSet for UploadPackHeader {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPackHeader {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -4922,6 +5148,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPackHeader {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PACK_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPackHeader",
@@ -4930,12 +5157,12 @@ pub const __UPLOAD_PACK_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPackRequest {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub body: ::core::option::Option<__buffa::oneof::upload_pack_request::Body>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -5095,6 +5322,7 @@ impl ::buffa::ExtensionSet for UploadPackRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for UploadPackRequest {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -5179,6 +5407,7 @@ impl<'de> ::serde::Deserialize<'de> for UploadPackRequest {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPackRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -5192,6 +5421,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPackRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PACK_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPackRequest",
@@ -5204,15 +5434,16 @@ pub mod upload_pack_request {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::upload_pack_request::Body;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::upload_pack_request::Body as BodyView;
 }
 /// Empty body is success.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPackResponse {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -5291,6 +5522,7 @@ impl ::buffa::ExtensionSet for UploadPackResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPackResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -5304,6 +5536,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPackResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PACK_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPackResponse",
@@ -5312,27 +5545,33 @@ pub const __UPLOAD_PACK_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct DownloadPackRequest {
     /// Field 1: `pack_id`
-    #[serde(
-        rename = "packId",
-        alias = "pack_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Opt in to one location response when discovery advertises support (§6.2).
     ///
     /// Field 2: `accept_location`
-    #[serde(
-        rename = "acceptLocation",
-        alias = "accept_location",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "acceptLocation",
+            alias = "accept_location",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub accept_location: ::core::option::Option<bool>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -5466,6 +5705,7 @@ impl ::buffa::ExtensionSet for DownloadPackRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for DownloadPackRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -5479,6 +5719,7 @@ impl ::buffa::json_helpers::ProtoElemJson for DownloadPackRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __DOWNLOAD_PACK_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.DownloadPackRequest",
@@ -5488,18 +5729,21 @@ pub const __DOWNLOAD_PACK_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry
 };
 /// Sent once before the first chunk on a download.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct DownloadPackHeader {
     /// Field 1: `total_bytes`
-    #[serde(
-        rename = "totalBytes",
-        alias = "total_bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "totalBytes",
+            alias = "total_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub total_bytes: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -5605,6 +5849,7 @@ impl ::buffa::ExtensionSet for DownloadPackHeader {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for DownloadPackHeader {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -5618,6 +5863,7 @@ impl ::buffa::json_helpers::ProtoElemJson for DownloadPackHeader {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __DOWNLOAD_PACK_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.DownloadPackHeader",
@@ -5627,35 +5873,44 @@ pub const __DOWNLOAD_PACK_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 };
 /// Alternative to header/chunks for an opted-in download (STC §6.2).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct DownloadPackLocation {
     /// HTTPS URL for exactly the requested pack; fetch without kit credentials.
     ///
     /// Field 1: `url`
-    #[serde(rename = "url", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "url", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub url: ::core::option::Option<::buffa::alloc::string::String>,
     /// Expiry as Unix time in milliseconds, within the advertised lifetime bound.
     ///
     /// Field 2: `expires_at_ms`
-    #[serde(
-        rename = "expiresAtMs",
-        alias = "expires_at_ms",
-        with = "::buffa::json_helpers::opt_int64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expiresAtMs",
+            alias = "expires_at_ms",
+            with = "::buffa::json_helpers::opt_int64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expires_at_ms: ::core::option::Option<i64>,
     /// Exact pack length; verify this and the requested content address before use.
     ///
     /// Field 3: `total_bytes`
-    #[serde(
-        rename = "totalBytes",
-        alias = "total_bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "totalBytes",
+            alias = "total_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub total_bytes: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -5810,6 +6065,7 @@ impl ::buffa::ExtensionSet for DownloadPackLocation {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for DownloadPackLocation {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -5823,6 +6079,7 @@ impl ::buffa::json_helpers::ProtoElemJson for DownloadPackLocation {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __DOWNLOAD_PACK_LOCATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.DownloadPackLocation",
@@ -5831,12 +6088,12 @@ pub const __DOWNLOAD_PACK_LOCATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct DownloadPackResponse {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub body: ::core::option::Option<__buffa::oneof::download_pack_response::Body>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -6036,6 +6293,7 @@ impl ::buffa::ExtensionSet for DownloadPackResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for DownloadPackResponse {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -6144,6 +6402,7 @@ impl<'de> ::serde::Deserialize<'de> for DownloadPackResponse {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for DownloadPackResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -6157,6 +6416,7 @@ impl ::buffa::json_helpers::ProtoElemJson for DownloadPackResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __DOWNLOAD_PACK_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.DownloadPackResponse",
@@ -6169,6 +6429,7 @@ pub mod download_pack_response {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::download_pack_response::Body;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::download_pack_response::Body as BodyView;
 }
@@ -6177,10 +6438,10 @@ pub mod download_pack_response {
 ///
 /// Empty discovery request; X-Repository is optional (SPEC-TRANSPORT-CONNECT §2.1).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetServerInfoRequest {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -6259,6 +6520,7 @@ impl ::buffa::ExtensionSet for GetServerInfoRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -6272,6 +6534,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_SERVER_INFO_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetServerInfoRequest",
@@ -6281,205 +6544,268 @@ pub const __GET_SERVER_INFO_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 };
 /// Deployment capabilities, independent of repository existence (SPEC-TRANSPORT-CONNECT §2.1).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetServerInfoResponse {
     /// Wire package: "kit.transport.v1" (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 1: `protocol`
-    #[serde(
-        rename = "protocol",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "protocol",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub protocol: ::core::option::Option<::buffa::alloc::string::String>,
     /// Transport specification version: 2 (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 2: `spec_version`
-    #[serde(
-        rename = "specVersion",
-        alias = "spec_version",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "specVersion",
+            alias = "spec_version",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub spec_version: ::core::option::Option<u32>,
     /// Largest accepted pack length (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 3: `max_pack_bytes`
-    #[serde(
-        rename = "maxPackBytes",
-        alias = "max_pack_bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxPackBytes",
+            alias = "max_pack_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_pack_bytes: ::core::option::Option<u64>,
     /// Power of two, at least 8 MiB (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
     ///
     /// Field 4: `part_size`
-    #[serde(
-        rename = "partSize",
-        alias = "part_size",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "partSize",
+            alias = "part_size",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub part_size: ::core::option::Option<u64>,
     /// Largest number of parts per upload (SPEC-TRANSPORT-CONNECT §2.1, §7.6).
     ///
     /// Field 5: `max_parts`
-    #[serde(
-        rename = "maxParts",
-        alias = "max_parts",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxParts",
+            alias = "max_parts",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_parts: ::core::option::Option<u32>,
     /// Largest ref count per page (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
     ///
     /// Field 6: `max_list_refs_page_size`
-    #[serde(
-        rename = "maxListRefsPageSize",
-        alias = "max_list_refs_page_size",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxListRefsPageSize",
+            alias = "max_list_refs_page_size",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_list_refs_page_size: ::core::option::Option<u32>,
     /// Smaller packs may skip BeginUpload; zero with admission or multiple repositories (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 7: `begin_upload_threshold_bytes`
-    #[serde(
-        rename = "beginUploadThresholdBytes",
-        alias = "begin_upload_threshold_bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "beginUploadThresholdBytes",
+            alias = "begin_upload_threshold_bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub begin_upload_threshold_bytes: ::core::option::Option<u64>,
     /// Whether AdvanceRefs commits both refs atomically (SPEC-TRANSPORT-CONNECT §2.1, §4).
     ///
     /// Field 8: `atomic_advance`
-    #[serde(
-        rename = "atomicAdvance",
-        alias = "atomic_advance",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "atomicAdvance",
+            alias = "atomic_advance",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub atomic_advance: ::core::option::Option<bool>,
     /// Whether pushed packs are decoded and verified (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 9: `indexed_mode`
-    #[serde(
-        rename = "indexedMode",
-        alias = "indexed_mode",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "indexedMode",
+            alias = "indexed_mode",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub indexed_mode: ::core::option::Option<bool>,
     /// Whether admission can challenge requests (SPEC-TRANSPORT-CONNECT §2.1, §5.1).
     ///
     /// Field 10: `admission`
-    #[serde(
-        rename = "admission",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "admission",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub admission: ::core::option::Option<bool>,
     /// Raw 32-byte current receipt+notice public key; empty only if unconfigured.
     ///
     /// Field 11: `receipt_public_key`
-    #[serde(
-        rename = "receiptPublicKey",
-        alias = "receipt_public_key",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receiptPublicKey",
+            alias = "receipt_public_key",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt_public_key: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// 64-hex BLAKE3 of receipt_public_key; empty only if unconfigured.
     ///
     /// Field 12: `receipt_key_id`
-    #[serde(
-        rename = "receiptKeyId",
-        alias = "receipt_key_id",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receiptKeyId",
+            alias = "receipt_key_id",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt_key_id: ::core::option::Option<::buffa::alloc::string::String>,
     /// Accepted owner signature schemes; empty until grants are enabled (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 13: `grant_schemes`
-    #[serde(
-        rename = "grantSchemes",
-        alias = "grant_schemes",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "grantSchemes",
+            alias = "grant_schemes",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub grant_schemes: ::buffa::alloc::vec::Vec<::buffa::alloc::string::String>,
     /// "allowlist", "any", or "single-repository" (SPEC-TRANSPORT-CONNECT §2.1, §7.5).
     ///
     /// Field 14: `namespace_policy`
-    #[serde(
-        rename = "namespacePolicy",
-        alias = "namespace_policy",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namespacePolicy",
+            alias = "namespace_policy",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub namespace_policy: ::core::option::Option<::buffa::alloc::string::String>,
     /// Fixed index prefix fan-out; default 16 (SPEC-TRANSPORT-CONNECT §2.1, §7.9).
     ///
     /// Field 15: `index_fanout`
-    #[serde(
-        rename = "indexFanout",
-        alias = "index_fanout",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "indexFanout",
+            alias = "index_fanout",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub index_fanout: ::core::option::Option<u32>,
     /// 0 when indexed mode is off
     ///
     /// Field 16: `max_delta_chain_depth`
-    #[serde(
-        rename = "maxDeltaChainDepth",
-        alias = "max_delta_chain_depth",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxDeltaChainDepth",
+            alias = "max_delta_chain_depth",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_delta_chain_depth: ::core::option::Option<u32>,
     /// Whether storage leases are enforced; STC §2.1.
     ///
     /// Field 17: `leases`
-    #[serde(rename = "leases", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "leases", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub leases: ::core::option::Option<bool>,
     /// Whether async inspection is configured; writers MUST sign reads to see
     /// non-held pending content. Held content is hidden from every caller,
     /// including with sync holds when false.
     ///
     /// Field 18: `async_inspection`
-    #[serde(
-        rename = "asyncInspection",
-        alias = "async_inspection",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "asyncInspection",
+            alias = "async_inspection",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub async_inspection: ::core::option::Option<bool>,
     /// Maximum distinct inspected objects in one advance; absent when no inspector
     /// is configured (SPEC-TRANSPORT-CONNECT §2.1).
     ///
     /// Field 19: `inspection_max_objects`
-    #[serde(
-        rename = "inspectionMaxObjects",
-        alias = "inspection_max_objects",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "inspectionMaxObjects",
+            alias = "inspection_max_objects",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub inspection_max_objects: ::core::option::Option<u32>,
     /// Whether DownloadPack accepts location opt-in; absent or false disables it.
     ///
     /// Field 20: `supports_pack_locations`
-    #[serde(
-        rename = "supportsPackLocations",
-        alias = "supports_pack_locations",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "supportsPackLocations",
+            alias = "supports_pack_locations",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub supports_pack_locations: ::core::option::Option<bool>,
     /// Maximum issued location lifetime in milliseconds; positive when supported.
     ///
     /// Field 21: `max_pack_location_lifetime_ms`
-    #[serde(
-        rename = "maxPackLocationLifetimeMs",
-        alias = "max_pack_location_lifetime_ms",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxPackLocationLifetimeMs",
+            alias = "max_pack_location_lifetime_ms",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_pack_location_lifetime_ms: ::core::option::Option<u64>,
     /// Most upload tickets one AdvanceRefs request may carry in ticket_ids
@@ -6487,23 +6813,29 @@ pub struct GetServerInfoResponse {
     /// value below two as absent and a value above 1,024 as 1,024.
     ///
     /// Field 22: `max_tickets_per_advance`
-    #[serde(
-        rename = "maxTicketsPerAdvance",
-        alias = "max_tickets_per_advance",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "maxTicketsPerAdvance",
+            alias = "max_tickets_per_advance",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub max_tickets_per_advance: ::core::option::Option<u32>,
     /// Ticketed attestmap writes and reads (STC §4.2); absent means unsupported.
     ///
     /// Field 23: `supports_attestations`
-    #[serde(
-        rename = "supportsAttestations",
-        alias = "supports_attestations",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "supportsAttestations",
+            alias = "supports_attestations",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub supports_attestations: ::core::option::Option<bool>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7156,6 +7488,7 @@ impl ::buffa::ExtensionSet for GetServerInfoResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -7169,6 +7502,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetServerInfoResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_SERVER_INFO_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetServerInfoResponse",
@@ -7181,34 +7515,43 @@ pub const __GET_SERVER_INFO_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 ///
 /// Reserve an upload; the repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4, §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct BeginUploadRequest {
     /// The ref this upload will advance (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `ref`
-    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Pack's 32-byte BLAKE3 digest (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 2: `pack_id`
-    #[serde(
-        rename = "packId",
-        alias = "pack_id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "packId",
+            alias = "pack_id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub pack_id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Total pack length (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 3: `bytes`
-    #[serde(
-        rename = "bytes",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "bytes",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub bytes: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7367,6 +7710,7 @@ impl ::buffa::ExtensionSet for BeginUploadRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for BeginUploadRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -7380,6 +7724,7 @@ impl ::buffa::json_helpers::ProtoElemJson for BeginUploadRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __BEGIN_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.BeginUploadRequest",
@@ -7389,12 +7734,12 @@ pub const __BEGIN_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 };
 /// Repository membership or an upload reservation (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct BeginUploadResponse {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub result: ::core::option::Option<__buffa::oneof::begin_upload_response::Result>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7558,6 +7903,7 @@ impl ::buffa::ExtensionSet for BeginUploadResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for BeginUploadResponse {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -7642,6 +7988,7 @@ impl<'de> ::serde::Deserialize<'de> for BeginUploadResponse {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for BeginUploadResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -7655,6 +8002,7 @@ impl ::buffa::json_helpers::ProtoElemJson for BeginUploadResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __BEGIN_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.BeginUploadResponse",
@@ -7667,15 +8015,16 @@ pub mod begin_upload_response {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::begin_upload_response::Result;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::begin_upload_response::Result as ResultView;
 }
 /// Indicates existing pack membership (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct AlreadyPresent {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7754,6 +8103,7 @@ impl ::buffa::ExtensionSet for AlreadyPresent {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for AlreadyPresent {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -7767,6 +8117,7 @@ impl ::buffa::json_helpers::ProtoElemJson for AlreadyPresent {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ALREADY_PRESENT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.AlreadyPresent",
@@ -7776,48 +8127,60 @@ pub const __ALREADY_PRESENT_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::b
 };
 /// Upload reservation bound by an opaque authenticated token (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadTicket {
     /// 32-byte id; its hex form is \<ticket\> in part: commitments (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `id`
-    #[serde(
-        rename = "id",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "id",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub id: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Uniform non-final part length (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 2: `part_size`
-    #[serde(
-        rename = "partSize",
-        alias = "part_size",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "partSize",
+            alias = "part_size",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub part_size: ::core::option::Option<u64>,
     /// Expiry in Unix milliseconds, as in auth v2 (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 3: `expires_unix_ms`
-    #[serde(
-        rename = "expiresUnixMs",
-        alias = "expires_unix_ms",
-        with = "::buffa::json_helpers::opt_int64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expiresUnixMs",
+            alias = "expires_unix_ms",
+            with = "::buffa::json_helpers::opt_int64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expires_unix_ms: ::core::option::Option<i64>,
     /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6, "Ticket token").
     ///
     /// Field 4: `token`
-    #[serde(
-        rename = "token",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "token",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7997,6 +8360,7 @@ impl ::buffa::ExtensionSet for UploadTicket {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadTicket {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8010,6 +8374,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadTicket {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_TICKET_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadTicket",
@@ -8019,29 +8384,35 @@ pub const __UPLOAD_TICKET_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buf
 };
 /// First message of one part's stream (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPartHeader {
     /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `ticket_token`
-    #[serde(
-        rename = "ticketToken",
-        alias = "ticket_token",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ticketToken",
+            alias = "ticket_token",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Zero-based part index (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 2: `index`
-    #[serde(
-        rename = "index",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "index",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub index: ::core::option::Option<u32>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -8175,6 +8546,7 @@ impl ::buffa::ExtensionSet for UploadPartHeader {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPartHeader {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8188,6 +8560,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPartHeader {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PART_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPartHeader",
@@ -8197,12 +8570,12 @@ pub const __UPLOAD_PART_HEADER_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = 
 };
 /// Header followed by ordered part bytes (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPartRequest {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub msg: ::core::option::Option<__buffa::oneof::upload_part_request::Msg>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -8343,6 +8716,7 @@ impl ::buffa::ExtensionSet for UploadPartRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for UploadPartRequest {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -8436,6 +8810,7 @@ impl<'de> ::serde::Deserialize<'de> for UploadPartRequest {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPartRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8449,6 +8824,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPartRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PART_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPartRequest",
@@ -8461,24 +8837,28 @@ pub mod upload_part_request {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::upload_part_request::Msg;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::upload_part_request::Msg as MsgView;
 }
 /// Acknowledges one uploaded part (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct UploadPartResponse {
     /// Opaque server-authenticated part receipt (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `receipt`
-    #[serde(
-        rename = "receipt",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receipt",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub receipt: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -8588,6 +8968,7 @@ impl ::buffa::ExtensionSet for UploadPartResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for UploadPartResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8601,6 +8982,7 @@ impl ::buffa::json_helpers::ProtoElemJson for UploadPartResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __UPLOAD_PART_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.UploadPartResponse",
@@ -8610,29 +8992,35 @@ pub const __UPLOAD_PART_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 };
 /// Finish an upload after all parts (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct CompleteUploadRequest {
     /// Opaque server-authenticated ticket token (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 1: `ticket_token`
-    #[serde(
-        rename = "ticketToken",
-        alias = "ticket_token",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ticketToken",
+            alias = "ticket_token",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub ticket_token: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
     /// Part receipts in part-index order (SPEC-TRANSPORT-CONNECT §7.6).
     ///
     /// Field 2: `receipts`
-    #[serde(
-        rename = "receipts",
-        with = "::buffa::json_helpers::proto_seq",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "receipts",
+            with = "::buffa::json_helpers::proto_seq",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec"
+        )
     )]
     pub receipts: ::buffa::alloc::vec::Vec<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -8761,6 +9149,7 @@ impl ::buffa::ExtensionSet for CompleteUploadRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8774,6 +9163,7 @@ impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __COMPLETE_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.CompleteUploadRequest",
@@ -8783,10 +9173,10 @@ pub const __COMPLETE_UPLOAD_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 };
 /// Empty body is successful completion (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct CompleteUploadResponse {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -8865,6 +9255,7 @@ impl ::buffa::ExtensionSet for CompleteUploadResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -8878,6 +9269,7 @@ impl ::buffa::json_helpers::ProtoElemJson for CompleteUploadResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __COMPLETE_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.CompleteUploadResponse",
@@ -8889,16 +9281,19 @@ pub const __COMPLETE_UPLOAD_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 ///
 /// Namespace RPC; it carries no X-Repository (SPEC-WRITE-GRANTS §5.3).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetGrantEpochRequest {
     /// Field 1: `namespace`
-    #[serde(
-        rename = "namespace",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namespace",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub namespace: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9010,6 +9405,7 @@ impl ::buffa::ExtensionSet for GetGrantEpochRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetGrantEpochRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9023,6 +9419,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetGrantEpochRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_GRANT_EPOCH_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetGrantEpochRequest",
@@ -9032,17 +9429,20 @@ pub const __GET_GRANT_EPOCH_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 };
 /// An absent stored epoch is 0 (SPEC-WRITE-GRANTS §5.3).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetGrantEpochResponse {
     /// Field 1: `epoch`
-    #[serde(
-        rename = "epoch",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "epoch",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub epoch: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9146,6 +9546,7 @@ impl ::buffa::ExtensionSet for GetGrantEpochResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetGrantEpochResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9159,6 +9560,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetGrantEpochResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_GRANT_EPOCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetGrantEpochResponse",
@@ -9169,17 +9571,20 @@ pub const __GET_GRANT_EPOCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 /// The single §4.2-encoded owner statement is at most 8,192 bytes. No auth v2
 /// envelope or replay entry applies (SPEC-WRITE-GRANTS §5.3).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetGrantEpochRequest {
     /// Field 1: `signed_statement`
-    #[serde(
-        rename = "signedStatement",
-        alias = "signed_statement",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "signedStatement",
+            alias = "signed_statement",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub signed_statement: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9291,6 +9696,7 @@ impl ::buffa::ExtensionSet for SetGrantEpochRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetGrantEpochRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9304,6 +9710,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetGrantEpochRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_GRANT_EPOCH_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetGrantEpochRequest",
@@ -9313,17 +9720,20 @@ pub const __SET_GRANT_EPOCH_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEnt
 };
 /// Stored epoch after revocation completion (SPEC-WRITE-GRANTS §5.3).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetGrantEpochResponse {
     /// Field 1: `epoch`
-    #[serde(
-        rename = "epoch",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "epoch",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub epoch: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9427,6 +9837,7 @@ impl ::buffa::ExtensionSet for SetGrantEpochResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetGrantEpochResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9440,6 +9851,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetGrantEpochResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_GRANT_EPOCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetGrantEpochResponse",
@@ -9450,12 +9862,12 @@ pub const __SET_GRANT_EPOCH_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEn
 /// Repository comes only from X-Repository (SPEC-TRANSPORT-CONNECT §7.4).
 /// A grant never authorizes either mode (SPEC-WRITE-GRANTS §9.1).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetRepoVisibilityRequest {
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub mode: ::core::option::Option<__buffa::oneof::set_repo_visibility_request::Mode>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9581,6 +9993,7 @@ impl ::buffa::ExtensionSet for SetRepoVisibilityRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for SetRepoVisibilityRequest {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -9669,6 +10082,7 @@ impl<'de> ::serde::Deserialize<'de> for SetRepoVisibilityRequest {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetRepoVisibilityRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9682,6 +10096,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetRepoVisibilityRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_REPO_VISIBILITY_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetRepoVisibilityRequest",
@@ -9694,14 +10109,15 @@ pub mod set_repo_visibility_request {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::set_repo_visibility_request::Mode;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::set_repo_visibility_request::Mode as ModeView;
 }
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetRepoVisibilityResponse {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9780,6 +10196,7 @@ impl ::buffa::ExtensionSet for SetRepoVisibilityResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetRepoVisibilityResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -9793,6 +10210,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetRepoVisibilityResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_REPO_VISIBILITY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetRepoVisibilityResponse",
@@ -9802,22 +10220,25 @@ pub const __SET_REPO_VISIBILITY_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonA
 };
 /// Signed read; repository comes only from X-Repository (§9.4; STC §7.4).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct IssueObjectUrlRequest {
     /// 0 requests the default; otherwise clamped to url_token_ttl (§9.4).
     ///
     /// Field 3: `ttl_seconds`
-    #[serde(
-        rename = "ttlSeconds",
-        alias = "ttl_seconds",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "ttlSeconds",
+            alias = "ttl_seconds",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub ttl_seconds: ::core::option::Option<u32>,
-    #[serde(flatten)]
+    #[cfg_attr(feature = "json", serde(flatten))]
     pub target: ::core::option::Option<__buffa::oneof::issue_object_url_request::Target>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -9988,6 +10409,7 @@ impl ::buffa::ExtensionSet for IssueObjectUrlRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl<'de> ::serde::Deserialize<'de> for IssueObjectUrlRequest {
     fn deserialize<D: ::serde::Deserializer<'de>>(
         d: D,
@@ -10107,6 +10529,7 @@ impl<'de> ::serde::Deserialize<'de> for IssueObjectUrlRequest {
         d.deserialize_map(_V)
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for IssueObjectUrlRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10120,6 +10543,7 @@ impl ::buffa::json_helpers::ProtoElemJson for IssueObjectUrlRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ISSUE_OBJECT_URL_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.IssueObjectUrlRequest",
@@ -10132,21 +10556,28 @@ pub mod issue_object_url_request {
     use super::*;
     #[doc(inline)]
     pub use super::__buffa::oneof::issue_object_url_request::Target;
+    #[cfg(feature = "transport-messages")]
     #[doc(inline)]
     pub use super::__buffa::view::oneof::issue_object_url_request::Target as TargetView;
 }
 /// Full ref name and UTF-8 path of 0..1,024 bytes; empty names the root tree.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct RefPath {
     /// Field 1: `ref`
-    #[serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "ref", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub r#ref: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `path`
-    #[serde(rename = "path", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "path", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub path: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -10281,6 +10712,7 @@ impl ::buffa::ExtensionSet for RefPath {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for RefPath {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10294,6 +10726,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RefPath {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __REF_PATH_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.RefPath",
@@ -10302,21 +10735,27 @@ pub const __REF_PATH_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::t
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct IssueObjectUrlResponse {
     /// Field 1: `token`
-    #[serde(rename = "token", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "token", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub token: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 2: `expires_unix_ms`
-    #[serde(
-        rename = "expiresUnixMs",
-        alias = "expires_unix_ms",
-        with = "::buffa::json_helpers::opt_int64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "expiresUnixMs",
+            alias = "expires_unix_ms",
+            with = "::buffa::json_helpers::opt_int64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub expires_unix_ms: ::core::option::Option<i64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -10450,6 +10889,7 @@ impl ::buffa::ExtensionSet for IssueObjectUrlResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for IssueObjectUrlResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10463,6 +10903,7 @@ impl ::buffa::json_helpers::ProtoElemJson for IssueObjectUrlResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ISSUE_OBJECT_URL_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.IssueObjectUrlResponse",
@@ -10475,27 +10916,33 @@ pub const __ISSUE_OBJECT_URL_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyE
 ///
 /// Detail on a challenged unary request (SPEC-TRANSPORT-CONNECT §5.1).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct AdmissionChallenge {
     /// 1 to 8 entries, in the server's order of preference
     ///
     /// Field 1: `challenges`
-    #[serde(
-        rename = "challenges",
-        skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
-        deserialize_with = "::buffa::json_helpers::null_as_default"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "challenges",
+            skip_serializing_if = "::buffa::json_helpers::skip_if::is_empty_vec",
+            deserialize_with = "::buffa::json_helpers::null_as_default"
+        )
     )]
     pub challenges: ::buffa::alloc::vec::Vec<Challenge>,
     /// text for a person; at most 512 bytes of UTF-8
     ///
     /// Field 2: `description`
-    #[serde(
-        rename = "description",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "description",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub description: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -10637,6 +11084,7 @@ impl ::buffa::ExtensionSet for AdmissionChallenge {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for AdmissionChallenge {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10650,6 +11098,7 @@ impl ::buffa::json_helpers::ProtoElemJson for AdmissionChallenge {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __ADMISSION_CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.AdmissionChallenge",
@@ -10659,20 +11108,26 @@ pub const __ADMISSION_CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry =
 };
 /// One opaque admission challenge (SPEC-TRANSPORT-CONNECT §5.1).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct Challenge {
     /// lowercase token: \[a-z0-9\]\[a-z0-9.-\]{0,63}
     ///
     /// Field 1: `scheme`
-    #[serde(rename = "scheme", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "scheme", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub scheme: ::core::option::Option<::buffa::alloc::string::String>,
     /// opaque to kit; at most 8,192 bytes
     ///
     /// Field 2: `value`
-    #[serde(rename = "value", skip_serializing_if = "::core::option::Option::is_none")]
+    #[cfg_attr(
+        feature = "json",
+        serde(rename = "value", skip_serializing_if = "::core::option::Option::is_none")
+    )]
     pub value: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -10810,6 +11265,7 @@ impl ::buffa::ExtensionSet for Challenge {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for Challenge {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10823,6 +11279,7 @@ impl ::buffa::json_helpers::ProtoElemJson for Challenge {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.Challenge",
@@ -10833,20 +11290,23 @@ pub const __CHALLENGE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::
 /// Detail on an `unavailable` AdvanceRefs whose consumed pack is still under
 /// verification (SPEC-TRANSPORT-CONNECT §7.6).
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct PendingVerification {
     /// server's suggested poll interval; bounded tiny-pack work may send under 1000
     ///
     /// Field 1: `retry_after_ms`
-    #[serde(
-        rename = "retryAfterMs",
-        alias = "retry_after_ms",
-        with = "::buffa::json_helpers::opt_uint32",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "retryAfterMs",
+            alias = "retry_after_ms",
+            with = "::buffa::json_helpers::opt_uint32",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub retry_after_ms: ::core::option::Option<u32>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -10952,6 +11412,7 @@ impl ::buffa::ExtensionSet for PendingVerification {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for PendingVerification {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -10965,6 +11426,7 @@ impl ::buffa::json_helpers::ProtoElemJson for PendingVerification {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.PendingVerification",
@@ -10977,10 +11439,10 @@ pub const __PENDING_VERIFICATION_JSON_ANY: ::buffa::type_registry::JsonAnyEntry 
 /// §5). The condition is carried by the type; the message has no fields and
 /// retrying with the same nonce is safe.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct MembershipNotVisible {
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11059,6 +11521,7 @@ impl ::buffa::ExtensionSet for MembershipNotVisible {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for MembershipNotVisible {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11072,6 +11535,7 @@ impl ::buffa::json_helpers::ProtoElemJson for MembershipNotVisible {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __MEMBERSHIP_NOT_VISIBLE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.MembershipNotVisible",
@@ -11082,17 +11546,20 @@ pub const __MEMBERSHIP_NOT_VISIBLE_JSON_ANY: ::buffa::type_registry::JsonAnyEntr
 /// Signed takedown notice used as a Connect error detail and on visible refs.
 /// The sole field is the exact DSSE JSON envelope.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct RedactionNotice {
     /// Field 1: `envelope`
-    #[serde(
-        rename = "envelope",
-        with = "::buffa::json_helpers::opt_bytes",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "envelope",
+            with = "::buffa::json_helpers::opt_bytes",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub envelope: ::core::option::Option<::buffa::alloc::vec::Vec<u8>>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11200,6 +11667,7 @@ impl ::buffa::ExtensionSet for RedactionNotice {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for RedactionNotice {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11213,6 +11681,7 @@ impl ::buffa::json_helpers::ProtoElemJson for RedactionNotice {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __REDACTION_NOTICE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.RedactionNotice",
@@ -11222,16 +11691,19 @@ pub const __REDACTION_NOTICE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::
 };
 /// Optional namespace authority fence.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetAuthorityGenerationRequest {
     /// Field 1: `namespace`
-    #[serde(
-        rename = "namespace",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "namespace",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub namespace: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11343,6 +11815,7 @@ impl ::buffa::ExtensionSet for GetAuthorityGenerationRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetAuthorityGenerationRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11356,6 +11829,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetAuthorityGenerationRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_AUTHORITY_GENERATION_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetAuthorityGenerationRequest",
@@ -11364,17 +11838,20 @@ pub const __GET_AUTHORITY_GENERATION_REQUEST_JSON_ANY: ::buffa::type_registry::J
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct GetAuthorityGenerationResponse {
     /// Field 1: `generation`
-    #[serde(
-        rename = "generation",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "generation",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub generation: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11480,6 +11957,7 @@ impl ::buffa::ExtensionSet for GetAuthorityGenerationResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for GetAuthorityGenerationResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11493,6 +11971,7 @@ impl ::buffa::json_helpers::ProtoElemJson for GetAuthorityGenerationResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __GET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.GetAuthorityGenerationResponse",
@@ -11502,17 +11981,20 @@ pub const __GET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY: ::buffa::type_registry::
 };
 /// Bounded, canonical deployment-authority statement; never an owner fallback.
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetAuthorityGenerationRequest {
     /// Field 1: `signed_statement`
-    #[serde(
-        rename = "signedStatement",
-        alias = "signed_statement",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "signedStatement",
+            alias = "signed_statement",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub signed_statement: ::core::option::Option<::buffa::alloc::string::String>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11624,6 +12106,7 @@ impl ::buffa::ExtensionSet for SetAuthorityGenerationRequest {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetAuthorityGenerationRequest {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11637,6 +12120,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetAuthorityGenerationRequest {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_AUTHORITY_GENERATION_REQUEST_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetAuthorityGenerationRequest",
@@ -11645,17 +12129,20 @@ pub const __SET_AUTHORITY_GENERATION_REQUEST_JSON_ANY: ::buffa::type_registry::J
     is_wkt: false,
 };
 #[derive(Clone, PartialEq, Default)]
-#[derive(::serde::Serialize, ::serde::Deserialize)]
-#[serde(default)]
+#[cfg_attr(feature = "json", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "json", serde(default))]
 pub struct SetAuthorityGenerationResponse {
     /// Field 1: `generation`
-    #[serde(
-        rename = "generation",
-        with = "::buffa::json_helpers::opt_uint64",
-        skip_serializing_if = "::core::option::Option::is_none"
+    #[cfg_attr(
+        feature = "json",
+        serde(
+            rename = "generation",
+            with = "::buffa::json_helpers::opt_uint64",
+            skip_serializing_if = "::core::option::Option::is_none"
+        )
     )]
     pub generation: ::core::option::Option<u64>,
-    #[serde(skip)]
+    #[cfg_attr(feature = "json", serde(skip))]
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -11761,6 +12248,7 @@ impl ::buffa::ExtensionSet for SetAuthorityGenerationResponse {
         &mut self.__buffa_unknown_fields
     }
 }
+#[cfg(feature = "json")]
 impl ::buffa::json_helpers::ProtoElemJson for SetAuthorityGenerationResponse {
     fn serialize_proto_json<S: ::serde::Serializer>(
         v: &Self,
@@ -11774,6 +12262,7 @@ impl ::buffa::json_helpers::ProtoElemJson for SetAuthorityGenerationResponse {
         <Self as ::serde::Deserialize>::deserialize(d)
     }
 }
+#[cfg(feature = "json")]
 #[doc(hidden)]
 pub const __SET_AUTHORITY_GENERATION_RESPONSE_JSON_ANY: ::buffa::type_registry::JsonAnyEntry = ::buffa::type_registry::JsonAnyEntry {
     type_url: "type.googleapis.com/kit.transport.v1.SetAuthorityGenerationResponse",
