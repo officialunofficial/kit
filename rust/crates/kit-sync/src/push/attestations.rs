@@ -58,7 +58,11 @@ fn persist(path: &std::path::Path, record: &Record) -> Result<(), Failure> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    crate::applied_packs::write_atomic(path, &record.encode(RecordKind::Push))?;
+    kit_core::durable::write_pointer(
+        path,
+        &record.encode(RecordKind::Push),
+        kit_core::durable::Parents::Create,
+    )?;
     Ok(())
 }
 

@@ -271,7 +271,7 @@ fn prepare_dir(store: &ObjectStore, guard: &PruneGuard) -> StoreResult<()> {
     if !fs::symlink_metadata(&dir)?.is_dir() {
         return Err(index::invalid_at(&dir, "not a directory"));
     }
-    crate::atomic::sync_dir(store.objects_root())?;
+    crate::durable::flush_dir(store.objects_root())?;
     prepared.store(true, Ordering::Release);
     Ok(())
 }
@@ -436,7 +436,7 @@ impl Staged {
         }
         let dir = store.pack_dir();
         let pair = Pair::new(&dir, key);
-        pack.as_file().sync_all()?;
+        crate::durable::flush_file(pack.as_file(), pack.path())?;
         let idx = stage_index(&dir, &pair, pack.path(), &rows)?;
         Ok(Self { pair, pack, idx })
     }
@@ -460,7 +460,7 @@ impl Staged {
             match scan_pair(&pair) {
                 Ok(_) => {
                     crate::store::refresh_mtime(&pair.pack)?;
-                    existing.sync_all()?;
+                    crate::durable::flush_file(&existing, &pair.pack)?;
                 }
                 // The staged copy's layout was checked against the writer's
                 // rows and it has this exact key. Replace a damaged member
@@ -471,19 +471,19 @@ impl Staged {
                 Err(e) => return Err(e),
             }
         }
-        crate::atomic::sync_dir(&dir)?;
+        crate::durable::flush_dir(&dir)?;
         after_pack_sync()?;
         if let Some(staged) = persist_unique(idx, &pair.index)? {
             let existing = open_regular(&pair.index)?;
             let rows = scan_pair(&pair)?;
             if matching_index(&pair, &rows)? {
-                existing.sync_all()?;
+                crate::durable::flush_file(&existing, &pair.index)?;
             } else {
                 staged.persist(&pair.index).map_err(|e| e.error)?;
             }
         }
         Index::open(&pair)?;
-        crate::atomic::sync_dir(&dir)?;
+        crate::durable::flush_dir(&dir)?;
         store
             .packs
             .enabled
@@ -868,19 +868,19 @@ mod tests {
     fn later_packs_of_a_store_skip_the_marker_and_parent_syncs() {
         let (_dir, layout, store) = packed_store();
         let guard = store.prune_guard().unwrap();
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let mut first = LocalPackWriter::new(&store, &guard).unwrap();
         first.write(&blob(b"first")).unwrap();
         first.publish().unwrap();
         // The marker's directory, the objects root, then the pack directory
         // after the pack and again after the index.
-        assert_eq!(crate::atomic::testing::dir_sync_calls(), 4);
+        assert_eq!(crate::durable::testing::dir_sync_calls(), 4);
 
-        crate::atomic::testing::reset_dir_sync_calls();
+        crate::durable::testing::reset_dir_sync_calls();
         let mut second = LocalPackWriter::new(&store, &guard).unwrap();
         second.write(&blob(b"second")).unwrap();
         second.publish().unwrap();
-        assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+        assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
         assert_eq!(pairs(&store).len(), 2);
         drop(guard);
 

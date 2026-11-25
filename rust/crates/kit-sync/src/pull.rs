@@ -230,7 +230,7 @@ fn land_pull(
     }
     write_pull_head(layout, store, remote_tip)?;
     write_ref_recording_history(layout, &branch, ref_condition, &remote_tip)?;
-    if let Err(e) = refs::write_head_branch(layout, &branch) {
+    if let Err(e) = point_head_at_branch(layout, &branch) {
         rollback_pull_ref(layout, &branch, local_tip, remote_tip)?;
         clear_pull_head(layout)?;
         return Err(e.into());
@@ -482,20 +482,31 @@ fn write_pull_head(
     let before_tree =
         kit_core::worktree::build_tree_from_index_against(store, store, &index, false, base)
             .map_err(|e| SyncError::RestoreSafety(e.to_string()))?;
-    crate::applied_packs::write_atomic(
+    kit_core::durable::write_pointer(
         &layout.pull_head_file(),
         &PullState {
             target,
             before_tree,
         }
         .encode(),
+        kit_core::durable::Parents::Create,
     )?;
     Ok(())
 }
 
+/// Make `HEAD` name `branch`. A `HEAD` that already does is left alone: the
+/// flush of the `PULL_HEAD` write just before made its directory entry
+/// durable, so a `HEAD` an earlier killed process left unflushed is covered.
+fn point_head_at_branch(layout: &RepoLayout, branch: &str) -> refs::RefResult<()> {
+    if matches!(refs::read_head(layout), Ok(refs::Head::Branch(held)) if held == branch) {
+        return Ok(());
+    }
+    refs::write_head_branch(layout, branch)
+}
+
 fn clear_pull_head(layout: &RepoLayout) -> Result<(), SyncError> {
     fs::remove_file(layout.pull_head_file())?;
-    crate::applied_packs::sync_parent_dir(layout.worktree_state_dir())?;
+    kit_core::durable::flush_dir(layout.worktree_state_dir())?;
     Ok(())
 }
 

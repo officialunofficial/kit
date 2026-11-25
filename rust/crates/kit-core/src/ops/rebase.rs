@@ -262,7 +262,7 @@ pub fn write_state(layout: &RepoLayout, state: &RebaseState) -> RebaseResult<()>
     for (name, tmp) in staged {
         tmp.persist(dir.join(name)).map_err(|e| e.error)?;
     }
-    crate::atomic::sync_dir(&dir)?;
+    crate::durable::flush_dir(&dir)?;
     Ok(())
 }
 

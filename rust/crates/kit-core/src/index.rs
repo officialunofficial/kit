@@ -28,7 +28,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
-use crate::atomic::write_atomic;
+use crate::durable::Parents;
 use crate::hash::{self, HASH_LEN, Hash};
 use crate::layout::RepoLayout;
 use crate::object::{EntryMode, Object};
@@ -620,7 +620,7 @@ pub fn write_index(layout: &RepoLayout, idx: &Index) -> IndexResult<()> {
     if bytes.len() as u64 > MAX_INDEX_BYTES {
         return Err(IndexError::TooLarge);
     }
-    write_atomic(&path, &bytes, true)?;
+    crate::durable::write_pointer(&path, &bytes, Parents::Create)?;
     Ok(())
 }
 

@@ -77,7 +77,7 @@ pub fn run(args: &[String]) -> u8 {
         if !opts.args.is_empty() {
             return super::usage_error("kit config --unset takes no positional arguments");
         }
-        return run_unset(&layout, &layered, raw_key, opts.local, opts.global);
+        return run_unset(&layout, raw_key, opts.local, opts.global);
     }
 
     match opts.args.len() {
@@ -172,8 +172,17 @@ pub fn run(args: &[String]) -> u8 {
     }
     // Apply to the repo layer only and persist that — never the merged
     // config — so user-scoped values are not materialized into the repo
-    // file (see the scope note above).
-    let mut repo_cfg = layered.repo;
+    // file (see the scope note above). The layer is read again under the
+    // config lock, so a change made by another `kit` command at the same
+    // time is kept.
+    let _lock = match config::lock(&layout) {
+        Ok(lock) => lock,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let mut repo_cfg = match config::read_layered(&layout) {
+        Ok(l) => l.repo,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
     if let Err(code) = apply(&mut repo_cfg, key, &normalized_value) {
         return code;
     }
@@ -189,7 +198,6 @@ pub fn run(args: &[String]) -> u8 {
 /// like `rm -f`, not an error — only an unknown key name is rejected.
 fn run_unset(
     layout: &kit_core::layout::RepoLayout,
-    layered: &config::LayeredConfig,
     raw_key: &str,
     local: bool,
     global: bool,
@@ -230,7 +238,14 @@ fn run_unset(
             ),
         };
     }
-    let mut repo_cfg = layered.repo.clone();
+    let _lock = match config::lock(layout) {
+        Ok(lock) => lock,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
+    let mut repo_cfg = match config::read_layered(layout) {
+        Ok(l) => l.repo,
+        Err(e) => return emit_err(&format!("config: {e}"), exit::CONFIG_ERROR),
+    };
     match unset_repo_key(&mut repo_cfg, key) {
         Ok(_removed) => {}
         Err(code) => return code,

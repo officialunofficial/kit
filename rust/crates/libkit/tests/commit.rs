@@ -278,6 +278,73 @@ fn an_amend_stops_when_head_moved_while_the_message_was_composed() {
     assert_eq!(f.head(), Some(concurrent.commit), "the branch is untouched");
 }
 
+/// The index file as a test sees a rewrite of it: the bytes, and the inode,
+/// which a temporary file and a rename change.
+#[cfg(unix)]
+fn index_file(f: &Fixture) -> (Vec<u8>, u64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = f.layout.index_file();
+    (fs::read(&path).unwrap(), fs::metadata(path).unwrap().ino())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_plain_commit_leaves_the_index_file_alone() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    f.stage("b.txt", "two\n");
+    f.stage("a.txt", "three\n");
+    let staged = index_file(&f);
+
+    let second = f.commit("second");
+    assert_eq!(index_file(&f), staged, "the index already holds the tree");
+    let idx = index::read_index(&f.layout).unwrap();
+    let paths: Vec<_> = idx.entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(idx.find_entry("a.txt").is_some() && idx.find_entry("b.txt").is_some());
+    assert_eq!(f.head(), Some(second.commit));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_commit_of_a_staged_removal_rebuilds_the_index_without_it() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.stage("b.txt", "two\n");
+    f.commit("first");
+    let mut idx = index::read_index(&f.layout).unwrap();
+    let removed = idx.find_entry("b.txt").unwrap();
+    idx.entries[removed].status = index::EntryStatus::Removed;
+    idx.entries[removed].object_hash = kit_core::hash::ZERO;
+    index::write_index(&f.layout, &idx).unwrap();
+    let staged = index_file(&f);
+
+    f.commit("drop b");
+    assert_ne!(index_file(&f), staged, "the tombstone is dropped");
+    let idx = index::read_index(&f.layout).unwrap();
+    assert!(idx.find_entry("b.txt").is_none(), "{:?}", idx.entries);
+    assert!(idx.find_entry("a.txt").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_amend_rebuilds_the_index_from_its_tree() {
+    let mut f = Fixture::new();
+    f.stage("a.txt", "one\n");
+    f.commit("first");
+    f.stage("a.txt", "two\n");
+    let staged = index_file(&f);
+
+    let pending = f.begin(true).unwrap();
+    f.make("amended", false, &pending).unwrap();
+    assert_ne!(
+        index_file(&f).1,
+        staged.1,
+        "an amend writes the index again"
+    );
+}
+
 fn start_merge(f: &Fixture, other: Hash) -> MergeState {
     let state = MergeState {
         merge_head: other,
@@ -296,6 +363,8 @@ fn a_commit_that_concludes_a_merge_has_two_parents_and_clears_the_merge() {
     let other = f.loose_commit("other", vec![]);
     start_merge(&f, other);
     f.stage("b.txt", "merged\n");
+    #[cfg(unix)]
+    let staged = index_file(&f);
 
     let pending = f.begin(false).unwrap();
     assert_eq!(
@@ -303,6 +372,8 @@ fn a_commit_that_concludes_a_merge_has_two_parents_and_clears_the_merge() {
         Some("Merge branch 'other'")
     );
     let merged = f.make("Merge branch 'other'", false, &pending).unwrap();
+    #[cfg(unix)]
+    assert_ne!(index_file(&f).1, staged.1, "a merge writes the index again");
     assert!(merged.is_merge());
     assert_eq!(merged.parents, vec![first.commit, other]);
     assert_eq!(

@@ -1302,11 +1302,10 @@ fn merge_abort_atomic_when_conflict_path_replaced_by_nonempty_dir() {
 }
 
 #[test]
-fn merge_commit_refused_when_staged_merge_was_reset_away() {
+fn a_reset_ends_a_staged_merge_so_the_commit_is_not_a_merge() {
     // `merge --no-commit` then `reset` (→ HEAD) then `commit`: the staged merge
-    // was discarded, so the index matches HEAD while the recorded merge result
-    // differs. kit must error "nothing to commit" rather than fabricate a
-    // no-op two-parent commit (matching git).
+    // was discarded and, as in git, the reset ended it. A commit after it must
+    // not fabricate a two-parent commit.
     let repo = Repo::new();
     repo.commit_file("a.txt", b"base\n", "c0");
     repo.ok(&["branch", "feature"]);
@@ -1317,16 +1316,14 @@ fn merge_commit_refused_when_staged_merge_was_reset_away() {
 
     repo.ok(&["merge", "--no-commit", "feature"]);
     repo.ok(&["reset"]); // discard the staged merge (index → HEAD)
-    let out = repo.run(&["commit", "-m", "noop merge"]);
-    assert!(!out.status.success(), "a reset-away merge must not commit");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("nothing to commit"),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !repo.kit_dir().join("MERGE_HEAD").exists(),
+        "the reset ends the merge"
     );
+    let _ = repo.run(&["commit", "-m", "after the reset"]);
     assert!(
-        repo.kit_dir().join("MERGE_HEAD").exists(),
-        "the merge must remain in progress (abortable)"
+        !repo.run(&["rev-parse", "HEAD^2"]).status.success(),
+        "no commit after the reset has a second parent"
     );
 }
 

@@ -735,6 +735,7 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
             let ours = match step {
                 SyncStep::DirBarrier(dir) => dir.starts_with(&root),
                 SyncStep::DeviceFlush(at) => *at == root,
+                SyncStep::Writeout(_) | SyncStep::Flush(_) => false,
             };
             if ours {
                 let tag = local_tag(&target, "v2");
@@ -756,7 +757,7 @@ fn a_tag_over_objects_found_in_the_store_publishes_after_they_are_durable() {
         .iter()
         .filter_map(|(step, _)| match step {
             SyncStep::DirBarrier(dir) => Some(dir.clone()),
-            SyncStep::DeviceFlush(_) => None,
+            SyncStep::DeviceFlush(_) | SyncStep::Writeout(_) | SyncStep::Flush(_) => None,
         })
         .collect();
     assert!(shards.is_subset(&barriered), "{steps:?}");

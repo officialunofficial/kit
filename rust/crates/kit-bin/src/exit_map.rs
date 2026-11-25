@@ -505,7 +505,8 @@ fn commit_exit_code(error: &commit::Error) -> u8 {
         | commit::Error::NothingStaged
         | commit::Error::MergeDiscarded
         | commit::Error::PullUnfinished(_)
-        | commit::Error::MergeStateIncomplete => exit::USAGE,
+        | commit::Error::MergeStateIncomplete
+        | commit::Error::OperationStateIncomplete(_) => exit::USAGE,
         // Another writer changed the state, so the caller can run again.
         commit::Error::Lock(_)
         | commit::Error::MergeChanged
@@ -1041,6 +1042,10 @@ mod tests {
             (commit::Error::AmendDuringMerge.into(), exit::USAGE),
             (commit::Error::NothingToAmend.into(), exit::USAGE),
             (commit::Error::NothingStaged.into(), exit::USAGE),
+            (
+                commit::Error::OperationStateIncomplete("revert").into(),
+                exit::USAGE,
+            ),
             (commit::Error::MergeChanged.into(), exit::TEMPFAIL),
             (commit::Error::HeadMoved.into(), exit::TEMPFAIL),
             (

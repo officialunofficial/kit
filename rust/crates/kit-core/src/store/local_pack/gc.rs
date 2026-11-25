@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use super::copy::{Copied, CopyPlan, Limit};
 use super::{Index, Location, Pair, read_pack_dir, scan_pair_checked, visit_pairs};
-use crate::atomic::sync_dir;
+use crate::durable::flush_dir as sync_dir;
 use crate::hash::Hash;
 use crate::ops::gc::{GcReport, LiveSet};
 use crate::store::{ObjectStore, StoreError, StoreResult};

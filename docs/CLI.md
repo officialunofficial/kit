@@ -1969,7 +1969,9 @@ These are documented behaviors, not bugs:
   passed explicitly (and requires `--ignore-rev`/`--ignore-revs-file`).
 - `kit reset [--soft|--mixed|--hard] [-f] [<commit>]` &mdash; `--soft` moves
   HEAD only; `--mixed` (the default) also resets the index; both leave the
-  worktree untouched. `--hard` additionally resets the worktree to the
+  worktree untouched. Every mode but `--soft` also ends a merge, cherry-pick
+  or revert in progress and drops the record of a pull that stopped before
+  its restore. `--hard` additionally resets the worktree to the
   target tree &mdash; overwriting tracked-file changes and removing tracked
   files the target drops. Untracked files are kept (like git), **except**
   an untracked path that *collides* with one the target writes. As a

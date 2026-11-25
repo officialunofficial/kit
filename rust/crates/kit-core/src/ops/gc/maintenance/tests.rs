@@ -173,11 +173,11 @@ fn sweep_keeps_young_files_and_yields_to_a_publisher() {
     assert_eq!(blocked.leftovers_removed, 0);
     assert!(old.exists());
     drop(guard);
-    crate::atomic::testing::reset_dir_sync_calls();
+    crate::durable::testing::reset_dir_sync_calls();
     let report = repo.run();
     assert_eq!(report.leftovers_removed, 2);
     assert_eq!(report.bytes_reclaimed, 12);
-    assert_eq!(crate::atomic::testing::dir_sync_calls(), 2);
+    assert_eq!(crate::durable::testing::dir_sync_calls(), 2);
     assert!(!old.exists());
     assert!(!old_index.exists());
     assert!(young.exists());
@@ -593,6 +593,25 @@ fn a_torn_stamp_only_creates_a_new_stamp_and_stops() {
     assert!(old.exists());
     assert_eq!(repo.run().leftovers_removed, 1);
     assert!(!old.exists());
+}
+
+/// A stamp that cannot be read must cost one more attempt, not a week of
+/// waiting: a torn stamp can only cause a new attempt.
+#[test]
+fn an_unreadable_stamp_does_not_postpone_the_next_collection() {
+    let repo = Repo::new();
+    for n in 0..MIN_PAIRS {
+        repo.pack(&[format!("young {n}").as_bytes()]);
+    }
+    let stamp = repo.layout.common_dir().join(AUTO_MAINTENANCE_STAMP);
+    fs::write(&stamp, [7; 5]).unwrap();
+
+    assert_eq!(repo.run().collection, Collection::NotDue);
+    assert_ne!(
+        repo.run().collection,
+        Collection::NotDue,
+        "a store at the floor is due again after a torn stamp is replaced"
+    );
 }
 
 /// A step that has never run is due as soon as the store holds the floor, so

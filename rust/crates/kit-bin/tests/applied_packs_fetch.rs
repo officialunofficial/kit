@@ -39,6 +39,18 @@ fn run_result(cwd: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn kit")
 }
 
+/// [`run_result`], with the full flushes of the process logged to `log`.
+fn run_logged(cwd: &Path, args: &[&str], log: &Path) -> std::process::Output {
+    let xdg = tempfile::tempdir().expect("xdg tempdir");
+    Command::new(kit_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .env("KIT_FLUSH_LOG", log)
+        .output()
+        .expect("spawn kit")
+}
+
 fn run_in(cwd: &Path, args: &[&str]) -> std::process::Output {
     let out = run_result(cwd, args);
     assert!(
@@ -210,7 +222,8 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         drop(guard);
     }
 
-    let out = run_result(&client, diagnostic);
+    let flush_log = client_dir.path().join("flush-log");
+    let out = run_logged(&client, diagnostic, &flush_log);
     assert!(!out.status.success(), "diagnostic {diagnostic:?} succeeded");
     let output = format!(
         "{}{}",
@@ -218,6 +231,15 @@ fn repair_after(diagnostic: &[&str], advance: bool) {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(output.contains(&hash::to_hex(&chunk)), "{output}");
+    // The removals are durable before the command returns: the repair flushes
+    // the directory of the verified-tip records and the records directory.
+    let flushed = fs::read_to_string(&flush_log).map_or(0, |log| log.lines().count());
+    // The fetch cursors' directory, the verified-tip records' directory and
+    // the records directory.
+    #[cfg(target_os = "macos")]
+    assert_eq!(flushed, 3);
+    #[cfg(not(target_os = "macos"))]
+    assert!(flushed >= 3, "{flushed}");
     assert!(!applied.exists());
     assert!(!heads.exists());
     assert_eq!(fs::read_dir(&anchors).unwrap().count(), 0);
@@ -719,7 +741,7 @@ fn multi_branch_fetch_loads_the_record_exactly_once() {
         "the failed appends must be reported once; stderr:\n{stderr}"
     );
     assert_eq!(
-        stderr.matches("/.origin.tmp").count(),
+        stderr.matches("/.kit.tmp.").count(),
         0,
         "the single rewrite over the unreadable record must succeed; stderr:\n{stderr}"
     );

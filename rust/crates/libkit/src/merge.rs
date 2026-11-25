@@ -277,14 +277,22 @@ pub fn start(
     if result.has_conflicts() {
         // Never overwrite dirty tracked files or untracked collisions.
         ensure_restore_safe(layout, store, result.tree_hash).map_err(Error::Worktree)?;
-        let records =
-            conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
+        let records: Vec<ConflictRecord> =
+            result.conflicts.iter().map(ConflictRecord::from).collect();
+        // The merge is recorded before the material, and its conflict list
+        // after. A stop in between leaves a merge that `--abort` can undo,
+        // never markers with no merge behind them. It also leaves a merge
+        // that `--continue` and a commit refuse, because they need the list:
+        // the files may still hold our side only, and no marker to say so.
         // The result tree lets an abort treat the clean hunks of the merge,
         // and not only the conflict paths, as material to discard. It goes
         // before the state, whose head marker is written last.
         conflict_state::write_result_tree(layout.worktree_state_dir(), &result.tree_hash)
             .map_err(Error::WriteState)?;
-        conflict_state::write_merge_state(layout, &state, &records).map_err(Error::WriteState)?;
+        conflict_state::begin_merge_state(layout, &state).map_err(Error::WriteState)?;
+        conflict::materialize(layout, store, result.tree_hash, &result.conflicts, observer)?;
+        conflict_state::write_conflicts(layout.worktree_state_dir(), &records)
+            .map_err(Error::WriteState)?;
         return Ok(Outcome::Conflicted { conflicts: records });
     }
 
@@ -385,13 +393,22 @@ pub fn resume(
 /// the merge. Clear the recorded state. Return the commit of `HEAD`.
 ///
 /// The function refuses, before it changes anything, when it would overwrite
-/// work that is not material of the merge.
+/// work that is not material of the merge. When `HEAD` already is the merge
+/// commit, a stop left the state behind, and the abort only clears it.
 ///
 /// # Errors
 /// [`Error::NoMergeInProgress`] when no merge is recorded. [`Error`] when the
 /// guards refuse or the store or the files fail.
 pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
     let (state, records) = read_state(layout)?;
+    // A stop after the merge commit and before the state was cleared leaves
+    // the state over a finished merge. `HEAD` already is that commit, and it
+    // is the only ref that holds it. Moving the branch back would orphan it,
+    // so the abort only clears the state.
+    if let Some(head) = committed_merge(layout, store, &state) {
+        conflict_state::clear_merge_state(layout).map_err(Error::ClearState)?;
+        return Ok(head);
+    }
     let target = state.orig_head;
     let target_tree = commit_tree(store, target)?;
     // Both a merge with conflicts and a staged merge record their result
@@ -409,6 +426,17 @@ pub fn abort(layout: &RepoLayout, store: &ObjectStore) -> Result<Hash, Error> {
     head::advance(layout, &target, RefWriteCondition::Any).map_err(Error::RestoreHead)?;
     conflict_state::clear_merge_state(layout).map_err(Error::ClearState)?;
     Ok(target)
+}
+
+/// `HEAD`, when it is the commit of the recorded merge: its parents are the
+/// commit before the merge and the merged commit, in that order. A `HEAD` or a
+/// commit that cannot be read is not, so the abort can still repair it.
+fn committed_merge(layout: &RepoLayout, store: &ObjectStore, state: &MergeState) -> Option<Hash> {
+    let head = refs::resolve_head(layout).ok().flatten()?;
+    match store.read_object(&head) {
+        Ok(Object::Commit(c)) if c.parents == [state.orig_head, state.merge_head] => Some(head),
+        _ => None,
+    }
 }
 
 fn read_state(layout: &RepoLayout) -> Result<(MergeState, Vec<ConflictRecord>), Error> {

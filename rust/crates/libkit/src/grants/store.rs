@@ -13,7 +13,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use kit_attest::grant::{Grant, OwnerScheme, RelyingParty};
@@ -226,7 +226,17 @@ impl GrantStore {
         if !path.exists() && self.count_files() >= MAX_STORE_FILES {
             return Err(StoreError::Full(self.dir.clone()));
         }
-        self.write_atomic(&path, header.as_bytes())?;
+        // The file is created 0600 and renamed whole, so a reader sees the old
+        // state or the whole new file.
+        kit_core::durable::write_pointer(
+            &path,
+            header.as_bytes(),
+            kit_core::durable::Parents::Existing,
+        )
+        .map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
         Ok(AddOutcome::Added)
     }
 
@@ -281,30 +291,6 @@ impl GrantStore {
             }
             Err(e) => Err(io_err(e)),
         }
-    }
-
-    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-        let io_err = |source| StoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        };
-        // `NamedTempFile` creates the file 0600 and the rename is atomic, so
-        // a reader sees the old state or the whole new file.
-        let mut tmp = tempfile::NamedTempFile::new_in(&self.dir).map_err(io_err)?;
-        tmp.write_all(bytes).map_err(io_err)?;
-        tmp.as_file().sync_all().map_err(io_err)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            tmp.as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))
-                .map_err(io_err)?;
-        }
-        tmp.persist(path).map_err(|e| io_err(e.error))?;
-        if let Ok(dir) = fs::File::open(&self.dir) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
     }
 }
 
