@@ -1053,9 +1053,13 @@ impl ObjectStore {
             if !pair_is_live(&pair)? {
                 continue;
             }
-            keep_going(self.check_live_pair(&dir, &pair, repair), &mut problems, |done| {
-                rebuilt += usize::from(done);
-            })?;
+            keep_going(
+                self.check_live_pair(&dir, &pair, repair),
+                &mut problems,
+                |done| {
+                    rebuilt += usize::from(done);
+                },
+            )?;
         }
         match problems.len() {
             0 => Ok(rebuilt),

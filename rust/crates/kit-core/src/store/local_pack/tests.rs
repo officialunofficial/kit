@@ -1036,10 +1036,7 @@ fn a_damaged_live_pair_does_not_hide_a_damaged_lone_pack() {
         "{text}"
     );
     for damaged in &pairs[..2] {
-        assert!(
-            text.contains(&damaged.pack.display().to_string()),
-            "{text}"
-        );
+        assert!(text.contains(&damaged.pack.display().to_string()), "{text}");
     }
     assert!(!pairs[0].index.exists());
     assert_eq!(fs::read(&pairs[2].index).unwrap(), healthy);
