@@ -151,9 +151,7 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
     /// a [`Group`] makes no flush call there.
     ///
     /// [`Group`]: crate::durable::Group
-    fn writeouts_need_flush(&self) -> bool {
-        true
-    }
+    fn writeouts_need_flush(&self) -> bool;
     /// The device that holds the open `file`, which lives in `dir`: the device
     /// its writeout went to, whatever happens to its directory meanwhile. A
     /// file that cannot be inspected is on device zero, which no flush anchor
@@ -2334,6 +2332,10 @@ mod tests {
     }
 
     impl Syncer for GatedSyncer {
+        fn writeouts_need_flush(&self) -> bool {
+            true
+        }
+
         fn writeout(&self, _file: &File, _path: &Path) -> io::Result<()> {
             self.started
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2560,6 +2562,10 @@ mod tests {
     }
 
     impl Syncer for FirstRenameFails {
+        fn writeouts_need_flush(&self) -> bool {
+            true
+        }
+
         fn writeout(&self, _file: &File, _path: &Path) -> io::Result<()> {
             Ok(())
         }

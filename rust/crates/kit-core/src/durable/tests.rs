@@ -140,6 +140,48 @@ fn a_pointer_from_a_reader_copies_exactly_the_length() {
 }
 
 #[test]
+fn a_copy_writes_whole_chunks_then_the_rest() {
+    let dir = TempDir::new().unwrap();
+    for (len, chunk) in [(10u64, 4usize), (8, 4), (3, 4), (0, 4), (5, 1), (4, 4)] {
+        let source: Vec<u8> = (0..16).collect();
+        let path = dir.path().join(format!("copy-{len}-{chunk}"));
+        let mut file = File::create(&path).unwrap();
+        let mut reader = &source[..];
+        copy_exact_in(&mut file, &mut reader, len, chunk).unwrap();
+        let want = &source[..usize::try_from(len).unwrap()];
+        assert_eq!(fs::read(&path).unwrap(), want, "len {len} chunk {chunk}");
+        assert_eq!(reader.len(), source.len() - want.len());
+    }
+    let mut file = File::create(dir.path().join("short")).unwrap();
+    let error = copy_exact_in(&mut file, &mut &b"abcdef"[..], 9, 4).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+}
+
+#[cfg(unix)]
+#[test]
+fn flushing_a_missing_directory_succeeds_and_any_other_failure_is_an_error() {
+    let dir = TempDir::new().unwrap();
+    assert!(flush_dir(dir.path()).is_ok());
+    assert!(flush_dir(&dir.path().join("gone")).is_ok());
+    // A path below a file is not "missing": the open fails with ENOTDIR.
+    let file = dir.path().join("file");
+    fs::write(&file, b"x").unwrap();
+    assert!(flush_dir(&file.join("below")).is_err());
+}
+
+#[test]
+fn a_rename_that_may_not_replace_fails_for_a_missing_directory_and_reports_a_taken_name() {
+    let dir = TempDir::new().unwrap();
+    let tmp = || temp_file_in(dir.path()).unwrap().into_temp_path();
+    let missing = dir.path().join("no/such/dir/file");
+    assert!(RealSyncer.rename_new(tmp(), &missing).is_err());
+
+    let dest = dir.path().join("dest");
+    assert!(RealSyncer.rename_new(tmp(), &dest).unwrap());
+    assert!(!RealSyncer.rename_new(tmp(), &dest).unwrap());
+}
+
+#[test]
 fn a_short_reader_writes_nothing_and_leaves_no_temp() {
     let dir = TempDir::new().unwrap();
     let dest = dir.path().join("pack");

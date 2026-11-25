@@ -134,20 +134,22 @@ fn prepare_parent(dest: &Path, parents: Parents) -> io::Result<&Path> {
 /// Copy exactly `len` bytes of `source` to `file`, [`crate::pack::SPOOL_BUFFER`]
 /// bytes at a time, so a file of any size is written with one buffer.
 fn copy_exact(file: &mut File, source: &mut dyn Read, len: u64) -> io::Result<()> {
-    let mut buf = vec![
-        0u8;
-        usize::try_from(len).map_or(crate::pack::SPOOL_BUFFER, |n| {
-            n.min(crate::pack::SPOOL_BUFFER)
-        })
-    ];
-    let mut left = len;
-    while left > 0 {
-        let n = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
-        source.read_exact(&mut buf[..n])?;
-        file.write_all(&buf[..n])?;
-        left -= n as u64;
+    copy_exact_in(file, source, len, crate::pack::SPOOL_BUFFER)
+}
+
+/// [`copy_exact`] with chunks of `chunk` bytes: the whole chunks, then the
+/// rest. A source that ends early is the `UnexpectedEof` of `read_exact`.
+fn copy_exact_in(file: &mut File, source: &mut dyn Read, len: u64, chunk: usize) -> io::Result<()> {
+    let chunk = chunk.max(1);
+    let step = u64::try_from(chunk).unwrap_or(u64::MAX);
+    let mut buf = vec![0u8; usize::try_from(len).map_or(chunk, |n| n.min(chunk))];
+    for _ in 0..len / step {
+        source.read_exact(&mut buf)?;
+        file.write_all(&buf)?;
     }
-    Ok(())
+    let rest = usize::try_from(len % step).unwrap_or(0);
+    source.read_exact(&mut buf[..rest])?;
+    file.write_all(&buf[..rest])
 }
 
 // ---------------------------------------------------------------------------
@@ -209,28 +211,23 @@ pub(crate) fn note_writeout(path: &Path) {
 /// # Errors
 /// The directory could not be opened or flushed.
 #[doc(hidden)]
-#[cfg(unix)]
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 pub fn flush_dir(dir: &Path) -> io::Result<()> {
     #[cfg(test)]
     testing::record_dir_sync_call();
-    match File::open(dir) {
-        Ok(handle) => flush_file(&handle, dir),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+    #[cfg(unix)]
+    {
+        match File::open(dir) {
+            Ok(handle) => flush_file(&handle, dir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
-}
-
-/// Flush a directory. Windows has no directory flush, so this does nothing.
-///
-/// # Errors
-/// Never.
-#[doc(hidden)]
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-pub fn flush_dir(_dir: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    testing::record_dir_sync_call();
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
