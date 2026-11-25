@@ -209,6 +209,13 @@ pub enum Error {
         "'{0}' is resolved in the worktree but not staged; run `kit add {0}` (or `kit rm {0}`) then `--continue`"
     )]
     NotStaged(String),
+    /// An abort would overwrite changes that it cannot tell from the material
+    /// of the operation, because a stop left the operation without its
+    /// conflict list.
+    #[error(
+        "the conflict list of the operation in progress is missing (its state was not fully written), so the abort cannot tell the conflict files from your own changes to '{0}'; run `kit reset --hard -f` to drop the operation and discard uncommitted changes"
+    )]
+    AbortWithoutList(String),
 }
 
 /// Wrap the failure of a safety check.
@@ -527,6 +534,30 @@ fn readable_result_tree(store: &ObjectStore, op_result_tree: Option<Hash>) -> Op
     // built in memory.
     let snapshot = EphemeralSink::new(store);
     op_result_tree.filter(|tree| diff_trees(&snapshot, None, Some(*tree)).is_ok())
+}
+
+/// [`ensure_abort_safe`] for a merge, a cherry-pick or a revert, which keep
+/// their conflict list in the state directory. Without that list, the
+/// conflict files that the operation wrote look like changes of the user, and
+/// the refusal says how to leave.
+///
+/// # Errors
+/// As [`ensure_abort_safe`], or [`Error::AbortWithoutList`].
+pub fn ensure_operation_abort_safe(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    records: &[ConflictRecord],
+    target_tree: Hash,
+    op_result_tree: Option<Hash>,
+) -> Result<(), Error> {
+    match ensure_abort_safe(layout, store, records, target_tree, op_result_tree) {
+        Err(Error::AbortOverwritesStaged(path) | Error::AbortOverwritesLocal(path))
+            if !layout.conflicts_file().is_file() =>
+        {
+            Err(Error::AbortWithoutList(path))
+        }
+        other => other,
+    }
 }
 
 /// Refuse an abort before it changes anything, when going back to
