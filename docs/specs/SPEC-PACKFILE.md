@@ -913,7 +913,8 @@ times, and a fetch of nine of them runs out. Each pack still obeys its
 own cap, and the bytes it decodes, a pack that fails included, come off what
 the fetch has left for the next pack. A retry of a chain decodes its packs
 again, is charged again and adds their lengths again. A delta base read from
-the store counts as decoded bytes each time it is read.
+the store counts toward what the fetch decodes each time the file reader reads
+it, and not toward the cap of the pack.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of

@@ -873,9 +873,9 @@ fn a_base_used_in_two_windows_is_read_back_and_nothing_outlives_its_window() {
     }
 }
 
-/// A window that reads a stored base back counts the read toward the decoded
-/// cap, as it counts a result: a pack of three windows over one large stored
-/// base is refused when the third read passes what the pack's size allows.
+/// A window that reads a stored base back counts the read toward what its
+/// fetch has left, as it counts a result: a pack of three windows over one
+/// large stored base is refused when the third read passes what is left.
 #[test]
 fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap() {
     const BASE_LEN: usize = 3 << 20;
@@ -893,8 +893,8 @@ fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap()
         charged += (base.len() + target.len()) as u64;
     }
     let pack = w.finish().unwrap();
-    // A pack this short is held to the floor of the cap, which three reads of
-    // 3 MiB do not reach, so the fetch's budget is what runs out.
+    // The pack's own cap is 2 GiB, which three reads of 3 MiB do not reach, and
+    // does not count them: the fetch's budget is what runs out.
     let dir = TempDir::new().unwrap();
     let file = verified(&pack, dir.path());
     let one_delta_a_window = WindowShape {
