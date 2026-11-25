@@ -249,7 +249,7 @@ impl io::Read for Tracked<'_> {
 /// the pointer.
 fn write_ref(dest: &Path, bytes: &[u8]) -> io::Result<()> {
     parents_durably(dest)?;
-    kit_core::durable::write_pointer(dest, bytes, Parents::Existing)
+    kit_core::durable::write_pointer_shared(dest, bytes, Parents::Existing)
 }
 
 /// Make the directory of `dest` and its parents, each made durable, so the
@@ -867,7 +867,7 @@ impl FileTransport {
     fn restore(&self, name: &str, path: &Path, previous: Option<&[u8]>) {
         match previous {
             Some(bytes) => {
-                let _ = kit_core::durable::write_pointer(path, bytes, Parents::Existing);
+                let _ = kit_core::durable::write_pointer_shared(path, bytes, Parents::Existing);
             }
             None => {
                 if remove_durably(path).unwrap_or(false) {
@@ -1334,7 +1334,7 @@ impl FileTransport {
             RefWriteCondition::Missing => {
                 // Exclusive create: succeeds only when the file is absent.
                 match parents_durably(&dest).and_then(|()| {
-                    kit_core::durable::write_pointer_new(&dest, &wire, Parents::Existing)
+                    kit_core::durable::write_pointer_new_shared(&dest, &wire, Parents::Existing)
                 }) {
                     Ok(true) => Ok(()),
                     Ok(false) if dest.is_dir() => Err(RefFileError::InvalidName(name.to_owned())),
@@ -1701,7 +1701,12 @@ impl Transport for FileTransport {
         };
         parents_durably(&path)
             .and_then(|()| {
-                kit_core::durable::write_pointer_from(&path, &mut source, len, Parents::Existing)
+                kit_core::durable::write_pointer_from_shared(
+                    &path,
+                    &mut source,
+                    len,
+                    Parents::Existing,
+                )
             })
             .map_err(|e| {
                 if source.failed {

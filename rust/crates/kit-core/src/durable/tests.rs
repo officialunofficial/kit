@@ -541,6 +541,58 @@ fn files_and_directories_that_other_code_wrote_are_written_out_and_flushed() {
 }
 
 #[test]
+fn a_flush_is_anchored_at_a_directory_that_is_still_there() {
+    let dir = TempDir::new().unwrap();
+    let (gone, kept) = (dir.path().join("gone"), dir.path().join("kept"));
+    fs::create_dir_all(&gone).unwrap();
+    fs::create_dir_all(&kept).unwrap();
+    let (rec, mut group) = recording();
+    group.note_dir(&gone).unwrap();
+    let staged = group
+        .stage(&kept.join("y"), b"1", Parents::Existing)
+        .unwrap();
+    fs::remove_dir(&gone).unwrap();
+
+    let token = group.flush().unwrap();
+    assert_eq!(flushes(&rec), [kept.clone()]);
+    group.publish(staged, &token).unwrap();
+}
+
+#[test]
+fn a_bare_file_name_is_flushed_in_the_current_directory() {
+    // Cargo runs a test with the package directory as its current one.
+    let (rec, mut group) = recording();
+    group.note_file(Path::new("Cargo.toml")).unwrap();
+    let _token = group.flush().unwrap();
+    assert_eq!(flushes(&rec), [PathBuf::from(".")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_pointer_gets_the_mode_of_a_created_file_and_a_pointer_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let dir = TempDir::new().unwrap();
+    let created = dir.path().join("created");
+    File::create(&created).unwrap();
+
+    let private = dir.path().join("private");
+    write_pointer(&private, b"x", Parents::Existing).unwrap();
+    assert_eq!(mode(&private), 0o600);
+
+    let shared = dir.path().join("shared");
+    write_pointer_shared(&shared, b"x", Parents::Existing).unwrap();
+    assert_eq!(mode(&shared), mode(&created));
+    let from = dir.path().join("from");
+    write_pointer_from_shared(&from, &mut &b"abc"[..], 3, Parents::Existing).unwrap();
+    assert_eq!(mode(&from), mode(&created));
+    let new = dir.path().join("new");
+    assert!(write_pointer_new_shared(&new, b"x", Parents::Existing).unwrap());
+    assert_eq!(mode(&new), mode(&created));
+    assert_eq!(temps_in(dir.path()), 0);
+}
+
+#[test]
 fn a_directory_that_is_gone_has_nothing_to_flush() {
     let dir = TempDir::new().unwrap();
     let (rec, mut group) = recording();

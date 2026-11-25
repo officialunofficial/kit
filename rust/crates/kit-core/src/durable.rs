@@ -80,6 +80,29 @@ pub(crate) fn temp_file_in(parent: &Path) -> io::Result<NamedTempFile> {
     NamedTempFile::with_prefix_in(temp_prefix(), parent)
 }
 
+/// Who may read a file the pointer writers make.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Mode 0600, the mode of `tempfile`.
+    Private,
+    /// The mode `File::create` gives: 0666 less the umask, for a file that
+    /// users sharing a directory read.
+    Shared,
+}
+
+fn temp_file_with(parent: &Path, access: Access) -> io::Result<NamedTempFile> {
+    #[cfg(unix)]
+    if access == Access::Shared {
+        use std::os::unix::fs::PermissionsExt as _;
+        return tempfile::Builder::new()
+            .prefix(&temp_prefix())
+            .permissions(fs::Permissions::from_mode(0o666))
+            .tempfile_in(parent);
+    }
+    let _ = access;
+    temp_file_in(parent)
+}
+
 /// Whether a write makes the missing directories above its destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Parents {
@@ -226,6 +249,19 @@ pub fn write_pointer(dest: &Path, bytes: &[u8], parents: Parents) -> io::Result<
     pointer_via(&RealSyncer, dest, parents, |file| file.write_all(bytes))
 }
 
+/// [`write_pointer`] of a file that users sharing its directory read: it gets
+/// the mode `File::create` gives, 0666 less the umask, where [`write_pointer`]
+/// makes it private to its owner.
+///
+/// # Errors
+/// As [`write_pointer`].
+#[doc(hidden)]
+pub fn write_pointer_shared(dest: &Path, bytes: &[u8], parents: Parents) -> io::Result<()> {
+    pointer_with(&RealSyncer, dest, parents, Access::Shared, |file| {
+        file.write_all(bytes)
+    })
+}
+
 /// [`write_pointer`] of exactly `len` bytes read from `source`, so a pointer of
 /// any size is written with one buffer. A failure to read `source` is the
 /// error of `read_exact` on it.
@@ -244,6 +280,22 @@ pub fn write_pointer_from(
     })
 }
 
+/// [`write_pointer_from`] with the mode of [`write_pointer_shared`].
+///
+/// # Errors
+/// As [`write_pointer_from`].
+#[doc(hidden)]
+pub fn write_pointer_from_shared(
+    dest: &Path,
+    source: &mut dyn Read,
+    len: u64,
+    parents: Parents,
+) -> io::Result<()> {
+    pointer_with(&RealSyncer, dest, parents, Access::Shared, |file| {
+        copy_exact(file, source, len)
+    })
+}
+
 /// A pointer written through `syncer`: the schedule of [`write_pointer`] with
 /// the device calls of the store's own seam, so a test sees them.
 pub(crate) fn pointer_via(
@@ -252,8 +304,18 @@ pub(crate) fn pointer_via(
     parents: Parents,
     fill: impl FnOnce(&mut File) -> io::Result<()>,
 ) -> io::Result<()> {
+    pointer_with(syncer, dest, parents, Access::Private, fill)
+}
+
+fn pointer_with(
+    syncer: &dyn Syncer,
+    dest: &Path,
+    parents: Parents,
+    access: Access,
+    fill: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = prepare_parent(dest, parents)?;
-    let mut tmp = temp_file_in(parent)?;
+    let mut tmp = temp_file_with(parent, access)?;
     fill(tmp.as_file_mut())?;
     syncer.full(tmp.as_file(), tmp.path())?;
     // A cross-platform atomic replace: rename(2) on Unix, `MoveFileExW` with
@@ -278,8 +340,26 @@ pub(crate) fn pointer_via(
 /// As [`write_pointer`]. An existing `dest` is `Ok(false)`, not an error.
 #[doc(hidden)]
 pub fn write_pointer_new(dest: &Path, bytes: &[u8], parents: Parents) -> io::Result<bool> {
+    pointer_new_with(dest, bytes, parents, Access::Private)
+}
+
+/// [`write_pointer_new`] with the mode of [`write_pointer_shared`].
+///
+/// # Errors
+/// As [`write_pointer_new`].
+#[doc(hidden)]
+pub fn write_pointer_new_shared(dest: &Path, bytes: &[u8], parents: Parents) -> io::Result<bool> {
+    pointer_new_with(dest, bytes, parents, Access::Shared)
+}
+
+fn pointer_new_with(
+    dest: &Path,
+    bytes: &[u8],
+    parents: Parents,
+    access: Access,
+) -> io::Result<bool> {
     let parent = prepare_parent(dest, parents)?;
-    let mut tmp = temp_file_in(parent)?;
+    let mut tmp = temp_file_with(parent, access)?;
     tmp.as_file_mut().write_all(bytes)?;
     flush_file(tmp.as_file(), tmp.path())?;
     // A failed rename returns the temp file, which drops and unlinks it:
@@ -365,9 +445,9 @@ pub struct Group {
     clock: u64,
     /// The clock at the group's latest rename, zero before any.
     last_rename: u64,
-    /// The devices written to since the last flush, each with a directory on
-    /// it to anchor the flush.
-    pending: BTreeMap<u64, PathBuf>,
+    /// The devices written to since the last flush, each with the directories
+    /// written in on it: the flush is anchored at the first one still there.
+    pending: BTreeMap<u64, Vec<PathBuf>>,
     failed: bool,
 }
 
@@ -419,9 +499,10 @@ impl Group {
     fn wrote(&mut self, anchor: &Path) {
         self.clock += 1;
         if let Some(device) = self.syncer.device_of(anchor) {
-            self.pending
-                .entry(device)
-                .or_insert_with(|| anchor.to_path_buf());
+            let anchors = self.pending.entry(device).or_default();
+            if !anchors.iter().any(|known| known == anchor) {
+                anchors.push(anchor.to_path_buf());
+            }
         }
     }
 
@@ -488,7 +569,13 @@ impl Group {
         let file = options.open(path)?;
         let written = self.syncer.writeout(&file, path);
         self.guard(written)?;
-        self.wrote(path.parent().unwrap_or(path));
+        // A bare file name lives in the current directory.
+        let dir = match path.parent() {
+            Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+            Some(parent) => parent,
+            None => path,
+        };
+        self.wrote(dir);
         Ok(())
     }
 
@@ -517,9 +604,17 @@ impl Group {
         self.live()?;
         let anchors = std::mem::take(&mut self.pending);
         if self.syncer.writeouts_need_flush() {
-            for anchor in anchors.values() {
-                let flushed = self.syncer.flush(anchor);
-                self.guard(flushed)?;
+            for (device, dirs) in &anchors {
+                // A directory that is gone since its write holds nothing to
+                // flush: anchor at one that is still there, or skip the device
+                // when none is.
+                let alive = dirs
+                    .iter()
+                    .find(|dir| self.syncer.device_of(dir) == Some(*device));
+                if let Some(anchor) = alive {
+                    let flushed = self.syncer.flush(anchor);
+                    self.guard(flushed)?;
+                }
             }
         }
         Ok(Flushed {
