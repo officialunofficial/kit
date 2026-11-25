@@ -1908,6 +1908,25 @@ fn dropping_loose_duplicates_takes_the_lock_in_batches_and_counts_the_holds() {
 }
 
 #[test]
+fn a_batch_of_loose_duplicates_stops_at_its_byte_cap() {
+    use crate::ops::gc::run_gc;
+
+    let (_dir, layout, store, objects) = five_loose_duplicates();
+    let largest = objects
+        .iter()
+        .map(|(id, _)| fs::metadata(store.path_for(id)).unwrap().len())
+        .max()
+        .unwrap();
+    // Room for one copy but never for two, whatever the count limit: each
+    // batch takes its first copy and stops there.
+    let _batch = set_retire_batch_limits(32, largest);
+
+    let report = run_gc(&store, &layout, 10, 5, false, &mut |_, _, _| {}).unwrap();
+    assert_eq!(report.loose_duplicates_pruned, 5);
+    assert_eq!(report.retire_batches, 5, "one copy per batch");
+}
+
+#[test]
 fn a_crash_between_loose_duplicate_batches_loses_nothing() {
     use crate::ops::gc::run_gc;
 
