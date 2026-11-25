@@ -39,10 +39,9 @@
 //! writeout or flush poisons the group, and nothing is retried: a retried
 //! `fsync` can report success for pages the kernel already dropped.
 //!
-//! Every device operation goes through [`crate::batch::Syncer`], so a test
-//! double sees them, and with the `fault-injection` feature
-//! [`crate::fault::SyncStep::Writeout`] and [`crate::fault::SyncStep::Flush`]
-//! report each one.
+//! Every device operation goes through the store's `Syncer`, so a test
+//! double sees them, and with the `fault-injection` feature the
+//! `Writeout` and `Flush` steps of `fault::SyncStep` report each one.
 //!
 //! The one documented exception to "a pointer is durable on its own" is
 //! `refs::RemoteRefBatch`: `refs/remotes/*` entries are not pointers anything

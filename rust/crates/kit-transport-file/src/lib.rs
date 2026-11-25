@@ -2528,7 +2528,8 @@ mod tests {
     }
 
     /// Plant links to `target` at the next 64 temp names beside `dest`,
-    /// counted from a name taken now. Returns the links.
+    /// counted from a name taken now. Returns the links this call made; a
+    /// name that already holds a link is left as it is.
     #[cfg(unix)]
     fn plant_links_ahead(dest: &Path, target: &Path) -> Vec<PathBuf> {
         let next = temp_path(dest).unwrap();
@@ -2536,18 +2537,22 @@ mod tests {
         let (stem, seq) = name.rsplit_once('.').unwrap();
         let seq: u64 = seq.parse().unwrap();
         (seq + 1..seq + 65)
-            .map(|n| {
+            .filter_map(|n| {
                 let link = next.with_file_name(format!("{stem}.{n}"));
-                std::os::unix::fs::symlink(target, &link).unwrap();
-                link
+                match std::os::unix::fs::symlink(target, &link) {
+                    Ok(()) => Some(link),
+                    Err(e) if e.kind() == ErrorKind::AlreadyExists => None,
+                    Err(e) => panic!("plant a link: {e}"),
+                }
             })
             .collect()
     }
 
-    /// A link planted at the temp names a write is about to use is neither
-    /// followed nor truncated: the target keeps its bytes, the link stays
-    /// and the write lands under a name that is free. The links are planted
-    /// from a fresh name right before each write.
+    /// A link planted at the names [`create_temp`] would use is neither
+    /// followed nor truncated by a write: the target keeps its bytes, the link
+    /// stays and the write lands under a name that is free. The temp names of
+    /// the writes themselves end in a random suffix and are created with
+    /// `O_EXCL`, so a link cannot be planted at one.
     #[cfg(unix)]
     #[test]
     fn writes_never_follow_a_link_at_a_temp_name() {

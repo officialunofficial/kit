@@ -554,7 +554,7 @@ fn a_flush_is_anchored_at_a_directory_that_is_still_there() {
     fs::remove_dir(&gone).unwrap();
 
     let token = group.flush().unwrap();
-    assert_eq!(flushes(&rec), [kept.clone()]);
+    assert_eq!(flushes(&rec), [kept]);
     group.publish(staged, &token).unwrap();
 }
 
