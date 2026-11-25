@@ -485,10 +485,10 @@ fn stash_entry_of_0_8_keeps_applying() {
         "93cf8f1d8f028b34df0a785cc4dc1f6821fad3cf3a9ab50d1331023f2efd11df",
     );
     let list = stash::deserialize_list(&manifest).unwrap();
-    let head = hash::from_hex("7e50456cdc0cc3505d3f2e0d2565b68cbcd154fbdd88bfd936a0531e1d168ec0")
-        .unwrap();
-    let saved = hash::from_hex("530c4cb8538320d5f693fad8334250ea08a3989070a58f134187a801a7496c39")
-        .unwrap();
+    let head =
+        hash::from_hex("7e50456cdc0cc3505d3f2e0d2565b68cbcd154fbdd88bfd936a0531e1d168ec0").unwrap();
+    let saved =
+        hash::from_hex("530c4cb8538320d5f693fad8334250ea08a3989070a58f134187a801a7496c39").unwrap();
     assert_eq!(list.entries.len(), 1);
     assert_eq!(list.entries[0].commit_hash, saved);
     assert_eq!(list.entries[0].parent_hash, head);
