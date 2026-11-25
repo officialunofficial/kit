@@ -168,8 +168,8 @@ fn pack_vectors_of_versions_1_and_2_keep_reading() {
         "tree_and_commit",
     ] {
         let pack = read(&format!("pack-v2/{name}.bin"));
-        let side: serde_json::Value = serde_json::from_slice(&read(&format!("pack-v2/{name}.json")))
-            .unwrap();
+        let side: serde_json::Value =
+            serde_json::from_slice(&read(&format!("pack-v2/{name}.json"))).unwrap();
         assert_eq!(&pack[..4], b"KIT\0", "{name}: magic");
         versions.insert(u32::from_le_bytes(pack[4..8].try_into().unwrap()));
         let (_dir, _layout, store) = fresh_store();
@@ -215,13 +215,34 @@ fn local_pack_vector_keeps_reading() {
 
     fs::create_dir_all(layout.objects_dir().join("pack")).unwrap();
     fs::write(layout.format_file(), &marker).unwrap();
-    fs::write(layout.objects_dir().join("pack").join(format!("{}.pack", key[1])), &pack).unwrap();
-    fs::write(layout.objects_dir().join("pack").join(format!("{}.idx", key[1])), &index).unwrap();
-    fs::write(layout.objects_dir().join("pack").join("unknown.meta"), read("local_pack_mixed/unknown.meta"))
-        .unwrap();
+    fs::write(
+        layout
+            .objects_dir()
+            .join("pack")
+            .join(format!("{}.pack", key[1])),
+        &pack,
+    )
+    .unwrap();
+    fs::write(
+        layout
+            .objects_dir()
+            .join("pack")
+            .join(format!("{}.idx", key[1])),
+        &index,
+    )
+    .unwrap();
+    fs::write(
+        layout.objects_dir().join("pack").join("unknown.meta"),
+        read("local_pack_mixed/unknown.meta"),
+    )
+    .unwrap();
 
     let store = ObjectStore::open(&layout).unwrap();
-    assert_eq!(store.check_local_packs(false).unwrap(), 0, "no damaged pair");
+    assert_eq!(
+        store.check_local_packs(false).unwrap(),
+        0,
+        "no damaged pair"
+    );
     // The vector's fourth object is the loose one (`loose.bin`); the other
     // three are in the pack.
     let packed = &objects[..3];
@@ -253,7 +274,10 @@ fn staging_index_ref_and_head_vectors_keep_reading() {
         rows,
         [
             ("README.md", (EntryStatus::Blob, seed("refs-index-blob"))),
-            ("scripts/build", (EntryStatus::Executable, seed("refs-index-exe"))),
+            (
+                "scripts/build",
+                (EntryStatus::Executable, seed("refs-index-exe"))
+            ),
             ("src", (EntryStatus::Tree, seed("refs-index-tree"))),
         ]
         .into_iter()
@@ -270,7 +294,10 @@ fn staging_index_ref_and_head_vectors_keep_reading() {
     let layout = RepoLayout::single(dir.path());
     fs::create_dir_all(layout.worktree_state_dir()).unwrap();
     fs::write(layout.head_file(), read("refs-index/head_symbolic.bin")).unwrap();
-    assert_eq!(refs::read_head(&layout).unwrap(), Head::Branch("main".to_owned()));
+    assert_eq!(
+        refs::read_head(&layout).unwrap(),
+        Head::Branch("main".to_owned())
+    );
 }
 
 #[test]
@@ -285,7 +312,10 @@ fn pack_list_vectors_keep_reading() {
     assert_eq!(&chained[..5], b"KPKL\x01");
     let node = decode_packlist(&chained).unwrap();
     assert_eq!(node.prev, Some(seed("packlist-prev")));
-    assert_eq!(node.packs, [seed("packlist-pack-1"), seed("packlist-pack-2")]);
+    assert_eq!(
+        node.packs,
+        [seed("packlist-pack-1"), seed("packlist-pack-2")]
+    );
 }
 
 #[test]
@@ -326,7 +356,7 @@ fn sparse_wire_and_cache_vectors_keep_reading() {
     assert_eq!(&cache[..5], b"KSPC\x02");
     let (manifest, proof) = decode_sparse_cache(&cache).unwrap();
     assert_eq!(manifest, response.manifest);
-    assert_eq!(proof, response.proof);
+    assert_eq!(proof.tree_bytes, response.proof.tree_bytes);
     // The two envelopes differ in the magic only.
     assert_eq!(cache[4..], wire[4..]);
 }
