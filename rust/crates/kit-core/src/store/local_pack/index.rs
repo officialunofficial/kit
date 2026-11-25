@@ -72,27 +72,31 @@ impl Pair {
         ))
     }
 
-    /// Name this pair in an error from reading its index. Damage gains the
-    /// repair hint. A failed read stays a failed read.
+    /// Name this pair in an error from reading its index. Damage found in
+    /// the index gains the repair hint; damage already named for the pack
+    /// does not. A failed read stays a failed read.
     pub(super) fn index_context(&self, error: impl Into<StoreError>) -> StoreError {
-        match self.context(error) {
-            StoreError::LocalPackDamaged { pack, reason } => StoreError::LocalPackDamaged {
-                pack,
-                reason: format!(
-                    "{reason}. If the index is damaged, run `kit closure repair-indexes`"
-                )
-                .into(),
-            },
-            other => other,
+        match error.into() {
+            StoreError::LocalPackDamaged { pack, reason } if pack.is_empty() => {
+                self.index_error(reason)
+            }
+            StoreError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                self.index_error("file ends early")
+            }
+            other => self.context(other),
         }
     }
 
     /// Name this pair in an error from reading it. A check that failed, or a
     /// file that ended early, is damage. A failed read stays a failed read.
+    ///
+    /// A version this kit does not read is damage too, unless both files
+    /// carry the same one: only a newer kit writes that.
     pub(super) fn context(&self, error: impl Into<StoreError>) -> StoreError {
         match error.into() {
-            StoreError::IncompatibleRepoFormat { found } => StoreError::IncompatibleRepoFormat {
-                found: found.map(|format| format!("{format} in {}", self.pack.display())),
+            StoreError::IncompatibleRepoFormat { found } => match self.check_versions() {
+                Err(newer) => newer,
+                Ok(()) => self.version_damage(found),
             },
             StoreError::LocalPackDamaged { pack, reason } if pack.is_empty() => self.error(reason),
             damaged @ StoreError::LocalPackDamaged { .. } => damaged,
@@ -104,16 +108,81 @@ impl Pair {
         }
     }
 
-    pub(super) fn check_versions(&self) -> StoreResult<()> {
-        for (path, magic, kind) in [
-            (&self.pack, *MAGIC, "local pack"),
-            (&self.index, *MAGIC_INDEX, "local index"),
-        ] {
-            if let Err(error @ StoreError::IncompatibleRepoFormat { .. }) =
-                open_regular(path).and_then(|mut file| read_version::<8>(&mut file, magic, kind))
-            {
-                return Err(self.context(error));
+    /// The file whose version differs from the other file's, as damage.
+    fn version_damage(&self, found: Option<String>) -> StoreError {
+        let [pack, index] = self.versions();
+        let reason = |kind: &str, version: u32, other: Option<u32>| {
+            if other.is_some() {
+                format!("{kind} version {version} does not match the other file of the pair")
+            } else {
+                format!("{kind} version {version} is not one this kit reads")
             }
+        };
+        match (pack, index) {
+            (_, Some(version)) if version != 1 => {
+                self.index_error(reason("local index", version, pack))
+            }
+            (Some(version), _) if version != 1 => self.error(reason("local pack", version, index)),
+            _ => self.error(found.unwrap_or_else(|| "unknown version".to_owned())),
+        }
+    }
+
+    /// The shards whose ids this pair can hold, for an index that is cut or
+    /// padded: its fanout is read once it agrees with the pack's count, and
+    /// its length is what is wrong. Any other failure, such as ids that leave
+    /// their bucket, leaves the fanout untrusted.
+    pub(super) fn shards(&self) -> Option<Box<[bool; 256]>> {
+        let mut head = [0; FANOUT_END];
+        let mut index = open_regular(&self.index).ok()?;
+        let index_len = index.metadata().ok()?.len();
+        index.read_exact(&mut head).ok()?;
+        let mut pack = open_regular(&self.pack).ok()?;
+        let len = pack.metadata().ok()?.len();
+        let (count, _, _) = read_header_sized(&mut pack, len).ok()?;
+        if head[..4] != *MAGIC_INDEX || le_u32(&head[8..12]) as usize != count {
+            return None;
+        }
+        validate_fanout_bounds(&head[12..], count).ok()?;
+        if index_len == (INDEX_BASE_LEN + INDEX_ROW_LEN * count) as u64 {
+            return None;
+        }
+        let mut shards = Box::new([false; 256]);
+        let mut before = 0;
+        for (shard, end) in head[12..].chunks_exact(4).map(le_u32).enumerate() {
+            shards[shard] = end > before;
+            before = end;
+        }
+        Some(shards)
+    }
+
+    /// The version field of the pack and of the index, where a file with the
+    /// right magic can be read.
+    fn versions(&self) -> [Option<u32>; 2] {
+        fn version(path: &Path, magic: [u8; 4]) -> Option<u32> {
+            let mut head = [0; 8];
+            open_regular(path).ok()?.read_exact(&mut head).ok()?;
+            (head[..4] == magic).then(|| le_u32(&head[4..]))
+        }
+        [
+            version(&self.pack, *MAGIC),
+            version(&self.index, *MAGIC_INDEX),
+        ]
+    }
+
+    /// Fails when both files carry the same version this kit does not read:
+    /// a newer kit wrote the pair, and this kit must not touch it. One file
+    /// that differs from the other is damage, not a newer format.
+    pub(super) fn check_versions(&self) -> StoreResult<()> {
+        if let [Some(pack), Some(index)] = self.versions()
+            && pack == index
+            && pack != 1
+        {
+            return Err(StoreError::IncompatibleRepoFormat {
+                found: Some(format!(
+                    "local pack and index version {pack} in {}",
+                    self.pack.display()
+                )),
+            });
         }
         Ok(())
     }
@@ -194,7 +263,7 @@ impl Index {
 
     fn load(pair: &Pair) -> StoreResult<Self> {
         let mut pack = open_regular(&pair.pack)?;
-        let (count, trailer, _) = read_header(&mut pack)?;
+        let (count, trailer, _) = read_header(&mut pack).map_err(|e| pair.context(e))?;
         let mut file = open_regular(&pair.index)?;
         let prefix = read_version::<8>(&mut file, *MAGIC_INDEX, "local index")?;
         let size = INDEX_BASE_LEN + INDEX_ROW_LEN * count;

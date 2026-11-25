@@ -573,9 +573,12 @@ payload length. Physical loose-file metadata remains available for a
 loose-file sweep.
 
 With `P` set, a reader checks the versions of each live pair before
-using its layout. An unknown local pack header or index version is
-`IncompatibleRepoFormat`, with an instruction to update kit. This
-error stops lookup and repair on that pair. See
+using its layout. A pair whose pack header and index carry the same unknown
+version was written by a newer kit: that is `IncompatibleRepoFormat`, with an
+instruction to update kit, and it stops lookup and repair. One file with an
+unknown version while the other differs is damage to that pair, not a newer
+format: the reader records it, names the pair, skips it as for any other
+damage, and keeps reading the other pairs. See
 [SPEC-PACKFILE §3.1.1](SPEC-PACKFILE.md#311-local-packs).
 
 Try known published packs, then the loose path. Skip an unusable index

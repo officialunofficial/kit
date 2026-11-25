@@ -453,7 +453,11 @@ rediscover the replacements.
 
 Gc also drops a loose duplicate, including one left by a push, after
 verifying a durable packed copy of the same id. It rechecks the loose
-candidate and replacement under the exclusive `format` try-lock. Keep
+candidate and replacement under the exclusive `format` try-lock, once per
+batch of at most 32 duplicates and 256 MiB of loose files in one pair, and
+counts each batch in the reported hold like a retirement batch. The pair is
+made durable before its first unlink, and a later batch rechecks the pair's
+stamps. Keep
 a loose copy still within grace when the packed copy is older. A
 duplicate can be reachable because the operation leaves a verified,
 usable copy. Gc keeps the loose copy when
@@ -504,7 +508,9 @@ The stamp is advisory and never authorizes deletion.
 
 **Sweep.** List `objects/pack/` by name to count published pairs and
 find recognized staging files and lone final members. Apply the manual
-orphan rule above at the default grace. Under the exclusive `format`
+orphan rule above at the default grace, except that the sweep leaves a lone
+pack alone: a pack without its index is invisible to readers, so the
+automatic step removes one only in its collection, after the mark (step 3). Under the exclusive `format`
 try-lock, recheck the candidate's name, counterpart, file identity and
 age. Keep the manual sweep's directory flush before unlinking the
 leftovers and its second flush after the unlinks. The sweep reads no object
@@ -571,7 +577,11 @@ than 32 packs, and the step costs a mark of the whole history.
    copy planning that follows defers only the copy. If every verified pack
    fails its recheck before retirement, the step reports `over_budget` and
    keeps the 7-day interval of a finished step. A damaged pair or
-   cancellation ends collection before retirement. Then plan
+   cancellation ends collection before retirement. Also plan each pack
+   that was already lone, and past grace, before the mark began: the mark
+   read every live object without it, so a live object that only such a pack
+   held would have stopped collection at step 2, and what is left in it is
+   not needed. Retirement rechecks that it is still lone. Then plan
    copy-then-retire as `kit gc` does (see "Local pack maintenance"), but
    keep only the inputs whose survivors fit in one output pack: at most
    64 MiB of payload and 65,536 entries, inputs that copy nothing first,
@@ -638,8 +648,9 @@ the same pack is still present, scan and verify it independently of
 the old index, and make its name durable before publishing a staged
 replacement index under SPEC-OBJECTS §10.1. If the pack changed, restart
 validation. A lone index is a crash leftover and cannot be rebuilt.
-Ordinary repair leaves a lone pack invisible. Gc handles recognized
-leftovers after grace.
+Repair also gives a lone pack its index: under the same try-lock it checks
+that the pack is still lone, scans and verifies the whole pack, and
+publishes the index as above. Gc handles recognized leftovers after grace.
 
 If the payload cannot be verified, report the damage. Invalidate the
 affected applied-pack records and fetch shortcuts, conservatively

@@ -562,6 +562,9 @@ fn collect(
 ) -> Result<Outcome, GcRootsError> {
     let now = now_secs();
     budget.check()?;
+    // Listed before the mark: a pack that loses its index during the mark
+    // may have served it.
+    let lone = store.plan_lone_packs(now, DEFAULT_GRACE_SECS)?;
     let (hard, mut soft) = collect_root_sets(layout, &mut |_| {})?;
     soft.sort_unstable();
     let mut roots = hard.clone();
@@ -586,6 +589,9 @@ fn collect(
         // The budget ended before one pack was verified: no progress.
         return Ok(Outcome::same(Collection::OverBudget));
     }
+    // The mark above read every live object while these packs were already
+    // without an index, so none holds an object that a live one needs.
+    retire.absorb_leftovers(lone);
     // Copy-then-retire is the added part of the step. A budget that runs out
     // in its planning, verification or copy defers only that part: the
     // wholly dead retirement planned above still runs, as it does today.

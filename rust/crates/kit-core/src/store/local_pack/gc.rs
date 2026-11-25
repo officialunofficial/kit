@@ -278,16 +278,42 @@ impl ObjectStore {
                 }
             }
             for (key, present) in members {
-                if present == 3 {
-                    pairs += 1;
-                } else {
-                    let pair = super::Pair::new(&dir, key);
-                    let path = if present == 1 { pair.pack } else { pair.index };
-                    plan.add_old_leftover(path, now, grace);
+                match present {
+                    3 => pairs += 1,
+                    2 => {
+                        let pair = super::Pair::new(&dir, key);
+                        plan.add_old_leftover(pair.index, now, grace);
+                    }
+                    // A pack that lost its index is invisible, so nothing here
+                    // knows what it holds. Only a mark that found every live
+                    // object without it may remove it: see `plan_lone_packs`.
+                    _ => {}
                 }
             }
         }
         Ok((plan, pairs))
+    }
+
+    /// Plan to remove the old packs that have no index. Call it before a mark
+    /// and keep the plan only if that mark read every live object: a live
+    /// object that only such a pack held would have failed the mark, so what
+    /// is left in these packs is not needed. Planning first matters: a pack
+    /// whose index went away during the mark may have served it.
+    pub(crate) fn plan_lone_packs(&self, now: u64, grace: u64) -> StoreResult<PackSweep> {
+        let mut plan = PackSweep::default();
+        let dir = self.pack_dir();
+        if let Some(entries) = read_pack_dir(&dir)? {
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                if let Some(LeftoverName::Pack(_)) = name.to_str().and_then(leftover_name)
+                    && is_leftover(&entry.path())
+                {
+                    plan.add_old_leftover(entry.path(), now, grace);
+                }
+            }
+        }
+        Ok(plan)
     }
 
     pub(crate) fn sweep_loose_duplicates(
@@ -336,53 +362,109 @@ impl ObjectStore {
                 return Ok(());
             }
 
-            #[cfg(test)]
-            super::tests::before_duplicate_try_lock();
-            let _guard = if report.dry_run {
-                None
-            } else {
-                let file = fs::File::open(self.format_path())?;
-                if file.try_lock().is_err() {
+            // The unlinks go in batches, like retirement, each under its own
+            // exclusive try-lock, so that one hold stays short however many
+            // duplicates a pair has. The syncs that make the pair durable
+            // before the first unlink run once: a later batch rechecks the
+            // stamps, so the pair is still the one that was synced.
+            let (size, byte_cap) = PackSweep::batch();
+            let mut durable = false;
+            let mut at = 0;
+            while at < duplicates.len() {
+                let start = at;
+                let mut bytes = byte_cap;
+                while at < duplicates.len()
+                    && at - start < size
+                    && (at == start || duplicates[at].2.len <= bytes)
+                {
+                    bytes = bytes.saturating_sub(duplicates[at].2.len);
+                    at += 1;
+                }
+                #[cfg(test)]
+                super::tests::before_duplicate_try_lock();
+                let guard = if report.dry_run {
+                    None
+                } else {
+                    let file = fs::File::open(self.format_path())?;
+                    if file.try_lock().is_err() {
+                        return Ok(());
+                    }
+                    Some(file)
+                };
+                let locked_at = std::time::Instant::now();
+                if !pack.unchanged(&pair.pack) || !locator.unchanged(&pair.index) {
                     return Ok(());
                 }
-                Some(file)
-            };
-            if !pack.unchanged(&pair.pack) || !locator.unchanged(&pair.index) {
-                return Ok(());
-            }
-            let mut durable = false;
-            for (id, frame, loose) in duplicates {
-                let path = self.path_for(&id);
-                let location = Location::Packed(Arc::clone(&index), frame);
-                if !loose.unchanged(&path)
-                    || ObjectStore::raw_at(&location)
-                        .and_then(|bytes| ObjectStore::verify_at(&location, &id, &bytes))
-                        .is_err()
-                {
-                    continue;
+                self.unlink_duplicates(
+                    &pair,
+                    &index,
+                    &duplicates[start..at],
+                    &mut durable,
+                    &mut previewed,
+                    report,
+                )?;
+                if guard.is_some() {
+                    drop(guard);
+                    report.retire_batches += 1;
+                    report.retire_hold_ms = report
+                        .retire_hold_ms
+                        .max(u64::try_from(locked_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    #[cfg(test)]
+                    super::tests::after_retire_batch(report.retire_batches)?;
                 }
-                if report.dry_run {
-                    previewed.insert(id);
-                } else {
-                    if !durable {
-                        crate::store::sync_reused_file(&pair.pack)?;
-                        crate::store::sync_reused_file(&pair.index)?;
-                        sync_dir(self.objects_root())?;
-                        sync_dir(&dir)?;
-                        durable = true;
-                    }
-                    fs::remove_file(path)?;
-                }
-                report.bytes_reclaimed += loose.len;
-                report.loose_duplicates_pruned += 1;
             }
             Ok(())
         })?;
         Ok(previewed)
     }
+
+    /// Drop the loose copies of one batch, or count them in a dry run. The
+    /// caller holds the exclusive lock and has rechecked the pair's stamps.
+    /// `durable` says the pair was already synced for an earlier batch.
+    fn unlink_duplicates(
+        &self,
+        pair: &Pair,
+        index: &Arc<Index>,
+        batch: &[(Hash, super::Frame, Stamp)],
+        durable: &mut bool,
+        previewed: &mut BTreeSet<Hash>,
+        report: &mut GcReport,
+    ) -> StoreResult<()> {
+        for (id, frame, loose) in batch {
+            let path = self.path_for(id);
+            let location = Location::Packed(Arc::clone(index), *frame);
+            if !loose.unchanged(&path)
+                || ObjectStore::raw_at(&location)
+                    .and_then(|bytes| ObjectStore::verify_at(&location, id, &bytes))
+                    .is_err()
+            {
+                continue;
+            }
+            if report.dry_run {
+                previewed.insert(*id);
+            } else {
+                if !*durable {
+                    crate::store::sync_reused_file(&pair.pack)?;
+                    crate::store::sync_reused_file(&pair.index)?;
+                    sync_dir(self.objects_root())?;
+                    sync_dir(&self.pack_dir())?;
+                    *durable = true;
+                }
+                fs::remove_file(path)?;
+            }
+            report.bytes_reclaimed += loose.len;
+            report.loose_duplicates_pruned += 1;
+        }
+        Ok(())
+    }
 }
 
 impl PackSweep {
+    /// Take over the leftovers that `other` planned.
+    pub(crate) fn absorb_leftovers(&mut self, other: Self) {
+        self.leftovers.extend(other.leftovers);
+    }
+
     fn add_old_leftover(&mut self, path: PathBuf, now: u64, grace: u64) {
         if let Some(stamp) = Stamp::read(&path)
             && stamp.old_enough(now, grace)
