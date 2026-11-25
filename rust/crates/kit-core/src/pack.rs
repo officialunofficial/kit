@@ -168,8 +168,11 @@ const MAX_FETCH_DECODED: u64 = 1 << 40;
 ///
 /// Each pack of the fetch obeys its own cap and also what is left here, and
 /// the bytes it decodes, a failed pack's included, come off what is left.
+///
+/// It is `Copy` so that a retry of a chain can start from the budget the first
+/// try started from.
 #[doc(hidden)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct FetchDecodeBudget {
     remaining: u64,
 }
@@ -188,7 +191,7 @@ impl FetchDecodeBudget {
     }
 
     /// The cap on what a pack of `pack_len` bytes may decode.
-    fn admit(&self, pack_len: u64) -> u64 {
+    fn admit(self, pack_len: u64) -> u64 {
         self.remaining.min(decoded_bytes_cap(
             usize::try_from(pack_len).unwrap_or(usize::MAX),
         ))
@@ -2264,8 +2267,9 @@ pub struct DecodeLimits {
     /// [`DeltaBaseSource`] while it is cached. `0x00` payloads are borrowed
     /// from the pack and do not count. An external base is measured once
     /// fetched, so the peak can pass the cap by the one base whose fetch
-    /// trips it. A [`window::WindowReader`] counts the `0x03`/`0x04` claims
-    /// of the entries it has yielded, and nothing else.
+    /// trips it. A [`window::WindowReader`] also cumulatively counts the
+    /// `0x03`/`0x04` claims of the entries it has yielded, and no other bytes;
+    /// it still checks every entry alone.
     pub max_decoded_bytes: u64,
     entry_geometry: Option<(u64, u64)>,
 }

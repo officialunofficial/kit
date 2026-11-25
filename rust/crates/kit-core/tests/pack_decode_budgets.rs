@@ -115,6 +115,69 @@ fn window_reader_sums_decoded_bytes() {
     assert_eq!(entries, ENTRIES);
 }
 
+/// Bytes zstd cannot shrink, so an entry of them is as long on the wire as it
+/// claims, and longer than a window.
+fn incompressible(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x.to_le_bytes()[0]
+        })
+        .collect()
+}
+
+/// Four entries of 100 KiB each, longer than a 64 KiB window, so the reader
+/// carries each across windows. Each is under the budget of 250 KiB, even
+/// with its wire bytes beside it, and the sum is not. The plain reader and
+/// one with an entry geometry, which restarts itself after each carried
+/// entry, both keep the total across that.
+#[test]
+fn window_reader_sums_claims_of_entries_longer_than_a_window() {
+    const CLAIM: usize = 100 << 10;
+    let frames: Vec<_> = (0..4)
+        .map(|n| (0x03u8, zstd_payload(&incompressible(CLAIM, n + 1))))
+        .collect();
+    let pack = build_pack(pack::VERSION_V2, &frames);
+    assert!(frames[0].1.len() > 64 << 10, "an entry fills a window");
+    let read = |limits: DecodeLimits| {
+        let mut source = pack.as_slice();
+        let mut entries = 0usize;
+        let result = window::read_all(
+            &mut source,
+            pack.len() as u64,
+            64 << 10,
+            limits,
+            None,
+            |_| {
+                entries += 1;
+                Ok(())
+            },
+        );
+        (result, entries)
+    };
+    let geometry = (CLAIM as u64 + (64 << 10), CLAIM as u64);
+    for (name, limits) in [
+        ("plain", DecodeLimits::default()),
+        (
+            "geometry",
+            DecodeLimits::default().with_entry_geometry(geometry.0, geometry.1),
+        ),
+    ] {
+        let (result, entries) = read(limits.with_max_decoded_bytes(250 << 10));
+        assert!(
+            matches!(result, Err(PackError::PackfileTooLarge)),
+            "{name}: {result:?} after {entries} entries"
+        );
+        assert!(entries < 4, "{name}: stopped before the last entry");
+        let (result, entries) = read(limits.with_max_decoded_bytes(4 * CLAIM as u64 + (200 << 10)));
+        result.unwrap_or_else(|error| panic!("{name}: a budget for the sum reads it: {error:?}"));
+        assert_eq!(entries, 4, "{name}");
+    }
+}
+
 /// A pack of one zstd entry per claim, each claim passing the pack's own cap
 /// and then failing on the bogus frame, so the test needs no object bigger
 /// than the claim's few bytes.

@@ -446,7 +446,10 @@ the remote to advertise a limit:
 
 A writer puts a single entry that is over one of its caps alone in a pack of its own, except a delta whose result, stream and base together pass the decoded-byte budget: the planner sends the object raw instead, since no reader of that budget could take the delta, and `Plan::prepare` refuses a delta its caller supplies.
 
-A pack that fits these limits is read by `PackReader::read`, by
+A pack that fits these limits is read by `PackReader::read` (which also counts
+each delta base it reads from the store, where a writer counts only the
+longest, so a pack of deltas over several bases of hundreds of MiB each may
+exceed its cap; the planner's bases are at most 1 MiB), by
 `decode_entries_with` and `rewrite_excluding` with `DecodeLimits::default()`
 and by the window reader with it. A caller of those that sets a larger
 decoded-byte budget accepts more, never less. `rewrite_excluding` refuses
@@ -903,8 +906,9 @@ plain number and not a ratio of the wire bytes, since a delta of a large
 manifest and a hostile delta both expand by more than any fixed ratio that an
 honest pack stays under. Each pack still obeys its own cap, and the bytes it
 decodes, a pack that fails included, come off what the fetch has left for the
-next pack. A delta base read from the store counts as decoded bytes each time
-it is read.
+next pack. A retry of a chain starts from the budget its first try started
+from. A delta base read from the store counts as decoded bytes each time it is
+read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of

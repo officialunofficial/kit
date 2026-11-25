@@ -243,6 +243,9 @@ pub(crate) fn apply_and_verify_chain(
         ..
     } = resolved;
     let mut done = ChainApplied::default();
+    // A retry decodes the chain again, so it starts from what the first try
+    // started from: one honest fetch is not charged twice for its packs.
+    let before = *decoded;
     let first = apply_pack_chain(
         store,
         source,
@@ -291,6 +294,7 @@ pub(crate) fn apply_and_verify_chain(
         chain = resolve_pack_chain(source, observer, head_ref, head)?;
     }
     let mut retry = ChainApplied::default();
+    *decoded = before;
     apply_pack_chain(
         store,
         source,
@@ -670,7 +674,9 @@ fn fetch_objects_inner(
             };
 
             // Apply the branch's chain, check the tip, and finish sealing
-            // its windows before taking the worktree lock.
+            // its windows before taking the worktree lock. The retry below
+            // starts from the same budget as this try.
+            let before = decoded;
             let (completed, applied_stats) = match apply_and_verify_chain(
                 store,
                 source,
@@ -706,6 +712,7 @@ fn fetch_objects_inner(
                         packs: fresh.packs,
                         nodes: fresh.nodes,
                     };
+                    decoded = before;
                     let stats = apply_and_verify_chain(
                         store,
                         source,
