@@ -78,6 +78,17 @@ fn the_real_syncer_needs_a_flush_only_where_a_writeout_is_not_durable() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_that_cannot_be_inspected_is_not_a_gone_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    fs::write(&file, b"x").unwrap();
+    // A path below a file fails with ENOTDIR, not NotFound: it stays in the
+    // flush, on device zero, where the flush fails for it.
+    assert_eq!(RealSyncer.device_of(&file.join("below")), Some(0));
+}
+
 #[test]
 fn a_missing_directory_has_no_device() {
     let dir = tempfile::tempdir().unwrap();
@@ -468,6 +479,21 @@ fn a_rename_needs_a_flush_after_every_earlier_rename() {
     let token = group.flush().unwrap();
     group.publish(again, &token).unwrap();
     assert_eq!(fs::read(&b).unwrap(), b"3");
+}
+
+#[test]
+fn a_new_file_rename_also_needs_a_flush_before_the_next_rename() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    assert!(group.publish_new(first, &token).unwrap());
+
+    // The token predates the rename of `a`.
+    assert!(group.publish(second, &token).is_err());
+    assert!(!b.exists());
 }
 
 #[test]
