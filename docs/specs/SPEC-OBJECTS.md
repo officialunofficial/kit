@@ -68,7 +68,7 @@ The prologue applies to **all seven object types**. Rationale:
 Readers MUST reject any of:
 - `object_type` not in `0x01..0x07` → `InvalidObjectType`
 - `magic` != `"KOB1"` → `InvalidMagic`
-- `schema_version` other than the version of the object's type →
+- `schema_version` that is not the version of the object's type →
   `UnsupportedObjectVersion`. The version of `chunked_blob` (`0x05`) is
   `0x02`. The version of every other type is `0x01`.
 
@@ -406,7 +406,8 @@ its own check for a verifier that holds no entries.
 An entry with `end_0 = 0` refuses as `end not increasing`. A fixed-size layout
 whose last end is off by one refuses as `fixed layout end`.
 
-A `schema_version` other than `0x02` is `UnsupportedObjectVersion` (§2),
+A `schema_version` that is not `0x02`, the only version of a chunked blob so
+far, is `UnsupportedObjectVersion` (§2),
 refused when the prologue is read, before `truncated` and the checks above.
 
 Reassembly: concatenate each `chunk_hash` blob's contents in order. A reader

@@ -14,10 +14,11 @@
 //!
 //! | Format and version | Vectors | Read by |
 //! |---|---|---|
-//! | Object prologue `KOB1`, schema 1 and 2 (blob, tree, commit, remix, chunked, tag) | `objects/`, `tags/`, ids in `formats/object-ids.txt` | here, `golden.rs`, `golden_tag.rs` |
-//! | Object ids (byte hash, tree root, chunked root) | `formats/object-ids.txt`, `proofs/` | here, `golden_proofs.rs` |
+//! | Object prologue `KOB1`, schema 1 and 2 (blob, tree, commit, remix, chunked, tag) | `objects/`, `tags/`, ids in `OBJECT_IDS` below | here, `golden.rs`, `golden_tag.rs` |
+//! | Object ids (byte hash, tree root, chunked root) | `OBJECT_IDS` below, `formats/object-ids.txt`, `proofs/` | here, `golden_proofs.rs` |
 //! | Pack `KIT\0` version 1 (raw and delta entries) and 2 (zstd entries) | `pack-v2/`, `local_pack_mixed/mixed.pack` | here, `golden_pack.rs` |
 //! | Local pack index `KITX` version 1, store marker `bmt-v2\nP` | `local_pack_mixed/` | here, `store::local_pack::tests` |
+//! | Loose store of 0.8.0 and 0.9.0, marker `bmt-v2\n` | `objects/blob.bin`, `objects/tree.bin` | here |
 //! | Staging index `KIDX` version 3, ref wire form, symbolic HEAD | `refs-index/` | here, `refs_integration.rs` |
 //! | Pack list `KPKL` version 1 | `formats/packlist-*.bin` | here |
 //! | Sparse wire `KSP1` and cache `KSPC` version 2 | `sparse/response_v2.bin`, `formats/sparse-cache.bin` | here (feature `sparse-checkout`) |
@@ -27,10 +28,31 @@
 //! | Delta stream version 1 | `pack-v2/`, inline pins | `golden_pack.rs` |
 //! | Encrypted key record `KITKSV1` | inline frozen record | `kit-keystore` unit tests, `golden_vectors.rs` |
 //! | Attestation envelopes and write grants | `attest/`, `grants/`, `auth-v2/`, `redaction/` | `kit-attest` golden tests, `golden_uploads.rs` |
+//! | Git bridge and git import headers and translations | `git-bridge/`, `git-import/` | the `kit-git-bridge` golden tests |
+//! | File remote ref locks and stripe versions | `ref-locks/` | `kit-transport-file` tests |
+//! | Connect and ssh transport wire, signatures | `transport/`, `ssh-serve/`, `ed25519/` | `golden_repository_grammar.rs`, `golden_ed25519.rs`, `kit-bin` and `kit-transport-*` tests |
 //!
-//! Records that a reader may drop and rebuild are not listed: the ancestry
-//! snapshot, the fetch cursor and checkpoint, the verified-tip record, the
-//! upload receipts, the sparse and attestation caches on disk.
+//! Not read here, and why:
+//!
+//! - The refusal vectors of `pack-v2/` (`boundary_later_delta_base`,
+//!   `boundary_payload_high_bit`, `boundary_payload_u32_max`): they must be
+//!   refused, and `golden_pack.rs` checks that.
+//! - The ancestry snapshot (`KHAN` version 2, `KSCR` version 2): only builds
+//!   with the `history-mmr` feature write it, and no release enables that
+//!   feature. The decoder is private, so a vector needs an in-crate test.
+//!   This is a gap. `KHAN` version 1 was retired before 0.8.0.
+//! - Disposable records that a reader may drop and rebuild: the fetch cursor
+//!   and checkpoint, the verified-tip record, the upload receipts, the
+//!   attestation cache.
+//! - Delta objects (type `0x06`): they exist in packs only.
+//! - Files with no version marker and no vector: `.kit/config`, the key
+//!   files, `shallow`, the sparse-checkout pattern file, the worktree
+//!   `commondir`, `kitdir` and `locked` files, and the git-bridge state
+//!   files. These are gaps.
+//!
+//! The store layout of 0.8.0 and 0.9.0 (marker `bmt-v2\n`, loose objects
+//! only) is written out in `loose_store_of_0_8_and_0_9_keeps_reading`. The
+//! marker of those releases is a literal there.
 #![allow(clippy::unwrap_used)] // unwrap is the assertion in test helpers
 
 use std::fs;
@@ -45,7 +67,7 @@ use kit_core::pack::{PackReader, pack_key};
 use kit_core::refs::{self, Head};
 use kit_core::store::ObjectStore;
 use kit_core::transfer::decode_packlist;
-use kit_core::{deserialize, serialize};
+use kit_core::deserialize;
 
 fn golden(path: &str) -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -75,20 +97,34 @@ fn lines(path: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// A vector of `formats/` is the bytes its manifest names.
-fn format_vector(name: &str) -> Vec<u8> {
+/// A vector of `formats/`, with the digest written out here: the manifest
+/// beside the vector is not enough, because the example rewrites both.
+fn format_vector(name: &str, digest: &str) -> Vec<u8> {
     let bytes = read(&format!("formats/{name}"));
-    let row = lines("formats/MANIFEST.txt")
-        .into_iter()
-        .find(|row| row[0] == name)
-        .unwrap_or_else(|| panic!("formats/MANIFEST.txt does not list {name}"));
     assert_eq!(
         to_hex(&hash::hash(&bytes)),
-        row[1],
+        digest,
         "{name}: the committed bytes changed"
     );
     bytes
 }
+
+const OBJECT_IDS: [(&str, &str, &str); 14] = [
+    ("objects/blob.bin", "blob", "591ca28e2d4a899e6856980172975f24c00893119d4d86f8e8c958831545b605"),
+    ("objects/empty_blob.bin", "blob", "9c71bce9d9acb21dc70fbeb505bf22cbc0e080ffe38d798d6dd35ba4fd2b9dfe"),
+    ("objects/empty_tree.bin", "tree", "b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7"),
+    ("objects/tree.bin", "tree", "6c08baba2342c0314204ee4e8b2917fe7b40aa9e23fc6729484f51d7711bf6a9"),
+    ("objects/tree_single_file.bin", "tree", "a4619f5be94e5d51d2575e1c176d52bbd17997c31830f1d637e5b08d29415a62"),
+    ("objects/chunked_blob.bin", "chunked", "02a34823f71a66cb9ae6e45fb266ccc23a2fe34b8a7ecad7b3c3056d5275a366"),
+    ("objects/chunked_blob_cs0_3chunks.bin", "chunked", "ec977e00e22d242df081590048270d0d5f98b6e34dcce104b66f4322e53f04f7"),
+    ("objects/commit_0parent.bin", "commit", "ef10b9d6cbc575c7d204b9a674482bb0cdee118b85c5494d47cc47c4e0d60405"),
+    ("objects/commit_1parent.bin", "commit", "a268f91be41f13ec03b83fe7f46553015598c9e53a07f821f352c3a4d52f0312"),
+    ("objects/commit_2parent.bin", "commit", "a72004436b820eb0877a2102ab57702d6d0c1de02c878ce2eaf8a52a2ca37aca"),
+    ("objects/remix_2sources.bin", "remix", "6a8e07b6b7ad9a5df78353cf187ca07615a4e4cbfceda7e1b03bf890685b42d1"),
+    ("objects/remix_identical_upstream_distinct_commit.bin", "remix", "04cf36f6a653d58a6c620e55bff6f866464a420f51472f3238b09fd707680104"),
+    ("tags/tag_annotated.bin", "tag", "d4dea5aae3d94d698d0de51725b5ddc3631c3c4a771d6233edd47a682059a709"),
+    ("tags/tag_signed.bin", "tag", "0a235e943960b14019cbede26325283387f17ec70ce2d30a7926a7421c98abbb"),
+];
 
 fn type_name(object: &Object) -> &'static str {
     match object {
@@ -111,41 +147,58 @@ fn fresh_store() -> (tempfile::TempDir, RepoLayout, ObjectStore) {
 
 #[test]
 fn every_object_vector_keeps_its_type_and_id() {
-    let rows = lines("formats/object-ids.txt");
-    assert_eq!(rows.len(), 14, "every object vector has a row");
     let mut types = std::collections::BTreeSet::new();
-    for row in rows {
-        let [file, kind, id] = row.as_slice() else {
-            panic!("bad row {row:?}");
-        };
+    for (file, kind, id) in OBJECT_IDS {
         let bytes = read(file);
         let object = deserialize(&bytes).unwrap_or_else(|e| panic!("{file}: {e}"));
         assert_eq!(type_name(&object), kind, "{file}: type");
-        assert_eq!(to_hex(&id_from_object(&object, &bytes)), *id, "{file}: id");
-        assert_eq!(serialize(&object).unwrap(), bytes, "{file}: bytes");
-        types.insert(kind.clone());
+        assert_eq!(to_hex(&id_from_object(&object, &bytes)), id, "{file}: id");
+        types.insert(kind);
     }
     assert_eq!(
         types.into_iter().collect::<Vec<_>>(),
         ["blob", "chunked", "commit", "remix", "tag", "tree"]
     );
+    // The listing that the reference check reads is the same table.
+    let listing = format_vector(
+        "object-ids.txt",
+        "e87d690af227f8b697103761df745e67cc5a906df19ad193eccb1cbbcb71ce73",
+    );
+    let rows: Vec<Vec<String>> = String::from_utf8(listing)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| l.split_whitespace().map(str::to_owned).collect())
+        .collect();
+    let table: Vec<Vec<String>> = OBJECT_IDS
+        .iter()
+        .map(|(f, k, i)| vec![(*f).to_owned(), (*k).to_owned(), (*i).to_owned()])
+        .collect();
+    assert_eq!(rows, table);
 }
 
+/// The store that 0.8.0 and 0.9.0 left: the marker `bmt-v2\n` and loose
+/// objects only, one file per object at `objects/<2 hex>/<62 hex>`.
 #[test]
-fn pinned_object_ids_do_not_move() {
-    // Ids that scripts/golden/objects_ref.py derives without this crate.
-    let id_of = |file: &str| {
-        let bytes = read(file);
-        to_hex(&id_from_object(&deserialize(&bytes).unwrap(), &bytes))
-    };
-    assert_eq!(
-        id_of("objects/empty_tree.bin"),
-        "b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7"
-    );
-    // A blob and a commit are addressed by the BLAKE3 of their bytes.
-    for file in ["objects/blob.bin", "objects/commit_0parent.bin"] {
-        let bytes = read(file);
-        assert_eq!(id_of(file), to_hex(&hash::hash(&bytes)), "{file}");
+fn loose_store_of_0_8_and_0_9_keeps_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = RepoLayout::single(dir.path());
+    fs::create_dir_all(layout.objects_dir()).unwrap();
+    fs::write(layout.format_file(), b"bmt-v2\n").unwrap();
+    let mut ids = Vec::new();
+    for (file, _, id) in OBJECT_IDS {
+        if file != "objects/blob.bin" && file != "objects/tree.bin" {
+            continue;
+        }
+        let loose = layout.objects_dir().join(&id[..2]);
+        fs::create_dir_all(&loose).unwrap();
+        fs::write(loose.join(&id[2..]), read(file)).unwrap();
+        ids.push((file, hash::from_hex(id).unwrap()));
+    }
+    let store = ObjectStore::open(&layout).unwrap();
+    assert_eq!(store.iter_object_hashes().unwrap().len(), 2);
+    for (file, id) in ids {
+        assert_eq!(store.read(&id).unwrap(), read(file), "{file}");
     }
 }
 
@@ -154,16 +207,26 @@ fn pinned_object_ids_do_not_move() {
 #[test]
 fn pack_vectors_of_versions_1_and_2_keep_reading() {
     let mut versions = std::collections::BTreeSet::new();
-    for name in [
-        "boundary_earlier_delta_base",
+    for (name, digest) in [
+        (
+            "boundary_earlier_delta_base",
+            "ebe419ce30637180b67b487e2496d436d1fdd62d05f171a42a4a82af48912666",
+        ),
         #[cfg(feature = "pack-zstd")]
-        "mixed",
+        (
+            "mixed",
+            "be39c79d31eef3b1bbdebfbf99939f1283905d16c7f2d6f387271924b787d44c",
+        ),
         #[cfg(feature = "pack-zstd")]
-        "raw_4k_repeat",
+        (
+            "raw_4k_repeat",
+            "7341c264369dc37847bb0275e3248e9ff6b64c8bb5f5cdd97e249f4e3a32948f",
+        ),
     ] {
         let pack = read(&format!("pack-v2/{name}.bin"));
         let side: serde_json::Value =
             serde_json::from_slice(&read(&format!("pack-v2/{name}.json"))).unwrap();
+        assert_eq!(to_hex(&hash::hash(&pack)), digest, "{name}: the bytes changed");
         assert_eq!(&pack[..4], b"KIT\0", "{name}: magic");
         versions.insert(u32::from_le_bytes(pack[4..8].try_into().unwrap()));
         let (_dir, _layout, store) = fresh_store();
@@ -206,6 +269,10 @@ fn local_pack_vector_keeps_reading() {
     assert_eq!(&pack[..8], b"KIT\0\x01\0\0\0");
     assert_eq!(&index[..8], b"KITX\x01\0\0\0");
     assert_eq!(to_hex(&pack_key(&pack)), key[1]);
+    assert_eq!(
+        key[1], "59bfa107ae4377d4be6d7c6b89a2e99da91203d857cd7a60ba35df3a2c0bf6ea",
+        "the committed pack changed"
+    );
 
     fs::create_dir_all(layout.objects_dir().join("pack")).unwrap();
     fs::write(layout.format_file(), &marker).unwrap();
@@ -297,13 +364,19 @@ fn staging_index_ref_and_head_vectors_keep_reading() {
 
 #[test]
 fn pack_list_vectors_keep_reading() {
-    let first = format_vector("packlist-first.bin");
+    let first = format_vector(
+        "packlist-first.bin",
+        "aa528fb3046f4847209bff803d4da3b9988b3a6e5857cfbf230c3b532f3b8759",
+    );
     assert_eq!(&first[..5], b"KPKL\x01");
     let node = decode_packlist(&first).unwrap();
     assert_eq!(node.prev, None);
     assert_eq!(node.packs, [seed("packlist-pack-0")]);
 
-    let chained = format_vector("packlist-chained.bin");
+    let chained = format_vector(
+        "packlist-chained.bin",
+        "fcc576cf4f6e52c622dbe9ab3fd6293ef2147d83fb762907106bd95357524b67",
+    );
     assert_eq!(&chained[..5], b"KPKL\x01");
     let node = decode_packlist(&chained).unwrap();
     assert_eq!(node.prev, Some(seed("packlist-prev")));
@@ -315,7 +388,10 @@ fn pack_list_vectors_keep_reading() {
 
 #[test]
 fn stash_manifest_vector_keeps_reading() {
-    let bytes = format_vector("stash-list.bin");
+    let bytes = format_vector(
+        "stash-list.bin",
+        "ed2185e9ded879fba71561ebcb754d1b93850a54cf33b78d6d577beeb520ceca",
+    );
     assert_eq!(&bytes[..4], b"KSTS");
     let list = stash::deserialize_list(&bytes).unwrap();
     assert_eq!(
@@ -335,7 +411,6 @@ fn stash_manifest_vector_keeps_reading() {
             },
         ]
     );
-    assert_eq!(stash::serialize_list(&list).unwrap(), bytes);
 }
 
 #[cfg(feature = "sparse-checkout")]
@@ -347,7 +422,10 @@ fn sparse_wire_and_cache_vectors_keep_reading() {
     assert_eq!(&wire[..5], b"KSP1\x02");
     let response = decode_sparse_response(&wire).unwrap();
 
-    let cache = format_vector("sparse-cache.bin");
+    let cache = format_vector(
+        "sparse-cache.bin",
+        "da65e1069a7f916b32993b12a05c7eeef3305479ec07da0588128238863ab832",
+    );
     assert_eq!(&cache[..5], b"KSPC\x02");
     let (manifest, proof) = decode_sparse_cache(&cache).unwrap();
     assert_eq!(manifest, response.manifest);

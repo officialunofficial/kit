@@ -147,7 +147,7 @@ Clippy enforces these rules in CI, with `rustfmt`.
 
 ## Format changes
 
-A format change updates the spec and the golden vectors in the same commit. The
+A format change updates the spec and adds the golden vectors of any new version in the same commit. The
 golden vectors must pass in the Rust code and in an independent reference check.
 Never change a published tag, magic or constant to fix a style issue.
 
@@ -160,7 +160,9 @@ Every object id and every format version that a release wrote stays readable.
 - Readers only widen. A change never makes a reader refuse bytes that it
   accepted before, and never gives an existing object a different id.
 - A new version brings its own vectors under `rust/tests/golden/`. The vectors
-  of the old version stay. Never regenerate a vector to follow a code change.
+  of the old version stay. The default test run never writes a vector. A switch that writes vectors is
+  for adding the vectors of a new version, never for following a change of
+  the code.
 - Add each new vector to `rust/crates/kit-core/tests/formats_stay_readable.rs`,
   or to the golden test of the crate that owns the format.
 - A record that a reader may drop and rebuild, such as a cache, a cursor or a

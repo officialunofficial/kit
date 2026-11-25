@@ -56,8 +56,12 @@ def varint(r):
         byte = r.u8()
         value |= (byte & 0x7F) << shift
         if byte < 0x80:
+            if shift and byte == 0:
+                raise ValueError("a length is not minimal")
             return value
         shift += 7
+        if shift > 28:
+            raise ValueError("a length is too long")
 
 
 def parse_packlist(data):
