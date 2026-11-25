@@ -184,9 +184,12 @@ logged hash is a GC root (clock-free, strict/fail-closed parse), and
 (default: younger than 90 days **or** among the most recent 50) so they
 stop pinning objects. A gc run expires first, then computes roots.
 
-`record` is durable &mdash; it `fsync`s the log file and its parent directory
-before returning &mdash; so a crash cannot leave a ref rewrite persisted while
-its recovery entry is lost. A last line without its newline is an append that a
+The entry is durable before the ref rewrite that it protects is published, so
+a crash cannot leave a ref rewrite persisted while its recovery entry is lost.
+`record` makes it durable before it returns (it `fsync`s the log file and its
+parent directory). `record_in` writes the line out and leaves it to the
+caller's shared flush, which MUST come before the ref rename (SPEC-OBJECTS
+§10.1, "Shared flush points"). A last line without its newline is an append that a
 crash or a full disk cut short: readers ignore it, and `record` cuts the file
 back to its last newline before it appends. The caller moves the ref only after
 `record` returns, so a cut entry protects nothing that moved. A tab in the
@@ -404,7 +407,7 @@ Gc publishes every output durably (SPEC-OBJECTS §10.1) under the shared
 before retiring any input. Under the exclusive `format` try-lock, before
 the first input unlink, gc checks that both members of every output and
 covering pair are present under their final names with unchanged stamps. It
-then flushes those files, the pack directory and the objects directory.
+then makes those files, the pack directory and the objects directory durable.
 A missed try-lock retires nothing. The outputs stay as duplicates, and
 the next run takes them as coverage for the live entries. It copies again
 only the entries that coverage may not drop. If the copy itself fails, gc
@@ -677,7 +680,7 @@ remains an error.
 | A chunk that is not a blob aborts gc | the mark reads the type of each distinct chunk and returns `GcRootsError::ChunkNotBlob` before the sweep lists an object ("Fail-closed requirement") |
 | gc holds neither every loose object nor an uncompacted chunk buffer | the sweep lists one `objects/<2 hex>/` directory at a time, and the chunk ids are compacted before the buffer grows past its threshold ("Retention roots") |
 | A superseded tip stays recoverable until the retention policy expires it | amend/reset/rebase/stash-pop append to `.kit/recovery-log` before moving the ref or dropping the stash entry; every logged hash is a root ("Recovery log") |
-| A crash cannot persist a ref rewrite while losing its recovery entry | `record` fsyncs the log file and its parent directory before returning ("Recovery log") |
+| A crash cannot persist a ref rewrite while losing its recovery entry | the entry is durable before the ref rename: `record` flushes the log file and its parent directory before returning, and `record_in` leaves a flush that comes before the ref rename ("Recovery log") |
 | A producer append cannot race an `expire` rewrite and vanish | callers hold the repo lock; gc runs expire → collect roots → prune under the same lock ("Recovery log") |
 | Recently-orphaned objects survive a gc run | unreachable objects younger than the grace window (default 14 days) are skipped ("Status") |
 | A writer outside gc's lock set never publishes a dangling ref | when every newly reachable object has an on-disk `mtime` strictly within `grace` of publication; import refreshes writes and complete cached closures, and the final sweep check is excluded from refresh ("Concurrent writers and the grace window") |

@@ -5,6 +5,7 @@ members = [
     "crates/kit-core",
     "crates/kit-test-util",
     "crates/kit-rpc",
+    "crates/kit-rpc-codegen",
     "crates/kit-attest",
     "crates/kit-keystore",
     "crates/kit-git-bridge",

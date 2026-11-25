@@ -46,10 +46,10 @@
 // `unsafe` — enforce that it stays that way.
 #![forbid(unsafe_code)]
 
-// Generated protobuf modules. `_includes.rs` is emitted by
-// buffa-build; it sets up the module tree for common.proto,
-// signer.proto, ssh.proto under `kit::rpc::v1`.
-include!(concat!(env!("OUT_DIR"), "/_includes.rs"));
+// Generated protobuf modules, checked in under `generated/`.
+// `_includes.rs` sets up the module tree for common.proto, signer.proto,
+// ssh.proto and verify.proto under `kit::rpc::v1`.
+include!("../generated/_includes.rs");
 
 /// Maximum length of a single framed protobuf message in bytes.
 /// Both directions of both protocols enforce this cap; receivers
@@ -96,6 +96,20 @@ mod tests {
         let dbg = format!("{pr:?}");
         assert!(dbg.contains("[REDACTED]"), "Debug must redact pin: {dbg}");
         assert!(!dbg.contains("123456"), "PIN leaked into Debug: {dbg}");
+    }
+
+    #[cfg(all(feature = "json", feature = "transport"))]
+    #[test]
+    fn json_feature_gives_transport_messages_a_json_codec() {
+        use crate::transport::grpc::health::v1::HealthCheckRequest;
+        let request = HealthCheckRequest {
+            service: "kit".into(),
+            ..Default::default()
+        };
+        let json = connectrpc::codec::encode_json(&request).expect("encode json");
+        assert_eq!(&json[..], br#"{"service":"kit"}"#);
+        let back: HealthCheckRequest = connectrpc::codec::decode_json(&json).expect("decode json");
+        assert_eq!(back.service, "kit");
     }
 
     #[cfg(feature = "transport-messages")]
@@ -151,5 +165,5 @@ mod tests {
 #[cfg(any(feature = "transport", feature = "transport-messages"))]
 #[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
 pub mod transport {
-    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
+    include!("../generated/transport/_connectrpc.rs");
 }

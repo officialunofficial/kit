@@ -6,14 +6,16 @@ checked-in generated output.
 
 ## Why the files are here
 
-The files come from the `.proto` schemas. The code generator (`buffa-build`)
-runs `protoc` or `buf`. Those tools are not part of a normal Rust build. The
+The files come from the `.proto` schemas. The code generators (`buffa-build` and
+`connectrpc-build`) run `protoc` or `buf`. Those tools are not part of a normal Rust build. The
 schemas also use protobuf edition 2023, and many hosts ship a `protoc` that
 is too old to read it. docs.rs is one of them. A build that generated the
 code would fail on those hosts.
 
-The build script copies these files into the build output. A normal build
-needs no `protoc`.
+`kit-rpc` compiles these files as ordinary source. It has no build script and
+no build dependencies, so a normal build needs no `protoc` and builds no code
+generator. The generators live in the `kit-rpc-codegen` tool crate, which
+nothing depends on.
 
 ## How the files stay correct
 
@@ -24,7 +26,7 @@ change without matching generated files fails CI.
 ## How to refresh the files
 
 Run `scripts/regen-rpc-proto.sh` and `scripts/regen-transport-proto.sh`.
-Both scripts need `protoc` 27 or newer. Commit the result in the same commit
+Both scripts run `kit-rpc-codegen` and need `protoc` 27 or newer. Commit the result in the same commit
 as the schema change.
 
 Never edit these files by hand.

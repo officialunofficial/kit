@@ -39,7 +39,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::bounded_read;
-use crate::durable::Parents;
+use crate::durable::{Flushed, Group, Parents, Staged};
 use crate::hash::{HASH_LEN, HEX_LEN, Hash, to_hex};
 use crate::layout::RepoLayout;
 
@@ -764,6 +764,125 @@ pub fn update_ref(
     cas_write(layout.common_dir(), &path, &wire, branch, condition)
 }
 
+/// A branch ref write staged in a [`Group`]: its temp file is written out and
+/// invisible until [`publish_staged_ref`].
+#[derive(Debug)]
+#[must_use = "a staged ref is invisible until it is published"]
+pub struct StagedRef {
+    staged: Staged,
+    common_dir: PathBuf,
+    path: PathBuf,
+    name: String,
+    wire: [u8; 65],
+}
+
+/// Stage the write of `h` to the branch `branch`, as [`update_ref`] makes it
+/// but in two steps, so its bytes share the flush of the objects it names.
+/// The name is checked now, the condition at [`publish_staged_ref`].
+///
+/// # Errors
+/// As [`update_ref`] for the name, [`RefError::Io`] when the temp file cannot
+/// be written, or the group is poisoned.
+pub fn stage_ref_update(
+    group: &mut Group,
+    layout: &RepoLayout,
+    branch: &str,
+    h: &Hash,
+) -> RefResult<StagedRef> {
+    check_local_write(layout.common_dir(), HEADS_DIR, branch, RefNameKind::Branch)?;
+    let path = ref_path(layout.common_dir(), HEADS_DIR, branch);
+    let wire = encode_ref_wire(h);
+    let staged = group.stage(&path, &wire, Parents::Create)?;
+    Ok(StagedRef {
+        staged,
+        common_dir: layout.common_dir().to_path_buf(),
+        path,
+        name: branch.to_string(),
+        wire,
+    })
+}
+
+/// The lock of a branch ref whose staged write was published. A ref write
+/// holds its lock until its rename is durable (SPEC-REFS §5.1.1): flush the
+/// group, then drop this.
+#[derive(Debug)]
+#[must_use = "the ref stays locked until this is dropped; flush the group first"]
+pub struct PublishedRef(#[allow(dead_code)] RefMutation);
+
+impl std::fmt::Debug for RefMutation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefMutation")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Publish a staged branch ref: take the ref lock, check `condition` and
+/// rename. `after` must come from a flush of `group` that covers the objects
+/// the ref names. The rename is not durable yet: the caller flushes `group`,
+/// and only then drops the returned lock, so that no other writer reads the
+/// ref before it is durable.
+///
+/// # Errors
+/// [`RefError::Conflict`] when `condition` fails, as [`update_ref`]. A
+/// refused token or a failed rename is [`RefError::Io`]. The staged file is
+/// dropped on any error.
+pub fn publish_staged_ref(
+    group: &mut Group,
+    staged: StagedRef,
+    condition: RefWriteCondition,
+    after: &Flushed,
+) -> RefResult<PublishedRef> {
+    let StagedRef {
+        staged,
+        common_dir,
+        path,
+        name,
+        wire,
+    } = staged;
+    let mutation = RefMutation::acquire(&common_dir, &path, &name)?;
+    mutation.write_staged(group, staged, &wire, condition, after)?;
+    Ok(PublishedRef(mutation))
+}
+
+/// A detached `HEAD` write staged in a [`Group`].
+#[derive(Debug)]
+#[must_use = "a staged HEAD is invisible until it is published"]
+pub struct StagedHead(Staged);
+
+/// Stage the write of a detached `HEAD`, as [`write_head_detached`] makes it
+/// but in two steps.
+///
+/// # Errors
+/// [`RefError::Io`] when the temp file cannot be written, or the group is
+/// poisoned.
+pub fn stage_head_detached(
+    group: &mut Group,
+    layout: &RepoLayout,
+    h: &Hash,
+) -> RefResult<StagedHead> {
+    let wire = encode_ref_wire(h);
+    Ok(StagedHead(group.stage(
+        &layout.head_file(),
+        &wire,
+        Parents::Existing,
+    )?))
+}
+
+/// Publish a staged detached `HEAD`. The caller flushes `group` for the
+/// rename before it reports success.
+///
+/// # Errors
+/// As [`publish_staged_ref`], without the condition.
+pub fn publish_staged_head(
+    group: &mut Group,
+    staged: StagedHead,
+    after: &Flushed,
+) -> RefResult<()> {
+    group.publish_sibling(staged.0, after)?;
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // History-coupled ref writes (feature: history-mmr)
 // -----------------------------------------------------------------------------
@@ -1319,8 +1438,14 @@ impl RefMutation {
 
     fn write(&self, wire: &[u8; 65], condition: RefWriteCondition) -> RefResult<()> {
         self.check(condition)?;
-        // Even a same-tip raw write refuses to bypass an outstanding intent.
-        // Ordinary writes preserve a matching snapshot only for a true no-op.
+        self.guard_history(wire)?;
+        self.write_preserving_history(wire, condition)
+    }
+
+    /// The history rule of a write of `wire`. Even a same-tip raw write
+    /// refuses to bypass an outstanding intent. Ordinary writes preserve a
+    /// matching snapshot only for a true no-op.
+    fn guard_history(&self, wire: &[u8; 65]) -> RefResult<()> {
         if self.current().ok().flatten() != decode_ref_wire(wire) {
             self.invalidate_history()?;
         } else if ancestry_state::Transaction::read(&ancestry_state::branch_dir(
@@ -1335,7 +1460,30 @@ impl RefMutation {
         {
             return Err(RefError::InvalidRef("pending history publication".into()));
         }
-        self.write_preserving_history(wire, condition)
+        Ok(())
+    }
+
+    /// [`Self::write`] of a staged temp file: the check and the rename that
+    /// `after` licenses, under this lock. The caller flushes the rename
+    /// before it releases the lock (SPEC-REFS §5.1.1).
+    fn write_staged(
+        &self,
+        group: &mut Group,
+        staged: Staged,
+        wire: &[u8; 65],
+        condition: RefWriteCondition,
+        after: &Flushed,
+    ) -> RefResult<()> {
+        self.check(condition)?;
+        self.guard_history(wire)?;
+        if matches!(condition, RefWriteCondition::Missing) {
+            if !group.publish_new_sibling(staged, after)? {
+                return Err(RefError::Conflict(self.name.clone()));
+            }
+        } else {
+            group.publish_sibling(staged, after)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn write_preserving_history(
@@ -3269,3 +3417,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod staged_tests;

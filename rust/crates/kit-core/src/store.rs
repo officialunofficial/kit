@@ -221,8 +221,14 @@ pub enum StoreError {
     /// A caller-selected in-memory operation budget was exhausted.
     #[error("object operation exceeded {0} limit")]
     OperationLimitExceeded(&'static str),
-    #[error("on-disk bytes hash to {actual}, expected {expected}")]
-    HashMismatch { expected: String, actual: String },
+    #[error("on-disk bytes hash to {actual}, expected {expected}{}", in_pack(.pack.as_deref()))]
+    HashMismatch {
+        expected: String,
+        actual: String,
+        /// The local pack that holds the bytes, when they were read from one.
+        /// Boxed so the error stays small.
+        pack: Option<Box<PathBuf>>,
+    },
     /// A local pack or its index failed a check: a bad header, size,
     /// checksum, frame, extent or key. A failed read stays [`Self::Io`].
     #[error("local pack {pack}: {reason}")]
@@ -397,6 +403,13 @@ pub struct PruneGuard {
 
 /// Result alias used throughout this module.
 pub type StoreResult<T> = Result<T, StoreError>;
+
+/// The tail of a hash-mismatch message that names the local pack.
+fn in_pack(pack: Option<&PathBuf>) -> String {
+    pack.map_or_else(String::new, |pack| {
+        format!(" (in local pack {})", pack.display())
+    })
+}
 
 #[derive(Debug, Default)]
 struct PackWrites {
@@ -579,6 +592,15 @@ impl ObjectStore {
     #[must_use]
     pub fn batch(&self) -> WriteBatch<'_> {
         self.batch_with_policy(self.default_policy)
+    }
+
+    /// A group of writes that share flushes, on this store's device calls, so
+    /// a test double of the store sees them too. See [`crate::durable`] and
+    /// [`WriteBatch::commit_in`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn group(&self) -> crate::durable::Group {
+        crate::durable::Group::with_syncer(Arc::clone(self.syncer()))
     }
 
     /// Start a batched write with an explicit [`SyncPolicy`].
@@ -1590,6 +1612,7 @@ fn check_hash(expected: &Hash, actual: &Hash) -> StoreResult<()> {
         return Err(StoreError::HashMismatch {
             expected: to_hex(expected),
             actual: to_hex(actual),
+            pack: None,
         });
     }
     Ok(())
@@ -2359,7 +2382,9 @@ mod tests {
         }
         let err = store.read(&h).unwrap_err();
         match err {
-            StoreError::HashMismatch { expected, actual } => {
+            StoreError::HashMismatch {
+                expected, actual, ..
+            } => {
                 assert_eq!(expected, to_hex(&h));
                 assert_ne!(actual, expected, "actual must differ once corrupted");
             }

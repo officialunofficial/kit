@@ -489,7 +489,7 @@ fn the_commit_waits_for_the_seal_in_flight() {
         .unwrap();
     let release = block_the_seal(&batch);
     std::thread::scope(|scope| {
-        let commit = scope.spawn(|| batch.flush(true));
+        let commit = scope.spawn(|| batch.flush(true, None));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!commit.is_finished());
         assert_eq!(pairs(&store), 0);

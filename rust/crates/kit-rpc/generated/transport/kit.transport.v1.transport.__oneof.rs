@@ -32,6 +32,7 @@ pub mod get_receipt_request {
             Self::Some(Selector::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Selector {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -80,6 +81,7 @@ pub mod upload_pack_request {
             Self::Some(Body::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Body {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -140,6 +142,7 @@ pub mod download_pack_response {
             Self::Some(Body::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Body {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -192,6 +195,7 @@ pub mod begin_upload_response {
             Self::Some(Result::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Result {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -231,6 +235,7 @@ pub mod upload_part_request {
             Self::Some(Msg::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Msg {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -259,6 +264,7 @@ pub mod set_repo_visibility_request {
         SignedStatement(::buffa::alloc::string::String),
     }
     impl ::buffa::Oneof for Mode {}
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Mode {
         fn serialize<S: ::serde::Serializer>(
             &self,
@@ -297,6 +303,7 @@ pub mod issue_object_url_request {
             Self::Some(Target::from(v))
         }
     }
+    #[cfg(feature = "json")]
     impl ::serde::Serialize for Target {
         fn serialize<S: ::serde::Serializer>(
             &self,

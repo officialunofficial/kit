@@ -41,14 +41,12 @@ kit-core = { version = "=0.10.0", path = "../kit-core" }
 # `UploadPack`/`DownloadPack`'s client-streaming/server-streaming RPCs work
 # natively without a separate opt-in — connectrpc 0.9 dropped the
 # `streaming` cargo feature (and `StreamingCompressionProvider`) entirely;
-# streaming RPCs themselves are unaffected. `json` keeps the
-# buffa-generated message types' serde derives (matches every other
-# connectrpc consumer in this workspace).
+# streaming RPCs themselves are unaffected. The client speaks binary
+# protobuf, so `json` stays off.
 connectrpc = { version = "0.9.1", default-features = false, features = [
     "client",
     "client-tls",
     "gzip",
-    "json",
 ] }
 buffa = "0.9.2"
 base64 = "0.23.1"
@@ -117,7 +115,6 @@ connectrpc = { version = "0.9.1", default-features = false, features = [
     "client-tls",
     "server",
     "gzip",
-    "json",
 ] }
 
 # Native TLS trust and streaming RPC regression fixture only.

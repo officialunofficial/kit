@@ -562,6 +562,15 @@ pub(in crate::store) fn named(path: &Path, error: StoreError) -> StoreError {
         StoreError::Io(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
             invalid_at(path, "file ends early")
         }
+        StoreError::HashMismatch {
+            expected,
+            actual,
+            pack: None,
+        } => StoreError::HashMismatch {
+            expected,
+            actual,
+            pack: Some(Box::new(path.to_path_buf())),
+        },
         other => other,
     }
 }

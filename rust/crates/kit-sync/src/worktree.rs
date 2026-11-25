@@ -45,6 +45,36 @@ pub fn sync_index_to_tree_observed(
     tree_hash: Hash,
     observed: &[core_worktree::StatObservation],
 ) -> Result<(), String> {
+    let idx = index_for_tree(layout, store, tree_hash, observed)?;
+    write_index_settled(layout, &idx)
+}
+
+/// [`sync_index_to_tree`] with the index staged on `group`, not written: the
+/// caller publishes it with a token from a flush of the group that covers the
+/// objects of the tree, and flushes the group again for the rename. The racy
+/// window is settled before the staged file is returned, as for the written
+/// index.
+///
+/// # Errors
+/// The text of the failed step.
+pub fn sync_index_to_tree_staged(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let idx = index_for_tree(layout, store, tree_hash, &[])?;
+    stage_index_settled(group, layout, &idx)
+}
+
+/// The index of `tree_hash`, with the stat cache of the current index kept
+/// wherever path and object agree, and `observed` applied.
+fn index_for_tree(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    tree_hash: Hash,
+    observed: &[core_worktree::StatObservation],
+) -> Result<Index, String> {
     let mut idx =
         kit_core::index::from_tree(store, tree_hash).map_err(|e| format!("index: {e}"))?;
     // Tree-derived entries carry no stat cache. Carry it over from the
@@ -82,7 +112,7 @@ pub fn sync_index_to_tree_observed(
             }
         }
     }
-    write_index_settled(layout, &idx)
+    Ok(idx)
 }
 
 /// The longest wait for the racy window to pass, in nanoseconds. A recorded
@@ -154,6 +184,53 @@ fn write_index_settled(layout: &RepoLayout, idx: &Index) -> Result<(), String> {
         write()?;
     }
     Ok(())
+}
+
+/// [`write_index_settled`] for a staged index: the wait and the rewrite of
+/// the temp file, so its mtime is judged where the index's would be.
+fn stage_index_settled(
+    group: &mut kit_core::durable::Group,
+    layout: &RepoLayout,
+    idx: &Index,
+) -> Result<kit_core::index::StagedIndex, String> {
+    let mut stage = || {
+        kit_core::index::stage_index(group, layout, idx).map_err(|e| format!("write index: {e}"))
+    };
+    let Some(newest) = idx
+        .entries
+        .iter()
+        .map(|e| e.mtime_ns)
+        .filter(|m| *m != 0 && !m.is_multiple_of(1_000_000_000))
+        .max()
+    else {
+        return stage();
+    };
+    let window = kit_core::index::PRECISE_RACY_WINDOW_NS;
+    let now = now_nanos();
+    let ready = newest.saturating_add(window).saturating_add(SETTLE_TICK_NS);
+    if ready > now && ready - now > SETTLE_MAX_WAIT_NS {
+        return stage();
+    }
+    if ready > now {
+        std::thread::sleep(std::time::Duration::from_nanos(ready - now));
+    }
+    let mut staged = stage()?;
+    for _ in 0..SETTLE_REWRITES {
+        let Ok(meta) = std::fs::metadata(staged.temp_path()) else {
+            break;
+        };
+        let stamp = core_worktree::mtime_nanos(&meta);
+        if stamp == 0
+            || stamp.is_multiple_of(1_000_000_000)
+            || newest < stamp.saturating_sub(window)
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_nanos(SETTLE_TICK_NS));
+        // The earlier temp file is dropped, and unlinked, as it is replaced.
+        staged = stage()?;
+    }
+    Ok(staged)
 }
 
 fn now_nanos() -> u64 {
@@ -1106,6 +1183,104 @@ mod tests {
             let e = &idx.entries[idx.find_entry("a").unwrap()];
             assert_eq!((e.mtime_ns, e.size, e.ino), (mtime_ns, 1, 7));
         }
+    }
+
+    /// The staged index publishes to the entries the written one has, and the
+    /// stat cache of the old index is kept where path and object agree.
+    #[test]
+    fn the_staged_index_matches_the_written_one_and_keeps_the_stat_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let blob = |data: &[u8]| {
+            put(
+                &store,
+                &Object::Blob(Blob {
+                    data: data.to_vec(),
+                }),
+            )
+        };
+        let (a, b) = (blob(b"a"), blob(b"b"));
+        let entry = |name: &str, hash: Hash| TreeEntry {
+            name: name.as_bytes().to_vec(),
+            mode: EntryMode::Blob,
+            object_hash: hash,
+        };
+        let one = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a)],
+            }),
+        );
+        let two = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a), entry("b", b)],
+            }),
+        );
+        // An old index whose entry for `a` has a stat cache.
+        sync_index_to_tree(&layout, &store, one).unwrap();
+        let mut old = kit_core::index::read_index(&layout).unwrap();
+        let at = old.find_entry("a").unwrap();
+        old.entries[at].mtime_ns = 5_000_000_001;
+        old.entries[at].size = 1;
+        old.entries[at].ino = 9;
+        kit_core::index::write_index(&layout, &old).unwrap();
+
+        let mut group = store.group();
+        let staged = sync_index_to_tree_staged(&mut group, &layout, &store, two).unwrap();
+        // Nothing is published until the group is flushed and the token used.
+        assert_eq!(
+            kit_core::index::read_index(&layout).unwrap().entries.len(),
+            1
+        );
+        let token = group.flush().unwrap();
+        kit_core::index::publish_staged_index(&mut group, staged, &token).unwrap();
+        let _named = group.flush().unwrap();
+
+        let idx = kit_core::index::read_index(&layout).unwrap();
+        assert_eq!(idx.entries.len(), 2);
+        let ea = &idx.entries[idx.find_entry("a").unwrap()];
+        assert_eq!(
+            (ea.object_hash, ea.mtime_ns, ea.size, ea.ino),
+            (a, 5_000_000_001, 1, 9)
+        );
+        let eb = &idx.entries[idx.find_entry("b").unwrap()];
+        assert_eq!((eb.object_hash, eb.mtime_ns, eb.size, eb.ino), (b, 0, 0, 0));
+
+        // The written path gives the same entries.
+        let other = tempfile::tempdir().unwrap();
+        let layout2 = RepoLayout::single(other.path());
+        let store2 = ObjectStore::init(&layout2).unwrap();
+        let (a2, b2) = (
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"a".to_vec(),
+                }),
+            ),
+            put(
+                &store2,
+                &Object::Blob(Blob {
+                    data: b"b".to_vec(),
+                }),
+            ),
+        );
+        let two2 = put(
+            &store2,
+            &Object::Tree(Tree {
+                entries: vec![entry("a", a2), entry("b", b2)],
+            }),
+        );
+        sync_index_to_tree(&layout2, &store2, two2).unwrap();
+        let written = kit_core::index::read_index(&layout2).unwrap();
+        let names = |i: &Index| {
+            i.entries
+                .iter()
+                .map(|e| (e.path.clone(), e.object_hash))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&idx), names(&written));
     }
 
     /// A recorded mtime far ahead of the clock is skew: the write does not

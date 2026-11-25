@@ -182,7 +182,47 @@ pub fn flush_file(file: &File, path: &Path) -> io::Result<()> {
     }
     file.sync_all()?;
     #[cfg(feature = "fault-injection")]
-    crate::fault::sync_step(|| crate::fault::SyncStep::Flush(path.to_path_buf()));
+    {
+        snapshot_after_flush();
+        crate::fault::sync_step(|| crate::fault::SyncStep::Flush(path.to_path_buf()));
+    }
+    Ok(())
+}
+
+/// A crash test that runs the binary names a tree in `KIT_FLUSH_SNAPSHOT_SRC`
+/// and a directory in `KIT_FLUSH_SNAPSHOT_DEST`. After each full flush, in
+/// order, the tree is copied to `<dest>/<n>` (n from 1), so the test can look
+/// at the repository as a power loss right after that flush would leave it. A
+/// copy that fails is skipped, since it only serves tests.
+#[cfg(feature = "fault-injection")]
+fn snapshot_after_flush() {
+    static ORDER: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+    let (Some(src), Some(dest)) = (
+        std::env::var_os("KIT_FLUSH_SNAPSHOT_SRC"),
+        std::env::var_os("KIT_FLUSH_SNAPSHOT_DEST"),
+    ) else {
+        return;
+    };
+    let mut order = ORDER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *order += 1;
+    let _ = copy_tree(Path::new(&src), &Path::new(&dest).join(order.to_string()));
+}
+
+#[cfg(feature = "fault-injection")]
+fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dest.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
     Ok(())
 }
 
@@ -421,6 +461,21 @@ pub struct Staged {
     dest: PathBuf,
 }
 
+impl Staged {
+    /// The temp file, for a reader that checks it before the publish, such as
+    /// its mtime.
+    #[must_use]
+    pub fn temp_path(&self) -> &Path {
+        &self.temp
+    }
+
+    /// The path the file takes when it is published.
+    #[must_use]
+    pub fn dest(&self) -> &Path {
+        &self.dest
+    }
+}
+
 /// Proof that a flush completed after every write the group had made up to a
 /// point. [`Group::publish`] needs one.
 #[derive(Debug)]
@@ -441,6 +496,9 @@ pub struct Group {
     clock: u64,
     /// The clock at the group's latest rename, zero before any.
     last_rename: u64,
+    /// The token of the run of sibling publishes under way, and the clock of
+    /// the latest rename before the run began.
+    siblings: Option<(u64, u64)>,
     /// The devices written to since the last flush, each with the directories
     /// written in on it: the flush is anchored at the first one still there.
     pending: BTreeMap<u64, Vec<PathBuf>>,
@@ -466,6 +524,7 @@ impl Group {
             syncer,
             clock: 0,
             last_rename: 0,
+            siblings: None,
             pending: BTreeMap::new(),
             failed: false,
         }
@@ -595,6 +654,24 @@ impl Group {
         Ok(())
     }
 
+    /// Record that code outside the group wrote out files on the device of
+    /// `dir`, such as the early writeouts of an object batch, so the next
+    /// flush covers that device. No device call is made. `dir` anchors the
+    /// flush, so it must stay in place until then.
+    pub(crate) fn note_written(&mut self, dir: &Path) {
+        let device = self.syncer.device_of(dir);
+        self.wrote(dir, device);
+    }
+
+    /// Record renames that code outside the group made, so a publish needs a
+    /// flush that comes after them.
+    pub(crate) fn note_renamed(&mut self) {
+        self.clock += 1;
+        self.last_rename = self.clock;
+        // A rename outside the group ends a run of sibling publishes.
+        self.siblings = None;
+    }
+
     /// An ordering point: one full flush for each device written to since the
     /// last one, and none where every writeout is already durable. The token
     /// covers every write and rename the group has made so far.
@@ -649,12 +726,24 @@ impl Group {
     /// and its temp file unlinked, on any error.
     pub fn publish(&mut self, staged: Staged, after: &Flushed) -> io::Result<()> {
         self.live()?;
-        self.covered(&staged, after)?;
-        let parent = parent_of(&staged.dest)?.to_path_buf();
-        self.clock += 1;
-        self.last_rename = self.clock;
-        self.syncer.rename(staged.temp, &staged.dest)?;
-        self.note_dir(&parent)
+        self.siblings = None;
+        self.covered(&staged, after, self.last_rename)?;
+        self.rename_in(staged, false).map(drop)
+    }
+
+    /// [`Group::publish`] of a file that does not depend on the files already
+    /// published under the same token: a ref and the index of one commit name
+    /// the same objects and neither names the other. The renames of the run
+    /// share the flush that follows them. The token must cover every rename
+    /// made before the run began, and the file's own writeout.
+    ///
+    /// # Errors
+    /// As [`Group::publish`].
+    pub fn publish_sibling(&mut self, staged: Staged, after: &Flushed) -> io::Result<()> {
+        self.live()?;
+        let floor = self.sibling_floor(after);
+        self.covered(&staged, after, floor)?;
+        self.rename_in(staged, false).map(drop)
     }
 
     /// [`Group::publish`] that leaves an existing `dest` alone: `Ok(false)`
@@ -664,10 +753,42 @@ impl Group {
     /// As [`Group::publish`].
     pub fn publish_new(&mut self, staged: Staged, after: &Flushed) -> io::Result<bool> {
         self.live()?;
-        self.covered(&staged, after)?;
+        self.siblings = None;
+        self.covered(&staged, after, self.last_rename)?;
+        self.rename_in(staged, true)
+    }
+
+    /// [`Group::publish_new`] as [`Group::publish_sibling`] publishes.
+    ///
+    /// # Errors
+    /// As [`Group::publish`].
+    pub fn publish_new_sibling(&mut self, staged: Staged, after: &Flushed) -> io::Result<bool> {
+        self.live()?;
+        let floor = self.sibling_floor(after);
+        self.covered(&staged, after, floor)?;
+        self.rename_in(staged, true)
+    }
+
+    /// The latest rename that a sibling publish under `after` must follow: the
+    /// last one before the run of that token began.
+    fn sibling_floor(&mut self, after: &Flushed) -> u64 {
+        match self.siblings {
+            Some((token, floor)) if token == after.upto => floor,
+            _ => {
+                self.siblings = Some((after.upto, self.last_rename));
+                self.last_rename
+            }
+        }
+    }
+
+    fn rename_in(&mut self, staged: Staged, only_new: bool) -> io::Result<bool> {
         let parent = parent_of(&staged.dest)?.to_path_buf();
-        if !self.syncer.rename_new(staged.temp, &staged.dest)? {
-            return Ok(false);
+        if only_new {
+            if !self.syncer.rename_new(staged.temp, &staged.dest)? {
+                return Ok(false);
+            }
+        } else {
+            self.syncer.rename(staged.temp, &staged.dest)?;
         }
         self.clock += 1;
         self.last_rename = self.clock;
@@ -676,15 +797,15 @@ impl Group {
     }
 
     /// Whether `after` shows a flush of this group that came after `staged`'s
-    /// writeout and after the group's latest rename, so that what the rename
+    /// writeout and after the rename at `floor`, so that what the rename
     /// depends on is durable.
-    fn covered(&self, staged: &Staged, after: &Flushed) -> io::Result<()> {
+    fn covered(&self, staged: &Staged, after: &Flushed, floor: u64) -> io::Result<()> {
         if staged.group != self.id || after.group != self.id {
             return Err(io::Error::other(
                 "the file or the token is of another group",
             ));
         }
-        if after.upto < staged.at || after.upto < self.last_rename {
+        if after.upto < staged.at || after.upto < floor {
             return Err(io::Error::other(
                 "no flush since the file's writeout and the group's last rename",
             ));

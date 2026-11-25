@@ -2398,12 +2398,18 @@ version = "0.10.0"
 dependencies = [
  "arbitrary",
  "buffa",
- "buffa-build",
  "connectrpc",
- "connectrpc-build",
  "kit-core",
  "serde",
  "thiserror",
+]
+
+[[package]]
+name = "kit-rpc-codegen"
+version = "0.10.0"
+dependencies = [
+ "buffa-build",
+ "connectrpc-build",
 ]
 
 [[package]]

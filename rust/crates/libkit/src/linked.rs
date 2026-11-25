@@ -991,7 +991,7 @@ pub fn repair(
             path: root.clone(),
             reason,
         };
-        let linked = layout::discover(&root).map_err(|e| unrepairable(e.to_string()))?;
+        let linked = layout::discover_unverified(&root).map_err(|e| unrepairable(e.to_string()))?;
         let state = linked.worktree_state_dir();
         // A repository with no linked tree has no registry directory.
         let registry_dir = layout.worktrees_dir().canonicalize().ok();
@@ -1033,7 +1033,7 @@ fn pointer_is_replaceable(root: &Path) -> bool {
         Err(e) => e.kind() == io::ErrorKind::NotFound,
         Ok(meta) => {
             meta.file_type().is_file()
-                && !matches!(layout::discover(root), Ok(linked) if !linked.is_single())
+                && !matches!(layout::discover_unverified(root), Ok(linked) if !linked.is_single())
         }
     }
 }
