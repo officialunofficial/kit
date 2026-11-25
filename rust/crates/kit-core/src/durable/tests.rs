@@ -619,6 +619,17 @@ fn a_lone_anchor_that_is_gone_when_the_flush_returns_fails_the_group() {
     assert!(group.note_dir(dir.path()).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn an_open_file_is_on_the_device_of_its_directory() {
+    let dir = TempDir::new().unwrap();
+    let file = File::create(dir.path().join("f")).unwrap();
+    assert_eq!(
+        RealSyncer.device_of_file(&file, dir.path()),
+        RealSyncer.device_of(dir.path())
+    );
+}
+
 #[test]
 fn a_bare_file_name_is_flushed_in_the_current_directory() {
     // Cargo runs a test with the package directory as its current one.

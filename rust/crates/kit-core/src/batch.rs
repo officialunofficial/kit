@@ -154,6 +154,22 @@ pub(crate) trait Syncer: Send + Sync + fmt::Debug {
     fn writeouts_need_flush(&self) -> bool {
         true
     }
+    /// The device that holds the open `file`, which lives in `dir`: the device
+    /// its writeout went to, whatever happens to its directory meanwhile. A
+    /// file that cannot be inspected is on device zero, which no flush anchor
+    /// matches, so the flush that needs it fails.
+    fn device_of_file(&self, file: &File, _dir: &Path) -> Option<u64> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            Some(file.metadata().map_or(0, |meta| meta.dev()))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            Some(0)
+        }
+    }
     /// The device that holds the directory `dir`, or `None` when it is gone.
     /// A [`Group`] flushes once for each device it wrote to. Zero where the
     /// platform has no device numbers.
@@ -1709,6 +1725,14 @@ pub(crate) mod testing {
             !self
                 .durable_writeouts
                 .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn device_of_file(&self, file: &File, dir: &Path) -> Option<u64> {
+            let devices = self.devices.lock().unwrap();
+            match devices.iter().find(|(prefix, _)| dir.starts_with(prefix)) {
+                Some((_, device)) => Some(*device),
+                None => RealSyncer.device_of_file(file, dir),
+            }
         }
 
         fn device_of(&self, dir: &Path) -> Option<u64> {
