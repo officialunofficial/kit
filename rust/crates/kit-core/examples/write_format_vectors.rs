@@ -17,9 +17,8 @@
 //! The vectors:
 //!
 //! * `object-ids.txt`: `<file> <type> <id>` for each object vector, from the
-//!   bytes in `objects/` and `tags/`. The ids of the empty tree, the
-//!   single-file tree and the three-chunk manifest are checked against the
-//!   values `scripts/golden/objects_ref.py` derives on its own.
+//!   bytes in `objects/` and `tags/`. `scripts/golden/formats_ref.py` derives
+//!   every id again without this crate.
 //! * `packlist-first.bin`, `packlist-chained.bin`: pack list nodes, version 1.
 //! * `sparse-cache.bin`: the sparse cache envelope, version 2. It is the
 //!   committed `sparse/response_v2.bin` with the cache magic.
@@ -57,12 +56,6 @@ const OBJECTS: [&str; 14] = [
     "tags/tag_signed.bin",
 ];
 
-/// Ids derived independently by `scripts/golden/objects_ref.py`.
-const REFERENCE_IDS: [(&str, &str); 1] = [(
-    "objects/empty_tree.bin",
-    "b29117ce9b3d66ba98cd0a57145400f0bf6fff8b5c27c4552d80a38446f27ef7",
-)];
-
 fn type_name(object: &Object) -> &'static str {
     match object {
         Object::Blob(_) => "blob",
@@ -88,11 +81,6 @@ fn main() -> std::io::Result<()> {
         let bytes = fs::read(golden.join(file))?;
         let object = deserialize(&bytes).expect("an object vector decodes");
         let id = to_hex(&id_from_object(&object, &bytes));
-        for (name, want) in REFERENCE_IDS {
-            if name == file {
-                assert_eq!(id, want, "{file}: id differs from the reference");
-            }
-        }
         writeln!(ids, "{file} {} {id}", type_name(&object)).expect("write to a String");
     }
     fs::write(out.join("object-ids.txt"), ids)?;
