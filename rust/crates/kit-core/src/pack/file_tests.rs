@@ -884,27 +884,25 @@ fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap()
     store.write(&base).unwrap();
     // Three tiny results, so the reads of the base are almost all the charge.
     let mut w = PackWriter::new();
+    let mut charged = 0u64;
     for keep in [100, 101, 102] {
         let (_, target) = blob(&blob_data(9, keep, false));
         w.push_delta(&base_id, &delta::encode(&base, &target).unwrap())
             .unwrap();
+        // The read of the base and the result of the delta.
+        charged += (base.len() + target.len()) as u64;
     }
     let pack = w.finish().unwrap();
-    let cap = pack.len() as u64 * DECODED_PER_WIRE_BYTE;
-    let read = BASE_LEN as u64 + 100;
-    assert!(
-        2 * read < cap && cap < 3 * read,
-        "two reads fit the cap and three do not: {cap}"
-    );
-
+    // A pack this short is held to the floor of the cap, which three reads of
+    // 3 MiB do not reach, so the fetch's budget is what runs out.
     let dir = TempDir::new().unwrap();
     let file = verified(&pack, dir.path());
     let one_delta_a_window = WindowShape {
         entries: 1,
         bytes: u64::MAX,
     };
-    let with = |remaining: u64| {
-        let mut fetch = FetchDecodeBudget { remaining };
+    let with = |limit: u64| {
+        let mut fetch = FetchDecodeBudget::with_limit(limit);
         decode_file(
             &file,
             &store,
@@ -915,9 +913,13 @@ fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap()
             None,
         )
     };
-    // The grant for the pack's wire bytes is the whole cap here.
-    assert!(matches!(with(0), Err(PackError::PackfileTooLarge)));
-    assert_eq!(with(3 * read).unwrap().delta_count, 3);
+    // The last read is the one that passes the budget, and without the charge
+    // for the reads the budget would not run out: the results are 330 bytes.
+    assert!(matches!(
+        with(charged - 1),
+        Err(PackError::PackfileTooLarge)
+    ));
+    assert_eq!(with(charged).unwrap().delta_count, 3);
 }
 
 /// Every commit, remix and tag a pack stores is listed in `signed` with its

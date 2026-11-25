@@ -2,8 +2,8 @@
 //!
 //! - The window reader refuses once the zstd claims it has yielded add up past
 //!   its budget, though each entry fits.
-//! - A fetch decodes at most one floor plus a fixed share of the wire bytes it
-//!   applied, however many packs it spreads them over.
+//! - A fetch decodes at most its budget, however many packs it spreads that
+//!   over.
 #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
 
 use std::path::Path;
@@ -130,11 +130,11 @@ fn claiming_pack(claims: &[u32]) -> Vec<u8> {
     build_pack(pack::VERSION_V2, &frames)
 }
 
-/// A pack that stays under its own cap can still be one of a million. The
-/// first pack takes the fetch's floor; the next, 90 bytes long, may decode a
-/// share of its own length and no more. Alone, the same pack passes.
+/// A pack that stays under its own cap can still be one of a million. With a
+/// budget of 2 GiB, the first pack takes it all and the next, which is small,
+/// may decode nothing. Alone, the same pack passes.
 #[test]
-fn a_fetch_decodes_one_floor_plus_a_share_of_its_wire_bytes() {
+fn a_fetch_decodes_no_more_than_its_budget() {
     let gib = 1u32 << 30;
     assert_eq!(MIN_TOTAL_DECODED, 2 * u64::from(gib));
     let dir = tempfile::tempdir().unwrap();
@@ -146,23 +146,27 @@ fn a_fetch_decodes_one_floor_plus_a_share_of_its_wire_bytes() {
         let staged = ObjectSpool::new(dir.path()).unwrap();
         PackReader::stage_verified(pack, &store, &[], &staged, fetch)
     };
-    let mut fetch = FetchDecodeBudget::new();
-    // Two claims of 1 GiB fit the floor. The frames are bogus, so the pack
-    // fails after its claims were charged, and a failed pack still spent them.
+    let mut fetch = FetchDecodeBudget::with_limit(MIN_TOTAL_DECODED);
+    // The frames are bogus, so the pack fails after its claims were charged,
+    // and a failed pack still spent them.
     let error = stage(&first, &mut fetch).unwrap_err();
     assert!(
         !matches!(error, PackError::PackfileTooLarge),
-        "the first pack is within the floor: {error:?}"
+        "the first pack is within the budget: {error:?}"
     );
     let error = stage(&second, &mut fetch).unwrap_err();
     assert!(
         matches!(error, PackError::PackfileTooLarge),
-        "the floor is spent: {error:?}"
+        "the budget is spent: {error:?}"
     );
 
-    let error = stage(&second, &mut FetchDecodeBudget::new()).unwrap_err();
+    let error = stage(
+        &second,
+        &mut FetchDecodeBudget::with_limit(MIN_TOTAL_DECODED),
+    )
+    .unwrap_err();
     assert!(
         !matches!(error, PackError::PackfileTooLarge),
-        "alone it fits the floor: {error:?}"
+        "alone it fits: {error:?}"
     );
 }

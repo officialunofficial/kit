@@ -673,6 +673,45 @@ mod tests {
     }
 
     #[test]
+    fn the_packs_of_a_chain_share_one_decoded_budget() {
+        // Two packs, each holding one compressible 64 KiB blob, which the
+        // pack stores compressed and the reader counts as 64 KiB decoded.
+        let tx = MemoryTransport::new();
+        let (first, second) = (vec![b'a'; 64 << 10], vec![b'b'; 64 << 10]);
+        let a = upload_blob_pack(&tx, &[&first]);
+        let b = upload_blob_pack(&tx, &[&second]);
+        let run = |limit: u64| {
+            let (_td, _layout, store, mut applied) = store_and_record();
+            store.try_activate_local_packs().unwrap();
+            let mut done = ChainApplied::default();
+            let result = apply_pack_chain(
+                &store,
+                &TransportSource::new(&tx),
+                &NoopObserver,
+                "origin",
+                "refs/heads/main",
+                &[a, b],
+                &mut applied,
+                false,
+                &mut done,
+                &store.prune_guard().unwrap(),
+                &mut FetchDecodeBudget::with_limit(limit),
+                |_| Ok(()),
+            );
+            (result, done.packs)
+        };
+        let (result, packs) = run(100 << 10);
+        assert!(matches!(
+            result,
+            Err(SyncError::Pack(PackError::PackfileTooLarge))
+        ));
+        assert_eq!(packs, 1, "the first pack fits, the second does not");
+        let (result, packs) = run(200 << 10);
+        result.unwrap();
+        assert_eq!(packs, 2);
+    }
+
+    #[test]
     fn an_interrupted_final_check_keeps_the_accepted_window() {
         let tx = MemoryTransport::new();
         let key = upload_blob_pack(&tx, &[b"kept"]);

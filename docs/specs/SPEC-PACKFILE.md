@@ -898,12 +898,13 @@ uses one pack and one pack's stored-object IDs at a time. Ref publication
 follows signature and closure checks. Unpack allocations are additional
 one-pack working memory.
 
-A fetch also bounds what all its packs decode together. It may decode 2 GiB,
-the floor of one pack's cap, plus 32,768 bytes for each wire byte of the packs
-it applies, however many packs there are. Each pack still obeys its own cap,
-and the bytes it decodes, a pack that fails included, come off what the
-fetch has left for the next pack. A delta base read from the store counts as
-decoded bytes each time it is read.
+A fetch also bounds what all its packs decode together: at most 1 TiB, a
+plain number and not a ratio of the wire bytes, since a delta of a large
+manifest and a hostile delta both expand by more than any fixed ratio that an
+honest pack stays under. Each pack still obeys its own cap, and the bytes it
+decodes, a pack that fails included, come off what the fetch has left for the
+next pack. A delta base read from the store counts as decoded bytes each time
+it is read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
 pack payload buffer. The reader holds one window of at most 64 MiB of

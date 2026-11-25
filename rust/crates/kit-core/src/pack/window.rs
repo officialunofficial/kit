@@ -15,7 +15,8 @@
 //! plus decoded output when both are live. It also caps the sum, over the entries a
 //! reader has yielded, of the sizes their zstd frames decompress to, so a pack of
 //! many small claims cannot pass one entry at a time. A reader resumed from a
-//! cursor counts from zero. Decoder-internal memory is additional
+//! cursor counts from zero, as the cursor does not carry the total, so a host
+//! that resumes between entries keeps its own total. Decoder-internal memory is additional
 //! (in particular the zstd window buffer; see the parent module).
 //!
 //! A resumed run re-fetches its current window and checks the checkpoint's

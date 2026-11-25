@@ -153,14 +153,21 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
 }
 
-/// The decoded bytes the packs of one fetch may expand to in total.
+/// The most a fetch decodes from all its packs together: 1 TiB.
 ///
 /// A pack's own cap ([`decoded_bytes_cap`]) never falls under
 /// [`MIN_TOTAL_DECODED`], so a fetch of a million tiny packs could decode
-/// that much from each. A fetch gets the floor once, then
-/// [`DECODED_PER_WIRE_BYTE`] for each wire byte of every pack it applies, so
-/// what it may decode follows what it downloaded. A pack still obeys its own
-/// cap, and what a pack decodes comes off what is left for the next.
+/// that much from each. No ratio to the wire bytes can bound the total: a
+/// delta of a 16 MiB manifest takes about a hundred wire bytes, as does a
+/// hostile delta that copies one base again and again. The limit is a plain
+/// number above what an honest fetch decodes, which follows the size of the
+/// repository.
+const MAX_FETCH_DECODED: u64 = 1 << 40;
+
+/// The decoded bytes the packs of one fetch may still expand to.
+///
+/// Each pack of the fetch obeys its own cap and also what is left here, and
+/// the bytes it decodes, a failed pack's included, come off what is left.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct FetchDecodeBudget {
@@ -168,19 +175,20 @@ pub struct FetchDecodeBudget {
 }
 
 impl FetchDecodeBudget {
-    /// The budget of a fetch that has applied no pack.
+    /// The budget of a fetch that has applied no pack: [`MAX_FETCH_DECODED`].
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            remaining: MIN_TOTAL_DECODED,
-        }
+        Self::with_limit(MAX_FETCH_DECODED)
     }
 
-    /// Count a pack of `pack_len` bytes and give the cap on what it may decode.
-    fn admit(&mut self, pack_len: u64) -> u64 {
-        self.remaining = self
-            .remaining
-            .saturating_add(pack_len.saturating_mul(DECODED_PER_WIRE_BYTE));
+    /// A budget of `bytes`, for a host that wants a smaller one.
+    #[must_use]
+    pub const fn with_limit(bytes: u64) -> Self {
+        Self { remaining: bytes }
+    }
+
+    /// The cap on what a pack of `pack_len` bytes may decode.
+    fn admit(&self, pack_len: u64) -> u64 {
         self.remaining.min(decoded_bytes_cap(
             usize::try_from(pack_len).unwrap_or(usize::MAX),
         ))
@@ -3828,32 +3836,18 @@ mod tests {
     }
 
     #[test]
-    fn a_fetch_gets_the_floor_once_and_a_share_of_each_pack() {
-        let share = |len: u64| len * DECODED_PER_WIRE_BYTE;
-        let mut fetch = FetchDecodeBudget::new();
-        // A tiny pack may take the floor, its own cap, and spends it all.
+    fn a_fetch_budget_caps_each_pack_and_loses_what_a_pack_decodes() {
+        let fetch = FetchDecodeBudget::new();
+        // A fresh budget leaves each pack its own cap.
+        assert_eq!(fetch.admit(100), decoded_bytes_cap(100));
+        assert_eq!(fetch.admit(64 << 20), MAX_TOTAL_DECODED);
+        // What a pack decodes comes off what is left for the next.
+        let mut fetch = FetchDecodeBudget::with_limit(3 << 30);
         assert_eq!(fetch.admit(100), MIN_TOTAL_DECODED);
         fetch.settle(MIN_TOTAL_DECODED);
-        // The floor is gone: the next tiny pack gets only the shares left,
-        // its own and the first pack's.
-        assert_eq!(fetch.admit(100), share(200));
-        fetch.settle(share(50));
-        assert_eq!(fetch.admit(100), share(250));
-        // What a pack leaves unspent stays for the next one.
-        let mut fetch = FetchDecodeBudget::new();
-        fetch.admit(100);
-        fetch.settle(1 << 30);
-        assert_eq!(
-            fetch.admit(100),
-            (MIN_TOTAL_DECODED - (1 << 30)) + share(200)
-        );
-        // A pack never gets more than its own cap, whatever is left.
-        let mut fetch = FetchDecodeBudget::new();
-        fetch.remaining = u64::MAX / 2;
-        assert_eq!(fetch.admit(1 << 20), decoded_bytes_cap(1 << 20));
-        // A spend past what is left leaves nothing, and nothing wraps.
+        assert_eq!(fetch.admit(100), 1 << 30);
         fetch.settle(u64::MAX);
-        assert_eq!(fetch.admit(0), 0);
+        assert_eq!(fetch.admit(100), 0);
     }
 
     #[test]
