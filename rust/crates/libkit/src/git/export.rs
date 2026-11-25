@@ -156,6 +156,7 @@ pub fn export(
         // (Re)initializing staging invalidates the map cache: cached
         // sha1s would point at objects the fresh staging repo does not
         // have, wedging update-ref/push (§12.3: cache is disposable).
+        staging::check_creatable(&staging)?;
         let _ = std::fs::remove_file(state.join("map"));
         std::fs::create_dir_all(&staging)
             .map_err(|e| step(Class::CannotCreate, "create staging dir", e))?;

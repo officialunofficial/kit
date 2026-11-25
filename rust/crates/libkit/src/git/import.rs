@@ -279,7 +279,13 @@ fn import_into(
         .map_err(|e| step(Class::CannotCreate, "create state dir", e))?;
     staging::check_location(&staging)?;
     if staging.join("objects").is_dir() {
-        staging::check_mirror(&staging)?;
+        if staging::check_mirror(&staging)?.is_none_or(|url| url.is_empty()) {
+            return Err(step(
+                Class::General,
+                "staging origin",
+                "the mirror has no origin url",
+            ));
+        }
         // Explicit refspecs (not the mirror's +refs/*:refs/*) so
         // --prune is scoped to upstream namespaces: fork-mode export
         // state living in this repo (refs/kit-export/*, the

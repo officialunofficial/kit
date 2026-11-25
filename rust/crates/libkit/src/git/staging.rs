@@ -45,6 +45,10 @@ const REDIRECTING_FILES: &[&str] = &[
     "gitdir",
     "objects/info/alternates",
     "objects/info/http-alternates",
+    "remotes/origin",
+    "branches/origin",
+    "info/grafts",
+    "shallow",
 ];
 
 /// What to do about a refused mirror. A mirror that is missing is rebuilt the
@@ -76,17 +80,47 @@ pub(crate) fn check_location(staging: &Path) -> Result<(), Error> {
     }
 }
 
+/// Refuse a mirror location that exists, holds something and has no `objects`
+/// directory: `git init` would write into whatever it holds.
+///
+/// # Errors
+/// [`Class::Config`] when `staging` is not empty.
+pub(crate) fn check_creatable(staging: &Path) -> Result<(), Error> {
+    let not_empty = std::fs::read_dir(staging).is_ok_and(|mut entries| entries.next().is_some());
+    if not_empty {
+        return Err(refuse(
+            staging,
+            "it is not empty and has no objects directory",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a link or a special file anywhere in the mirror. Git follows a link
 /// to a directory such as `refs` or `objects` and reads and writes the
 /// repository it points at. Kit and git never make one. The files inside the
-/// two-hex-digit object directories are not listed: a link there names one
-/// file, and git checks the id of what it reads.
+/// two-hex-digit object directories are not listed: kit makes its temporary
+/// files there without following a link, and git checks the id of what it
+/// reads. `hooks` is not listed either, since `core.hooksPath` always
+/// replaces it and a template can leave links there. An entry that vanishes
+/// during the walk, as an emptied ref directory does under `git gc`, is
+/// skipped.
 fn check_entries(staging: &Path, dir: &Path) -> Result<(), Error> {
-    let entries = std::fs::read_dir(dir).map_err(|e| refuse(staging, e))?;
+    let entries = match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && dir != staging => return Ok(()),
+        other => other.map_err(|e| refuse(staging, e))?,
+    };
     for entry in entries {
-        let entry = entry.map_err(|e| refuse(staging, e))?;
-        let kind = entry.file_type().map_err(|e| refuse(staging, e))?;
+        let Ok(entry) = entry else { continue };
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(refuse(staging, e)),
+        };
         let path = entry.path();
+        if dir == staging && entry.file_name() == "hooks" {
+            continue;
+        }
         if kind.is_dir() {
             let name = entry.file_name();
             let loose = name.len() == 2
@@ -326,6 +360,7 @@ mod tests {
         for name in REDIRECTING_FILES {
             let tmp = tempfile::tempdir().unwrap();
             let m = mirror(tmp.path());
+            std::fs::create_dir_all(m.join(name).parent().unwrap()).unwrap();
             std::fs::write(m.join(name), "../elsewhere\n").unwrap();
             let why = refusal(&m);
             assert!(why.contains(name), "{name}: {why}");
@@ -403,6 +438,46 @@ mod tests {
         let made = Command::new("mkfifo").arg(m.join("HEAD")).status().unwrap();
         assert!(made.success());
         assert!(refusal(&m).contains("HEAD"));
+    }
+
+    #[test]
+    fn files_that_change_the_walk_or_the_remote_are_refused() {
+        for name in [
+            "info/grafts",
+            "shallow",
+            "remotes/origin",
+            "branches/origin",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mirror(tmp.path());
+            let file = m.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "x\n").unwrap();
+            assert!(refusal(&m).contains(name), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_hooks_is_ignored_and_a_directory_that_vanishes_is_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = mirror(tmp.path());
+        std::fs::create_dir_all(m.join("hooks")).unwrap();
+        std::os::unix::fs::symlink(tmp.path(), m.join("hooks/pre-push")).unwrap();
+        check_mirror(&m).unwrap();
+        // A nested directory that is gone when the walk reaches it.
+        assert!(check_entries(&m, &m.join("refs/gone")).is_ok());
+    }
+
+    #[test]
+    fn a_location_that_holds_something_without_objects_is_not_created_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo.git");
+        assert!(check_creatable(&dir).is_ok());
+        std::fs::create_dir(&dir).unwrap();
+        assert!(check_creatable(&dir).is_ok());
+        std::fs::create_dir(dir.join("refs")).unwrap();
+        assert!(check_creatable(&dir).is_err());
     }
 
     #[test]

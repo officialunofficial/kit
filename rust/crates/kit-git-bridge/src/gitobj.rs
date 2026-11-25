@@ -110,7 +110,24 @@ impl GitObject {
         // Unique per process so concurrent writers never share a tmp
         // path; content addressing makes the rename race benign.
         let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), sha1_hex(&id)));
-        std::fs::write(&tmp, &compressed)?;
+        // `create_new` never opens through a link or over a file that is
+        // already there. A leftover of a crashed run with this name is
+        // removed (a link is removed, not what it names) and made again.
+        let create = || {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+        };
+        let mut file = match create() {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&tmp)?;
+                create()?
+            }
+            other => other?,
+        };
+        file.write_all(&compressed)?;
+        drop(file);
         match std::fs::rename(&tmp, &path) {
             Ok(()) => Ok(id),
             Err(e) => {
@@ -306,6 +323,30 @@ mod tests {
         let mut raw = Vec::new();
         std::io::Read::read_to_end(&mut dec, &mut raw).unwrap();
         assert_eq!(raw, obj.raw());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_where_the_temporary_file_goes_is_replaced_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let obj = GitObject {
+            gtype: GitType::Blob,
+            body: b"abc".to_vec(),
+        };
+        let path = GitObject::loose_path(dir.path(), &obj.id());
+        let parent = path.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        let tmp = parent.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            sha1_hex(&obj.id())
+        ));
+        std::os::unix::fs::symlink(&victim, &tmp).unwrap();
+        obj.write_loose(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(path.is_file());
     }
 
     #[test]

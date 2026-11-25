@@ -368,3 +368,31 @@ fn export_creates_nothing_through_a_link_in_place_of_the_mirror() {
     assert!(!out.status.success(), "{out:?}");
     assert_eq!(std::fs::read_dir(&other).unwrap().count(), 0);
 }
+
+/// An export into a mirror location that holds files but no objects
+/// directory does not run `git init` over what is there.
+#[test]
+fn export_does_not_initialize_over_a_directory_that_holds_files() {
+    let f = Fixture::imported();
+    let mirror = f.fork().join(".kit/git/m/repo.git");
+    std::fs::create_dir_all(mirror.join("refs")).unwrap();
+    std::fs::write(
+        mirror.join("config"),
+        "[uploadpack]\n\tpackObjectsHook = x\n",
+    )
+    .unwrap();
+    let dest = f.root.path().join("mirror");
+    let out = f.kit(
+        &f.fork(),
+        &[
+            "git",
+            "export",
+            dest.to_str().unwrap(),
+            "--remote-name",
+            "m",
+            "--no-attest",
+        ],
+    );
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!mirror.join("HEAD").exists());
+}
