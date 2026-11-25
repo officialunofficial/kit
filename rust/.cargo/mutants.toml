@@ -4,6 +4,8 @@ exclude_re = [
   "kani_proofs::",
   # A per-file writeout leaves no trace a test can observe; the full flush that follows it is counted.
   'kit-core/src/batch\.rs:[0-9]+:[0-9]+: replace RealSyncer::file_barrier -> ',
+  # A per-directory writeout leaves no trace a test can observe; the flush that follows it is counted.
+  'kit-core/src/batch\.rs:[0-9]+:[0-9]+: replace RealSyncer::dir_barrier -> ',
   # Each protector arm is compiled out on the other platform; active dispatch is covered by tests.
   'kit-keystore/src/software/mod.rs:.*delete match arm (MacosKeychainProtector|LinuxSecretServiceProtector)::ID in default_protector_by_id',
   # Metadata decoding emits only malformed-entry errors, so its error guard is always true.

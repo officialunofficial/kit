@@ -497,6 +497,25 @@ fn a_new_file_rename_also_needs_a_flush_before_the_next_rename() {
 }
 
 #[test]
+fn a_flush_right_after_a_failed_rename_covers_the_files_staged_before() {
+    let dir = TempDir::new().unwrap();
+    let (taken, other) = (dir.path().join("taken"), dir.path().join("other"));
+    let (_rec, mut group) = recording();
+    let blocked = group.stage(&taken, b"1", Parents::Existing).unwrap();
+    let waiting = group.stage(&other, b"2", Parents::Existing).unwrap();
+    // A non-empty directory at the name makes the rename fail.
+    fs::create_dir_all(taken.join("inside")).unwrap();
+    let token = group.flush().unwrap();
+    assert!(group.publish(blocked, &token).is_err());
+
+    // No write came after the failed rename, so the new token is equal to it:
+    // that is a flush after it.
+    let token = group.flush().unwrap();
+    group.publish(waiting, &token).unwrap();
+    assert_eq!(fs::read(&other).unwrap(), b"2");
+}
+
+#[test]
 fn a_token_of_another_group_is_refused() {
     let dir = TempDir::new().unwrap();
     let dest = dir.path().join("a");
