@@ -262,6 +262,15 @@ impl DiffBudget {
     }
 
     #[cfg(test)]
+    fn with_byte_limit(byte_limit: u64) -> Self {
+        Self {
+            pairs: WalkBudget::with_byte_limit(byte_limit),
+            removed: WalkBudget::with_byte_limit(byte_limit),
+            added: WalkBudget::with_byte_limit(byte_limit),
+        }
+    }
+
+    #[cfg(test)]
     fn with_limit(limit: u64) -> Self {
         Self {
             pairs: WalkBudget::with_limit(limit),
@@ -3574,26 +3583,44 @@ mod tests {
     fn a_one_sided_directory_counts_its_depth_from_where_the_walk_reached_it() {
         let (_dir, store) = fresh_store();
         let file = |name: &[u8]| entry(name, EntryMode::Blob, put_blob(&store, name));
-        // The directory `r` is 10 levels deep and the shared chain above it
-        // is 120 levels deep. Each is under the nesting limit, the two
-        // together are not.
-        let deep = chain_over(&store, 10, vec![file(b"leaf")]);
+        // The directory `r` is 126 levels deep and the shared chain above it
+        // is 4 levels deep. Each is under the nesting limit, the two together
+        // are not.
+        let deep = chain_over(&store, 126, vec![file(b"leaf")]);
         let with_r = vec![entry(b"r", EntryMode::Tree, deep), file(b"z")];
         let without_r = vec![file(b"y"), file(b"z")];
-        let with = load_entries(&store, Some(chain_over(&store, 120, with_r))).unwrap();
-        let without = load_entries(&store, Some(chain_over(&store, 120, without_r))).unwrap();
+        let with = load_entries(&store, Some(chain_over(&store, 4, with_r))).unwrap();
+        let without = load_entries(&store, Some(chain_over(&store, 4, without_r))).unwrap();
         let walk = |old: &[TreeEntry], new: &[TreeEntry]| {
             let mut out = Vec::new();
             let mut budget = DiffBudget::with_limit(1_000_000);
             diff_entries_recursive(&store, old, new, "", &mut out, false, 0, &mut budget)
         };
-        assert!(matches!(
-            walk(&with, &without),
-            Err(StoreError::TreeTooDeep)
-        ));
-        assert!(matches!(
-            walk(&without, &with),
-            Err(StoreError::TreeTooDeep)
-        ));
+        assert!(matches!(walk(&with, &without), Err(StoreError::TreeTooDeep)));
+        assert!(matches!(walk(&without, &with), Err(StoreError::TreeTooDeep)));
+    }
+
+    #[test]
+    fn a_long_directory_name_counts_against_the_byte_budget_at_each_path() {
+        let (_dir, store) = fresh_store();
+        // A directory with a 100 byte name holds a file `a` that differs. The
+        // walk compares the directory (100 bytes), then the file (102 bytes),
+        // at 67 bytes of index entry each.
+        let side = |data: &[u8]| {
+            let tree = put_tree(
+                &store,
+                vec![entry(b"a", EntryMode::Blob, put_blob(&store, data))],
+            );
+            vec![entry(&[b'd'; 100], EntryMode::Tree, tree)]
+        };
+        let (old, new) = (side(b"old"), side(b"new"));
+        let walk = |byte_limit| {
+            let mut out = Vec::new();
+            let mut budget = DiffBudget::with_byte_limit(byte_limit);
+            diff_entries_recursive(&store, &old, &new, "", &mut out, false, 0, &mut budget)
+        };
+        let exact = (67 + 100) + (67 + 102);
+        walk(exact).unwrap();
+        assert!(matches!(walk(exact - 1), Err(StoreError::TreeTooLarge)));
     }
 }

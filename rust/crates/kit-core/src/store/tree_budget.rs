@@ -269,6 +269,68 @@ mod tests {
     }
 
     #[test]
+    fn a_subtree_taken_whole_counts_its_paths_below_the_prefix() {
+        let (_dir, store) = open();
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
+        let tree = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![
+                    entry(b"a", EntryMode::Blob, blob),
+                    entry(b"b", EntryMode::Blob, blob),
+                ],
+            }),
+        );
+        // Two files under a 100 byte directory: 2 * (67 + 1) for the entries
+        // as named in the tree, and 101 more bytes of prefix and `/` each.
+        let exact = 2 * (67 + 1) + 2 * 101;
+        let take = |byte_limit| WalkBudget::with_byte_limit(byte_limit).take_subtree(&store, tree, 100);
+        take(exact).unwrap();
+        assert!(matches!(take(exact - 1), Err(StoreError::TreeTooLarge)));
+    }
+
+    #[test]
+    fn nesting_is_allowed_to_the_limit_and_refused_one_past_it() {
+        let (_dir, store) = open();
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
+        let mut cur = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry(b"f", EntryMode::Blob, blob)],
+            }),
+        );
+        let wrap = |inner| {
+            put(
+                &store,
+                &Object::Tree(Tree {
+                    entries: vec![entry(b"d", EntryMode::Tree, inner)],
+                }),
+            )
+        };
+        // The root is at depth 0, so the file's own tree is at depth
+        // MAX_TREE_DEPTH once there are that many directories above it.
+        for _ in 0..MAX_TREE_DEPTH {
+            cur = wrap(cur);
+        }
+        check_tree_leaves(&store, cur).unwrap();
+        cur = wrap(cur);
+        assert!(matches!(
+            check_tree_leaves(&store, cur),
+            Err(StoreError::TreeTooDeep)
+        ));
+    }
+
+    #[test]
     fn a_shared_subtree_is_read_once() {
         let (_dir, store) = open();
         // 2^100 leaves from 102 objects: the walk must stop at the cap and
