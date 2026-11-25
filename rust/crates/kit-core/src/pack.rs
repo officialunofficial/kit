@@ -153,25 +153,31 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
         .clamp(MIN_TOTAL_DECODED, MAX_TOTAL_DECODED)
 }
 
-/// What a fetch may decode before its packs add to it: 1 TiB.
+/// What a fetch may decode before its packs add to it: 16 GiB, the most one
+/// pack decodes ([`MAX_TOTAL_DECODED`]).
 ///
 /// A pack's own cap ([`decoded_bytes_cap`]) never falls under
 /// [`MIN_TOTAL_DECODED`], so a fetch of a million tiny packs could decode
-/// that much from each. This bounds what such a fetch decodes in all, however
-/// small its packs are. Each pack the fetch reads then adds
-/// [`FETCH_DECODED_PER_WIRE_BYTE`] times its length to the budget.
-const FETCH_DECODED_FLOOR: u64 = 1 << 40;
+/// that much from each. Each pack the fetch reads adds
+/// [`FETCH_DECODED_PER_WIRE_BYTE`] times its length to this, so a fetch of
+/// tiny packs that claim more than that ratio runs out after a few of them.
+const FETCH_DECODED_FLOOR: u64 = MAX_TOTAL_DECODED;
 
-/// What each wire byte of a pack adds to the budget of its fetch: 4 Mi
-/// decoded bytes.
+/// What each wire byte of a pack adds to the budget of its fetch: 2 Mi
+/// decoded bytes. A fetch of packs that a kit writer made stays under it.
 ///
-/// The writer keeps every pack under this ratio, so a fetch of packs a writer
-/// made never runs out, however much it holds. A zstd entry decodes to at
-/// most 32,768 times its frame (an all-zero block of 128 KiB takes 4 bytes).
-/// A delta of a 16 MiB manifest, the most the planner deltas, takes at least
-/// 32 bytes of base hash and 5 of entry frame and about 20 of instructions
-/// when one run changes, which is a ratio of about 290,000.
-const FETCH_DECODED_PER_WIRE_BYTE: u64 = 4 << 20;
+/// The bound on what a writer makes: a zstd entry expands at most 32,768
+/// times, since a 128 KiB block of one byte takes 4 bytes. A delta stream
+/// expands at most 9,363 times, since a COPY of 65,535 bytes takes 7 (SPEC-DELTA §7),
+/// and the planner deltas results of at most 16 MiB (`ManifestBudget::each`)
+/// against bases of at most 16 MiB. The most a pack counts per wire byte is
+/// then a zstd delta entry of 256 COPYs of one 64 KiB block, whose stream
+/// zstd packs into a few dozen bytes, with the result and the base read from
+/// the store counted: about 33 MiB of decoded bytes for about 70 bytes of
+/// pack, or 470,000 times. The test `a_pack_a_kit_writer_makes_fits_the_fetch_ratio` builds
+/// that pack and keeps this at least twice that. A hostile pack that claims
+/// 2 GiB from a hundred bytes is 21 million times and runs the budget out.
+const FETCH_DECODED_PER_WIRE_BYTE: u64 = 2 << 20;
 
 /// The decoded bytes the packs of one fetch may still expand to.
 ///
@@ -184,9 +190,13 @@ const FETCH_DECODED_PER_WIRE_BYTE: u64 = 4 << 20;
 #[derive(Debug)]
 pub struct FetchDecodeBudget {
     remaining: u64,
+    per_wire_byte: u64,
 }
 
 impl FetchDecodeBudget {
+    /// What each wire byte of a pack adds to the budget (see the limit's doc).
+    pub const PER_WIRE_BYTE: u64 = FETCH_DECODED_PER_WIRE_BYTE;
+
     /// The budget of a fetch that has applied no pack: [`FETCH_DECODED_FLOOR`].
     #[must_use]
     pub const fn new() -> Self {
@@ -196,7 +206,20 @@ impl FetchDecodeBudget {
     /// A budget of `bytes`, before the packs add to it.
     #[must_use]
     pub const fn with_limit(bytes: u64) -> Self {
-        Self { remaining: bytes }
+        Self {
+            remaining: bytes,
+            per_wire_byte: FETCH_DECODED_PER_WIRE_BYTE,
+        }
+    }
+
+    /// A budget of `bytes` that the packs add nothing to, so a test can run it
+    /// out with a pack of a few hundred bytes.
+    #[cfg(test)]
+    const fn exact(bytes: u64) -> Self {
+        Self {
+            remaining: bytes,
+            per_wire_byte: 0,
+        }
     }
 
     /// Add what a pack of `pack_len` bytes brings, and return the cap on what
@@ -204,7 +227,7 @@ impl FetchDecodeBudget {
     fn admit(&mut self, pack_len: u64) -> u64 {
         self.remaining = self
             .remaining
-            .saturating_add(pack_len.saturating_mul(FETCH_DECODED_PER_WIRE_BYTE));
+            .saturating_add(pack_len.saturating_mul(self.per_wire_byte));
         self.remaining.min(decoded_bytes_cap(
             usize::try_from(pack_len).unwrap_or(usize::MAX),
         ))

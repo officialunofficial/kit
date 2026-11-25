@@ -902,7 +902,7 @@ fn each_window_that_reads_a_stored_base_counts_the_read_toward_the_decoded_cap()
         bytes: u64::MAX,
     };
     let with = |limit: u64| {
-        let mut fetch = FetchDecodeBudget::with_limit(limit);
+        let mut fetch = FetchDecodeBudget::exact(limit);
         decode_file(
             &file,
             &store,

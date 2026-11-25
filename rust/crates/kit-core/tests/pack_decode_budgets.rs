@@ -256,3 +256,29 @@ fn a_fetch_of_the_most_compressible_pack_needs_no_floor() {
     )
     .unwrap();
 }
+
+/// The pack of a kit writer that expands most per wire byte is a zstd delta
+/// entry whose stream is 256 COPYs of one 64 KiB block: a result of 16 MiB, the
+/// most the planner deltas, from a base of the same size, the most it reads
+/// from the store. Its stream is regular, so zstd packs it into a few dozen
+/// bytes. The decoded bytes it counts per wire byte stay at most half of what
+/// each wire byte adds to a fetch.
+#[test]
+fn a_pack_a_kit_writer_makes_fits_the_fetch_ratio() {
+    const BLOCK: usize = 64 << 10;
+    const RESULT: usize = 16 * MIB;
+    let block = incompressible(BLOCK, 7);
+    let result: Vec<u8> = block.iter().copied().cycle().take(RESULT).collect();
+    let stream = kit_core::delta::encode(&block, &result).unwrap();
+    assert!(stream.len() <= 256 * 7 + 64, "the stream is copies of one block");
+    let mut payload = vec![0u8; 32];
+    payload.extend_from_slice(&zstd_payload(&stream));
+    let wire = (pack::ENTRY_FRAME_LEN + payload.len()) as u64;
+    // The stream's claim, the result, and the 16 MiB base read from the store.
+    let decoded = (stream.len() + RESULT + 16 * MIB) as u64;
+    let ratio = decoded / wire;
+    assert!(
+        ratio * 2 <= FetchDecodeBudget::PER_WIRE_BYTE,
+        "{decoded} decoded bytes from {wire} wire bytes is {ratio} times"
+    );
+}
