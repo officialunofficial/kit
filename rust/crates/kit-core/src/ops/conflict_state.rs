@@ -44,7 +44,10 @@ use crate::durable::Parents;
 use crate::hash::{self, HEX_LEN, Hash};
 use crate::index::validate_index_path;
 use crate::layout::RepoLayout;
+use crate::object::Object;
 use crate::ops::merge::{Conflict, ConflictKind};
+use crate::refs;
+use crate::store::ObjectStore;
 
 /// File name: other parent of an in-progress merge.
 pub const MERGE_HEAD: &str = "MERGE_HEAD";
@@ -631,7 +634,7 @@ pub fn ensure_conflict_list(layout: &RepoLayout) -> ConflictStateResult<()> {
     }
     Err(ConflictStateError::Io(io::Error::new(
         io::ErrorKind::NotFound,
-        "the conflict list of the operation in progress is missing (its state was not fully written); abort the operation or run `kit reset --hard` to drop it",
+        "the conflict list of the operation in progress is missing (its state was not fully written); abort the operation or run `kit reset --hard -f` to drop it",
     )))
 }
 
@@ -650,6 +653,52 @@ pub fn clear_operation_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     clear_merge_state(layout)?;
     clear_cherry_pick_state(layout)?;
     clear_revert_state(layout)
+}
+
+/// `HEAD`, when it is the commit that the operation in progress made: its
+/// parents are exactly `parents`, in that order. A merge has the commit before
+/// it and the merged commit.
+///
+/// A stop after the commit moved the branch and before the state was cleared
+/// leaves the state over a finished operation. `HEAD` is the only ref that
+/// holds the commit, so moving the branch back, or committing again, would
+/// orphan it or write a second one. A `HEAD` or a commit that cannot be read
+/// is not the result, so the caller can still repair it.
+#[must_use]
+pub fn result_commit(layout: &RepoLayout, store: &ObjectStore, parents: &[Hash]) -> Option<Hash> {
+    let head = refs::resolve_head(layout).ok().flatten()?;
+    match store.read_object(&head) {
+        Ok(Object::Commit(c)) if c.parents == parents => Some(head),
+        _ => None,
+    }
+}
+
+/// [`result_commit`] for a cherry-pick or a revert, whose commit has the one
+/// parent that any other child of that commit has too, and so is told apart by
+/// the index: it is written with the commit, so it holds the tree of the
+/// commit then. A paused operation whose `HEAD` moved to another child holds a
+/// resolution that the index of that child does not, and it is still live.
+#[must_use]
+pub fn staged_result_commit(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    parent: Hash,
+) -> Option<Hash> {
+    let head = result_commit(layout, store, &[parent])?;
+    let Ok(Object::Commit(commit)) = store.read_object(&head) else {
+        return None;
+    };
+    let index = crate::index::read_index(layout).ok()?;
+    let snapshot = crate::store::EphemeralSink::new(store);
+    let staged = crate::worktree::build_tree_from_index_against(
+        store,
+        &snapshot,
+        &index,
+        false,
+        Some(commit.tree_hash),
+    )
+    .ok()?;
+    (staged == commit.tree_hash).then_some(head)
 }
 
 /// `true` when a merge is in progress (`MERGE_HEAD` present).
@@ -697,6 +746,127 @@ mod tests {
 
     fn h(seed: &str) -> Hash {
         hash::hash(seed.as_bytes())
+    }
+
+    fn put_commit(store: &ObjectStore, parents: Vec<Hash>, seed: &str) -> Hash {
+        let tree = store
+            .write(
+                &crate::serialize::serialize(&Object::Tree(crate::object::Tree {
+                    entries: vec![],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let commit = Object::Commit(crate::object::Commit::new_unannotated(
+            tree,
+            parents,
+            crate::object::Identity::ed25519([0u8; 32]),
+            [0u8; 32],
+            seed.as_bytes().to_vec(),
+            1,
+            [0u8; 64],
+        ));
+        store
+            .write(&crate::serialize::serialize(&commit).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn head_is_the_result_only_with_exactly_the_recorded_parents() {
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let (a, b) = (
+            put_commit(&store, vec![], "a"),
+            put_commit(&store, vec![], "b"),
+        );
+        let merge = put_commit(&store, vec![a, b], "merge");
+        let pick = put_commit(&store, vec![a], "pick");
+        crate::refs::write_head_branch(&layout, "main").unwrap();
+        // No branch yet: no result.
+        assert_eq!(result_commit(&layout, &store, &[a, b]), None);
+
+        crate::refs::write_ref(&layout, "main", &merge).unwrap();
+        assert_eq!(result_commit(&layout, &store, &[a, b]), Some(merge));
+        // The order and the count of the parents are part of the answer.
+        assert_eq!(result_commit(&layout, &store, &[b, a]), None);
+        assert_eq!(result_commit(&layout, &store, &[a]), None);
+        assert_eq!(result_commit(&layout, &store, &[a, b, a]), None);
+
+        crate::refs::write_ref(&layout, "main", &pick).unwrap();
+        assert_eq!(result_commit(&layout, &store, &[a]), Some(pick));
+        assert_eq!(result_commit(&layout, &store, &[b]), None);
+        // The commit before the operation is not its result.
+        crate::refs::write_ref(&layout, "main", &a).unwrap();
+        assert_eq!(result_commit(&layout, &store, &[a]), None);
+        assert_eq!(result_commit(&layout, &store, &[]), Some(a));
+    }
+
+    #[test]
+    fn a_pick_is_over_only_when_the_index_holds_the_tree_of_head() {
+        use crate::index::{EntryStatus, Index, IndexEntry};
+        use crate::object::{Blob, EntryMode, Tree, TreeEntry};
+        let dir = TempDir::new().unwrap();
+        let layout = RepoLayout::single(dir.path());
+        let store = ObjectStore::init(&layout).unwrap();
+        let blob = |data: &[u8]| {
+            let obj = Object::Blob(Blob {
+                data: data.to_vec(),
+            });
+            store
+                .write(&crate::serialize::serialize(&obj).unwrap())
+                .unwrap()
+        };
+        let (one, two) = (blob(b"one"), blob(b"two"));
+        let tree = Object::Tree(Tree {
+            entries: vec![TreeEntry {
+                name: b"f".to_vec(),
+                mode: EntryMode::Blob,
+                object_hash: one,
+            }],
+        });
+        let tree = store
+            .write(&crate::serialize::serialize(&tree).unwrap())
+            .unwrap();
+        let before = put_commit(&store, vec![], "before");
+        let pick = Object::Commit(crate::object::Commit::new_unannotated(
+            tree,
+            vec![before],
+            crate::object::Identity::ed25519([0u8; 32]),
+            [0u8; 32],
+            b"pick".to_vec(),
+            1,
+            [0u8; 64],
+        ));
+        let pick = store
+            .write(&crate::serialize::serialize(&pick).unwrap())
+            .unwrap();
+        crate::refs::write_head_branch(&layout, "main").unwrap();
+        crate::refs::write_ref(&layout, "main", &pick).unwrap();
+        let staged = |hash| {
+            let mut index = Index::new();
+            index.upsert_entry(IndexEntry {
+                path: "f".into(),
+                status: EntryStatus::Blob,
+                object_hash: hash,
+                mtime_ns: 0,
+                size: 0,
+                ino: 0,
+                ctime_ns: 0,
+            });
+            crate::index::write_index(&layout, &index).unwrap();
+        };
+
+        // A resolution that is not in the commit leaves the pick live.
+        staged(two);
+        assert_eq!(staged_result_commit(&layout, &store, before), None);
+        // An index that is not there leaves it live too.
+        fs::remove_file(layout.index_file()).unwrap();
+        assert_eq!(staged_result_commit(&layout, &store, before), None);
+        staged(one);
+        assert_eq!(staged_result_commit(&layout, &store, before), Some(pick));
+        // Another parent is another commit.
+        assert_eq!(staged_result_commit(&layout, &store, one), None);
     }
 
     #[test]

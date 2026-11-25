@@ -259,6 +259,25 @@ pub(crate) fn error(msg: &str, code: u8) -> u8 {
     code
 }
 
+/// The commit that a cherry-pick or a revert in progress already made, when a
+/// stop left its state over it: `HEAD` is that commit, the index holds its
+/// tree, and no file still has the conflict markers of the operation. A pick
+/// whose `HEAD` moved to another commit of the same parent has markers or a
+/// resolution that the commit does not hold, and stays live.
+pub(crate) fn finished_pick(
+    layout: &RepoLayout,
+    store: &ObjectStore,
+    orig_head: Hash,
+    records: &[kit_core::ops::conflict_state::ConflictRecord],
+) -> Option<Hash> {
+    let commit = kit_core::ops::conflict_state::staged_result_commit(layout, store, orig_head)?;
+    matches!(
+        libkit::conflict::first_unresolved_marker(layout.worktree_root(), records),
+        Ok(None)
+    )
+    .then_some(commit)
+}
+
 /// Load the tree hash of a commit object, surfacing a CLI error code.
 ///
 /// Shared by the `cherry-pick`/`revert`/`merge` replay+rollback paths,

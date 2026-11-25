@@ -12,7 +12,10 @@
 //! - ordering: a ref, an index or a recovery-log line that appears after a
 //!   flush names only objects that were visible at the flush before, and a
 //!   recovery-log line is there before the ref it protects moves;
-//! - a merge's state is cleared only after the merge commit is durable.
+//! - a merge's state is cleared only after the merge commit is durable;
+//! - a merge, cherry-pick or revert whose state outlives the commit that
+//!   concludes it keeps that commit, and one whose stop left no conflict list
+//!   can be aborted.
 //!
 //! The device operations are those of the real binary. The hook is a
 //! test-only environment variable, so each case runs in its own process.
@@ -22,17 +25,21 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 use common::{Repo, check_exit, check_invariants, kit, kit_env};
 use kit_core::hash::{Hash, ZERO, to_hex};
 use kit_core::index::read_index;
 use kit_core::layout::RepoLayout;
+use kit_core::object::Object;
 use kit_core::ops::reachable_objects;
 use kit_core::refs;
 use kit_core::store::ObjectStore;
 
 fn copy_tree(src: &Path, dest: &Path) {
     fs::create_dir_all(dest).unwrap();
+    // The key directory must keep its mode, or a command that signs refuses.
+    fs::set_permissions(dest, fs::metadata(src).unwrap().permissions()).unwrap();
     for entry in fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
         let to = dest.join(entry.file_name());
@@ -46,8 +53,8 @@ fn copy_tree(src: &Path, dest: &Path) {
 }
 
 /// The repository before `args` ran, after each of its full flushes, and after
-/// it returned.
-fn crash_points(repo: &Repo, scratch: &Path, args: &[&str]) -> Vec<PathBuf> {
+/// it returned, with the output of the command.
+fn snapshots(repo: &Repo, scratch: &Path, args: &[&str]) -> (Output, Vec<PathBuf>) {
     let before = scratch.join("before");
     copy_tree(repo.path(), &before);
     let snaps = scratch.join("flushes");
@@ -61,11 +68,6 @@ fn crash_points(repo: &Repo, scratch: &Path, args: &[&str]) -> Vec<PathBuf> {
             ("KIT_FLUSH_SNAPSHOT_DEST", snaps.to_str().unwrap()),
         ],
     );
-    assert!(
-        out.status.success(),
-        "kit {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
     let mut points = vec![before];
     let flushes = fs::read_dir(&snaps).unwrap().count();
     for n in 1..=flushes {
@@ -74,6 +76,18 @@ fn crash_points(repo: &Repo, scratch: &Path, args: &[&str]) -> Vec<PathBuf> {
     let after = scratch.join("after");
     copy_tree(repo.path(), &after);
     points.push(after);
+    (out, points)
+}
+
+/// The repository before `args` ran, after each of its full flushes, and after
+/// it returned.
+fn crash_points(repo: &Repo, scratch: &Path, args: &[&str]) -> Vec<PathBuf> {
+    let (out, points) = snapshots(repo, scratch, args);
+    assert!(
+        out.status.success(),
+        "kit {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     points
 }
 
@@ -94,8 +108,9 @@ impl State {
             tip: refs::read_ref(&layout, "main").unwrap(),
             index: fs::read(root.join(".kit/index")).unwrap_or_default(),
             log: fs::read_to_string(root.join(".kit/recovery-log")).unwrap_or_default(),
-            merging: root.join(".kit/MERGE_HEAD").exists()
-                || root.join(".kit/CHERRY_PICK_HEAD").exists(),
+            merging: OPERATION_MARKERS
+                .iter()
+                .any(|marker| root.join(".kit").join(marker).exists()),
             layout,
         }
     }
@@ -373,4 +388,415 @@ fn every_crash_point_of_a_cherry_pick_commit_clears_the_state_after_the_ref_is_d
             );
         }
     }
+}
+
+/// The files that mark and describe a merge, a cherry-pick or a revert in
+/// progress. The markers come first.
+const OPERATION_MARKERS: [&str; 3] = ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"];
+const OPERATION_FILES: [&str; 9] = [
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "MERGE_MSG",
+    "CHERRY_PICK_MSG",
+    "REVERT_MSG",
+    "ORIG_HEAD",
+    "kit-conflicts",
+    "KIT_OP_RESULT",
+];
+
+/// The repository after a command that concluded an operation, with the state
+/// of the operation back: a stop after the branch moved and before the state
+/// was cleared. `before` is the repository as it was when the operation was
+/// still in progress.
+fn stale_state(before: &Path, after: &Path, scratch: &Path) -> PathBuf {
+    let stale = scratch.join("stale");
+    copy_tree(after, &stale);
+    for name in OPERATION_FILES {
+        let from = before.join(".kit").join(name);
+        if from.is_file() {
+            fs::copy(from, stale.join(".kit").join(name)).unwrap();
+        }
+    }
+    stale
+}
+
+/// `kit <args>` on a copy of `point`, which stays as it was. The copy and its
+/// output come back.
+fn run_on_copy(point: &Path, xdg: &Path, args: &[&str]) -> (tempfile::TempDir, Output) {
+    let copy = copy_of(point);
+    let out = kit(copy.path(), xdg, args);
+    (copy, out)
+}
+
+/// A copy of a crash point that a command can sign in. The copy of a flush
+/// does not keep the mode of the key directory.
+fn copy_of(point: &Path) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(point, copy.path());
+    fs::set_permissions(
+        copy.path().join(".kit/keys"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    copy
+}
+
+fn tip_of(root: &Path) -> Option<Hash> {
+    State::at(root).tip()
+}
+
+/// The points of a command that concludes an operation where the state of the
+/// operation is still there over the commit that concludes it: the crash
+/// points that the command passes, and the one that a stop right before the
+/// clear leaves.
+fn stale_points(points: &[PathBuf], scratch: &Path, new: Hash) -> Vec<PathBuf> {
+    let mut stale: Vec<PathBuf> = points[1..]
+        .iter()
+        .filter(|point| {
+            let state = State::at(point);
+            state.merging() && state.tip() == Some(new)
+        })
+        .cloned()
+        .collect();
+    stale.push(stale_state(&points[0], points.last().unwrap(), scratch));
+    stale
+}
+
+fn no_operation(root: &Path, label: &str) {
+    for name in OPERATION_FILES {
+        assert!(
+            !root.join(".kit").join(name).exists(),
+            "[{label}] {name} is left"
+        );
+    }
+}
+
+/// `main` and `side` change the same file. `op` stops on the conflict, and
+/// the arguments start it.
+fn conflicting(op: &str) -> (Repo, Vec<String>) {
+    let repo = base_repo();
+    if op == "revert" {
+        repo.write("a/f0.txt", b"changed\n");
+        repo.ok(&["add", "a/f0.txt"]);
+        repo.ok(&["commit", "-m", "change"]);
+        repo.write("a/f0.txt", b"later\n");
+        repo.ok(&["add", "a/f0.txt"]);
+        repo.ok(&["commit", "-m", "later"]);
+        return (repo, vec![op.into(), "HEAD~1".into()]);
+    }
+    repo.ok(&["branch", "side"]);
+    repo.write("a/f0.txt", b"main\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    repo.ok(&["commit", "-m", "main"]);
+    repo.ok(&["checkout", "side"]);
+    repo.write("a/f0.txt", b"side\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    repo.ok(&["commit", "-m", "side"]);
+    repo.ok(&["checkout", "main"]);
+    let target = if op == "merge" {
+        "side".to_owned()
+    } else {
+        to_hex(
+            &refs::read_ref(&RepoLayout::single(repo.path()), "side")
+                .unwrap()
+                .unwrap(),
+        )
+    };
+    (repo, vec![op.into(), target])
+}
+
+fn resolve(repo: &Repo) {
+    repo.write("a/f0.txt", b"resolved\n");
+    repo.ok(&["add", "a/f0.txt"]);
+}
+
+/// The parents of the commit that `tip` names.
+fn parents_of(root: &Path, tip: Hash) -> Vec<Hash> {
+    let store = ObjectStore::open(&RepoLayout::single(root)).unwrap();
+    match store.read_object(&tip).unwrap() {
+        Object::Commit(c) => c.parents,
+        other => panic!("not a commit: {other:?}"),
+    }
+}
+
+/// `op --abort` and `op --continue` on the repository that a stop after the
+/// commit of `op --continue` left: they keep the commit.
+fn a_stop_after_the_commit_of(op: &str) {
+    let (repo, args) = conflicting(op);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(!repo.run(&args).status.success(), "{op} conflicts");
+    resolve(&repo);
+    let scratch = tempfile::tempdir().unwrap();
+    let points = crash_points(&repo, scratch.path(), &[op, "--continue"]);
+    let (old, new) = (
+        State::at(&points[0]).tip().unwrap(),
+        tip_of(points.last().unwrap()).unwrap(),
+    );
+    assert_ne!(old, new, "{op}: the continue moved the ref");
+    for (n, point) in stale_points(&points, scratch.path(), new)
+        .iter()
+        .enumerate()
+    {
+        for action in ["--abort", "--continue"] {
+            let label = format!("{op} {action}, stale point {n}");
+            let (copy, out) = run_on_copy(point, repo.xdg(), &[op, action]);
+            check_exit(&out, &label).unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                out.status.success(),
+                "[{label}] {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                tip_of(copy.path()),
+                Some(new),
+                "[{label}] the commit is kept"
+            );
+            no_operation(copy.path(), &label);
+            check_invariants(copy.path(), &label).unwrap_or_else(|e| panic!("{e}"));
+        }
+    }
+}
+
+#[test]
+fn a_cherry_pick_stopped_after_its_commit_keeps_the_commit() {
+    a_stop_after_the_commit_of("cherry-pick");
+}
+
+#[test]
+fn a_revert_stopped_after_its_commit_keeps_the_commit() {
+    a_stop_after_the_commit_of("revert");
+}
+
+#[test]
+fn a_commit_over_a_merge_that_a_stop_left_the_state_of_is_not_a_sibling() {
+    let repo = base_repo();
+    repo.ok(&["branch", "side"]);
+    repo.write("a/f0.txt", b"main\n");
+    repo.ok(&["add", "a/f0.txt"]);
+    repo.ok(&["commit", "-m", "main"]);
+    repo.ok(&["checkout", "side"]);
+    repo.write("side.txt", b"side\n");
+    repo.ok(&["add", "side.txt"]);
+    repo.ok(&["commit", "-m", "side"]);
+    repo.ok(&["checkout", "main"]);
+    repo.ok(&["merge", "--no-commit", "side"]);
+    let scratch = tempfile::tempdir().unwrap();
+    let points = crash_points(&repo, scratch.path(), &["commit", "-m", "merged"]);
+    let new = tip_of(points.last().unwrap()).unwrap();
+    assert_eq!(parents_of(points.last().unwrap(), new).len(), 2);
+    for (n, point) in stale_points(&points, scratch.path(), new)
+        .iter()
+        .enumerate()
+    {
+        let label = format!("commit over a merge, stale point {n}");
+        let copy = copy_of(point);
+        // A change staged after the stop is a commit of its own.
+        fs::write(copy.path().join("later.txt"), b"later\n").unwrap();
+        for args in [vec!["add", "later.txt"], vec!["commit", "-m", "later"]] {
+            let out = kit(copy.path(), repo.xdg(), &args);
+            assert!(
+                out.status.success(),
+                "[{label}] {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let tip = tip_of(copy.path()).unwrap();
+        assert_eq!(parents_of(copy.path(), tip), vec![new], "[{label}]");
+        no_operation(copy.path(), &label);
+        check_invariants(copy.path(), &label).unwrap_or_else(|e| panic!("{e}"));
+
+        // A commit of what is staged already never drops the merge commit.
+        let (copy, out) = run_on_copy(point, repo.xdg(), &["commit", "-m", "again"]);
+        check_exit(&out, &label).unwrap_or_else(|e| panic!("{e}"));
+        let tip = tip_of(copy.path()).unwrap();
+        let store = ObjectStore::open(&RepoLayout::single(copy.path())).unwrap();
+        assert!(
+            reachable_objects(&store, &tip).unwrap().contains(&new),
+            "[{label}] the merge commit is not under the branch"
+        );
+        no_operation(copy.path(), &label);
+    }
+}
+
+#[test]
+fn a_merge_stopped_after_its_commit_keeps_the_commit() {
+    let (repo, args) = conflicting("merge");
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(!repo.run(&args).status.success(), "the merge conflicts");
+    resolve(&repo);
+    let scratch = tempfile::tempdir().unwrap();
+    let points = crash_points(&repo, scratch.path(), &["merge", "--continue"]);
+    let new = tip_of(points.last().unwrap()).unwrap();
+    for (n, point) in stale_points(&points, scratch.path(), new)
+        .iter()
+        .enumerate()
+    {
+        for action in ["--abort", "--continue"] {
+            let label = format!("merge {action}, stale point {n}");
+            let (copy, out) = run_on_copy(point, repo.xdg(), &["merge", action]);
+            check_exit(&out, &label).unwrap_or_else(|e| panic!("{e}"));
+            assert!(
+                out.status.success(),
+                "[{label}] {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                tip_of(copy.path()),
+                Some(new),
+                "[{label}] the commit is kept"
+            );
+            no_operation(copy.path(), &label);
+        }
+    }
+}
+
+/// The abort of an operation that a stop left without its conflict list
+/// restores the branch and the files, or refuses and names the way out. The
+/// way out drops the operation and restores the files.
+fn a_stop_before_the_conflict_list_of(op: &str) {
+    let (repo, args) = conflicting(op);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let scratch = tempfile::tempdir().unwrap();
+    let (out, mut points) = snapshots(&repo, scratch.path(), &args);
+    assert!(!out.status.success(), "{op} conflicts");
+    // The markers are written and the list is not.
+    let unlisted = scratch.path().join("unlisted");
+    copy_tree(points.last().unwrap(), &unlisted);
+    fs::remove_file(unlisted.join(".kit/kit-conflicts")).unwrap();
+    points.push(unlisted);
+    let old = State::at(&points[0]).tip();
+    let original = fs::read(points[0].join("a/f0.txt")).unwrap();
+    let mut refused = 0;
+    for (n, point) in points.iter().enumerate() {
+        if !State::at(point).merging() {
+            continue;
+        }
+        let label = format!("{op} --abort, point {n}");
+        let (copy, out) = run_on_copy(point, repo.xdg(), &[op, "--abort"]);
+        check_exit(&out, &label).unwrap_or_else(|e| panic!("{e}"));
+        let way_out = if out.status.success() {
+            copy
+        } else {
+            refused += 1;
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("kit reset --hard -f"),
+                "[{label}] the refusal names no way out: {stderr}"
+            );
+            // The refusal changed nothing.
+            assert_eq!(tip_of(copy.path()), old, "[{label}]");
+            let (copy, out) = run_on_copy(point, repo.xdg(), &["reset", "--hard", "-f"]);
+            assert!(
+                out.status.success(),
+                "[{label}] the way out: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            copy
+        };
+        assert_eq!(tip_of(way_out.path()), old, "[{label}] the branch is back");
+        assert_eq!(
+            fs::read(way_out.path().join("a/f0.txt")).unwrap(),
+            original,
+            "[{label}] the file is back"
+        );
+        no_operation(way_out.path(), &label);
+    }
+    // Some point has markers and no list, and the abort refuses it.
+    assert!(refused > 0, "{op}: no point is refused");
+}
+
+#[test]
+fn a_merge_stopped_before_its_conflict_list_is_aborted_or_names_the_way_out() {
+    a_stop_before_the_conflict_list_of("merge");
+}
+
+#[test]
+fn a_cherry_pick_stopped_before_its_conflict_list_is_aborted_or_names_the_way_out() {
+    a_stop_before_the_conflict_list_of("cherry-pick");
+}
+
+#[test]
+fn a_revert_stopped_before_its_conflict_list_is_aborted_or_names_the_way_out() {
+    a_stop_before_the_conflict_list_of("revert");
+}
+
+/// A paused pick or revert whose `HEAD` moved to another child of the commit
+/// before it is still live: its resolution is not in that commit. Continuing
+/// commits the resolution on top of it, and never reports a commit that was
+/// not made.
+fn a_live_operation_on_a_moved_head(op: &str) {
+    let (repo, args) = conflicting(op);
+    repo.ok(&["branch", "moved"]);
+    repo.ok(&["checkout", "moved"]);
+    repo.write("y.txt", b"y\n");
+    repo.ok(&["add", "y.txt"]);
+    repo.ok(&["commit", "-m", "y"]);
+    let moved = tip_of_branch(repo.path(), "moved");
+    repo.ok(&["checkout", "main"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(!repo.run(&args).status.success(), "{op} conflicts");
+    repo.ok(&["reset", "--soft", &to_hex(&moved)]);
+    resolve(&repo);
+
+    let out = repo.run(&[op, "--continue"]);
+    assert!(
+        out.status.success(),
+        "{op} --continue: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tip = tip_of(repo.path()).unwrap();
+    assert_ne!(tip, moved, "{op} --continue made no commit");
+    assert_eq!(parents_of(repo.path(), tip), vec![moved]);
+    assert_eq!(
+        fs::read(repo.path().join("a/f0.txt")).unwrap(),
+        b"resolved\n"
+    );
+    no_operation(repo.path(), op);
+}
+
+fn tip_of_branch(root: &Path, branch: &str) -> Hash {
+    refs::read_ref(&RepoLayout::single(root), branch)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn a_cherry_pick_on_a_moved_head_is_still_live() {
+    a_live_operation_on_a_moved_head("cherry-pick");
+}
+
+#[test]
+fn a_revert_on_a_moved_head_is_still_live() {
+    a_live_operation_on_a_moved_head("revert");
+}
+
+/// A paused pick whose `HEAD` moved to a child of the commit before it that
+/// has the same tree: the index holds that tree, but the conflict markers are
+/// still in the file. Continuing refuses.
+fn a_live_pick_on_a_moved_head_with_markers() {
+    let op = "cherry-pick";
+    let (repo, args) = conflicting(op);
+    repo.ok(&["branch", "same"]);
+    repo.ok(&["checkout", "same"]);
+    repo.ok(&["commit", "-m", "same tree"]);
+    let same = tip_of_branch(repo.path(), "same");
+    repo.ok(&["checkout", "main"]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    assert!(!repo.run(&args).status.success(), "{op} conflicts");
+    repo.ok(&["reset", "--soft", &to_hex(&same)]);
+
+    let out = repo.run(&[op, "--continue"]);
+    assert!(!out.status.success(), "{op} --continue: {out:?}");
+    assert_eq!(tip_of(repo.path()), Some(same), "{op}: no commit was made");
+    assert!(
+        repo.path().join(".kit/CHERRY_PICK_HEAD").exists(),
+        "{op}: the state is still there"
+    );
+}
+
+#[test]
+fn a_cherry_pick_on_a_moved_head_with_markers_is_still_live() {
+    a_live_pick_on_a_moved_head_with_markers();
 }

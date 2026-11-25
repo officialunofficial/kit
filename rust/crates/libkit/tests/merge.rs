@@ -634,6 +634,34 @@ fn abort_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
 }
 
 #[test]
+fn continue_keeps_a_merge_commit_that_a_stop_left_the_state_over() {
+    let f = init();
+    let (ours, theirs) = diverged(&f);
+    start(&f, &merge_request("topic")).unwrap();
+    f.write("a.txt", "resolved\n");
+    f.stage("a.txt");
+    let merged = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    // The stop came after the branch moved and before the state was cleared.
+    let state = MergeState {
+        merge_head: theirs,
+        orig_head: ours,
+        message: b"Merge branch 'topic'".to_vec(),
+    };
+    conflict_state::write_merge_state(&f.layout, &state, &[]).unwrap();
+
+    let again = merge::resume(&f.layout, &f.store, &TestSigning).unwrap();
+    assert_eq!(again.commit, merged.commit);
+    assert_eq!((again.ours, again.theirs), (ours, theirs));
+    assert_eq!(again.tree, merged.tree);
+    assert!(!is_merge_in_progress(&f.layout));
+    // No second merge commit took the branch from the first.
+    assert_eq!(
+        refs::read_ref(&f.layout, "main").unwrap(),
+        Some(merged.commit)
+    );
+}
+
+#[test]
 fn abort_still_moves_the_branch_when_head_is_not_the_merge() {
     let f = init();
     let (ours, theirs) = diverged(&f);

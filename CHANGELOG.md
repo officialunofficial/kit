@@ -64,6 +64,8 @@ The project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `kit commit` during a cherry-pick or a revert now refuses while a conflict has markers or is not staged, and when the operation's conflict list is missing, as it does for a merge, and ends the operation when it commits, so a later `--abort` cannot move the branch back over the commit. `libkit::commit::Error` gains `OperationStateIncomplete`.
 - `kit merge --abort` keeps a file that the merge added and the user then edited and stopped tracking with `kit rm --cached`, as git does.
 - `kit merge --abort` when a crash left the merge state over a finished merge commit now clears the state and leaves the branch on the merge commit, where it moved the branch back and left the commit for `gc` to delete.
+- `kit cherry-pick` and `kit revert` with `--abort` or `--continue`, `kit merge --continue`, and `kit commit` over a merge, no longer drop or repeat a commit that a stop left the operation's state over: when `HEAD` already is the commit that the operation made, they clear the state and keep the branch where it is, where an abort could move the branch back over the commit, a continue wrote a second commit, and a commit wrote a sibling of the merge commit. A cherry-pick or revert is taken as over only when the index also holds the commit's tree, so a paused one whose `HEAD` moved to another commit stays live. With `--format json`, `--abort` then reports the kept commit as `hash`.
+- `kit merge --abort`, `kit cherry-pick --abort` and `kit revert --abort` of an operation that a stop left with its conflict files and no conflict list now say to run `kit reset --hard -f`, as the abort cannot tell the conflict files from changes of your own.
 
 ## [0.10.0] - 2026-11-22
 
