@@ -296,6 +296,38 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_name_counts_in_the_path_of_each_file_below_it() {
+        let (_dir, store) = open();
+        let blob = put(
+            &store,
+            &Object::Blob(Blob {
+                data: b"x".to_vec(),
+            }),
+        );
+        let inner = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![
+                    entry(b"a", EntryMode::Blob, blob),
+                    entry(b"b", EntryMode::Blob, blob),
+                ],
+            }),
+        );
+        let root = put(
+            &store,
+            &Object::Tree(Tree {
+                entries: vec![entry(b"0123456789", EntryMode::Tree, inner)],
+            }),
+        );
+        // Two files named `a` and `b` under a 10 byte directory: 2 * (67 + 1)
+        // for the entries and 11 more bytes of directory and `/` each.
+        let exact = 2 * (67 + 1) + 2 * 11;
+        check_within(&store, root, caps(u64::MAX, u64::MAX, exact)).unwrap();
+        let err = check_within(&store, root, caps(u64::MAX, u64::MAX, exact - 1)).unwrap_err();
+        assert!(matches!(err, StoreError::TreeTooLarge));
+    }
+
+    #[test]
     fn nesting_is_allowed_to_the_limit_and_refused_one_past_it() {
         let (_dir, store) = open();
         let blob = put(
