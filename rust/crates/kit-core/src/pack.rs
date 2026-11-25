@@ -160,8 +160,9 @@ fn decoded_bytes_cap(pack_len: usize) -> u64 {
 /// that much from each. No ratio to the wire bytes can bound the total: a
 /// delta of a 16 MiB manifest takes about a hundred wire bytes, as does a
 /// hostile delta that copies one base again and again. The limit is a plain
-/// number above what an honest fetch decodes, which follows the size of the
-/// repository.
+/// number that a fetch of a repository this size or smaller does not reach. A
+/// fetch of more compressible content than that is refused, and no setting
+/// raises the limit.
 const MAX_FETCH_DECODED: u64 = 1 << 40;
 
 /// The decoded bytes the packs of one fetch may still expand to.
@@ -170,7 +171,7 @@ const MAX_FETCH_DECODED: u64 = 1 << 40;
 /// the bytes it decodes, a failed pack's included, come off what is left.
 ///
 /// A retry of a chain decodes its packs again and is charged again, so a fetch
-/// that retries has about half the limit.
+/// that retries has less of the limit.
 #[doc(hidden)]
 #[derive(Debug)]
 pub struct FetchDecodeBudget {
@@ -615,8 +616,11 @@ pub fn serialized_bound(payload: u64, entries: usize) -> u64 {
 
 /// What a pack under construction holds, as far as the limits a reader
 /// applies are concerned. Every writer that seals packs asks
-/// [`Self::seals_before`] before it adds an entry, so a pack it seals is one
-/// every reader accepts.
+/// [`Self::seals_before`] before it adds an entry, so a pack it seals stays
+/// within the decoded budget of every reader. A reader of a thin pack also
+/// counts each read of a base from the store, where this counts only the
+/// longest, so a pack of deltas over several large stored bases can pass the
+/// cap of [`PackReader::read`] though it seals.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PackFill {
     entries: usize,
@@ -2269,7 +2273,9 @@ pub struct DecodeLimits {
     /// fetched, so the peak can pass the cap by the one base whose fetch
     /// trips it. A [`window::WindowReader`] also cumulatively counts the
     /// `0x03`/`0x04` claims of the entries it has yielded, and no other bytes;
-    /// it still checks every entry alone.
+    /// it still checks every entry alone. A host that streams sealed packs
+    /// through a window reader sets it to at least
+    /// [`Self::DEFAULT_MAX_DECODED_BYTES`], the most a sealed pack decodes.
     pub max_decoded_bytes: u64,
     entry_geometry: Option<(u64, u64)>,
 }

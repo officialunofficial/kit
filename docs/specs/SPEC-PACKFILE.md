@@ -413,7 +413,7 @@ These are policy caps, not wire limits. Implementations MUST fail with
 `TooManyObjects`/`PackfileTooLarge` on violation rather than
 silently truncating.
 
-**A writer seals a pack every reader accepts.** The caps above are the
+**A writer seals a pack within every reader's budget.** The caps above are the
 format's. A reader also refuses a pack for its own limits, so a writer stops
 adding entries to a pack before it passes any of them, and never relies on
 the remote to advertise a limit:
@@ -449,7 +449,8 @@ A writer puts a single entry that is over one of its caps alone in a pack of its
 A pack that fits these limits is read by `PackReader::read` (which also counts
 each delta base it reads from the store, where a writer counts only the
 longest, so a pack of deltas over several bases of hundreds of MiB each may
-exceed its cap; the planner's bases are at most 1 MiB), by
+exceed its cap; a push stays under it, since the planner keeps the manifest
+bases it reads to 256 MiB for a plan and its other bases to 1 MiB each), by
 `decode_entries_with` and `rewrite_excluding` with `DecodeLimits::default()`
 and by the window reader with it. A caller of those that sets a larger
 decoded-byte budget accepts more, never less. `rewrite_excluding` refuses
@@ -907,7 +908,7 @@ manifest and a hostile delta both expand by more than any fixed ratio that an
 honest pack stays under. Each pack still obeys its own cap, and the bytes it
 decodes, a pack that fails included, come off what the fetch has left for the
 next pack. A retry of a chain decodes its packs again and is charged again, so
-a fetch that retries has about half the limit. A delta base read from the store counts as decoded bytes each time it is
+a fetch that retries has less of the limit. A delta base read from the store counts as decoded bytes each time it is
 read.
 
 A caller that unpacks a pack from a verified file (§11.1) instead holds no
