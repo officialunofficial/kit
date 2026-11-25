@@ -776,6 +776,65 @@ fn an_import_checks_out_the_default_branch_and_verifies() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_fetch_refuses_a_linked_raw_cache() {
+    if !git_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let up = upstream(root.path());
+    let fork = root.path().join("fork");
+    let import_request = import::Request {
+        url: up.to_str().unwrap(),
+        remote_name: "upstream",
+        key: None,
+    };
+    import::clone(&fork, &import_request, &Recorder::default()).unwrap();
+    let layout = layout::discover(&fork).unwrap();
+    let fetch = FetchRequest {
+        remote_name: "upstream",
+        key: None,
+    };
+
+    // `raw` is a link to a directory elsewhere: the next fetch writes nothing there.
+    let raw = fork.join(".kit/git/upstream/raw");
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::rename(&raw, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &raw).unwrap();
+    let before = count_files(&elsewhere);
+
+    std::fs::write(up.join("b.txt"), "world\n").unwrap();
+    git(&up, &["add", "b.txt"]);
+    git(&up, &["commit", "--quiet", "-m", "second"]);
+    let err = import::fetch(&layout, &fetch, true, &Recorder::default()).unwrap_err();
+    assert!(err.to_string().contains("Delete it and rerun"), "{err}");
+    assert_eq!(count_files(&elsewhere), before);
+
+    // A verify reads no retained bytes through the link either.
+    let report = verify::verify(
+        &fork,
+        &verify::Request {
+            remote_name: Some("upstream"),
+            fork_audit: false,
+            refs: &[],
+        },
+    )
+    .unwrap();
+    assert!(!report.failures.is_empty());
+}
+
+#[cfg(unix)]
+fn count_files(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let p = e.unwrap().path();
+            if p.is_dir() { count_files(&p) } else { 1 }
+        })
+        .sum()
+}
+
 #[test]
 fn a_fetch_pulls_the_new_commits_of_the_upstream() {
     if !git_available() {
