@@ -836,3 +836,192 @@ fn a_failed_rename_does_not_poison_the_group() {
     assert_eq!(temps_in(dir.path()), 0);
     assert!(group.flush().is_ok());
 }
+
+#[test]
+fn files_published_as_siblings_share_the_flush_that_follows_them() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish_sibling(first, &token).unwrap();
+    // The same token licenses a file that does not depend on the first.
+    group.publish_sibling(second, &token).unwrap();
+    assert_eq!(fs::read(&a).unwrap(), b"1");
+    assert_eq!(fs::read(&b).unwrap(), b"2");
+    assert_eq!(renames(&rec), 2);
+
+    // One flush after both renames makes them durable.
+    let _named = group.flush().unwrap();
+    assert_eq!(flushes(&rec).len(), 2);
+}
+
+#[test]
+fn a_sibling_still_needs_a_flush_after_every_rename_before_its_run() {
+    let dir = TempDir::new().unwrap();
+    let (a, b, c) = (
+        dir.path().join("a"),
+        dir.path().join("b"),
+        dir.path().join("c"),
+    );
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let third = group.stage(&c, b"3", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish(first, &token).unwrap();
+
+    // A rename that is not a sibling came first, and this token predates it.
+    assert!(group.publish_sibling(second, &token).is_err());
+    assert!(!b.exists());
+    assert!(group.publish_sibling(third, &token).is_err());
+    assert!(!c.exists());
+}
+
+#[test]
+fn a_plain_publish_ends_a_run_of_siblings() {
+    let dir = TempDir::new().unwrap();
+    let (a, b, c) = (
+        dir.path().join("a"),
+        dir.path().join("b"),
+        dir.path().join("c"),
+    );
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let third = group.stage(&c, b"3", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish_sibling(first, &token).unwrap();
+    group.publish_sibling(second, &token).unwrap();
+    // A strict publish follows both renames, which this token predates.
+    assert!(group.publish(third, &token).is_err());
+    assert!(!c.exists());
+}
+
+#[test]
+fn a_rename_outside_the_group_ends_a_run_of_siblings() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish_sibling(first, &token).unwrap();
+    // Objects are renamed by code outside the group after the first sibling.
+    group.note_renamed();
+    assert!(group.publish_sibling(second, &token).is_err());
+    assert!(!b.exists());
+}
+
+#[test]
+fn a_new_token_starts_a_new_run_of_siblings() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.publish_sibling(first, &token).unwrap();
+
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let again = group.flush().unwrap();
+    group.publish_sibling(second, &again).unwrap();
+    assert_eq!(fs::read(&b).unwrap(), b"2");
+}
+
+#[test]
+fn a_sibling_of_another_group_or_a_stale_token_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let (_rec, mut group) = recording();
+    let early = group.flush().unwrap();
+    let staged = group.stage(&a, b"1", Parents::Existing).unwrap();
+    assert!(group.publish_sibling(staged, &early).is_err());
+    assert!(!a.exists());
+
+    let (_rec, mut other) = recording();
+    let foreign = other.stage(&b, b"2", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    assert!(group.publish_sibling(foreign, &token).is_err());
+    assert!(!b.exists());
+}
+
+#[test]
+fn a_new_sibling_leaves_a_taken_name_and_shares_the_flush() {
+    let dir = TempDir::new().unwrap();
+    let (a, b, taken) = (
+        dir.path().join("a"),
+        dir.path().join("b"),
+        dir.path().join("taken"),
+    );
+    fs::write(&taken, b"old").unwrap();
+    let (_rec, mut group) = recording();
+    let first = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let second = group.stage(&b, b"2", Parents::Existing).unwrap();
+    let third = group.stage(&taken, b"3", Parents::Existing).unwrap();
+    let flushed = group.flush().unwrap();
+    assert!(group.publish_new_sibling(first, &flushed).unwrap());
+    assert!(group.publish_new_sibling(second, &flushed).unwrap());
+    assert!(!group.publish_new_sibling(third, &flushed).unwrap());
+    assert_eq!(fs::read(&taken).unwrap(), b"old");
+    assert_eq!(fs::read(&b).unwrap(), b"2");
+
+    let early = group.flush().unwrap();
+    let stale = group
+        .stage(&dir.path().join("c"), b"4", Parents::Existing)
+        .unwrap();
+    assert!(group.publish_new_sibling(stale, &flushed).is_err());
+    drop(early);
+}
+
+#[test]
+fn a_write_made_elsewhere_is_flushed_with_the_group() {
+    let dir = TempDir::new().unwrap();
+    let (rec, mut group) = recording();
+    // No flush is due before any write is recorded.
+    let _token = group.flush().unwrap();
+    assert!(flushes(&rec).is_empty());
+
+    group.note_written(dir.path());
+    // Recording makes no device call, but the next flush runs.
+    assert!(rec.events().is_empty());
+    let _token = group.flush().unwrap();
+    assert_eq!(flushes(&rec), [dir.path().to_path_buf()]);
+}
+
+#[test]
+fn a_rename_made_elsewhere_must_be_flushed_before_a_publish() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a");
+    let (_rec, mut group) = recording();
+    let staged = group.stage(&a, b"1", Parents::Existing).unwrap();
+    let token = group.flush().unwrap();
+    group.note_renamed();
+    assert!(group.publish(staged, &token).is_err());
+    assert!(!a.exists());
+
+    let staged = group.stage(&a, b"2", Parents::Existing).unwrap();
+    group.note_renamed();
+    let token = group.flush().unwrap();
+    group.publish(staged, &token).unwrap();
+    assert_eq!(fs::read(&a).unwrap(), b"2");
+}
+
+#[test]
+fn a_staged_file_names_its_temp_and_its_destination() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a");
+    let (_rec, mut group) = recording();
+    let staged = group.stage(&a, b"1", Parents::Existing).unwrap();
+    assert_eq!(staged.dest(), a);
+    assert_eq!(staged.temp_path().parent(), Some(dir.path()));
+    assert!(
+        staged
+            .temp_path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".kit.tmp.")
+    );
+    assert_eq!(fs::read(staged.temp_path()).unwrap(), b"1");
+}

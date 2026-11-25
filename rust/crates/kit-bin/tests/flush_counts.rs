@@ -8,8 +8,9 @@
 //! and the test counts the lines.
 //!
 //! The pinned counts are for Apple file systems, where a per-file writeout is
-//! `fsync(2)`, a full flush is `F_FULLFSYNC`, and the batch makes one full flush
-//! for its objects and one for each directory it names. A build with the
+//! `fsync(2)`, a full flush is `F_FULLFSYNC`, and a command makes one full
+//! flush for each ordering point (the bytes of its objects and pointers, the
+//! names of its objects, the names of its pointers). A build with the
 //! `history-mmr` feature also writes the ancestry snapshots of each ref
 //! update, 14 more flushes for a commit and for a pull. Linux flushes the shard
 //! directories one by one, so its counts differ; there only the log itself is
@@ -119,9 +120,10 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
         "a pull that keeps the branch leaves HEAD alone"
     );
 
-    // add: an object and the objects directory, the index and its directory.
-    // commit: an object and the objects directory, the branch ref and its
-    // directory; the index stays as it is.
+    // add: the bytes of the object, then its name and the bytes of the index,
+    // then the name of the index.
+    // commit: the bytes of the trees, the commit and the branch ref, then the
+    // names of the objects, then the name of the ref; the index stays as it is.
     // push: the remote's pack, node and two refs, each with a directory flush,
     // and the tracking ref with its directory.
     // fetch: the format marker and its directory, the objects directory, the
@@ -133,13 +135,67 @@ fn each_command_of_the_edit_loop_makes_the_pinned_number_of_full_flushes() {
     // The ancestry snapshots of a ref update add 14 flushes to a commit and
     // to a pull.
     let expected = if cfg!(feature = "history-mmr") {
-        [4, 0, 18, 10, 9, 30]
+        [3, 0, 18, 10, 9, 30]
     } else {
-        [4, 0, 4, 10, 9, 16]
+        [3, 0, 3, 10, 9, 16]
     };
     assert_eq!(
         [add, unchanged, commit, push, fetch, pull],
         expected,
         "full flushes of add, an unchanged add, commit, push, fetch and pull"
+    );
+}
+
+/// An amend and the commit that concludes a merge, on the same ordering
+/// points as a plain commit: the recovery line and the rebuilt index ride the
+/// flush of the object names, and the merge state is cleared after the ref
+/// name is durable, which costs one more flush.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_amend_and_a_merge_commit_make_the_pinned_number_of_full_flushes() {
+    let repo = Repo::new();
+    for dir in ["a", "dir/sub"] {
+        for file in 0..3 {
+            repo.write(
+                &format!("{dir}/f{file}.txt"),
+                format!("{dir} {file}\n").as_bytes(),
+            );
+        }
+    }
+    repo.ok(&["add", "."]);
+    repo.ok(&["commit", "-m", "base"]);
+    repo.ok(&["branch", "side"]);
+
+    let logs = tempfile::tempdir().unwrap();
+    let log = logs.path().join("flushes");
+    let count = |args: &[&str]| flushes(repo.path(), repo.xdg(), &log, args);
+
+    edit(&repo, 1);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    repo.ok(&["add", "dir/sub/edited.txt"]);
+    let amend = count(&["commit", "--amend", "-m", "amended"]);
+
+    repo.ok(&["checkout", "side"]);
+    repo.write("side.txt", b"side\n");
+    repo.ok(&["add", "side.txt"]);
+    repo.ok(&["commit", "-m", "side"]);
+    repo.ok(&["checkout", "main"]);
+    edit(&repo, 2);
+    repo.ok(&["add", "dir/sub/edited.txt"]);
+    repo.ok(&["commit", "-m", "main"]);
+    repo.ok(&["merge", "--no-commit", "side"]);
+    let merge = count(&["commit", "-m", "merged"]);
+
+    // The ancestry snapshots of a ref update add 14 flushes, and the index
+    // name has a flush of its own after the one-shot ref write.
+    let expected = if cfg!(feature = "history-mmr") {
+        [19, 20]
+    } else {
+        [3, 4]
+    };
+    assert_eq!(
+        [amend, merge],
+        expected,
+        "full flushes of an amend and of a merge commit"
     );
 }

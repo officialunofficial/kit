@@ -577,6 +577,34 @@ pub fn clear_merge_state(layout: &RepoLayout) -> ConflictStateResult<()> {
     Ok(())
 }
 
+/// [`clear_merge_state`], then a writeout of the directory on `group`. The
+/// removals are durable when the caller flushes `group`, so a commit that
+/// concludes a merge makes them durable after the ref that records it.
+///
+/// # Errors
+/// As [`clear_merge_state`], or the group is poisoned.
+pub fn clear_merge_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_merge_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
+    Ok(())
+}
+
+/// [`clear_operation_state`], then a writeout of the directory on `group`.
+///
+/// # Errors
+/// As [`clear_operation_state`], or the group is poisoned.
+pub fn clear_operation_state_in(
+    layout: &RepoLayout,
+    group: &mut crate::durable::Group,
+) -> ConflictStateResult<()> {
+    clear_operation_state(layout)?;
+    group.note_dir(layout.worktree_state_dir())?;
+    Ok(())
+}
+
 /// Remove all cherry-pick state files (idempotent).
 ///
 /// # Errors
@@ -944,5 +972,44 @@ mod tests {
         clear_operation_state(&kit).unwrap();
         assert!(!is_revert_in_progress(&kit));
         assert!(!kit.conflicts_file().exists());
+    }
+
+    #[test]
+    fn the_clear_in_a_group_removes_the_state_and_writes_its_directory_out() {
+        use crate::batch::Syncer;
+        use crate::batch::testing::{Ev, RecordingSyncer};
+        use crate::durable::Group;
+        use std::sync::Arc;
+
+        for operation in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let layout = RepoLayout::single(dir.path());
+            fs::create_dir_all(layout.worktree_state_dir()).unwrap();
+            for file in [
+                layout.merge_head_file(),
+                layout.cherry_pick_head_file(),
+                layout.orig_head_file(),
+                layout.conflicts_file(),
+            ] {
+                fs::write(file, b"x").unwrap();
+            }
+            let rec = Arc::new(RecordingSyncer::default());
+            let mut group = Group::with_syncer(Arc::clone(&rec) as Arc<dyn Syncer>);
+            if operation {
+                clear_operation_state_in(&layout, &mut group).unwrap();
+                assert!(!layout.cherry_pick_head_file().exists());
+            } else {
+                clear_merge_state_in(&layout, &mut group).unwrap();
+                // A merge's clear leaves a cherry-pick's marker alone.
+                assert!(layout.cherry_pick_head_file().exists());
+            }
+            assert!(!layout.merge_head_file().exists());
+            assert!(!layout.orig_head_file().exists());
+            assert!(!layout.conflicts_file().exists());
+            assert_eq!(
+                rec.events(),
+                [Ev::DirBarrier(layout.worktree_state_dir().to_path_buf())]
+            );
+        }
     }
 }

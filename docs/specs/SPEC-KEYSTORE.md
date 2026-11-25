@@ -691,8 +691,8 @@ offset  size     field
 
 Any bit outside 0–2 set MUST be rejected as a decoding error.
 
-Readers MUST reject any version byte other than `0x01` (no dual-version
-read &mdash; see SPEC-CONVENTIONS §2.2) and MUST
+Readers MUST reject any version byte they do not read (SPEC-CONVENTIONS
+§2.2); `0x01` is the only version so far. Readers MUST
 reject any trailing bytes after the declared field list, the same
 discipline SPEC-INDEX applies to the staging-area file.
 

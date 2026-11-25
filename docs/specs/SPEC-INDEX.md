@@ -148,12 +148,18 @@ holds the entries of the tree it built.
 Writes use atomic-rename: write to a sibling tempfile (named
 `.kit.tmp.<pid>.<seq>`, which does not contain the file's name, so a
 file name of any length the file system allows works; the writer
-creates it exclusively and never follows a link), `fsync` the tempfile,
-`rename(2)` into place, then `fsync` the parent directory so the rename itself is
-durable across power loss. The `.kit/` directory is created if absent.
-(The index write is deliberately NOT part of the object store's batched
-durability schedule &mdash; it is one of the durable pointers that schedule
-orders itself against; see SPEC-OBJECTS §10.1.)
+creates it exclusively and never follows a link), then `rename(2)` into place.
+The `.kit/` directory is created if absent. The write obeys three rules:
+
+- The tempfile's contents MUST be durable before the rename.
+- Every object the index names MUST be durable at its location before the
+  rename.
+- The rename MUST be durable before the command reports success.
+
+The index is one of the durable pointers that the object store orders itself
+against. A writer MAY share device flushes with the objects and refs of the
+same command, if the rules above hold at the rename (SPEC-OBJECTS §10.1,
+"Shared flush points").
 
 Readers MUST enforce:
 
@@ -164,8 +170,8 @@ Readers MUST enforce:
   before interpreting entries. The checksum detects corruption, not malicious
   replacement by an actor who can rewrite the entire local file.
 
-Only version 3 is supported. Readers MUST reject every other version without
-rewriting the index. An unsupported index MUST NOT be rebuilt from
+Version 3 is the only version so far. Readers MUST reject a version they do
+not read without rewriting the index. An unsupported index MUST NOT be rebuilt from
 HEAD or working files, because those cannot recover its staged selections.
 
 GC MUST abort before sweeping if any registered worktree index is corrupt or
@@ -231,7 +237,7 @@ re-emits current filenames byte-identically and records every fixture BLAKE3 in
 | Every entry has a defined kind, and removals carry no object | status whitelist → `IndexError::BadStatus` (§3); `removed` entries MUST carry `[0;32]`, enforced at read time → `IndexError::RemovedHasHash` (§2, §3) |
 | The stat cache never changes an observable result | cache is an optimization only &mdash; all five match conditions must hold, and racy entries (not safely older than the index file's mtime) are re-hashed (§4) |
 | A cache hit reflects the bytes that were actually hashed | cache fields recorded from the opened descriptor used for hashing, never a stat taken after verification (§4) |
-| A reader never sees a torn index | tempfile + `fsync` + `rename` + parent-dir `fsync` (§5); only an absent file reads as empty; present empty/corrupt state fails closed (§5) |
+| A reader never sees a torn index | tempfile contents durable before the `rename`, the rename durable before the command reports success (§5); only an absent file reads as empty; present empty/corrupt state fails closed (§5) |
 
 The index is local-only, never transported or signed. Its staged selections
 are durable user state and GC retention roots, even though the stat cache is
