@@ -21,7 +21,7 @@ use kit_git_bridge::translate::translate_closure;
 use kit_git_bridge::{BridgeError, map, refname};
 
 use super::{
-    Class, Error, Event, SignerError, Skipped, git_in, git_version, lock_state, plain,
+    Class, Error, Event, SignerError, Skipped, git_in, git_version, lock_state, plain, staging,
     state::read_stamp, step, validate_url,
 };
 
@@ -161,6 +161,7 @@ pub fn export(
         git_in(&staging, &["init", "--bare", "--quiet", "."])
             .map_err(|e| step(Class::CannotCreate, "init staging repo", e))?;
     }
+    staging::check_mirror(&staging)?;
     let mut known = map::load_map(&state).map_err(|e| step(Class::General, "load map cache", e))?;
     let prior_state =
         map::load_ref_state(&state).map_err(|e| step(Class::General, "load ref state", e))?;
