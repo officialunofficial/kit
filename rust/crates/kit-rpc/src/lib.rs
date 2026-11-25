@@ -46,10 +46,10 @@
 // `unsafe` — enforce that it stays that way.
 #![forbid(unsafe_code)]
 
-// Generated protobuf modules. `_includes.rs` is emitted by
-// buffa-build; it sets up the module tree for common.proto,
-// signer.proto, ssh.proto under `kit::rpc::v1`.
-include!(concat!(env!("OUT_DIR"), "/_includes.rs"));
+// Generated protobuf modules, checked in under `generated/`.
+// `_includes.rs` sets up the module tree for common.proto, signer.proto,
+// ssh.proto and verify.proto under `kit::rpc::v1`.
+include!("../generated/_includes.rs");
 
 /// Maximum length of a single framed protobuf message in bytes.
 /// Both directions of both protocols enforce this cap; receivers
@@ -151,5 +151,5 @@ mod tests {
 #[cfg(any(feature = "transport", feature = "transport-messages"))]
 #[allow(missing_debug_implementations, clippy::all, clippy::pedantic)]
 pub mod transport {
-    include!(concat!(env!("OUT_DIR"), "/_connectrpc.rs"));
+    include!("../generated/transport/_connectrpc.rs");
 }

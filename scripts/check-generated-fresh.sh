@@ -8,8 +8,7 @@
 # honest: it regenerates the code and compares the result with the checked-in
 # files.
 #
-# Needs `protoc` 27 or newer on PATH (or PROTOC) and the
-# wasm32-unknown-unknown target. Run from any directory:
+# Needs `protoc` 27 or newer on PATH (or PROTOC). Run from any directory:
 #   bash scripts/check-generated-fresh.sh
 
 set -euo pipefail
